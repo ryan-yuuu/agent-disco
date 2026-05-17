@@ -221,3 +221,6 @@ __marimo__/
 .claude/
 
 CLAUDE.md
+
+# Calfkit per-agent runtime state (channel subscriptions, etc.)
+state/

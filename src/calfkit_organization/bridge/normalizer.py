@@ -8,8 +8,8 @@ Identity resolution rules (shared):
     - ``is_bot`` mirrors Discord's ``author.bot`` flag.
     - ``is_webhook`` is true when ``message.webhook_id`` is set.
     - ``agent_id`` is set when the author is a webhook whose ``display_name``
-      matches a registered :class:`AgentSpec`. Display-name match is the
-      bridge↔agent self-recognition primitive.
+      matches a registered :class:`AgentDefinition`. Display-name match is
+      the bridge↔agent self-recognition primitive.
     - ``is_human_owner`` is set when ``message.author.id`` equals
       ``settings.owner_user_id`` AND the author is not a bot.
 
@@ -28,7 +28,8 @@ from typing import Any, Literal
 
 import uuid_utils
 
-from calfkit_organization.bridge.registry import AgentRegistry, AgentSpec
+from calfkit_organization.agents.definition import AgentDefinition
+from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,7 @@ class SlashNormalizer:
     def normalize(
         self,
         interaction: Any,
-        slash_target: AgentSpec,
+        slash_target: AgentDefinition,
         message_arg: str,
         followup_message_id: int,
     ) -> WireMessage:
@@ -193,7 +194,7 @@ class SlashNormalizer:
 
         Args:
             interaction: The Discord interaction (slash invocation).
-            slash_target: The :class:`AgentSpec` whose slash was invoked.
+            slash_target: The :class:`AgentDefinition` whose slash was invoked.
             message_arg: The text the user typed into the slash's ``message`` parameter.
             followup_message_id: The ID of the bridge's followup message — the
                 visible echo posted via ``interaction.followup.send``. This is

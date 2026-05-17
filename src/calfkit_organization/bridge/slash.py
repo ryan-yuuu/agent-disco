@@ -1,9 +1,9 @@
 """Discord slash command registration and dispatch.
 
 Owns the ``app_commands.CommandTree`` for the bot. At construction time
-registers one ``/agent_id`` command per :class:`AgentSpec` in the registry,
-each bound to the same dispatch path. At runtime, when a user invokes a
-slash command:
+registers one ``/agent_id`` command per :class:`AgentDefinition` in the
+registry, each bound to the same dispatch path. At runtime, when a user
+invokes a slash command:
 
     1. Defer the interaction publicly (Discord shows "Bot is thinking…").
     2. Post a public followup that echoes the invocation. This message
@@ -23,9 +23,10 @@ import logging
 import discord
 from discord import app_commands
 
+from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.bridge.normalizer import SlashNormalizer
 from calfkit_organization.bridge.publisher import KafkaPublisher
-from calfkit_organization.bridge.registry import AgentRegistry, AgentSpec
+from calfkit_organization.bridge.registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,10 @@ class SlashCommandManager:
         synced = await self._tree.sync(guild=guild)
         logger.info("synced %d slash command(s) guild=%s", len(synced), guild_id)
 
-    def _build_command(self, spec: AgentSpec) -> app_commands.Command:
+    def _build_command(self, spec: AgentDefinition) -> app_commands.Command:
         # A factory function gives each callback its own scope so ``spec``
         # closes over its own loop iteration, not the last one.
-        def _make_callback(spec: AgentSpec):
+        def _make_callback(spec: AgentDefinition):
             @app_commands.describe(message="What you want this agent to do")
             async def callback(interaction: discord.Interaction, message: str) -> None:
                 await self._on_invocation(interaction, spec, message)
@@ -78,7 +79,7 @@ class SlashCommandManager:
     async def _on_invocation(
         self,
         interaction: discord.Interaction,
-        spec: AgentSpec,
+        spec: AgentDefinition,
         message: str,
     ) -> None:
         logger.info(

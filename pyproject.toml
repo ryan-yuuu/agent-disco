@@ -9,10 +9,12 @@ dependencies = [
     "discord-py>=2.7.1",
     "pydantic-settings>=2.14.1",
     "python-dotenv>=1.2.2",
+    "python-frontmatter>=1.1.0,<2",
 ]
 
 [project.scripts]
 calfkit-bridge = "calfkit_organization.bridge.gateway:main"
+calfkit-agent = "calfkit_organization.agents.runner:main"
 
 [build-system]
 requires = ["hatchling"]

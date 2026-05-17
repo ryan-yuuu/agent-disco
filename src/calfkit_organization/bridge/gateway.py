@@ -189,8 +189,8 @@ def main() -> None:
     if settings.guild_id is None:
         raise SystemExit("DISCORD_GUILD_ID is required (global slash sync is too slow for dev)")
 
-    registry_path = Path(os.getenv("CALFKIT_BRIDGE_AGENTS_PATH", "config/agents.toml"))
-    registry = AgentRegistry.from_toml(registry_path)
+    agents_dir = Path(os.getenv("CALFKIT_AGENTS_DIR", "agents"))
+    registry = AgentRegistry.from_agents_dir(agents_dir)
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 

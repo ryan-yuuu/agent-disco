@@ -41,6 +41,17 @@ _WEBHOOK_NAME = "calfkit"
 _AUDIT_REASON = "calfkit-organization persona sender"
 
 
+def dicebear_avatar_url(seed: str) -> str:
+    """Return a deterministic DiceBear "glass" avatar URL for ``seed``.
+
+    DiceBear's "glass" style (https://www.dicebear.com) renders abstract
+    frosted-gradient blobs; same seed → same image, no auth required.
+    Used as the default persona avatar source for calfkit agents so each
+    agent gets a stable, recognizable identity without us hosting images.
+    """
+    return f"https://api.dicebear.com/9.x/glass/png?seed={seed}"
+
+
 @dataclass(frozen=True, slots=True)
 class Persona:
     """A display identity to project through a webhook on send.

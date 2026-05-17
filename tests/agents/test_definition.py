@@ -1,0 +1,157 @@
+"""Unit tests for AgentDefinition field validators and the parse_agent_md loader."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from calfkit_organization.agents.definition import AgentDefinition, parse_agent_md
+
+
+def _make_definition(**overrides) -> AgentDefinition:
+    defaults = dict(
+        agent_id="scheduler",
+        slash="/scheduler",
+        display_name="Aksel (Scheduler)",
+        description="Calendar mechanics.",
+        system_prompt="Test scheduler.",
+    )
+    return AgentDefinition(**(defaults | overrides))
+
+
+class TestAgentDefinitionValidators:
+    def test_valid_construction(self) -> None:
+        d = _make_definition()
+        assert d.agent_id == "scheduler"
+        assert d.slash == "/scheduler"
+
+    def test_construct_via_name_alias(self) -> None:
+        """YAML uses ``name:``; Pydantic alias should accept that key as well."""
+        d = AgentDefinition(
+            name="echo",
+            slash="/echo",
+            display_name="Echo",
+            description="Echoes.",
+            system_prompt="Echo body.",
+        )
+        assert d.agent_id == "echo"
+
+    @pytest.mark.parametrize("bad_id", ["Scheduler", "sched uler", "x" * 33, "", "sched.uler"])
+    def test_invalid_agent_id_rejected(self, bad_id: str) -> None:
+        with pytest.raises(ValidationError, match="name"):
+            _make_definition(agent_id=bad_id)
+
+    @pytest.mark.parametrize("bad_slash", ["scheduler", "/Scheduler", "/x" * 20, "/", "/sched.uler"])
+    def test_invalid_slash_rejected(self, bad_slash: str) -> None:
+        with pytest.raises(ValidationError, match="slash"):
+            _make_definition(slash=bad_slash)
+
+    def test_display_name_clyde_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Clyde"):
+            _make_definition(display_name="clyde")
+
+    @pytest.mark.parametrize("bad_name", ["", "x" * 81])
+    def test_display_name_length_rejected(self, bad_name: str) -> None:
+        with pytest.raises(ValidationError, match="display_name"):
+            _make_definition(display_name=bad_name)
+
+    @pytest.mark.parametrize("bad_desc", ["", "x" * 101])
+    def test_description_length_rejected(self, bad_desc: str) -> None:
+        with pytest.raises(ValidationError, match="description"):
+            _make_definition(description=bad_desc)
+
+    @pytest.mark.parametrize("bad_body", ["", "   ", "\n\n"])
+    def test_empty_system_prompt_rejected(self, bad_body: str) -> None:
+        with pytest.raises(ValidationError, match="system_prompt"):
+            _make_definition(system_prompt=bad_body)
+
+    def test_tools_default_empty(self) -> None:
+        d = _make_definition()
+        assert d.tools == ()
+
+    def test_tools_coerced_to_tuple(self) -> None:
+        d = _make_definition(tools=["calendar", "email"])
+        assert d.tools == ("calendar", "email")
+
+    def test_model_dump_by_alias_uses_yaml_key(self) -> None:
+        """Pin the YAML-facing contract: ``model_dump(by_alias=True)`` emits ``name``.
+
+        Guards against an accidental future change to the alias setup that
+        would silently break any ``calfkit-agent init``-style dump-to-YAML
+        path.
+        """
+        d = _make_definition()
+        dumped = d.model_dump(by_alias=True)
+        assert dumped["name"] == "scheduler"
+        assert "agent_id" not in dumped
+
+
+class TestParseAgentMd:
+    def _write_md(self, path: Path, body: str = "You are a scheduler.", **frontmatter_extra) -> None:
+        fields = {
+            "name": path.stem,
+            "slash": f"/{path.stem}",
+            "display_name": path.stem.title(),
+            "description": f"Test {path.stem}.",
+        }
+        fields.update(frontmatter_extra)
+        lines = ["---"]
+        for k, v in fields.items():
+            lines.append(f"{k}: {v}")
+        lines.append("---")
+        lines.append("")
+        lines.append(body)
+        path.write_text("\n".join(lines))
+
+    def test_happy_path(self, tmp_path: Path) -> None:
+        path = tmp_path / "scheduler.md"
+        self._write_md(path)
+        d = parse_agent_md(path)
+        assert d.agent_id == "scheduler"
+        assert d.slash == "/scheduler"
+        assert d.system_prompt == "You are a scheduler."
+
+    def test_filename_must_match_name(self, tmp_path: Path) -> None:
+        path = tmp_path / "scheduler.md"
+        # frontmatter declares name=finance but filename is scheduler.md
+        self._write_md(path, name="finance")
+        with pytest.raises(ValueError, match="does not match filename stem"):
+            parse_agent_md(path)
+
+    def test_missing_frontmatter_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "scheduler.md"
+        path.write_text("Just a body, no frontmatter.\n")
+        with pytest.raises(ValueError, match="missing YAML frontmatter"):
+            parse_agent_md(path)
+
+    def test_missing_required_field_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "scheduler.md"
+        path.write_text(
+            "---\n"
+            "name: scheduler\n"
+            "slash: /scheduler\n"
+            # missing display_name + description
+            "---\n"
+            "Body.\n"
+        )
+        with pytest.raises(ValidationError):
+            parse_agent_md(path)
+
+    def test_empty_body_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "scheduler.md"
+        path.write_text(
+            "---\n"
+            "name: scheduler\n"
+            "slash: /scheduler\n"
+            "display_name: Scheduler\n"
+            "description: Test.\n"
+            "---\n"
+        )
+        with pytest.raises(ValidationError, match="system_prompt"):
+            parse_agent_md(path)
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            parse_agent_md(tmp_path / "nope.md")

@@ -1,7 +1,8 @@
 """Discord ↔ Calfkit-topic bridge.
 
 Public surface:
-    AgentSpec, AgentRegistry        — agent roster loader
+    AgentRegistry                   — agent roster index (definitions live in
+                                      :mod:`calfkit_organization.agents`)
     WireMessage, WireAuthor         — typed Discord event payload on Kafka
     MessageNormalizer, SlashNormalizer — discord types → WireMessage
     KafkaPublisher                  — WireMessage → calfkit Envelope → Kafka
@@ -18,14 +19,13 @@ from calfkit_organization.bridge.normalizer import (
     UnknownAgentMentionError,
 )
 from calfkit_organization.bridge.publisher import KafkaPublisher
-from calfkit_organization.bridge.registry import AgentRegistry, AgentSpec
+from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.slash import SlashCommandManager
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 
 __all__ = [
     "A2AChannelResolver",
     "AgentRegistry",
-    "AgentSpec",
     "DiscordIngressGateway",
     "KafkaPublisher",
     "MessageNormalizer",

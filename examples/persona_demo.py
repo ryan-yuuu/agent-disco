@@ -21,6 +21,7 @@ from calfkit_organization.discord import (
     DiscordPersonaSender,
     DiscordSettings,
     Persona,
+    dicebear_avatar_url,
 )
 
 
@@ -31,13 +32,8 @@ async def main() -> None:
     if settings.default_channel_id is None:
         raise SystemExit("set DISCORD_DEFAULT_CHANNEL_ID in .env")
 
-    # DiceBear "glass" style (https://www.dicebear.com): abstract
-    # frosted-gradient blobs, deterministic per seed, no auth.
-    def avatar(seed: str) -> str:
-        return f"https://api.dicebear.com/9.x/glass/png?seed={seed}"
-
-    aksel = Persona(name="Aksel (Scheduler)", avatar_url=avatar("Aksel"))
-    finn = Persona(name="Finn (Finance)", avatar_url=avatar("Finn"))
+    aksel = Persona(name="Aksel (Scheduler)", avatar_url=dicebear_avatar_url("Aksel"))
+    finn = Persona(name="Finn (Finance)", avatar_url=dicebear_avatar_url("Finn"))
 
     async with DiscordPersonaSender(settings) as personas:
         a = await personas.send(

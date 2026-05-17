@@ -1,72 +1,42 @@
-"""Unit tests for AgentSpec validators and AgentRegistry duplicate detection / TOML loading."""
+"""Unit tests for AgentRegistry duplicate detection and the from_agents_dir loader."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
-from calfkit_organization.bridge.registry import AgentRegistry, AgentSpec
+from calfkit_organization.agents.definition import AgentDefinition
+from calfkit_organization.bridge.registry import AgentRegistry
 
 
-def _make_spec(**overrides) -> AgentSpec:
+def _make_definition(**overrides) -> AgentDefinition:
     defaults = dict(
         agent_id="scheduler",
         slash="/scheduler",
         display_name="Aksel (Scheduler)",
         description="Calendar mechanics.",
+        system_prompt="Test scheduler agent.",
     )
-    return AgentSpec(**(defaults | overrides))
-
-
-class TestAgentSpecValidators:
-    def test_valid_construction(self) -> None:
-        spec = _make_spec()
-        assert spec.agent_id == "scheduler"
-        assert spec.slash == "/scheduler"
-
-    @pytest.mark.parametrize("bad_id", ["Scheduler", "sched uler", "x" * 33, "", "sched.uler"])
-    def test_invalid_agent_id_rejected(self, bad_id: str) -> None:
-        with pytest.raises(ValidationError, match="agent_id"):
-            _make_spec(agent_id=bad_id)
-
-    @pytest.mark.parametrize("bad_slash", ["scheduler", "/Scheduler", "/x" * 20, "/", "/sched.uler"])
-    def test_invalid_slash_rejected(self, bad_slash: str) -> None:
-        with pytest.raises(ValidationError, match="slash"):
-            _make_spec(slash=bad_slash)
-
-    def test_display_name_clyde_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="Clyde"):
-            _make_spec(display_name="clyde")
-
-    @pytest.mark.parametrize("bad_name", ["", "x" * 81])
-    def test_display_name_length_rejected(self, bad_name: str) -> None:
-        with pytest.raises(ValidationError, match="display_name"):
-            _make_spec(display_name=bad_name)
-
-    @pytest.mark.parametrize("bad_desc", ["", "x" * 101])
-    def test_description_length_rejected(self, bad_desc: str) -> None:
-        with pytest.raises(ValidationError, match="description"):
-            _make_spec(description=bad_desc)
+    return AgentDefinition(**(defaults | overrides))
 
 
 class TestAgentRegistryDuplicates:
     def test_duplicate_agent_id_rejected(self) -> None:
-        a = _make_spec()
-        b = _make_spec(slash="/other", display_name="Other")
+        a = _make_definition()
+        b = _make_definition(slash="/other", display_name="Other")
         with pytest.raises(ValueError, match="duplicate agent_id"):
             AgentRegistry([a, b])
 
     def test_duplicate_slash_rejected(self) -> None:
-        a = _make_spec()
-        b = _make_spec(agent_id="other", display_name="Other")
+        a = _make_definition()
+        b = _make_definition(agent_id="other", display_name="Other")
         with pytest.raises(ValueError, match="duplicate slash"):
             AgentRegistry([a, b])
 
     def test_duplicate_display_name_rejected(self) -> None:
-        a = _make_spec()
-        b = _make_spec(agent_id="other", slash="/other")
+        a = _make_definition()
+        b = _make_definition(agent_id="other", slash="/other")
         with pytest.raises(ValueError, match="duplicate display_name"):
             AgentRegistry([a, b])
 
@@ -76,8 +46,8 @@ class TestAgentRegistryLookups:
     def registry(self) -> AgentRegistry:
         return AgentRegistry(
             [
-                _make_spec(),
-                _make_spec(
+                _make_definition(),
+                _make_definition(
                     agent_id="finance",
                     slash="/finance",
                     display_name="Finn (Finance)",
@@ -98,59 +68,48 @@ class TestAgentRegistryLookups:
         assert registry.by_display_name("Aksel (Scheduler)").agent_id == "scheduler"
         assert registry.by_display_name("Unknown") is None
 
-    def test_all_returns_specs_in_order(self, registry: AgentRegistry) -> None:
-        all_specs = registry.all()
-        assert [s.agent_id for s in all_specs] == ["scheduler", "finance"]
+    def test_all_returns_definitions_in_order(self, registry: AgentRegistry) -> None:
+        all_defs = registry.all()
+        assert [d.agent_id for d in all_defs] == ["scheduler", "finance"]
 
 
-class TestFromToml:
-    def test_loads_valid_file(self, tmp_path: Path) -> None:
-        config = tmp_path / "agents.toml"
-        config.write_text(
-            """
-[[agents]]
-agent_id = "scheduler"
-slash = "/scheduler"
-display_name = "Aksel (Scheduler)"
-description = "Calendar."
+class TestFromAgentsDir:
+    """``AgentRegistry.from_agents_dir`` delegates to the loader; this tests the integration."""
 
-[[agents]]
-agent_id = "finance"
-slash = "/finance"
-display_name = "Finn (Finance)"
-description = "Bookkeeping."
-"""
-        )
-        registry = AgentRegistry.from_toml(config)
+    def _write_agent(self, dir_: Path, name: str, **frontmatter_extra) -> None:
+        fields = {
+            "name": name,
+            "slash": f"/{name}",
+            "display_name": name.title(),
+            "description": f"Test agent {name}.",
+        }
+        fields.update(frontmatter_extra)
+        lines = ["---"]
+        for k, v in fields.items():
+            lines.append(f"{k}: {v}")
+        lines.append("---")
+        lines.append("")
+        lines.append(f"You are {name}.")
+        (dir_ / f"{name}.md").write_text("\n".join(lines))
+
+    def test_loads_valid_directory(self, tmp_path: Path) -> None:
+        self._write_agent(tmp_path, "scheduler")
+        self._write_agent(tmp_path, "finance")
+        registry = AgentRegistry.from_agents_dir(tmp_path)
         assert registry.by_id("scheduler") is not None
         assert registry.by_id("finance") is not None
 
-    def test_missing_file_raises(self, tmp_path: Path) -> None:
+    def test_missing_directory_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
-            AgentRegistry.from_toml(tmp_path / "nonexistent.toml")
+            AgentRegistry.from_agents_dir(tmp_path / "nonexistent")
 
-    def test_malformed_toml_raises(self, tmp_path: Path) -> None:
-        config = tmp_path / "agents.toml"
-        config.write_text("this is = not [[valid toml")
-        with pytest.raises(Exception):  # tomllib.TOMLDecodeError is a subclass of ValueError
-            AgentRegistry.from_toml(config)
-
-    def test_invalid_agent_entry_raises(self, tmp_path: Path) -> None:
-        config = tmp_path / "agents.toml"
-        config.write_text(
-            """
-[[agents]]
-agent_id = "BAD ID"
-slash = "/scheduler"
-display_name = "Aksel"
-description = "Calendar."
-"""
-        )
-        with pytest.raises(ValidationError):
-            AgentRegistry.from_toml(config)
-
-    def test_empty_agents_section(self, tmp_path: Path) -> None:
-        config = tmp_path / "agents.toml"
-        config.write_text("# no agents\n")
-        registry = AgentRegistry.from_toml(config)
+    def test_empty_directory_returns_empty_registry(self, tmp_path: Path) -> None:
+        registry = AgentRegistry.from_agents_dir(tmp_path)
         assert registry.all() == ()
+
+    def test_duplicate_slash_in_dir_rejected(self, tmp_path: Path) -> None:
+        # Two agents both claim slash /shared — registry catches this.
+        self._write_agent(tmp_path, "alice", slash="/shared")
+        self._write_agent(tmp_path, "bob", slash="/shared")
+        with pytest.raises(ValueError, match="duplicate slash"):
+            AgentRegistry.from_agents_dir(tmp_path)

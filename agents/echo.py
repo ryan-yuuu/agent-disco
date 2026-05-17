@@ -5,9 +5,12 @@ filters incoming events with two gates (not-from-self, slash-addressed-to-me),
 and replies to each accepted event with ``echo: <content>`` posted via
 :class:`DiscordPersonaSender` as an inline reply.
 
-This demonstrates the per-agent runtime pattern that every other agent in
-the org will follow: a separate process, its own consumer group, its own
-gates, posting back into Discord through webhooks.
+This is a *hand-coded* calfkit runtime kept alongside the declarative
+``agents/echo.md`` definition. Identity fields (``agent_id``,
+``display_name``, ``avatar_url``) are read from the parsed ``echo.md`` at
+runtime startup so this file and the bridge's registry cannot drift. The
+system-prompt body of ``echo.md`` is unused here — this runtime echoes
+content directly without invoking an LLM.
 
 Configuration (environment variables):
 
@@ -17,11 +20,6 @@ Configuration (environment variables):
                                    listens on (e.g. "12345,67890");
                                    falls back to DISCORD_DEFAULT_CHANNEL_ID
     CALF_HOST_URL                  Kafka bootstrap; defaults to "localhost"
-
-The agent's ``display_name`` ("Echo") must match the corresponding entry in
-``config/agents.toml``; the bridge's normalizer uses display-name matching to
-resolve persona-webhook messages back to ``agent_id="echo"`` for the
-not-from-self gate.
 
 Run::
 
@@ -33,6 +31,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
+from pathlib import Path
 
 from calfkit.client import Client
 from calfkit.models import NodeResult, SessionRunContext, Silent, State
@@ -40,23 +40,19 @@ from calfkit.nodes import BaseNodeDef
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
+from calfkit_organization.agents.definition import parse_agent_md
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.discord.persona import DiscordPersonaSender, Persona
 from calfkit_organization.discord.settings import DiscordSettings
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 
-AGENT_ID = "echo"
-DISPLAY_NAME = "Echo"
-
-
-def _addressable(ctx: SessionRunContext) -> bool:
-    """Reject messages from self or unrecognized bots; allow humans and other agents.
+def _make_addressable_gate(agent_id: str) -> Callable[[SessionRunContext], bool]:
+    """Build the not-from-self / not-from-unknown-bot gate, scoped to ``agent_id``.
 
     Decision logic:
-        - author.agent_id == AGENT_ID → reject (this agent's own persona;
+        - author.agent_id == agent_id → reject (this agent's own persona;
           prevents echo→echo loops).
         - author.is_bot == True AND author.agent_id is None → reject. Covers
           the bridge bot's direct messages and any third-party bots in the
@@ -65,31 +61,39 @@ def _addressable(ctx: SessionRunContext) -> bool:
           recognized personas (so the echo agent can respond to peers if
           they ever address it).
     """
-    discord = ctx.deps.provided_deps.get("discord")
-    if discord is None:
-        return False
-    author = discord.get("author", {})
-    if author.get("agent_id") == AGENT_ID:
-        return False
-    if author.get("is_bot", False) and not author.get("agent_id"):
-        return False
-    return True
+
+    def _addressable(ctx: SessionRunContext) -> bool:
+        discord = ctx.deps.provided_deps.get("discord")
+        if discord is None:
+            return False
+        author = discord.get("author", {})
+        if author.get("agent_id") == agent_id:
+            return False
+        if author.get("is_bot", False) and not author.get("agent_id"):
+            return False
+        return True
+
+    return _addressable
 
 
-def _addressed_to_me(ctx: SessionRunContext) -> bool:
-    """Accept plain channel messages; for slash invocations, only those targeted at us.
+def _make_addressed_to_me_gate(agent_id: str) -> Callable[[SessionRunContext], bool]:
+    """Build the slash-addressing gate, scoped to ``agent_id``.
 
     Decision table:
         kind="message" → accept (no slash present means the agent is free to respond)
-        kind="slash", slash_target == AGENT_ID → accept
-        kind="slash", slash_target != AGENT_ID → reject (slash was for some other agent)
+        kind="slash", slash_target == agent_id → accept
+        kind="slash", slash_target != agent_id → reject (slash was for some other agent)
     """
-    discord = ctx.deps.provided_deps.get("discord")
-    if discord is None:
-        return False
-    if discord.get("kind") == "slash":
-        return discord.get("slash_target") == AGENT_ID
-    return True
+
+    def _addressed_to_me(ctx: SessionRunContext) -> bool:
+        discord = ctx.deps.provided_deps.get("discord")
+        if discord is None:
+            return False
+        if discord.get("kind") == "slash":
+            return discord.get("slash_target") == agent_id
+        return True
+
+    return _addressed_to_me
 
 
 class EchoNode(BaseNodeDef):
@@ -100,11 +104,12 @@ class EchoNode(BaseNodeDef):
         *,
         node_id: str,
         subscribe_topics: list[str],
+        persona: Persona,
         persona_sender: DiscordPersonaSender,
     ) -> None:
         super().__init__(node_id=node_id, subscribe_topics=subscribe_topics)
         self._persona_sender = persona_sender
-        self._persona = Persona(name=DISPLAY_NAME)
+        self._persona = persona
 
     async def run(self, ctx: SessionRunContext) -> NodeResult[State]:
         wire = WireMessage.model_validate(ctx.deps.provided_deps["discord"])
@@ -136,10 +141,8 @@ def _resolve_channel_ids() -> list[int]:
 
 
 async def _amain() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    definition = parse_agent_md(Path(__file__).with_name("echo.md"))
+    persona = Persona(name=definition.display_name, avatar_url=definition.avatar_url)
 
     settings = DiscordSettings()  # type: ignore[call-arg]
     channel_ids = _resolve_channel_ids()
@@ -149,15 +152,16 @@ async def _amain() -> None:
     async with DiscordPersonaSender(settings) as persona_sender:
         async with Client.connect(server_urls) as client:
             node = EchoNode(
-                node_id=AGENT_ID,
+                node_id=definition.agent_id,
                 subscribe_topics=subscribe_topics,
+                persona=persona,
                 persona_sender=persona_sender,
             )
             # AND-semantics: both gates must accept. Authorship check first so
             # we short-circuit on self/unknown-bot before doing content-based
             # addressed-to-me checks.
-            node.gate(_addressable)
-            node.gate(_addressed_to_me)
+            node.gate(_make_addressable_gate(definition.agent_id))
+            node.gate(_make_addressed_to_me_gate(definition.agent_id))
 
             worker = Worker(client, [node])
             logger.info(
@@ -169,6 +173,11 @@ async def _amain() -> None:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    load_dotenv()
     try:
         asyncio.run(_amain())
     except KeyboardInterrupt:
