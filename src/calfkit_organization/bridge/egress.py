@@ -1,0 +1,95 @@
+"""Agent-to-agent channel resolution.
+
+Provides a small helper for agents that want to message another agent.
+Channels are named deterministically as ``a2a-{x}-{y}`` with the two agent
+IDs sorted alphabetically, so any pair has exactly one canonical channel
+regardless of who initiates contact. The resolver caches name → channel-ID
+lookups in-memory; on cache miss it queries Discord, and on full miss it
+creates the channel with default permissions (per locked decision #13).
+
+The bridge itself does not own an instance of this; agents construct one
+as needed.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import discord
+
+from calfkit_organization.bridge.registry import AgentRegistry
+from calfkit_organization.discord.sender import DiscordSender
+
+logger = logging.getLogger(__name__)
+
+
+class A2AChannelResolver:
+    """Resolves (and lazily creates) the relationship channel between two agents."""
+
+    def __init__(
+        self,
+        sender: DiscordSender,
+        registry: AgentRegistry,
+        guild_id: int,
+    ) -> None:
+        self._sender = sender
+        self._registry = registry
+        self._guild_id = guild_id
+        self._cache: dict[tuple[str, str], int] = {}
+
+    async def resolve_or_create(self, agent_a_id: str, agent_b_id: str) -> int:
+        """Return the channel ID of the ``a2a-{x}-{y}`` channel for this pair.
+
+        Pair canonicalization: the two IDs are sorted alphabetically before
+        lookup, so ``("scheduler", "finance")`` and ``("finance",
+        "scheduler")`` map to the same channel. Both agents must exist in
+        the registry.
+
+        Raises:
+            ValueError: If either agent_id is unknown or if both are equal.
+            discord.Forbidden: If the bot lacks ``Manage Channels`` in the
+                guild and the channel needs to be created.
+        """
+        pair = self._canonical_pair(agent_a_id, agent_b_id)
+        if pair in self._cache:
+            return self._cache[pair]
+
+        channel_id = await self._discover(pair)
+        if channel_id is None:
+            channel_id = await self._create(pair)
+        self._cache[pair] = channel_id
+        return channel_id
+
+    def _canonical_pair(self, a: str, b: str) -> tuple[str, str]:
+        if a == b:
+            raise ValueError(f"agent cannot have an a2a channel with itself: {a!r}")
+        for agent_id in (a, b):
+            if self._registry.by_id(agent_id) is None:
+                raise ValueError(f"unknown agent_id: {agent_id!r}")
+        first, second = sorted([a, b])
+        return first, second
+
+    @staticmethod
+    def _channel_name(pair: tuple[str, str]) -> str:
+        return f"a2a-{pair[0]}-{pair[1]}"
+
+    async def _discover(self, pair: tuple[str, str]) -> int | None:
+        """Look for an existing channel by name. Returns its ID or None."""
+        name = self._channel_name(pair)
+        guild = await self._sender.client.fetch_guild(self._guild_id)
+        for channel in await guild.fetch_channels():
+            if isinstance(channel, discord.TextChannel) and channel.name == name:
+                logger.info("resolved a2a channel name=%s id=%s", name, channel.id)
+                return channel.id
+        return None
+
+    async def _create(self, pair: tuple[str, str]) -> int:
+        """Create the channel with default permissions. No overwrites."""
+        name = self._channel_name(pair)
+        guild = await self._sender.client.fetch_guild(self._guild_id)
+        channel = await guild.create_text_channel(
+            name=name,
+            reason=f"calfkit a2a channel for agents {pair[0]} and {pair[1]}",
+        )
+        logger.info("created a2a channel name=%s id=%s", name, channel.id)
+        return channel.id

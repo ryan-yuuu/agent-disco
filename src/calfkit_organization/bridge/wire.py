@@ -1,0 +1,73 @@
+"""Wire schema for Discord events flowing through Kafka.
+
+These pydantic models are the contract between the bridge (producer) and any
+calfkit agent (consumer). The bridge serializes a :class:`WireMessage` to JSON
+and tucks it into ``envelope.context.deps.provided_deps["discord"]`` on each
+publish. Agents read it back via the same path inside their gates and ``run()``.
+
+Both models are frozen — once normalized, a wire message is immutable.
+
+``schema_version`` policy:
+    - Add-only fields are non-breaking. Do not bump the version.
+    - Field renames or removals require bumping ``schema_version`` AND a
+      CHANGELOG entry. Consumers must tolerate the bump.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, model_validator
+
+
+class WireAuthor(BaseModel):
+    """Resolved author identity for a Discord message.
+
+    ``agent_id`` is set when the author is a persona webhook whose display name
+    matches a registered agent. ``is_human_owner`` is set when the author is
+    the configured human owner user.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    discord_user_id: int
+    display_name: str
+    is_bot: bool
+    is_webhook: bool
+    webhook_id: int | None = None
+    agent_id: str | None = None
+    is_human_owner: bool = False
+
+
+class WireMessage(BaseModel):
+    """A Discord event (regular message or slash invocation) projected onto Kafka.
+
+    For ``kind="message"``, ``message_id`` is the user's Discord message ID.
+    For ``kind="slash"``, ``message_id`` is the bridge's followup message ID
+    (the visible echo posted via ``interaction.followup.send``). In both cases
+    this is the ID an agent should pass to ``DiscordPersonaSender.send``'s
+    ``reply_to_message_id`` parameter to render its reply as an inline reply
+    to the source.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: int = 1
+    event_id: str
+    kind: Literal["message", "slash"]
+    slash_target: str | None = None
+    message_id: int
+    channel_id: int
+    guild_id: int
+    content: str
+    author: WireAuthor
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def _check_slash_target(self) -> "WireMessage":
+        if self.kind == "slash" and self.slash_target is None:
+            raise ValueError("slash_target is required when kind='slash'")
+        if self.kind == "message" and self.slash_target is not None:
+            raise ValueError("slash_target must be None when kind='message'")
+        return self

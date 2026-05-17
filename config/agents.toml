@@ -1,0 +1,18 @@
+# Calfkit-organization agent roster.
+#
+# The bridge loads this file at startup to register slash commands and
+# resolve persona-webhook authorship. agent_id, slash, and display_name
+# must each be unique across the roster.
+#
+# Field constraints:
+#   agent_id     — [a-z0-9_-]{1,32}
+#   slash        — "/" + [a-z0-9_-]{1,32}
+#   display_name — 1-80 chars; cannot be "Clyde" (reserved by Discord)
+#   description  — 1-100 chars (Discord slash-command description limit)
+#   avatar_url   — optional public image URL
+
+[[agents]]
+agent_id = "echo"
+slash = "/echo"
+display_name = "Echo"
+description = "Echoes back whatever you send. Useful as a smoke-test agent."

@@ -1,9 +1,44 @@
 [project]
 name = "calfkit-organization"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-agent organization on Discord."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "calfkit>=0.2.5",
+    "calfkit>=0.2.6",
+    "discord-py>=2.7.1",
+    "pydantic-settings>=2.14.1",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+calfkit-bridge = "calfkit_organization.bridge.gateway:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/calfkit_organization"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "W", "SIM", "RUF"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"examples/*" = ["T201"]  # allow print() in examples
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
 ]
