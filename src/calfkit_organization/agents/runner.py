@@ -192,6 +192,29 @@ async def _load_or_bootstrap_state(
     return state
 
 
+def _build_worker_or_bootstrap_error(
+    factory: AgentFactory,
+    definition: AgentDefinition,
+    state: AgentRuntimeState,
+    store: AgentStateStore,
+):
+    """Wrap :meth:`AgentFactory.build` so any failure surfaces as a
+    :class:`BootstrapError`.
+
+    CLI bootstrap: any factory.build failure is fatal. The bare-Exception
+    catch is deliberate — pydantic_ai raises ``UserError(RuntimeError)``
+    for missing API keys and the model-client constructors can raise
+    other types we don't want to enumerate. Convert them all to a clean
+    stderr exit so operators don't see a traceback.
+    """
+    try:
+        return factory.build(definition, state, store)
+    except Exception as e:
+        raise BootstrapError(
+            f"agent {definition.agent_id!r} failed to construct: {e}"
+        ) from e
+
+
 async def _amain(args: argparse.Namespace) -> None:
     """Build and run the agent. Pure-ish: callers configure logging+env."""
     agents_dir = Path(os.getenv(_AGENTS_DIR_ENV, _AGENTS_DIR_DEFAULT))
@@ -207,7 +230,9 @@ async def _amain(args: argparse.Namespace) -> None:
     async with DiscordPersonaSender(settings) as persona_sender:
         async with Client.connect(server_urls) as calfkit_client:
             factory = AgentFactory(persona_sender, calfkit_client)
-            worker = factory.build(definition, state, store)
+            worker = _build_worker_or_bootstrap_error(
+                factory, definition, state, store
+            )
 
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()

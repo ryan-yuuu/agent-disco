@@ -15,6 +15,7 @@ Format (matches Claude Code's ``.claude/agents/*.md`` convention)::
     provider: anthropic
     model: claude-sonnet-4-5
     tools: [calendar, email]
+    thinking_effort: high
     ---
 
     You are Aksel, the Scheduler. ...
@@ -23,10 +24,11 @@ The YAML key is ``name`` (Claude Code parity). Internally the field is
 ``agent_id`` via a Pydantic alias so existing ``spec.agent_id`` access
 patterns are preserved across the codebase.
 
-Channel subscriptions and other deployment-specific state are deliberately
-**not** in the frontmatter; keeping the ``.md`` portable across deployments
-is a core design property. Per-deployment runtime state lives in
-``state/agents/<name>.json``; see :mod:`calfkit_organization.agents.state`.
+``thinking_effort`` is the one frontmatter field that is operator-tunable
+at runtime — the ``/thinking-effort`` Discord slash command rewrites it
+via :mod:`calfkit_organization.agents.md_writer`. Channel subscriptions
+and other strictly deployment-specific state still live outside the .md
+(see :mod:`calfkit_organization.agents.state`).
 """
 
 from __future__ import annotations
@@ -48,6 +50,15 @@ The factory maps each provider to a concrete model-client class:
     - ``"openai"`` → :class:`calfkit.OpenAIModelClient`
 """
 
+ThinkingEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
+"""Operator-facing thinking-effort tiers.
+
+Six abstract levels mapped to provider-specific reasoning/thinking
+parameters in :mod:`calfkit_organization.agents.thinking`. Tier names
+parallel Claude Code's effort vocabulary; ``xhigh`` is a calfkit-specific
+step between ``high`` and ``max``.
+"""
+
 
 class AgentDefinition(BaseModel):
     """One agent's declarative definition: identity, runtime hints, and system prompt.
@@ -57,7 +68,10 @@ class AgentDefinition(BaseModel):
     first invocation.
     """
 
-    model_config = ConfigDict(frozen=True, populate_by_name=True)
+    # ``extra="forbid"`` surfaces frontmatter typos (``provder: openai``,
+    # ``thiking_effort: high``) at parse time rather than silently dropping
+    # them — important now that a slash command can rewrite the same file.
+    model_config = ConfigDict(frozen=True, populate_by_name=True, extra="forbid")
 
     agent_id: str = Field(..., alias="name")
     slash: str
@@ -67,7 +81,14 @@ class AgentDefinition(BaseModel):
     provider: Provider | None = None
     model: str | None = None
     tools: tuple[str, ...] = ()
+    thinking_effort: ThinkingEffort | None = None
     system_prompt: str
+    source_path: Path | None = Field(default=None, exclude=True, repr=False)
+    """Path to the ``.md`` file this definition was parsed from. Set by
+    :func:`parse_agent_md`; ``None`` for in-memory test constructions.
+    ``exclude=True`` prevents accidental round-trip into a YAML dump;
+    ``repr=False`` keeps logs tidy. Required for the ``/thinking-effort``
+    slash command's rewrite."""
 
     @field_validator("agent_id")
     @classmethod
@@ -136,4 +157,8 @@ def parse_agent_md(path: Path) -> AgentDefinition:
         )
 
     metadata["system_prompt"] = body.strip()
+    # Resolve so the path remains valid even if the process later
+    # ``os.chdir``s — the bridge daemon doesn't today, but a future
+    # plugin or signal handler could.
+    metadata["source_path"] = path.resolve()
     return AgentDefinition(**metadata)

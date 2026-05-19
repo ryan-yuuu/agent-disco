@@ -27,6 +27,7 @@ def _definition(
     provider: Provider | None = None,
     model: str | None = None,
     tools: tuple[str, ...] = (),
+    thinking_effort: str | None = None,
 ) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
@@ -36,6 +37,7 @@ def _definition(
         provider=provider,
         model=model,
         tools=tools,
+        thinking_effort=thinking_effort,  # type: ignore[arg-type]
         system_prompt="You are a test agent.",
     )
 
@@ -335,6 +337,75 @@ class TestModelResolution:
             MagicMock(),
         )
         assert calls[0] == ("openai", "gpt-5-mini")
+
+
+class TestThinkingEffortBaking:
+    """Factory passes definition.thinking_effort through build_model_settings
+    into the calfkit Agent constructor as a tier-2 default."""
+
+    def test_anthropic_high_passes_thinking_dict(self) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _definition(provider="anthropic", thinking_effort="high"),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        agent_loop = worker._nodes[0]._agent_loop  # internal access acceptable in tests
+        assert agent_loop.model_settings == {
+            "anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}
+        }
+
+    def test_openai_medium_passes_reasoning_effort(self) -> None:
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _definition(provider="openai", thinking_effort="medium"),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        agent_loop = worker._nodes[0]._agent_loop
+        assert agent_loop.model_settings == {"openai_reasoning_effort": "low"}
+
+    def test_no_effort_in_definition_no_model_settings(self) -> None:
+        """thinking_effort=None → no tier-2 model_settings."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _definition(provider="anthropic"),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        agent_loop = worker._nodes[0]._agent_loop
+        assert agent_loop.model_settings is None
+
+    def test_effort_none_passes_empty_dict(self) -> None:
+        """Explicit "none" → empty dict (calfkit merges as no-op)."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _definition(provider="openai", thinking_effort="none"),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        agent_loop = worker._nodes[0]._agent_loop
+        assert agent_loop.model_settings == {}
 
 
 class TestResolveProviderModuleFunction:

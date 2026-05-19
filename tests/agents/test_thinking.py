@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.bridge.thinking import build_model_settings
+from calfkit_organization.agents.thinking import build_model_settings
 
 
 class TestNoneAndUnset:

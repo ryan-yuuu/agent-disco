@@ -7,8 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from unittest.mock import MagicMock
+
+from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.agents.runner import (
     BootstrapError,
+    _build_worker_or_bootstrap_error,
     _load_or_bootstrap_state,
     _parse_channel_ids,
     bootstrap_env_var,
@@ -197,3 +201,54 @@ class TestLoadOrBootstrapState:
         monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", " , , ")
         with pytest.raises(BootstrapError, match="parsed to zero channels"):
             await _load_or_bootstrap_state(store, "echo")
+
+
+class TestBuildWorkerOrBootstrapError:
+    """The factory.build wrap converts every failure mode into BootstrapError
+    so the CLI exits cleanly instead of dumping a traceback."""
+
+    @staticmethod
+    def _definition() -> AgentDefinition:
+        return AgentDefinition(
+            agent_id="echo",
+            slash="/echo",
+            display_name="Echo",
+            description="Test.",
+            system_prompt="Test echo.",
+        )
+
+    def test_value_error_wrapped(self) -> None:
+        factory = MagicMock()
+        factory.build.side_effect = ValueError("no channels")
+        with pytest.raises(BootstrapError, match="echo.*failed to construct.*no channels"):
+            _build_worker_or_bootstrap_error(
+                factory,
+                self._definition(),
+                AgentRuntimeState(channels=[1]),
+                MagicMock(),
+            )
+
+    def test_runtime_error_wrapped(self) -> None:
+        """pydantic_ai raises UserError(RuntimeError) on missing API keys —
+        not ValueError or KeyError. The wrap must catch this too."""
+        factory = MagicMock()
+        factory.build.side_effect = RuntimeError("ANTHROPIC_API_KEY is not set")
+        with pytest.raises(BootstrapError, match="ANTHROPIC_API_KEY"):
+            _build_worker_or_bootstrap_error(
+                factory,
+                self._definition(),
+                AgentRuntimeState(channels=[1]),
+                MagicMock(),
+            )
+
+    def test_happy_path_returns_worker(self) -> None:
+        factory = MagicMock()
+        sentinel = object()
+        factory.build.return_value = sentinel
+        result = _build_worker_or_bootstrap_error(
+            factory,
+            self._definition(),
+            AgentRuntimeState(channels=[1]),
+            MagicMock(),
+        )
+        assert result is sentinel

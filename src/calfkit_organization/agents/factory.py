@@ -25,7 +25,9 @@ The factory does NOT manage the lifecycle of its dependencies
 does not change the running agent's Kafka subscriptions. Adding a channel
 to an existing agent requires a process restart. The ``store`` parameter
 is accepted into :meth:`build` for forward compatibility but is not used
-in v1.
+in v1 — ``thinking_effort`` (the other runtime-tunable knob) lives in the
+``.md`` frontmatter rather than the state file, so the store is purely a
+channels reader.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from calfkit.worker import Worker
 from calfkit_organization.agents.definition import AgentDefinition, Provider
 from calfkit_organization.agents.gates import make_addressable_gate, make_addressed_to_me_gate
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
+from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.discord.persona import DiscordPersonaSender
 
 logger = logging.getLogger(__name__)
@@ -213,13 +216,15 @@ class AgentFactory:
         subscribe_topics = [
             self._subscribe_topic_template.format(cid=cid) for cid in state.channels
         ]
+        model_settings = build_model_settings(provider, definition.thinking_effort)
 
         logger.info(
-            "building agent=%s provider=%s model=%s topics=%s",
+            "building agent=%s provider=%s model=%s topics=%s thinking_effort=%s",
             definition.agent_id,
             provider,
             model_name,
             subscribe_topics,
+            definition.thinking_effort,
         )
 
         agent = Agent(
@@ -227,6 +232,7 @@ class AgentFactory:
             system_prompt=definition.system_prompt,
             subscribe_topics=subscribe_topics,
             model_client=self._model_client_factory(provider, model_name),
+            model_settings=model_settings,
         )
         agent.gate(make_addressable_gate(definition.agent_id))
         agent.gate(make_addressed_to_me_gate(definition.agent_id))

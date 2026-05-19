@@ -19,7 +19,6 @@ from calfkit.client import NodeResult
 from calfkit.models import State
 
 from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.roundtrip import BridgeRoundTrip
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
@@ -210,135 +209,120 @@ class TestDropPaths:
         persona_sender.send.assert_not_awaited()
 
 
+def _make_registry(
+    *,
+    scheduler_effort: str | None = None,
+    scribe_effort: str | None = None,
+) -> AgentRegistry:
+    """Two-provider registry with optional baked-in thinking_effort values."""
+    return AgentRegistry(
+        [
+            AgentDefinition(
+                agent_id="scheduler",
+                slash="/scheduler",
+                display_name="Aksel (Scheduler)",
+                description="Calendar.",
+                avatar_url="https://example.com/aksel.png",
+                provider="anthropic",
+                thinking_effort=scheduler_effort,  # type: ignore[arg-type]
+                system_prompt="Anthropic scheduler.",
+            ),
+            AgentDefinition(
+                agent_id="scribe",
+                slash="/scribe",
+                display_name="Scribe",
+                description="Notes.",
+                avatar_url="https://example.com/scribe.png",
+                provider="openai",
+                thinking_effort=scribe_effort,  # type: ignore[arg-type]
+                system_prompt="OpenAI scribe.",
+            ),
+        ]
+    )
+
+
 class TestModelSettings:
-    """Per-call model_settings injection driven by state file + provider mapping."""
+    """Per-call model_settings injection driven by registry state + provider mapping."""
 
-    @staticmethod
-    def _two_provider_registry() -> AgentRegistry:
-        return AgentRegistry(
-            [
-                AgentDefinition(
-                    agent_id="scheduler",
-                    slash="/scheduler",
-                    display_name="Aksel (Scheduler)",
-                    description="Calendar.",
-                    avatar_url="https://example.com/aksel.png",
-                    provider="anthropic",
-                    system_prompt="Anthropic scheduler.",
-                ),
-                AgentDefinition(
-                    agent_id="scribe",
-                    slash="/scribe",
-                    display_name="Scribe",
-                    description="Notes.",
-                    avatar_url="https://example.com/scribe.png",
-                    provider="openai",
-                    system_prompt="OpenAI scribe.",
-                ),
-            ]
-        )
-
-    async def test_anthropic_target_with_effort_passes_thinking_dict(
+    @pytest.mark.parametrize(
+        ("effort", "expected"),
+        [
+            ("low", {"anthropic_thinking": {"type": "enabled", "budget_tokens": 4000}}),
+            ("medium", {"anthropic_thinking": {"type": "enabled", "budget_tokens": 10000}}),
+            ("high", {"anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}}),
+            ("xhigh", {"anthropic_thinking": {"type": "enabled", "budget_tokens": 48000}}),
+            ("max", {"anthropic_thinking": {"type": "enabled", "budget_tokens": 63999}}),
+        ],
+    )
+    async def test_anthropic_target_passes_thinking_dict_for_each_tier(
         self,
-        tmp_path: Path,
         client: MagicMock,
         persona_sender: AsyncMock,
+        effort: str,
+        expected: dict,
     ) -> None:
         client.execute_node.return_value = _node_result()
-        store = AgentStateStore(tmp_path / "scheduler.json")
-        await store.save(AgentRuntimeState(channels=[6789], thinking_effort="high"))
-
         rt = BridgeRoundTrip(
             client,
-            self._two_provider_registry(),
+            _make_registry(scheduler_effort=effort),
             persona_sender,
-            state_dir=tmp_path,
         )
         await rt.handle(_wire(slash_target="scheduler"))
+        assert client.execute_node.call_args.kwargs["model_settings"] == expected
 
-        kwargs = client.execute_node.call_args.kwargs
-        assert kwargs["model_settings"] == {
-            "anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}
-        }
-
-    async def test_openai_target_with_effort_passes_reasoning_effort(
+    @pytest.mark.parametrize(
+        ("effort", "expected_value"),
+        [
+            ("low", "minimal"),
+            ("medium", "low"),
+            ("high", "medium"),
+            ("xhigh", "high"),
+            ("max", "high"),  # OpenAI saturates at high.
+        ],
+    )
+    async def test_openai_target_passes_reasoning_effort_for_each_tier(
         self,
-        tmp_path: Path,
         client: MagicMock,
         persona_sender: AsyncMock,
+        effort: str,
+        expected_value: str,
     ) -> None:
         client.execute_node.return_value = _node_result(emitter_node_id="scribe")
-        store = AgentStateStore(tmp_path / "scribe.json")
-        await store.save(AgentRuntimeState(channels=[6789], thinking_effort="medium"))
-
         rt = BridgeRoundTrip(
             client,
-            self._two_provider_registry(),
+            _make_registry(scribe_effort=effort),
             persona_sender,
-            state_dir=tmp_path,
         )
         await rt.handle(_wire(slash_target="scribe"))
-
-        kwargs = client.execute_node.call_args.kwargs
-        assert kwargs["model_settings"] == {"openai_reasoning_effort": "low"}
+        assert client.execute_node.call_args.kwargs["model_settings"] == {
+            "openai_reasoning_effort": expected_value
+        }
 
     async def test_effort_none_passes_empty_dict(
         self,
-        tmp_path: Path,
         client: MagicMock,
         persona_sender: AsyncMock,
     ) -> None:
         """Operator-disabled thinking is an explicit empty dict, not None."""
         client.execute_node.return_value = _node_result()
-        store = AgentStateStore(tmp_path / "scheduler.json")
-        await store.save(AgentRuntimeState(channels=[6789], thinking_effort="none"))
-
         rt = BridgeRoundTrip(
             client,
-            self._two_provider_registry(),
+            _make_registry(scheduler_effort="none"),
             persona_sender,
-            state_dir=tmp_path,
         )
         await rt.handle(_wire(slash_target="scheduler"))
 
         kwargs = client.execute_node.call_args.kwargs
         assert kwargs["model_settings"] == {}
 
-    async def test_state_file_without_effort_field_passes_none(
+    async def test_no_effort_in_definition_passes_none(
         self,
-        tmp_path: Path,
         client: MagicMock,
         persona_sender: AsyncMock,
     ) -> None:
+        """thinking_effort absent from frontmatter → no override."""
         client.execute_node.return_value = _node_result()
-        store = AgentStateStore(tmp_path / "scheduler.json")
-        await store.save(AgentRuntimeState(channels=[6789]))  # effort defaults to None
-
-        rt = BridgeRoundTrip(
-            client,
-            self._two_provider_registry(),
-            persona_sender,
-            state_dir=tmp_path,
-        )
-        await rt.handle(_wire(slash_target="scheduler"))
-
-        kwargs = client.execute_node.call_args.kwargs
-        assert kwargs["model_settings"] is None
-
-    async def test_missing_state_file_passes_none(
-        self,
-        tmp_path: Path,
-        client: MagicMock,
-        persona_sender: AsyncMock,
-    ) -> None:
-        """No state file (agent never bootstrapped) → no override."""
-        client.execute_node.return_value = _node_result()
-        rt = BridgeRoundTrip(
-            client,
-            self._two_provider_registry(),
-            persona_sender,
-            state_dir=tmp_path,
-        )
+        rt = BridgeRoundTrip(client, _make_registry(), persona_sender)
         await rt.handle(_wire(slash_target="scheduler"))
 
         kwargs = client.execute_node.call_args.kwargs
@@ -346,65 +330,35 @@ class TestModelSettings:
 
     async def test_ambient_message_passes_none(
         self,
-        tmp_path: Path,
         client: MagicMock,
         persona_sender: AsyncMock,
     ) -> None:
         """slash_target=None → bridge doesn't know the recipient → no override.
 
         Documented v1 limitation: ambient messages can't carry per-agent
-        effort. See bridge/roundtrip.py module docstring.
+        effort even when the agent's .md declares one. See
+        :mod:`bridge.roundtrip` module docstring.
         """
         client.execute_node.return_value = _node_result()
-        # Even with a populated state file, ambient flow ignores it.
-        store = AgentStateStore(tmp_path / "scheduler.json")
-        await store.save(AgentRuntimeState(channels=[6789], thinking_effort="max"))
-
         rt = BridgeRoundTrip(
             client,
-            self._two_provider_registry(),
+            _make_registry(scheduler_effort="max"),
             persona_sender,
-            state_dir=tmp_path,
         )
         await rt.handle(_wire(slash_target=None, kind="message"))
 
         kwargs = client.execute_node.call_args.kwargs
         assert kwargs["model_settings"] is None
 
-    async def test_state_dir_unset_passes_none(
-        self,
-        tmp_path: Path,
-        client: MagicMock,
-        persona_sender: AsyncMock,
-    ) -> None:
-        """Bridge built without state_dir (e.g. older test code) → no override."""
-        client.execute_node.return_value = _node_result()
-        rt = BridgeRoundTrip(
-            client,
-            self._two_provider_registry(),
-            persona_sender,
-            # state_dir intentionally omitted
-        )
-        await rt.handle(_wire(slash_target="scheduler"))
-
-        kwargs = client.execute_node.call_args.kwargs
-        assert kwargs["model_settings"] is None
-
     async def test_target_missing_from_registry_passes_none(
         self,
-        tmp_path: Path,
         client: MagicMock,
         persona_sender: AsyncMock,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """slash_target references an unknown agent → log + no override."""
         client.execute_node.return_value = _node_result()
-        rt = BridgeRoundTrip(
-            client,
-            self._two_provider_registry(),
-            persona_sender,
-            state_dir=tmp_path,
-        )
+        rt = BridgeRoundTrip(client, _make_registry(), persona_sender)
         with caplog.at_level(logging.WARNING):
             await rt.handle(_wire(slash_target="ghost"))
 
@@ -412,104 +366,83 @@ class TestModelSettings:
         assert kwargs["model_settings"] is None
         assert any("missing from registry" in r.message for r in caplog.records)
 
-    async def test_malformed_state_file_passes_none(
+    async def test_provider_resolution_failure_degrades_to_no_override(
         self,
-        tmp_path: Path,
         client: MagicMock,
         persona_sender: AsyncMock,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Corrupted JSON in state file → log + no override; the call still goes."""
-        client.execute_node.return_value = _node_result()
-        (tmp_path / "scheduler.json").write_text("{ not valid json", encoding="utf-8")
-
-        rt = BridgeRoundTrip(
-            client,
-            self._two_provider_registry(),
-            persona_sender,
-            state_dir=tmp_path,
-        )
-        with caplog.at_level(logging.WARNING):
-            await rt.handle(_wire(slash_target="scheduler"))
-
-        kwargs = client.execute_node.call_args.kwargs
-        assert kwargs["model_settings"] is None
-        assert any("malformed state" in r.message for r in caplog.records)
-
-    async def test_unreadable_state_file_passes_none(
-        self,
-        tmp_path: Path,
-        client: MagicMock,
-        persona_sender: AsyncMock,
-        caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """OSError arm (e.g. permission denied) → log + no override.
-
-        Separate from FileNotFoundError so a future regression that
-        collapses both into one arm — losing the "failed to read state"
-        log line — fails this test.
-        """
-        client.execute_node.return_value = _node_result()
-        (tmp_path / "scheduler.json").write_text(
-            AgentRuntimeState(channels=[6789], thinking_effort="high").model_dump_json(),
-            encoding="utf-8",
-        )
-
-        def _raise_permission_error(*_args: Any, **_kwargs: Any) -> str:
-            raise PermissionError("simulated unreadable state file")
-
-        monkeypatch.setattr(Path, "read_text", _raise_permission_error)
-
-        rt = BridgeRoundTrip(
-            client,
-            self._two_provider_registry(),
-            persona_sender,
-            state_dir=tmp_path,
-        )
-        with caplog.at_level(logging.WARNING):
-            await rt.handle(_wire(slash_target="scheduler"))
-
-        kwargs = client.execute_node.call_args.kwargs
-        assert kwargs["model_settings"] is None
-        assert any("failed to read state" in r.message for r in caplog.records)
-
-    async def test_anthropic_unknown_effort_degrades_to_empty_dict(
-        self,
-        tmp_path: Path,
-        client: MagicMock,
-        persona_sender: AsyncMock,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A future / hand-edited effort tier should degrade, not raise.
+        """A bad env-var typo at runtime is caught and degrades to defaults.
 
-        Bypasses pydantic validation by writing the JSON directly so the
-        defensive guard in build_model_settings is exercised end-to-end.
+        Boot-time validation in ``BridgeRoundTrip.__init__`` catches the
+        common case, but if the env var drifts mid-process or
+        ``build_model_settings`` ever raises ValueError on an effort tier,
+        the per-call resolution path must not blow up the round-trip.
         """
         client.execute_node.return_value = _node_result()
-        # `extra="ignore"` on AgentRuntimeState means an unknown tier value
-        # in the file would normally fail Literal validation; write the
-        # JSON manually and monkeypatch validate_json to skip the strict
-        # check, simulating the post-deserialization-bypass scenario.
-        (tmp_path / "scheduler.json").write_text(
-            '{"schema_version": 1, "channels": [6789], "thinking_effort": "ludicrous"}',
-            encoding="utf-8",
-        )
 
+        # Construct the round-trip FIRST (boot validation runs cleanly),
+        # then monkeypatch so only the per-call path sees the failure.
         rt = BridgeRoundTrip(
             client,
-            self._two_provider_registry(),
+            _make_registry(scheduler_effort="high"),
             persona_sender,
-            state_dir=tmp_path,
         )
+
+        def _raise_value_error(*_args: Any, **_kwargs: Any) -> None:
+            raise ValueError("simulated provider misconfig")
+
+        monkeypatch.setattr(
+            "calfkit_organization.bridge.roundtrip.resolve_provider",
+            _raise_value_error,
+        )
+
         with caplog.at_level(logging.WARNING):
             await rt.handle(_wire(slash_target="scheduler"))
 
-        # Strict pydantic rejects "ludicrous" via Literal — caught by the
-        # malformed-state ValueError arm, model_settings becomes None.
+        # The call still happened — just without an override.
         kwargs = client.execute_node.call_args.kwargs
         assert kwargs["model_settings"] is None
-        assert any("malformed state" in r.message for r in caplog.records)
+        assert any(
+            "model_settings resolution failed" in r.message for r in caplog.records
+        )
+
+    async def test_picks_up_runtime_change_after_set_thinking_effort(
+        self,
+        client: MagicMock,
+        persona_sender: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Hot reload: a runtime registry mutation flows to the next call's settings."""
+        # Use a real on-disk .md so registry.set_thinking_effort can write.
+        import frontmatter
+
+        md_path = tmp_path / "scheduler.md"
+        post = frontmatter.Post(
+            "Body.",
+            name="scheduler",
+            slash="/scheduler",
+            display_name="Aksel (Scheduler)",
+            description="Calendar.",
+            provider="anthropic",
+        )
+        md_path.write_text(frontmatter.dumps(post) + "\n", encoding="utf-8")
+
+        registry = AgentRegistry.from_agents_dir(tmp_path)
+        rt = BridgeRoundTrip(client, registry, persona_sender)
+
+        # Before the mutation: no override.
+        client.execute_node.return_value = _node_result()
+        await rt.handle(_wire(slash_target="scheduler"))
+        assert client.execute_node.call_args.kwargs["model_settings"] is None
+
+        # After the mutation: anthropic high (31999) flows through.
+        await registry.set_thinking_effort("scheduler", "high")
+        await rt.handle(_wire(slash_target="scheduler"))
+        assert client.execute_node.call_args.kwargs["model_settings"] == {
+            "anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}
+        }
 
 
 class TestConcurrency:

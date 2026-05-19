@@ -102,6 +102,41 @@ class TestAgentDefinitionValidators:
         assert dumped["name"] == "scheduler"
         assert "agent_id" not in dumped
 
+    def test_thinking_effort_defaults_to_none(self) -> None:
+        assert _make_definition().thinking_effort is None
+
+    @pytest.mark.parametrize(
+        "effort", ["none", "low", "medium", "high", "xhigh", "max"]
+    )
+    def test_thinking_effort_accepts_known_tiers(self, effort: str) -> None:
+        d = _make_definition(thinking_effort=effort)
+        assert d.thinking_effort == effort
+
+    @pytest.mark.parametrize("bad_effort", ["ludicrous", "HIGH", "", "veryhigh"])
+    def test_thinking_effort_rejects_unknown_values(self, bad_effort: str) -> None:
+        with pytest.raises(ValidationError, match="thinking_effort"):
+            _make_definition(thinking_effort=bad_effort)
+
+    def test_source_path_excluded_from_model_dump(self) -> None:
+        """``source_path`` is an in-memory annotation, not a YAML field."""
+        d = _make_definition(source_path=Path("/tmp/scheduler.md"))
+        assert d.source_path == Path("/tmp/scheduler.md")
+        assert "source_path" not in d.model_dump()
+        assert "source_path" not in d.model_dump(by_alias=True)
+
+    @pytest.mark.parametrize(
+        "typo", ["provder", "thiking_effort", "displayname", "extra_garbage"]
+    )
+    def test_unknown_frontmatter_keys_rejected(self, typo: str) -> None:
+        """``extra="forbid"`` surfaces frontmatter typos at parse time.
+
+        Before this guard, ``provder: openai`` would silently fall back
+        to the project default ``anthropic`` provider — a bewildering
+        debugging experience for operators.
+        """
+        with pytest.raises(ValidationError):
+            _make_definition(**{typo: "value"})
+
 
 class TestParseAgentMd:
     def _write_md(self, path: Path, body: str = "You are a scheduler.", **frontmatter_extra) -> None:
@@ -127,6 +162,19 @@ class TestParseAgentMd:
         assert d.agent_id == "scheduler"
         assert d.slash == "/scheduler"
         assert d.system_prompt == "You are a scheduler."
+
+    def test_stamps_source_path(self, tmp_path: Path) -> None:
+        """source_path lets the bridge rewrite the same file later."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path)
+        d = parse_agent_md(path)
+        assert d.source_path == path
+
+    def test_parses_thinking_effort_frontmatter_field(self, tmp_path: Path) -> None:
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, thinking_effort="high")
+        d = parse_agent_md(path)
+        assert d.thinking_effort == "high"
 
     def test_filename_must_match_name(self, tmp_path: Path) -> None:
         path = tmp_path / "scheduler.md"

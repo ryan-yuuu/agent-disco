@@ -55,8 +55,6 @@ class DiscordIngressGateway:
         settings: DiscordSettings,
         roundtrip: BridgeRoundTrip,
         registry: AgentRegistry,
-        *,
-        state_dir: Path,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -75,7 +73,6 @@ class DiscordIngressGateway:
             registry=registry,
             roundtrip=self._roundtrip,
             slash_normalizer=self._slash_normalizer,
-            state_dir=state_dir,
             owner_user_id=settings.owner_user_id,
         )
         # Per-agent invocation slashes (``/echo``, ``/scribe``, …) are
@@ -230,7 +227,6 @@ def main() -> None:
         raise SystemExit("DISCORD_GUILD_ID is required (global slash sync is too slow for dev)")
 
     agents_dir = Path(os.getenv("CALFKIT_AGENTS_DIR", "agents"))
-    state_dir = Path(os.getenv("CALFKIT_STATE_DIR", "state/agents"))
     registry = AgentRegistry.from_agents_dir(agents_dir)
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
@@ -252,11 +248,8 @@ def main() -> None:
                     calfkit_client=calfkit_client,
                     registry=registry,
                     persona_sender=persona_sender,
-                    state_dir=state_dir,
                 )
-                gateway = DiscordIngressGateway(
-                    settings, roundtrip, registry, state_dir=state_dir
-                )
+                gateway = DiscordIngressGateway(settings, roundtrip, registry)
 
                 stop = asyncio.Event()
                 loop = asyncio.get_running_loop()

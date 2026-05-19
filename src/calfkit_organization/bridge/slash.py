@@ -4,10 +4,14 @@ Owns the ``app_commands.CommandTree`` for the bot. Two kinds of commands
 can be registered:
 
 * ``/thinking-effort agent:<name> effort:<tier>`` — the operator slash
-  registered by :meth:`register_thinking_effort`. Writes the persisted
-  effort tier into ``state/agents/<name>.json`` via a per-agent
-  :class:`AgentStateStore` cached at registration time. Authorization is
-  restricted to ``DiscordSettings.owner_user_id``.
+  registered by :meth:`register_thinking_effort`. Rewrites the
+  ``thinking_effort`` field of the agent's ``.md`` frontmatter via
+  :meth:`AgentRegistry.set_thinking_effort`, and swaps the in-memory
+  :class:`AgentDefinition` in the registry so the next round-trip picks
+  up the new value. The frontmatter is validated **before** the disk
+  write so a malformed ``.md`` surfaces immediately rather than at next
+  agent boot. Authorization is restricted to
+  ``DiscordSettings.owner_user_id``.
 * Per-agent invocation slashes (``/echo``, ``/scribe``, …) built by
   :meth:`register_all`. Currently disabled in the bridge in favour of
   ``@<agent_id>`` text-prefix invocation, but the builder is preserved
@@ -21,14 +25,12 @@ can be registered:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import cast, get_args
 
 import discord
 from discord import app_commands
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.state import AgentStateStore, ThinkingEffort
+from calfkit_organization.agents.definition import AgentDefinition, ThinkingEffort
 from calfkit_organization.bridge.normalizer import SlashNormalizer
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.roundtrip import BridgeRoundTrip
@@ -49,28 +51,14 @@ class SlashCommandManager:
         roundtrip: BridgeRoundTrip,
         slash_normalizer: SlashNormalizer,
         *,
-        state_dir: Path | None = None,
         owner_user_id: int | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
         self._roundtrip = roundtrip
         self._normalizer = slash_normalizer
-        self._state_dir = state_dir
         self._owner_user_id = owner_user_id
         self._tree = app_commands.CommandTree(client)
-        # One AgentStateStore per agent. Built eagerly when state_dir is
-        # known so the orphan-tmp sweep runs once at boot — not on every
-        # slash invocation — and concurrent invocations share the per-agent
-        # asyncio.Lock. Empty dict when state_dir is None (test/legacy).
-        self._stores: dict[str, AgentStateStore] = (
-            {
-                spec.agent_id: AgentStateStore(state_dir / f"{spec.agent_id}.json")
-                for spec in registry.all()
-            }
-            if state_dir is not None
-            else {}
-        )
 
     def register_all(self) -> None:
         """Add one :class:`app_commands.Command` per agent. Call once at startup."""
@@ -80,22 +68,12 @@ class SlashCommandManager:
     def register_thinking_effort(self) -> None:
         """Register ``/thinking-effort`` on the command tree.
 
-        Requires ``state_dir`` to have been supplied at construction; raises
-        :class:`RuntimeError` otherwise so misconfiguration fails at boot
-        rather than at first invocation.
-
-        The per-agent :class:`AgentStateStore` cache is built at
-        construction time (see ``__init__``).
-
-        Ambient-message limitation: the persisted tier only applies when
-        the bridge can identify the target agent (slash invocations and
-        ``@<agent_id>`` mentions). Plain channel messages fall back to the
-        agent's constructor defaults — see :mod:`bridge.thinking`.
+        Ambient-message limitation: the rewritten effort only takes effect
+        on the *next* message for slash invocations and ``@<agent_id>``
+        mentions — ambient channel messages use whatever was baked into
+        the agent's model client at boot. See
+        :mod:`calfkit_organization.agents.thinking` for the full story.
         """
-        if self._state_dir is None:
-            raise RuntimeError(
-                "SlashCommandManager.register_thinking_effort requires state_dir at construction"
-            )
         self._tree.add_command(self._build_thinking_effort_command())
 
     def _build_thinking_effort_command(self) -> app_commands.Command:
@@ -131,7 +109,6 @@ class SlashCommandManager:
         agent_id: str,
         effort: str,
     ) -> None:
-        assert self._state_dir is not None  # enforced by register_thinking_effort
         logger.info(
             "thinking-effort slash invoked agent=%s effort=%s user_id=%s",
             agent_id,
@@ -140,7 +117,18 @@ class SlashCommandManager:
         )
 
         async def reply(text: str) -> None:
-            await interaction.response.send_message(text, ephemeral=True)
+            # If the Discord API rejects our reply (rate-limit, expired
+            # interaction token, etc.) log it but don't propagate — the
+            # caller is in an error-recovery path and there's nothing
+            # actionable left to do.
+            try:
+                await interaction.response.send_message(text, ephemeral=True)
+            except discord.HTTPException:
+                logger.exception(
+                    "failed to send slash reply agent=%s interaction_id=%s",
+                    agent_id,
+                    interaction.id,
+                )
 
         if self._owner_user_id is not None and interaction.user.id != self._owner_user_id:
             await reply("Only the configured owner can change agent effort.")
@@ -157,36 +145,45 @@ class SlashCommandManager:
             await reply(f"Unknown effort `{effort}`. Choose one of: {choices}")
             return
 
-        # Stores are pre-built at __init__. A miss here means post-boot
-        # drift from the registry; should be impossible — treat defensively.
-        store = self._stores.get(agent_id)
-        if store is None:
-            logger.error(
-                "no AgentStateStore for known agent_id=%s (registered=%s)",
-                agent_id,
-                sorted(self._stores),
-            )
-            await reply(
-                f"Internal error: no state store for `{agent_id}` "
-                f"(interaction_id={interaction.id}). Check bridge logs."
-            )
-            return
         try:
-            await store.set_thinking_effort(cast(ThinkingEffort, effort))
+            await self._registry.set_thinking_effort(
+                agent_id, cast(ThinkingEffort, effort)
+            )
         except FileNotFoundError:
+            logger.error(
+                "agent %s source_path missing on disk; cannot rewrite frontmatter",
+                agent_id,
+            )
             await reply(
-                f"Agent `{agent_id}` has no state file yet "
-                "(start the agent at least once to bootstrap it)."
+                f"Internal error: agent `{agent_id}` source file is missing. "
+                "Check the bridge logs."
             )
             return
-        except Exception:
+        except ValueError:
+            # Includes pydantic ValidationError (subclass) and the
+            # md_writer's "malformed YAML" re-raise. The .md is unusable
+            # for this agent until the operator fixes it.
             logger.exception(
-                "failed to persist thinking_effort agent=%s interaction_id=%s",
+                "agent %s frontmatter validation failed interaction_id=%s",
                 agent_id,
                 interaction.id,
             )
             await reply(
-                f"Sorry — failed to persist the new effort tier "
+                f"Couldn't rewrite `{agent_id}`'s .md — frontmatter is invalid "
+                f"(interaction_id={interaction.id}). Check the bridge logs."
+            )
+            return
+        except OSError:
+            # Filesystem error during atomic write (permission, ENOSPC,
+            # EROFS, fsync failure). The on-disk file is unchanged
+            # because md_writer cleans up its tmp file.
+            logger.exception(
+                "filesystem error rewriting %s.md interaction_id=%s",
+                agent_id,
+                interaction.id,
+            )
+            await reply(
+                f"Couldn't write `{agent_id}`'s .md — filesystem error "
                 f"(interaction_id={interaction.id}). Check the bridge logs."
             )
             return
@@ -194,12 +191,14 @@ class SlashCommandManager:
         if effort == "none":
             await reply(
                 f"Saved `effort=none` for `{agent_id}`. Thinking is disabled; "
-                "applies to the next slash or @-mention message."
+                "applies to the next slash or @-mention message. "
+                "Restart the agent process to apply to ambient messages too."
             )
         else:
             await reply(
                 f"Saved `effort={effort}` for `{agent_id}`. "
-                "Applies to the next slash or @-mention message."
+                "Applies to the next slash or @-mention message. "
+                "Restart the agent process to apply to ambient messages too."
             )
 
     async def sync(self, guild_id: int | None) -> None:

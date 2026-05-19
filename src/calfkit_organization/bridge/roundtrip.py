@@ -26,36 +26,27 @@ target a single agent); migrate to a non-dedupe outbox consumer when
 ambient multi-agent flows matter.
 
 **Per-call thinking-effort overrides** (v1): when ``wire.slash_target`` is
-set, the round-trip reads ``state/agents/<target>.json`` and attaches a
+set, the round-trip reads the target agent's current ``thinking_effort``
+from the registry's in-memory :class:`AgentDefinition` and attaches a
 provider-specific ``model_settings`` dict to the calfkit invocation so the
 agent uses the configured effort on this exact call. Ambient messages
-(``slash_target is None``) flow without overrides because the bridge does
-not know which subscribed agent will gate-accept the event; those calls
-fall back to whatever was baked into the agent's model client.
-
-**Cross-process state writes**: both this module (writing
-``thinking_effort``) and the agent runner (writing ``channels`` on first
-boot — see ``agents/runner.py``) open the same per-agent JSON. In steady
-state the agent never writes; the only realistic conflict is a bridge
-``/thinking-effort`` write racing the agent's first-boot bootstrap, which
-is operator-driven and rare. If runtime channel mutation is added later,
-a cross-process file lock will be needed.
+(``slash_target is None``) flow without overrides — the agent falls back
+to whatever was baked into its model client at boot (see
+:mod:`calfkit_organization.agents.thinking`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any
 
 from calfkit.client import Client
 
 from calfkit_organization.agents.definition import Provider
 from calfkit_organization.agents.factory import DEFAULT_PROVIDER, resolve_provider
-from calfkit_organization.agents.state import AgentRuntimeState
+from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.thinking import build_model_settings
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.discord.persona import (
     DiscordPersonaSender,
@@ -85,7 +76,6 @@ class BridgeRoundTrip:
         registry: AgentRegistry,
         persona_sender: DiscordPersonaSender,
         *,
-        state_dir: Path | None = None,
         default_provider: Provider = DEFAULT_PROVIDER,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         max_in_flight: int = _DEFAULT_MAX_IN_FLIGHT,
@@ -94,7 +84,6 @@ class BridgeRoundTrip:
         self._client = calfkit_client
         self._registry = registry
         self._persona_sender = persona_sender
-        self._state_dir = state_dir
         self._default_provider = default_provider
         self._timeout_seconds = timeout_seconds
         self._semaphore = asyncio.Semaphore(max_in_flight)
@@ -186,46 +175,41 @@ class BridgeRoundTrip:
     def _resolve_model_settings(self, wire: WireMessage) -> dict[str, Any] | None:
         """Compute per-call ``model_settings`` for ``wire``, or ``None``.
 
-        Returns ``None`` for ambient messages (``slash_target is None``)
-        and for any state-file error (missing file, parse error, unknown
-        target) — the agent then falls back to its constructor defaults.
+        Reads the target agent's current ``thinking_effort`` from the
+        in-memory registry (kept fresh by
+        :meth:`AgentRegistry.set_thinking_effort`). Returns ``None`` for
+        ambient messages and for any error — the agent then falls back
+        to whatever was baked into its model client at boot.
         """
         target = wire.slash_target
-        if target is None or self._state_dir is None:
+        if target is None:
             return None
 
         spec = self._registry.by_id(target)
         if spec is None:
-            logger.warning(
-                "slash_target=%r missing from registry; skipping model_settings",
+            # event_id rather than just slash_target so operators can
+            # grep the Discord event the user invoked.
+            logger.error(
+                "slash_target=%r missing from registry event_id=%s; "
+                "operator effort tier will not apply",
                 target,
-            )
-            return None
-
-        state_path = self._state_dir / f"{target}.json"
-        try:
-            raw = state_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-        except OSError:
-            logger.warning(
-                "failed to read state for agent=%s path=%s; skipping model_settings",
-                target,
-                state_path,
-                exc_info=True,
+                wire.event_id,
             )
             return None
 
         try:
-            state = AgentRuntimeState.model_validate_json(raw)
-        except ValueError:
+            provider = resolve_provider(spec, default_provider=self._default_provider)
+            return build_model_settings(provider, spec.thinking_effort)
+        except ValueError as e:
+            # resolve_provider raises on a typo'd CALFKIT_AGENT_DEFAULT_PROVIDER
+            # (boot validates the steady state, but env can drift); the mapper
+            # raises on an unknown provider. Neither should fail the LLM call.
             logger.warning(
-                "malformed state for agent=%s path=%s; skipping model_settings",
+                "model_settings resolution failed for agent=%s event_id=%s "
+                "cause=%s; falling back to model client defaults",
                 target,
-                state_path,
+                wire.event_id,
+                type(e).__name__,
                 exc_info=True,
             )
             return None
-
-        provider = resolve_provider(spec, default_provider=self._default_provider)
-        return build_model_settings(provider, state.thinking_effort)

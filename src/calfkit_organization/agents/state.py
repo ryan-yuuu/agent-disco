@@ -1,9 +1,11 @@
-"""Per-agent runtime state — channel subscriptions plus future fields.
+"""Per-agent runtime state — strictly channel subscriptions today.
 
 Each agent runs as its own process and owns one JSON file at
 ``state/agents/<agent_id>.json`` (or wherever :envvar:`CALFKIT_STATE_DIR`
-points). The state file is read at boot, mutated in memory during runtime,
-and persisted with a crash-safe rename pattern:
+points). ``thinking_effort`` was previously stored here but has moved to
+the ``.md`` frontmatter (see :class:`AgentDefinition`); this module is
+now channels-only. The state file is read at boot, mutated in memory
+during runtime, and persisted with a crash-safe rename pattern:
 
 1. write payload to a sibling ``.<name>.<rand>.tmp`` file
 2. ``fsync`` the file
@@ -32,21 +34,10 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
-
-
-ThinkingEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
-"""Operator-facing thinking-effort tiers.
-
-Six abstract levels mapped to provider-specific reasoning/thinking
-parameters in :mod:`calfkit_organization.bridge.thinking`. Tier names
-parallel Claude Code's effort vocabulary; ``xhigh`` is a calfkit-specific
-step between ``high`` and ``max``.
-"""
 
 
 class AgentRuntimeState(BaseModel):
@@ -55,13 +46,19 @@ class AgentRuntimeState(BaseModel):
     Add new fields freely; ``extra="ignore"`` keeps older readers compatible
     with files written by newer code. Bump ``schema_version`` only on
     breaking changes (field removal or rename) and pair with a migrator.
+
+    Note: ``thinking_effort`` is intentionally **not** stored here — it's a
+    declared default in the agent's ``.md`` frontmatter (see
+    :class:`AgentDefinition`) and is mutated via
+    :func:`calfkit_organization.agents.md_writer.update_thinking_effort`.
+    Old state files that still carry the field are ignored gracefully
+    (``extra="ignore"``).
     """
 
     model_config = ConfigDict(extra="ignore")
 
     schema_version: int = 1
     channels: list[int] = Field(default_factory=list)
-    thinking_effort: ThinkingEffort | None = None
 
 
 class AgentStateStore:
@@ -116,19 +113,6 @@ class AgentStateStore:
             if channel_id not in state.channels:
                 return
             state = state.model_copy(update={"channels": [c for c in state.channels if c != channel_id]})
-            self._write(state)
-
-    async def set_thinking_effort(self, value: ThinkingEffort) -> None:
-        """Persist a new ``thinking_effort`` tier. No-op when the value is unchanged.
-
-        The no-op-on-same-value path avoids a spurious write (and its
-        fsync) on a re-apply; useful for any future mtime-watching consumer.
-        """
-        async with self._lock:
-            state = self._read()
-            if state.thinking_effort == value:
-                return
-            state = state.model_copy(update={"thinking_effort": value})
             self._write(state)
 
     def _read(self) -> AgentRuntimeState:

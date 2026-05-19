@@ -16,28 +16,24 @@ class TestAgentRuntimeState:
         s = AgentRuntimeState()
         assert s.schema_version == 1
         assert s.channels == []
-        assert s.thinking_effort is None
 
     def test_extra_fields_ignored(self) -> None:
-        """Forward-compat: unknown fields from newer writers must not crash older readers."""
+        """Forward-compat: unknown fields from newer writers must not crash older readers.
+
+        Also covers the post-migration case where old state files still
+        carry a ``thinking_effort`` field — it's ignored cleanly now that
+        the field lives in the .md frontmatter.
+        """
         s = AgentRuntimeState.model_validate({"channels": [42], "future_field": "ignored"})
         assert s.channels == [42]
 
-    def test_thinking_effort_accepts_known_tiers(self) -> None:
-        for tier in ("none", "low", "medium", "high", "xhigh", "max"):
-            s = AgentRuntimeState.model_validate({"channels": [1], "thinking_effort": tier})
-            assert s.thinking_effort == tier
-
-    def test_thinking_effort_rejects_unknown_value(self) -> None:
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            AgentRuntimeState.model_validate({"channels": [1], "thinking_effort": "bananas"})
-
-    def test_old_state_files_without_thinking_effort_load_clean(self) -> None:
-        """Back-compat: a pre-feature state file must load with effort=None."""
-        s = AgentRuntimeState.model_validate({"schema_version": 1, "channels": [42]})
-        assert s.thinking_effort is None
+    def test_legacy_thinking_effort_field_is_ignored(self) -> None:
+        """Old state files written before the migration still load."""
+        s = AgentRuntimeState.model_validate(
+            {"schema_version": 1, "channels": [42], "thinking_effort": "high"}
+        )
+        assert s.channels == [42]
+        assert not hasattr(s, "thinking_effort")
 
 
 class TestAgentStateStore:
@@ -96,36 +92,6 @@ class TestAgentStateStore:
         await store.remove_channel(999)
         loaded = await store.load()
         assert loaded.channels == [1]
-
-    async def test_set_thinking_effort_persists(self, store: AgentStateStore) -> None:
-        await store.save(AgentRuntimeState(channels=[1]))
-        await store.set_thinking_effort("high")
-        loaded = await store.load()
-        assert loaded.thinking_effort == "high"
-        assert loaded.channels == [1]  # other fields preserved
-
-    async def test_set_thinking_effort_can_overwrite(self, store: AgentStateStore) -> None:
-        await store.save(AgentRuntimeState(channels=[1], thinking_effort="low"))
-        await store.set_thinking_effort("xhigh")
-        loaded = await store.load()
-        assert loaded.thinking_effort == "xhigh"
-
-    async def test_set_thinking_effort_idempotent_skips_write(
-        self, store: AgentStateStore
-    ) -> None:
-        """No-op write when value is unchanged so file mtime stays stable."""
-        await store.save(AgentRuntimeState(channels=[1], thinking_effort="medium"))
-        mtime_before = store.path.stat().st_mtime_ns
-        await store.set_thinking_effort("medium")
-        mtime_after = store.path.stat().st_mtime_ns
-        assert mtime_before == mtime_after
-
-    async def test_set_thinking_effort_missing_file_raises(
-        self, store: AgentStateStore
-    ) -> None:
-        """No bootstrap: an agent must have been seeded before effort can be set."""
-        with pytest.raises(FileNotFoundError):
-            await store.set_thinking_effort("low")
 
     async def test_concurrent_add_channels_no_lost_writes(self, store: AgentStateStore) -> None:
         """All scheduled add_channel calls land in the persisted state.
