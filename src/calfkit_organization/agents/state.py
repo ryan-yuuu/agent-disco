@@ -32,10 +32,21 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
+
+
+ThinkingEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
+"""Operator-facing thinking-effort tiers.
+
+Six abstract levels mapped to provider-specific reasoning/thinking
+parameters in :mod:`calfkit_organization.bridge.thinking`. Tier names
+parallel Claude Code's effort vocabulary; ``xhigh`` is a calfkit-specific
+step between ``high`` and ``max``.
+"""
 
 
 class AgentRuntimeState(BaseModel):
@@ -50,6 +61,7 @@ class AgentRuntimeState(BaseModel):
 
     schema_version: int = 1
     channels: list[int] = Field(default_factory=list)
+    thinking_effort: ThinkingEffort | None = None
 
 
 class AgentStateStore:
@@ -104,6 +116,19 @@ class AgentStateStore:
             if channel_id not in state.channels:
                 return
             state = state.model_copy(update={"channels": [c for c in state.channels if c != channel_id]})
+            self._write(state)
+
+    async def set_thinking_effort(self, value: ThinkingEffort) -> None:
+        """Persist a new ``thinking_effort`` tier. No-op when the value is unchanged.
+
+        The no-op-on-same-value path avoids a spurious write (and its
+        fsync) on a re-apply; useful for any future mtime-watching consumer.
+        """
+        async with self._lock:
+            state = self._read()
+            if state.thinking_effort == value:
+                return
+            state = state.model_copy(update={"thinking_effort": value})
             self._write(state)
 
     def _read(self) -> AgentRuntimeState:

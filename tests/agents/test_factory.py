@@ -17,7 +17,7 @@ from calfkit.nodes import Agent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 from calfkit_organization.agents.definition import AgentDefinition, Provider
-from calfkit_organization.agents.factory import AgentFactory
+from calfkit_organization.agents.factory import AgentFactory, resolve_provider
 from calfkit_organization.agents.state import AgentRuntimeState
 
 
@@ -335,6 +335,40 @@ class TestModelResolution:
             MagicMock(),
         )
         assert calls[0] == ("openai", "gpt-5-mini")
+
+
+class TestResolveProviderModuleFunction:
+    """``resolve_provider`` is lifted to module scope so the bridge can reuse it."""
+
+    def test_definition_provider_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "anthropic")
+        assert (
+            resolve_provider(_definition(provider="openai"), default_provider="anthropic")
+            == "openai"
+        )
+
+    def test_env_var_used_when_definition_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "openai")
+        assert (
+            resolve_provider(_definition(provider=None), default_provider="anthropic")
+            == "openai"
+        )
+
+    def test_default_used_when_neither_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
+        assert (
+            resolve_provider(_definition(provider=None), default_provider="openai")
+            == "openai"
+        )
+
+    def test_unknown_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "cohere")
+        with pytest.raises(ValueError, match="unknown provider 'cohere'"):
+            resolve_provider(_definition(provider=None))
 
 
 class TestToolsWarning:

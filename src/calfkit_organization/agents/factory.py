@@ -3,8 +3,8 @@
 The factory builds a vanilla :class:`calfkit.Agent` node — no subclassing —
 configured to subscribe to ``discord.channel.{cid}.in`` for each channel in
 the agent's persisted state. The agent's identity rides on every outbound
-publish via calfkit 0.3.0's ``x-calf-emitter`` Kafka header, so the bridge
-egress can resolve the responding agent's persona from
+publish via calfkit's ``x-calf-emitter`` Kafka header, so the bridge egress
+can resolve the responding agent's persona from
 ``NodeResult.emitter_node_id`` without any application-level identity
 stamping.
 
@@ -47,7 +47,11 @@ from calfkit_organization.discord.persona import DiscordPersonaSender
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PROVIDER: Provider = "anthropic"
+DEFAULT_PROVIDER: Provider = "anthropic"
+"""Project-wide default LLM provider when neither ``definition.provider``
+nor the ``CALFKIT_AGENT_DEFAULT_PROVIDER`` env var is set. Public so the
+bridge can pin to the same value as the agent runner."""
+
 _DEFAULT_PROVIDER_ENV_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 _DEFAULT_MODEL_ENV_VAR = "CALFKIT_AGENT_DEFAULT_MODEL"
 _DEFAULT_SUBSCRIBE_TOPIC_TEMPLATE = "discord.channel.{cid}.in"
@@ -85,11 +89,37 @@ def _default_model_client_factory(provider: Provider, model_name: str) -> Pydant
     )
 
 
+def resolve_provider(
+    definition: AgentDefinition,
+    *,
+    default_provider: Provider = DEFAULT_PROVIDER,
+) -> Provider:
+    """Resolve the LLM provider for ``definition`` using the standard fallback chain.
+
+    Precedence (first non-empty wins):
+        1. ``definition.provider``
+        2. ``os.environ["CALFKIT_AGENT_DEFAULT_PROVIDER"]``
+        3. ``default_provider``
+
+    Raises:
+        ValueError: if the resolved value isn't one of the known providers
+            (typically only reachable via env-var override with an unknown
+            value).
+    """
+    raw = definition.provider or os.getenv(_DEFAULT_PROVIDER_ENV_VAR) or default_provider
+    if raw not in _PROVIDER_DEFAULT_MODELS:
+        raise ValueError(
+            f"unknown provider {raw!r} for agent {definition.agent_id!r}; "
+            f"expected one of {sorted(_PROVIDER_DEFAULT_MODELS)}"
+        )
+    return raw  # type: ignore[return-value]
+
+
 class AgentFactory:
     """Builds a :class:`Worker` running one LLM-backed agent.
 
     Identity carriage:
-        The constructed :class:`Agent` is unmodified calfkit; calfkit 0.3.0
+        The constructed :class:`Agent` is unmodified calfkit; calfkit
         stamps ``x-calf-emitter`` / ``x-calf-emitter-kind`` Kafka headers on
         every outbound publish, so the bridge resolves the responding agent
         via :attr:`NodeResult.emitter_node_id` and looks up the persona in
@@ -114,7 +144,7 @@ class AgentFactory:
         persona_sender: DiscordPersonaSender,
         calfkit_client: Client,
         *,
-        default_provider: Provider = _DEFAULT_PROVIDER,
+        default_provider: Provider = DEFAULT_PROVIDER,
         default_model: str | None = None,
         model_client_factory: ModelClientFactory | None = None,
         subscribe_topic_template: str = _DEFAULT_SUBSCRIBE_TOPIC_TEMPLATE,
@@ -209,17 +239,7 @@ class AgentFactory:
         return Worker(self._calfkit_client, [agent])
 
     def _resolve_provider(self, definition: AgentDefinition) -> Provider:
-        raw = (
-            definition.provider
-            or os.getenv(_DEFAULT_PROVIDER_ENV_VAR)
-            or self._default_provider
-        )
-        if raw not in _PROVIDER_DEFAULT_MODELS:
-            raise ValueError(
-                f"unknown provider {raw!r} for agent {definition.agent_id!r}; "
-                f"expected one of {sorted(_PROVIDER_DEFAULT_MODELS)}"
-            )
-        return raw  # type: ignore[return-value]
+        return resolve_provider(definition, default_provider=self._default_provider)
 
     def _resolve_model(self, definition: AgentDefinition, provider: Provider) -> str:
         return (

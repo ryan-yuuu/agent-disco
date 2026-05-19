@@ -55,6 +55,8 @@ class DiscordIngressGateway:
         settings: DiscordSettings,
         roundtrip: BridgeRoundTrip,
         registry: AgentRegistry,
+        *,
+        state_dir: Path,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -73,13 +75,16 @@ class DiscordIngressGateway:
             registry=registry,
             roundtrip=self._roundtrip,
             slash_normalizer=self._slash_normalizer,
+            state_dir=state_dir,
+            owner_user_id=settings.owner_user_id,
         )
-        # Native Discord slash commands are disabled. The bridge now uses
-        # @<agent_id> text-prefix invocation parsed by MessageNormalizer.
-        # We still call slash.sync() in _on_ready with an empty tree to
-        # remove any stale slash commands that earlier deploys registered.
-        # To re-enable native slashes, uncomment the next line.
+        # Per-agent invocation slashes (``/echo``, ``/scribe``, …) are
+        # disabled in favour of ``@<agent_id>`` text-prefix invocation parsed
+        # by MessageNormalizer. To re-enable them, uncomment the next line.
         # self._slash.register_all()
+        # The /thinking-effort operator slash is always registered so the
+        # tree is non-empty and stale per-agent slashes get pruned on sync.
+        self._slash.register_thinking_effort()
 
         # Bounded LRU of Discord message ids we've already invoked an agent
         # for. discord.py can redeliver MESSAGE_CREATE on gateway reconnect;
@@ -225,6 +230,7 @@ def main() -> None:
         raise SystemExit("DISCORD_GUILD_ID is required (global slash sync is too slow for dev)")
 
     agents_dir = Path(os.getenv("CALFKIT_AGENTS_DIR", "agents"))
+    state_dir = Path(os.getenv("CALFKIT_STATE_DIR", "state/agents"))
     registry = AgentRegistry.from_agents_dir(agents_dir)
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
@@ -246,8 +252,11 @@ def main() -> None:
                     calfkit_client=calfkit_client,
                     registry=registry,
                     persona_sender=persona_sender,
+                    state_dir=state_dir,
                 )
-                gateway = DiscordIngressGateway(settings, roundtrip, registry)
+                gateway = DiscordIngressGateway(
+                    settings, roundtrip, registry, state_dir=state_dir
+                )
 
                 stop = asyncio.Event()
                 loop = asyncio.get_running_loop()
