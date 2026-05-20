@@ -35,7 +35,10 @@ state is benign there.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+
+import discord
 
 from calfkit.client import Client
 from calfkit.models import ToolContext
@@ -113,19 +116,22 @@ async def private_chat(
         The target agent's textual response. Empty string if the target
         produced no text output.
 
-    Behavior on bad inputs (returned as an error string the LLM can read,
-    so the caller can adapt rather than aborting the whole turn):
+    Behavior on operational issues (returned as an error string the LLM
+    can read, so the caller can adapt rather than aborting the whole turn —
+    raising would never reach the calling agent because the tool's
+    ``ReturnCall`` would not fire, leaving the caller to wait on its own
+    execute timeout):
         - Unknown ``target_agent_id`` → ``"error: unknown agent ..."``
         - ``caller == target`` → ``"error: ... cannot privately chat
           with itself"``
+        - Target did not reply within timeout → ``"error: target
+          ... did not reply within Ns"``
 
     Raises:
         RuntimeError: if :func:`init` was not called, or the tool is
             invoked without a discoverable caller / originating wire.
             These represent infrastructure problems, not LLM input errors,
             and are not catchable by the calling LLM.
-        asyncio.TimeoutError: if the target does not reply within the
-            configured timeout.
     """
     if _client is None or _persona_sender is None or _resolver is None or _registry is None:
         raise RuntimeError(
@@ -189,22 +195,60 @@ async def private_chat(
     caller_persona = Persona(name=caller_spec.display_name, avatar_url=caller_spec.avatar_url)
     target_persona = Persona(name=target_spec.display_name, avatar_url=target_spec.avatar_url)
 
-    await _post_projection(caller_persona, a2a_channel_id, content)
+    await _post_projection(
+        caller_persona,
+        a2a_channel_id,
+        content,
+        caller=caller_agent_id,
+        target=target_agent_id,
+        correlation_id=None,
+    )
 
     target_topic = _AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=target_agent_id)
-    result = await _client.execute_node(
-        user_prompt=content,
-        topic=target_topic,
-        deps={
-            "discord": forwarded_wire.model_dump(mode="json"),
-            "caller_agent_id": caller_agent_id,
-        },
-        output_type=str,
-        timeout=_timeout_seconds,
+    logger.info(
+        "private_chat invoking caller=%s target=%s topic=%s timeout=%.1fs",
+        caller_agent_id,
+        target_agent_id,
+        target_topic,
+        _timeout_seconds,
     )
+    try:
+        result = await _client.execute_node(
+            user_prompt=content,
+            topic=target_topic,
+            deps={
+                "discord": forwarded_wire.model_dump(mode="json"),
+                "caller_agent_id": caller_agent_id,
+            },
+            output_type=str,
+            timeout=_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        # Returning as a string (rather than raising) is deliberate: if we
+        # raise, the tool's ReturnCall never fires and the calling agent's
+        # execute_node also times out — two timeouts for one logical
+        # failure. An error string lets the LLM see the failure and adapt.
+        logger.warning(
+            "private_chat timeout caller=%s target=%s topic=%s timeout=%.1fs",
+            caller_agent_id,
+            target_agent_id,
+            target_topic,
+            _timeout_seconds,
+        )
+        return (
+            f"error: target {target_agent_id!r} did not reply within "
+            f"{_timeout_seconds:.0f}s"
+        )
     response_text = result.output if result.output is not None else ""
 
-    await _post_projection(target_persona, a2a_channel_id, response_text)
+    await _post_projection(
+        target_persona,
+        a2a_channel_id,
+        response_text,
+        caller=caller_agent_id,
+        target=target_agent_id,
+        correlation_id=result.correlation_id,
+    )
 
     logger.info(
         "private_chat completed caller=%s target=%s correlation_id=%s response_len=%d",
@@ -216,11 +260,30 @@ async def private_chat(
     return response_text
 
 
-async def _post_projection(persona: Persona, channel_id: int, content: str) -> None:
-    """Post a projection message; retry once, then log + accept the gap.
+async def _post_projection(
+    persona: Persona,
+    channel_id: int,
+    content: str,
+    *,
+    caller: str,
+    target: str,
+    correlation_id: str | None,
+) -> None:
+    """Post a projection message; retry once on Discord errors, then log + accept the gap.
 
     Projections are an audit trail. The Kafka exchange is the system of
-    record, so a Discord failure must never abort the A2A turn.
+    record, so a transient Discord failure must never abort the A2A turn.
+
+    Exception scope: only :class:`discord.DiscordException` (the library's
+    own family) is caught — that covers HTTP errors, rate-limits, gateway
+    issues, etc. ``RuntimeError`` (sender not started) and ``TypeError``
+    (channel id not a text channel) escape because they indicate the
+    projection sub-system is misconfigured, not transiently down — those
+    deserve to surface as the originating bug rather than be swallowed.
+
+    ``caller``/``target``/``correlation_id`` are logged on failure so an
+    operator finding an audit gap on a particular pair channel can
+    correlate it back to the specific A2A turn.
     """
     assert _persona_sender is not None  # guarded by the caller
     # Empty content is legal (some agents may legitimately reply ""), but
@@ -231,20 +294,26 @@ async def _post_projection(persona: Persona, channel_id: int, content: str) -> N
         try:
             await _persona_sender.send(persona, channel_id=channel_id, content=payload)
             return
-        except Exception:
+        except discord.DiscordException:
             if attempt < 2:
                 logger.warning(
-                    "projection post attempt=%d failed persona=%s channel=%s; retrying",
+                    "projection attempt=%d failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; retrying",
                     attempt,
                     persona.name,
                     channel_id,
+                    caller,
+                    target,
+                    correlation_id,
                     exc_info=True,
                 )
             else:
                 logger.warning(
-                    "projection post failed persona=%s channel=%s; accepting audit gap",
+                    "projection failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; accepting audit gap",
                     persona.name,
                     channel_id,
+                    caller,
+                    target,
+                    correlation_id,
                     exc_info=True,
                 )
 

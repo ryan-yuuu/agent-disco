@@ -9,10 +9,12 @@ matter.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 from calfkit.client import Client
 from calfkit.models import ToolContext
@@ -295,25 +297,104 @@ class TestProjectionBestEffort:
     async def test_projection_failure_does_not_abort(
         self, deps: dict[str, Any]
     ) -> None:
-        """A Discord projection error must never lose the A2A call."""
+        """A transient Discord projection error must never lose the A2A call."""
         deps["client"].execute_node.return_value = _result("bob's reply")
-        deps["persona_sender"].send = AsyncMock(side_effect=Exception("discord 500"))
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=discord.DiscordException("transient")
+        )
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert out == "bob's reply"
 
-    async def test_projection_retries_once_then_logs(
+    async def test_projection_retries_once_then_logs_with_correlation(
         self,
         deps: dict[str, Any],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Each projection post tries twice on persistent failure; second
-        failure logs a warning naming the channel and persona."""
+        """Each projection post tries twice on persistent Discord failure;
+        second-failure log names the channel, caller, target, and (when
+        known) correlation_id so an operator can match a gap to a turn."""
         import logging as _logging
 
         deps["client"].execute_node.return_value = _result("ok")
-        deps["persona_sender"].send = AsyncMock(side_effect=Exception("boom"))
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=discord.DiscordException("persistent")
+        )
         with caplog.at_level(_logging.WARNING):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         # 2 attempts per projection × 2 projections = 4 send calls.
         assert deps["persona_sender"].send.await_count == 4
-        assert any("accepting audit gap" in r.message for r in caplog.records)
+        final = [r for r in caplog.records if "accepting audit gap" in r.message]
+        assert final, "expected a final-failure log line"
+        joined = " ".join(r.getMessage() for r in final)
+        assert "caller=alice" in joined
+        assert "target=bob" in joined
+
+    async def test_projection_succeeds_on_retry(self, deps: dict[str, Any]) -> None:
+        """First attempt fails, second succeeds: the retry actually works.
+        Pins the ``return`` inside the retry loop so a refactor that broke
+        the early-return would surface here."""
+        deps["client"].execute_node.return_value = _result("ok")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                discord.DiscordException("transient"),  # first projection, attempt 1 fails
+                None,  # first projection, attempt 2 succeeds
+                None,  # second projection, attempt 1 succeeds
+            ]
+        )
+        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert deps["persona_sender"].send.await_count == 3
+
+    async def test_non_discord_projection_error_propagates(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """RuntimeError / TypeError from the persona sender indicate
+        infrastructure misconfiguration (sender not started, channel id not
+        a text channel) — they must NOT be swallowed as "best-effort."""
+        deps["client"].execute_node.return_value = _result("ok")
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=RuntimeError("sender not started")
+        )
+        with pytest.raises(RuntimeError, match="sender not started"):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+
+
+class TestExecuteNodeFailures:
+    async def test_timeout_returns_error_string_not_raise(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """``execute_node`` timeout is operational, not LLM-input — but if
+        we raise, the tool's ReturnCall never fires and the calling agent's
+        own execute also times out (double timeout). Returning a string
+        lets the calling LLM see the failure and adapt."""
+        deps["client"].execute_node.side_effect = asyncio.TimeoutError()
+        out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert "did not reply" in out
+        assert "bob" in out
+
+    async def test_timeout_skips_response_projection(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """On timeout, only the request projection has been posted; the
+        response projection must not run (there's no response). Pins that
+        the second send call is skipped."""
+        deps["client"].execute_node.side_effect = asyncio.TimeoutError()
+        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Only the request projection attempted (1 send call).
+        assert deps["persona_sender"].send.await_count == 1
+
+
+class TestResolverFailure:
+    async def test_resolver_failure_propagates_and_skips_invocation(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Channel resolution is intentionally NOT best-effort: without an
+        audit channel there's nowhere to project, and the audit invariant
+        is part of the design. The error must propagate, and the target
+        agent must never be invoked under a half-broken setup."""
+        deps["resolver"].resolve_or_create.side_effect = discord.Forbidden(
+            MagicMock(status=403), "missing permission"
+        )
+        with pytest.raises(discord.Forbidden):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        deps["client"].execute_node.assert_not_called()
+        deps["persona_sender"].send.assert_not_called()

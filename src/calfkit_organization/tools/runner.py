@@ -32,6 +32,7 @@ import logging
 import os
 import signal
 from pathlib import Path
+from typing import Any
 
 from calfkit.client import Client
 from calfkit.worker import Worker
@@ -77,6 +78,20 @@ def _resolve_timeout() -> float:
     return value
 
 
+def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
+    """Validate the tool registry has at least one tool and return its values.
+
+    Extracted from ``_amain`` so the empty-registry guard can be tested
+    without standing up Discord/Kafka. The guard prevents the worker from
+    starting in an inert state where it subscribes to no topics — a
+    failure mode that would be very confusing in production logs.
+    """
+    nodes = list(registry.values())
+    if not nodes:
+        raise SystemExit("TOOL_REGISTRY is empty; nothing to host")
+    return nodes
+
+
 async def _run_worker(worker: Worker) -> None:
     """Run ``worker`` until SIGINT/SIGTERM, then drain cleanly.
 
@@ -101,7 +116,15 @@ async def _run_worker(worker: Worker) -> None:
             if worker_exc is not None:
                 logger.error("worker crashed during runtime; exiting non-zero", exc_info=worker_exc)
             else:
-                logger.warning("worker.run() returned without an exception; exiting")
+                # A clean return from ``worker.run()`` without a shutdown
+                # signal is unexpected. Treat as a crash so supervisors
+                # configured for ``Restart=on-failure`` restart us —
+                # without this, the process exits 0 and the supervisor
+                # leaves us down.
+                worker_exc = RuntimeError(
+                    "worker.run() returned unexpectedly without a shutdown signal"
+                )
+                logger.error("%s; exiting non-zero", worker_exc)
         else:
             logger.info("shutdown signal received, draining tools worker")
     finally:
@@ -133,8 +156,11 @@ async def _amain() -> None:
     ):
         # Eagerly start the broker so the reply dispatcher is live before
         # any tool tries to ``execute_node`` — mirrors the bridge's
-        # boot-time eager start.
-        if not client.broker._connection:
+        # boot-time eager start. ``broker.running`` is faststream's public
+        # state flag (defined on BrokerUsecase); avoid the private
+        # ``broker._connection`` attribute which can change shape between
+        # faststream releases.
+        if not client.broker.running:
             await client.broker.start()
 
         resolver = A2AChannelResolver(sender, registry, settings.guild_id)
@@ -146,12 +172,7 @@ async def _amain() -> None:
             timeout_seconds=timeout_seconds,
         )
 
-        tool_nodes = list(TOOL_REGISTRY.values())
-        if not tool_nodes:
-            # Defensive: registry should always contain at least one tool, but
-            # surfacing this fail-fast prevents an inert worker that silently
-            # consumes no topics.
-            raise SystemExit("TOOL_REGISTRY is empty; nothing to host")
+        tool_nodes = _resolve_tool_nodes(TOOL_REGISTRY)
 
         worker = Worker(client, tool_nodes)
         logger.info(
