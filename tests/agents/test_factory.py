@@ -8,7 +8,6 @@ so no provider client is constructed.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -92,7 +91,8 @@ class TestBuild:
         assert worker._nodes[0].node_id == "scheduler"
 
     def test_subscribe_topics_use_in_suffix(self) -> None:
-        """Bridge publishes to ``discord.channel.{cid}.in``; agent must match."""
+        """Bridge publishes to ``discord.channel.{cid}.in``; agent must match.
+        Per-agent inbox ``agent.{id}.in`` is always appended for A2A."""
         _, model_factory = _model_factory_spy()
         factory = AgentFactory(
             persona_sender=MagicMock(),
@@ -108,10 +108,12 @@ class TestBuild:
             "discord.channel.100.in",
             "discord.channel.200.in",
             "discord.channel.300.in",
+            "agent.scheduler.in",
         ]
 
     def test_subscribe_topic_template_override(self) -> None:
-        """The template is configurable for tests / alternate deployments."""
+        """The template is configurable for tests / alternate deployments.
+        The per-agent inbox is independent of the channel template."""
         _, model_factory = _model_factory_spy()
         factory = AgentFactory(
             persona_sender=MagicMock(),
@@ -124,7 +126,25 @@ class TestBuild:
             AgentRuntimeState(channels=[100]),
             MagicMock(),
         )
-        assert worker._nodes[0].subscribe_topics == ["my.test.channel.100"]
+        assert worker._nodes[0].subscribe_topics == [
+            "my.test.channel.100",
+            "agent.scheduler.in",
+        ]
+
+    def test_per_agent_inbox_uses_agent_id(self) -> None:
+        """Inbox suffix derives from agent_id, not display_name or slash."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+        )
+        worker = factory.build(
+            _definition(agent_id="researcher"),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].subscribe_topics[-1] == "agent.researcher.in"
 
     def test_gates_registered_in_short_circuit_order(self) -> None:
         """Addressable gate first (cheap), addressed-to-me second (content-based)."""
@@ -442,40 +462,82 @@ class TestResolveProviderModuleFunction:
             resolve_provider(_definition(provider=None))
 
 
-class TestToolsWarning:
-    def test_non_empty_tools_logs_warning_with_agent_and_tools(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        _, model_factory = _model_factory_spy()
-        factory = AgentFactory(
-            persona_sender=MagicMock(),
-            calfkit_client=MagicMock(),
-            model_client_factory=model_factory,
-        )
-        with caplog.at_level(logging.WARNING):
-            factory.build(
-                _definition(agent_id="scheduler", tools=("calendar", "email")),
-                AgentRuntimeState(channels=[100]),
-                MagicMock(),
-            )
-        assert any(
-            "scheduler" in r.message and "calendar" in r.message
-            for r in caplog.records
-            if r.levelno >= logging.WARNING
-        )
+def _fake_tool_node(name: str) -> Any:
+    """Build a MagicMock that quacks like a ``ToolNodeDef`` for wiring tests."""
+    node = MagicMock()
+    node.tool_schema.name = name
+    return node
 
-    def test_empty_tools_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
+
+class TestToolsWiring:
+    """``definition.tools`` names are resolved against the registry and passed
+    to the calfkit ``Agent``. Unknown names raise at build time."""
+
+    def test_empty_tools_passes_none_to_agent(self) -> None:
+        """Empty tuple → ``Agent(tools=None)`` (calfkit's no-tools sentinel)."""
         _, model_factory = _model_factory_spy()
         factory = AgentFactory(
             persona_sender=MagicMock(),
             calfkit_client=MagicMock(),
             model_client_factory=model_factory,
+            tool_registry={},
         )
-        with caplog.at_level(logging.WARNING):
+        worker = factory.build(
+            _definition(tools=()),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].tools == []
+
+    def test_known_tool_name_is_wired_through_registry(self) -> None:
+        """A name listed in ``tools:`` resolves to the registry's ToolNodeDef
+        and lands in ``Agent.tools``."""
+        _, model_factory = _model_factory_spy()
+        fake_calendar = _fake_tool_node("calendar")
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"calendar": fake_calendar},
+        )
+        worker = factory.build(
+            _definition(tools=("calendar",)),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        assert worker._nodes[0].tools == [fake_calendar]
+
+    def test_unknown_tool_name_raises_with_known_list(self) -> None:
+        """Typo in ``.md`` fails at build, listing every unknown plus
+        what the registry actually contains so the operator can fix it."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"calendar": _fake_tool_node("calendar")},
+        )
+        with pytest.raises(ValueError, match="unknown tool"):
             factory.build(
-                _definition(tools=()),
+                _definition(agent_id="scheduler", tools=("calndar",)),
                 AgentRuntimeState(channels=[100]),
                 MagicMock(),
             )
-        assert not any("tools" in r.message for r in caplog.records)
+
+    def test_unknown_tool_error_aggregates_multiple_names(self) -> None:
+        """Several typos surface in one message — operator fixes the .md once."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"calendar": _fake_tool_node("calendar")},
+        )
+        with pytest.raises(ValueError) as excinfo:
+            factory.build(
+                _definition(agent_id="scheduler", tools=("calndar", "emial")),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+        assert "calndar" in str(excinfo.value)
+        assert "emial" in str(excinfo.value)

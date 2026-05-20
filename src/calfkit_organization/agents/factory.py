@@ -2,11 +2,19 @@
 
 The factory builds a vanilla :class:`calfkit.Agent` node — no subclassing —
 configured to subscribe to ``discord.channel.{cid}.in`` for each channel in
-the agent's persisted state. The agent's identity rides on every outbound
-publish via calfkit's ``x-calf-emitter`` Kafka header, so the bridge egress
-can resolve the responding agent's persona from
-``NodeResult.emitter_node_id`` without any application-level identity
-stamping.
+the agent's persisted state, plus a single per-agent inbox topic
+``agent.{agent_id}.in`` used by the ``calfkit-tools`` runner to invoke the
+agent for A2A traffic without round-tripping through Discord. The agent's
+identity rides on every outbound publish via calfkit's ``x-calf-emitter``
+Kafka header, so the bridge egress can resolve the responding agent's
+persona from ``NodeResult.emitter_node_id`` without any application-level
+identity stamping.
+
+Tools declared in the agent's ``.md`` frontmatter under ``tools:`` are
+resolved against :data:`calfkit_organization.tools.TOOL_REGISTRY` and
+passed to the calfkit ``Agent`` constructor. Each agent only carries the
+tool's :class:`~calfkit.nodes.ToolNodeDef` for schema + subscribe-topic
+purposes — the actual tool body runs in the ``calfkit-tools`` deployment.
 
 Two public entry points:
 
@@ -50,6 +58,7 @@ from collections.abc import Callable
 
 from calfkit.client import Client
 from calfkit.nodes import Agent
+from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker import Worker
@@ -59,6 +68,7 @@ from calfkit_organization.agents.gates import make_addressable_gate, make_addres
 from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
 from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.discord.persona import DiscordPersonaSender
+from calfkit_organization.tools import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +80,10 @@ bridge can pin to the same value as the agent runner."""
 _DEFAULT_PROVIDER_ENV_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 _DEFAULT_MODEL_ENV_VAR = "CALFKIT_AGENT_DEFAULT_MODEL"
 _DEFAULT_SUBSCRIBE_TOPIC_TEMPLATE = "discord.channel.{cid}.in"
+_AGENT_INBOX_TOPIC_TEMPLATE = "agent.{agent_id}.in"
+"""Per-agent private inbox topic. The ``calfkit-tools`` runner publishes
+A2A invocations here so an agent can be reached without routing through
+Discord. Subscribed to by every agent in addition to its channel topics."""
 
 _PROVIDER_DEFAULT_MODELS: dict[Provider, str] = {
     "anthropic": "claude-sonnet-4-5",
@@ -163,6 +177,7 @@ class AgentFactory:
         default_model: str | None = None,
         model_client_factory: ModelClientFactory | None = None,
         subscribe_topic_template: str = _DEFAULT_SUBSCRIBE_TOPIC_TEMPLATE,
+        tool_registry: dict[str, ToolNodeDef] | None = None,
     ) -> None:
         """Construct an agent factory.
 
@@ -189,6 +204,10 @@ class AgentFactory:
             subscribe_topic_template: Format string with ``{cid}`` placeholder,
                 applied to each channel id in ``state.channels`` to build the
                 agent's subscribe topics. Mirrors the bridge's publish topic.
+            tool_registry: Map of tool name → :class:`ToolNodeDef` used to
+                resolve names declared in ``definition.tools``. Defaults to
+                the module-level :data:`TOOL_REGISTRY`; tests pass a
+                fixture-built dict.
         """
         self._persona_sender = persona_sender
         self._calfkit_client = calfkit_client
@@ -196,6 +215,7 @@ class AgentFactory:
         self._default_model = default_model
         self._model_client_factory = model_client_factory or _default_model_client_factory
         self._subscribe_topic_template = subscribe_topic_template
+        self._tool_registry = TOOL_REGISTRY if tool_registry is None else tool_registry
 
     def build(
         self,
@@ -242,27 +262,29 @@ class AgentFactory:
                 f"agent {definition.agent_id!r} has no channels in state; "
                 "an agent must subscribe to at least one channel"
             )
-        if definition.tools:
-            logger.warning(
-                "agent %r declares tools=%s but tools are not wired in v1; ignoring",
-                definition.agent_id,
-                list(definition.tools),
-            )
+        tools = self._resolve_tools(definition)
 
         provider = self._resolve_provider(definition)
         model_name = self._resolve_model(definition, provider)
         subscribe_topics = [
             self._subscribe_topic_template.format(cid=cid) for cid in state.channels
         ]
+        # Per-agent inbox: the ``calfkit-tools`` runner publishes A2A
+        # invocations to this topic so the LLM-driven ``private_chat``
+        # tool can reach this agent without round-tripping through Discord.
+        # Appended last so channel topics retain their existing order in
+        # logs and assertions.
+        subscribe_topics.append(_AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=definition.agent_id))
         model_settings = build_model_settings(provider, definition.thinking_effort)
 
         logger.info(
-            "building agent=%s provider=%s model=%s topics=%s thinking_effort=%s",
+            "building agent=%s provider=%s model=%s topics=%s thinking_effort=%s tools=%s",
             definition.agent_id,
             provider,
             model_name,
             subscribe_topics,
             definition.thinking_effort,
+            [t.tool_schema.name for t in tools] if tools else [],
         )
 
         agent = Agent(
@@ -271,6 +293,7 @@ class AgentFactory:
             subscribe_topics=subscribe_topics,
             model_client=self._model_client_factory(provider, model_name),
             model_settings=model_settings,
+            tools=tools or None,
         )
         agent.gate(make_addressable_gate(definition.agent_id))
         agent.gate(make_addressed_to_me_gate(definition.agent_id))
@@ -292,3 +315,29 @@ class AgentFactory:
             or self._default_model
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
+
+    def _resolve_tools(self, definition: AgentDefinition) -> list[ToolNodeDef]:
+        """Resolve ``definition.tools`` names against the tool registry.
+
+        Raises:
+            ValueError: if any declared name is missing from the registry.
+                Lists every unknown name in one message so a multi-typo
+                ``.md`` surfaces all of them in a single boot.
+        """
+        if not definition.tools:
+            return []
+        resolved: list[ToolNodeDef] = []
+        unknown: list[str] = []
+        for name in definition.tools:
+            node = self._tool_registry.get(name)
+            if node is None:
+                unknown.append(name)
+            else:
+                resolved.append(node)
+        if unknown:
+            known = sorted(self._tool_registry)
+            raise ValueError(
+                f"agent {definition.agent_id!r} declares unknown tool(s) "
+                f"{unknown!r}; known tools: {known or '<none registered>'}"
+            )
+        return resolved
