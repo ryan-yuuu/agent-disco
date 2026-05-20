@@ -120,6 +120,26 @@ class TestPublish:
         assert kwargs["deps"]["discord"]["channel_id"] == 6789
         assert kwargs["deps"]["discord"]["slash_target"] == "scheduler"
 
+    async def test_includes_phonebook_in_deps(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """Every invocation carries a phonebook snapshot so decoupled
+        deployments (e.g. the tools runner) can resolve personas, build
+        peer rosters, and validate targets without local file access."""
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire())
+
+        phonebook = client.invoke_node.call_args.kwargs["deps"]["phonebook"]
+        assert isinstance(phonebook, list)
+        ids = sorted(e["agent_id"] for e in phonebook)
+        assert ids == ["scheduler", "scribe"]
+        # Each entry carries the fields downstream needs.
+        scribe = next(e for e in phonebook if e["agent_id"] == "scribe")
+        assert scribe["display_name"] == "Scribe"
+        assert "description" in scribe
+
     async def test_records_wire_in_pending_wires_before_invoke(
         self,
         client: MagicMock,

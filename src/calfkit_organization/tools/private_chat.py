@@ -44,6 +44,7 @@ from calfkit.models import ToolContext
 from calfkit.nodes import ToolNodeDef, agent_tool
 
 from calfkit_organization.agents.peer_roster import build_temp_instructions
+from calfkit_organization.agents.phonebook import phonebook_from_registry
 from calfkit_organization.bridge.egress import A2AChannelResolver
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireMessage
@@ -213,7 +214,9 @@ async def private_chat(
             },
             output_type=str,
             timeout=_timeout_seconds,
-            temp_instructions=build_temp_instructions(_registry, target_agent_id),
+            temp_instructions=build_temp_instructions(
+                phonebook_from_registry(_registry), target_agent_id
+            ),
         )
     except asyncio.TimeoutError:
         # Returning as a string (rather than raising) is deliberate: if we

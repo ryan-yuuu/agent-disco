@@ -37,6 +37,11 @@ from calfkit.client import Client
 from calfkit_organization.agents.definition import Provider
 from calfkit_organization.agents.factory import DEFAULT_PROVIDER, resolve_provider
 from calfkit_organization.agents.peer_roster import build_temp_instructions
+from calfkit_organization.agents.phonebook import (
+    PhonebookEntry,
+    phonebook_from_registry,
+    phonebook_to_deps,
+)
 from calfkit_organization.agents.thinking import build_model_settings
 from calfkit_organization.bridge.pending_wires import PendingWires
 from calfkit_organization.bridge.registry import AgentRegistry
@@ -99,15 +104,25 @@ class BridgeIngress:
         synchronously. The bridge's egress is the outbox consumer in a
         different consumer group, so the actual reply is still observed.
         """
+        # Build the phonebook fresh on every invocation so any future
+        # hot-add on the registry takes effect immediately. The same
+        # phonebook is used twice: locally to compute temp_instructions,
+        # and serialized into deps so decoupled deployments (e.g. the
+        # tools runner) can do persona lookups and peer-roster building
+        # without needing local file access to agents/*.md.
+        phonebook = phonebook_from_registry(self._registry)
         model_settings = self._resolve_model_settings(wire)
-        temp_instructions = self._resolve_temp_instructions(wire)
+        temp_instructions = self._resolve_temp_instructions(wire, phonebook)
         self._pending_wires.put(wire.event_id, wire)
         try:
             handle = await self._client.invoke_node(
                 user_prompt=wire.content,
                 topic=self._ingress_topic_template.format(cid=wire.channel_id),
                 correlation_id=wire.event_id,
-                deps={"discord": wire.model_dump(mode="json")},
+                deps={
+                    "discord": wire.model_dump(mode="json"),
+                    "phonebook": phonebook_to_deps(phonebook),
+                },
                 output_type=str,
                 model_settings=model_settings,
                 temp_instructions=temp_instructions,
@@ -125,7 +140,11 @@ class BridgeIngress:
 
         handle._future.cancel()
 
-    def _resolve_temp_instructions(self, wire: WireMessage) -> str | None:
+    def _resolve_temp_instructions(
+        self,
+        wire: WireMessage,
+        phonebook: list[PhonebookEntry],
+    ) -> str | None:
         """Compute the per-call ``temp_instructions`` for ``wire``.
 
         Only returns content for slash invocations (where we know exactly
@@ -133,15 +152,11 @@ class BridgeIngress:
         the same envelope reaches every subscriber, so we can't tailor a
         per-target roster — those agents fall back to the reactive error
         path on ``private_chat`` if they reach for it.
-
-        Reads the registry on every call so a future hot-add mechanism
-        (the registry itself doesn't support hot-add yet, but this code
-        path is ready when it does) takes effect immediately.
         """
         target = wire.slash_target
         if target is None:
             return None
-        return build_temp_instructions(self._registry, target)
+        return build_temp_instructions(phonebook, target)
 
     def _resolve_model_settings(self, wire: WireMessage) -> dict[str, Any] | None:
         """Compute per-call ``model_settings`` for ``wire``, or ``None``.
