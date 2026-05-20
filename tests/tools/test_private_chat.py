@@ -2,9 +2,10 @@
 
 Tests call the bare async function directly with a constructed
 :class:`ToolContext`, bypassing calfkit's tool dispatch. The module-level
-singletons are populated via :func:`private_chat.init` per-test, and
-``monkeypatch`` restores them after each test so suite ordering doesn't
-matter.
+singletons are populated via ``monkeypatch.setattr`` per-test (so leak is
+impossible across tests), and the phonebook arrives via ``ctx.deps`` —
+mirroring the bridge ingress, which is the tool's only source of agent
+identity.
 """
 
 from __future__ import annotations
@@ -20,9 +21,8 @@ from calfkit.client import Client
 from calfkit.models import ToolContext
 from calfkit.models.session_context import Deps
 
-from calfkit_organization.agents.definition import AgentDefinition
+from calfkit_organization.agents.phonebook import PhonebookEntry, phonebook_to_deps
 from calfkit_organization.bridge.egress import A2AChannelResolver
-from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.tools import private_chat as pc
@@ -62,39 +62,56 @@ def _wire(
     )
 
 
-def _ctx(*, caller: str = "alice", wire: WireMessage | None = None) -> ToolContext:
-    """Construct a ToolContext mirroring what calfkit's dispatch builds."""
+def _entry(agent_id: str, *, tools: tuple[str, ...] = ()) -> PhonebookEntry:
+    return PhonebookEntry(
+        agent_id=agent_id,
+        display_name=f"{agent_id.title()} Bot",
+        avatar_url=f"https://example.com/{agent_id}.png",
+        description="test",
+        tools=tools,
+    )
+
+
+# Default phonebook used by ``_ctx``: just alice and bob, no tools. Tests
+# that need a different roster construct one inline and pass via ``phonebook=``.
+_DEFAULT_PHONEBOOK = [_entry("alice"), _entry("bob")]
+
+
+def _ctx(
+    *,
+    caller: str = "alice",
+    wire: WireMessage | None = None,
+    phonebook: list[PhonebookEntry] | None = None,
+) -> ToolContext:
+    """Construct a ToolContext mirroring what calfkit's dispatch builds.
+
+    The bridge ingress populates ``deps["phonebook"]`` on every invocation;
+    tests do the same so the tool reads the same shape it would in
+    production.
+    """
     if wire is None:
         wire = _wire()
+    if phonebook is None:
+        phonebook = _DEFAULT_PHONEBOOK
     return ToolContext(
         deps=Deps(
             correlation_id="corr-1",
-            provided_deps={"discord": wire.model_dump(mode="json")},
+            provided_deps={
+                "discord": wire.model_dump(mode="json"),
+                "phonebook": phonebook_to_deps(phonebook),
+            },
         ),
         agent_name=caller,
     )
 
 
-def _agent(agent_id: str, *, tools: tuple[str, ...] = ()) -> AgentDefinition:
-    return AgentDefinition(
-        agent_id=agent_id,
-        slash=f"/{agent_id}",
-        display_name=f"{agent_id.title()} Bot",
-        description="test",
-        avatar_url=f"https://example.com/{agent_id}.png",
-        tools=tools,
-        system_prompt="x",
-    )
-
-
-# Test below uses ``_agent_with_tools`` as an alias for ``_agent(..., tools=...)``
-# to keep the call sites readable when tools matter.
-_agent_with_tools = _agent
-
-
 @pytest.fixture
 def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Inject mocks into private_chat's module-level singletons.
+
+    No registry: under the decoupled-deployment model the tool's only
+    source of agent identity is the phonebook in ``ctx.deps``. Tests
+    that want a different phonebook pass it to ``_ctx``.
 
     ``monkeypatch.setattr`` restores the originals after the test, so
     one test's ``init`` cannot leak into another's.
@@ -105,26 +122,16 @@ def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     persona_sender.send = AsyncMock()
     resolver = MagicMock(spec=A2AChannelResolver)
     resolver.resolve_or_create = AsyncMock(return_value=12345)
-    registry = MagicMock(spec=AgentRegistry)
-    registry.by_id = MagicMock(
-        side_effect=lambda agent_id: {
-            "alice": _agent("alice"),
-            "bob": _agent("bob"),
-        }.get(agent_id)
-    )
-    registry.all = MagicMock(return_value=[_agent("alice"), _agent("bob")])
 
     monkeypatch.setattr(pc, "_client", client)
     monkeypatch.setattr(pc, "_persona_sender", persona_sender)
     monkeypatch.setattr(pc, "_resolver", resolver)
-    monkeypatch.setattr(pc, "_registry", registry)
     monkeypatch.setattr(pc, "_timeout_seconds", 30.0)
 
     return {
         "client": client,
         "persona_sender": persona_sender,
         "resolver": resolver,
-        "registry": registry,
     }
 
 
@@ -206,26 +213,32 @@ class TestHappyPath:
     ) -> None:
         """When invoking the target, the tool injects the peer-roster
         temp_instructions so the target (if A2A-enabled itself) sees who
-        else it can chain-call. Built from the registry per-call so a
-        hot-added agent reaches the next invocation immediately."""
-        # Re-wire registry so bob declares private_chat (so a roster gets
-        # built) and there's a third agent for it to see.
-        deps["registry"].by_id.side_effect = lambda agent_id: {
-            "alice": _agent_with_tools("alice", tools=("private_chat",)),
-            "bob": _agent_with_tools("bob", tools=("private_chat",)),
-            "carol": _agent_with_tools("carol"),
-        }.get(agent_id)
-        deps["registry"].all.return_value = [
-            _agent_with_tools("alice", tools=("private_chat",)),
-            _agent_with_tools("bob", tools=("private_chat",)),
-            _agent_with_tools("carol"),
+        else it can chain-call. Built from the phonebook in deps, so a
+        hot-added agent (in a future registry refresh) reaches the next
+        invocation immediately."""
+        phonebook = [
+            _entry("alice", tools=("private_chat",)),
+            _entry("bob", tools=("private_chat",)),
+            _entry("carol"),
         ]
         deps["client"].execute_node.return_value = _result("ok")
-        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
         instructions = deps["client"].execute_node.await_args.kwargs["temp_instructions"]
         assert instructions is not None
         assert "carol" in instructions
         assert "bob" not in instructions  # target excluded from its own roster
+
+    async def test_propagates_phonebook_to_target_deps(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """The phonebook must ride along to the target so a chain-calling
+        target (B → C) doesn't lose its view of the organization."""
+        phonebook = [_entry("alice"), _entry("bob"), _entry("carol")]
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
+        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
+        ids = sorted(e["agent_id"] for e in passed_deps["phonebook"])
+        assert ids == ["alice", "bob", "carol"]
 
     async def test_resolves_pair_channel_for_caller_and_target(
         self, deps: dict[str, Any]
@@ -307,7 +320,6 @@ class TestInfraErrors:
         monkeypatch.setattr(pc, "_client", None)
         monkeypatch.setattr(pc, "_persona_sender", None)
         monkeypatch.setattr(pc, "_resolver", None)
-        monkeypatch.setattr(pc, "_registry", None)
         with pytest.raises(RuntimeError, match="not initialized"):
             await pc.private_chat(_ctx(), "bob", "x")
 
@@ -319,25 +331,40 @@ class TestInfraErrors:
         with pytest.raises(RuntimeError, match="emitter_node_id"):
             await pc.private_chat(ctx, "bob", "x")
 
-    async def test_missing_discord_dep_raises(self, deps: dict[str, Any]) -> None:
+    async def test_missing_phonebook_dep_raises(self, deps: dict[str, Any]) -> None:
+        """The bridge ingress is contractually required to populate
+        ``deps['phonebook']`` on every publish — its absence indicates the
+        invocation bypassed the bridge, not an LLM input error."""
         ctx = ToolContext(
             deps=Deps(correlation_id="c", provided_deps={}),
+            agent_name="alice",
+        )
+        with pytest.raises(RuntimeError, match="deps\\['phonebook'\\]"):
+            await pc.private_chat(ctx, "bob", "x")
+
+    async def test_missing_discord_dep_raises(self, deps: dict[str, Any]) -> None:
+        """Same contract as phonebook: bridge populates ``deps['discord']``
+        on every publish."""
+        ctx = ToolContext(
+            deps=Deps(
+                correlation_id="c",
+                provided_deps={"phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK)},
+            ),
             agent_name="alice",
         )
         with pytest.raises(RuntimeError, match="deps\\['discord'\\]"):
             await pc.private_chat(ctx, "bob", "x")
 
-    async def test_unknown_caller_raises(
-        self, monkeypatch: pytest.MonkeyPatch, deps: dict[str, Any]
-    ) -> None:
-        """If the registry doesn't recognize the caller, persona resolution
+    async def test_unknown_caller_raises(self, deps: dict[str, Any]) -> None:
+        """If the phonebook doesn't include the caller, persona resolution
         would fall back to nothing — surface this as an infrastructure bug,
         not as an error string the LLM could accidentally suppress."""
-        deps["registry"].by_id = MagicMock(
-            side_effect=lambda agent_id: _agent("bob") if agent_id == "bob" else None
-        )
-        with pytest.raises(RuntimeError, match="not in the registry"):
-            await pc.private_chat(_ctx(caller="ghost"), "bob", "x")
+        # Phonebook contains bob but not the caller ("ghost").
+        phonebook = [_entry("bob")]
+        with pytest.raises(RuntimeError, match="not in the phonebook"):
+            await pc.private_chat(
+                _ctx(caller="ghost", phonebook=phonebook), "bob", "x"
+            )
 
 
 class TestProjectionBestEffort:
@@ -407,8 +434,8 @@ class TestProjectionBestEffort:
 
 class TestInit:
     """``init()`` is the only path the runner uses to wire dependencies.
-    A regression that swapped parameters (e.g. registry vs resolver) would
-    silently break A2A at runtime — pin the bindings."""
+    A regression that swapped parameters (e.g. persona_sender vs resolver)
+    would silently break A2A at runtime — pin the bindings."""
 
     def test_init_binds_each_arg_to_its_singleton(
         self, monkeypatch: pytest.MonkeyPatch
@@ -417,26 +444,22 @@ class TestInit:
         monkeypatch.setattr(pc, "_client", None)
         monkeypatch.setattr(pc, "_persona_sender", None)
         monkeypatch.setattr(pc, "_resolver", None)
-        monkeypatch.setattr(pc, "_registry", None)
         monkeypatch.setattr(pc, "_timeout_seconds", -1.0)
 
         client = MagicMock(spec=Client)
         persona_sender = MagicMock(spec=DiscordPersonaSender)
         resolver = MagicMock(spec=A2AChannelResolver)
-        registry = MagicMock(spec=AgentRegistry)
 
         pc.init(
             client=client,
             persona_sender=persona_sender,
             resolver=resolver,
-            registry=registry,
             timeout_seconds=42.0,
         )
 
         assert pc._client is client
         assert pc._persona_sender is persona_sender
         assert pc._resolver is resolver
-        assert pc._registry is registry
         assert pc._timeout_seconds == 42.0
 
 

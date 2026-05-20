@@ -7,8 +7,12 @@ regardless of who initiates contact. The resolver caches name → channel-ID
 lookups in-memory; on cache miss it queries Discord, and on full miss it
 creates the channel with default permissions (per locked decision #13).
 
-The bridge itself does not own an instance of this; agents construct one
-as needed.
+The resolver intentionally does not validate agent identities against a
+registry: callers run in deployments that may not have an
+:class:`AgentRegistry` (e.g. the ``calfkit-tools`` process, which can't
+read ``agents/*.md``). Caller code is expected to validate ids against
+a phonebook or registry before reaching here; the resolver only refuses
+the degenerate self-pair.
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ import logging
 
 import discord
 
-from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.discord.sender import DiscordSender
 
 logger = logging.getLogger(__name__)
@@ -29,11 +32,9 @@ class A2AChannelResolver:
     def __init__(
         self,
         sender: DiscordSender,
-        registry: AgentRegistry,
         guild_id: int,
     ) -> None:
         self._sender = sender
-        self._registry = registry
         self._guild_id = guild_id
         self._cache: dict[tuple[str, str], int] = {}
 
@@ -42,11 +43,10 @@ class A2AChannelResolver:
 
         Pair canonicalization: the two IDs are sorted alphabetically before
         lookup, so ``("scheduler", "finance")`` and ``("finance",
-        "scheduler")`` map to the same channel. Both agents must exist in
-        the registry.
+        "scheduler")`` map to the same channel.
 
         Raises:
-            ValueError: If either agent_id is unknown or if both are equal.
+            ValueError: If both agent ids are equal.
             discord.Forbidden: If the bot lacks ``Manage Channels`` in the
                 guild and the channel needs to be created.
         """
@@ -60,12 +60,10 @@ class A2AChannelResolver:
         self._cache[pair] = channel_id
         return channel_id
 
-    def _canonical_pair(self, a: str, b: str) -> tuple[str, str]:
+    @staticmethod
+    def _canonical_pair(a: str, b: str) -> tuple[str, str]:
         if a == b:
             raise ValueError(f"agent cannot have an a2a channel with itself: {a!r}")
-        for agent_id in (a, b):
-            if self._registry.by_id(agent_id) is None:
-                raise ValueError(f"unknown agent_id: {agent_id!r}")
         first, second = sorted([a, b])
         return first, second
 

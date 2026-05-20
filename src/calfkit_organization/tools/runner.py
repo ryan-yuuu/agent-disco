@@ -5,13 +5,15 @@ single calfkit :class:`Worker`. Standalone process — separate from the
 bridge and the agent runner — so the tool lifecycle is decoupled from
 both, matching calfkit's tool-as-deployment model.
 
-Dependencies wired at boot and injected into each tool module:
+This deployment intentionally has no read access to ``agents/*.md``.
+Agent identities (display name, avatar, description, tools) arrive at
+the tool body via the phonebook the bridge places in ``deps`` on every
+invocation. The runner wires only the resources that exist on this
+host:
 
-* :class:`AgentRegistry` — loaded from ``agents/*.md`` so the tool can
-  validate caller/target identities and resolve personas.
 * :class:`DiscordSender` — REST-only client used by
   :class:`A2AChannelResolver` to discover/create the ``a2a-{x}-{y}``
-  channels.
+  channels. Uses the bot token from this deployment's env.
 * :class:`DiscordPersonaSender` — webhook-based projector that posts
   request/response audit entries under each agent's persona.
 * :class:`calfkit.client.Client` — connected with a private reply topic
@@ -31,7 +33,6 @@ import asyncio
 import logging
 import os
 import signal
-from pathlib import Path
 from typing import Any
 
 from calfkit.client import Client
@@ -39,7 +40,6 @@ from calfkit.worker import Worker
 from dotenv import load_dotenv
 
 from calfkit_organization.bridge.egress import A2AChannelResolver
-from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.discord.sender import DiscordSender
 from calfkit_organization.discord.settings import DiscordSettings
@@ -47,8 +47,6 @@ from calfkit_organization.tools import TOOL_REGISTRY, private_chat
 
 logger = logging.getLogger(__name__)
 
-_AGENTS_DIR_ENV = "CALFKIT_AGENTS_DIR"
-_AGENTS_DIR_DEFAULT = "agents"
 _REPLY_TOPIC = "calfkit.tools.reply"
 """Named reply topic for the tools client. Must differ from the bridge's
 ``discord.outbox`` so target-agent ReturnCalls route here, not to the
@@ -144,8 +142,6 @@ async def _amain() -> None:
             "DISCORD_GUILD_ID is required for calfkit-tools (a2a channel resolver needs it)"
         )
 
-    agents_dir = Path(os.getenv(_AGENTS_DIR_ENV, _AGENTS_DIR_DEFAULT))
-    registry = AgentRegistry.from_agents_dir(agents_dir)
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
     timeout_seconds = _resolve_timeout()
 
@@ -163,12 +159,11 @@ async def _amain() -> None:
         if not client.broker.running:
             await client.broker.start()
 
-        resolver = A2AChannelResolver(sender, registry, settings.guild_id)
+        resolver = A2AChannelResolver(sender, settings.guild_id)
         private_chat.init(
             client=client,
             persona_sender=persona_sender,
             resolver=resolver,
-            registry=registry,
             timeout_seconds=timeout_seconds,
         )
 

@@ -44,9 +44,8 @@ from calfkit.models import ToolContext
 from calfkit.nodes import ToolNodeDef, agent_tool
 
 from calfkit_organization.agents.peer_roster import build_temp_instructions
-from calfkit_organization.agents.phonebook import phonebook_from_registry
+from calfkit_organization.agents.phonebook import PhonebookEntry, phonebook_from_deps, phonebook_to_deps
 from calfkit_organization.bridge.egress import A2AChannelResolver
-from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.wire import WireMessage
 from calfkit_organization.discord.persona import DiscordPersonaSender, Persona
 
@@ -65,10 +64,14 @@ agent-side dependency."""
 
 # Module-level injected singletons. Populated only by the calfkit-tools
 # runner's startup via init(). Tests overwrite via monkeypatch.
+#
+# Note the absence of any AgentRegistry: the tool's deployment is decoupled
+# from the bridge and cannot read agents/*.md. The bridge passes the
+# canonical roster snapshot in deps["phonebook"] on every invocation;
+# the tool reads it per-call from ctx.deps.provided_deps.
 _client: Client | None = None
 _persona_sender: DiscordPersonaSender | None = None
 _resolver: A2AChannelResolver | None = None
-_registry: AgentRegistry | None = None
 _timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
 
@@ -77,7 +80,6 @@ def init(
     client: Client,
     persona_sender: DiscordPersonaSender,
     resolver: A2AChannelResolver,
-    registry: AgentRegistry,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> None:
     """Inject the runtime dependencies the tool body uses.
@@ -87,11 +89,10 @@ def init(
     tests, surprising in production. Not thread-safe; assumes a single
     asyncio event loop, which is what calfkit's Worker provides.
     """
-    global _client, _persona_sender, _resolver, _registry, _timeout_seconds
+    global _client, _persona_sender, _resolver, _timeout_seconds
     _client = client
     _persona_sender = persona_sender
     _resolver = resolver
-    _registry = registry
     _timeout_seconds = timeout_seconds
 
 
@@ -131,7 +132,7 @@ async def private_chat(
         * ``error: target '<name>' did not reply within Ns`` — the peer
           did not respond in time. Try again or pick another agent.
     """
-    if _client is None or _persona_sender is None or _resolver is None or _registry is None:
+    if _client is None or _persona_sender is None or _resolver is None:
         raise RuntimeError("private_chat tool not initialized; the calfkit-tools runner must call init() at startup")
 
     caller_agent_id = ctx.agent_name
@@ -143,18 +144,33 @@ async def private_chat(
     if caller_agent_id == target_agent_id:
         return f"error: agent {caller_agent_id!r} cannot privately chat with itself"
 
-    target_spec = _registry.by_id(target_agent_id)
-    if target_spec is None:
-        known = ", ".join(sorted(s.agent_id for s in _registry.all()))
+    # Parse the phonebook out of deps. The bridge ingress populates this
+    # on every invocation; the agent's dispatch propagates it into the
+    # tool's ctx unchanged. The tool's deployment cannot itself read
+    # agents/*.md — this is the only source of identity information we
+    # have.
+    phonebook_raw = ctx.deps.provided_deps.get("phonebook")
+    if phonebook_raw is None:
+        raise RuntimeError(
+            "private_chat invoked without deps['phonebook']; the bridge ingress is "
+            "expected to populate this key on every publish"
+        )
+    phonebook = phonebook_from_deps(phonebook_raw)
+
+    target_entry = _lookup(phonebook, target_agent_id)
+    if target_entry is None:
+        known = ", ".join(sorted(e.agent_id for e in phonebook))
         return f"error: unknown agent {target_agent_id!r}; known agents: {known}"
 
-    caller_spec = _registry.by_id(caller_agent_id)
-    if caller_spec is None:
+    caller_entry = _lookup(phonebook, caller_agent_id)
+    if caller_entry is None:
         # Caller is supposed to be a registered agent (only they can invoke
-        # tools). A missing registry entry is an infrastructure bug, not LLM
-        # input — raise so it surfaces in logs rather than silently degrading
-        # the projection to no-persona.
-        raise RuntimeError(f"caller {caller_agent_id!r} is not in the registry; cannot resolve persona")
+        # tools). A missing phonebook entry is an infrastructure bug, not
+        # LLM input — raise so it surfaces in logs rather than silently
+        # degrading the projection to no-persona.
+        raise RuntimeError(
+            f"caller {caller_agent_id!r} is not in the phonebook; cannot resolve persona"
+        )
 
     incoming_wire_dict = ctx.deps.provided_deps.get("discord")
     if not isinstance(incoming_wire_dict, dict):
@@ -184,8 +200,8 @@ async def private_chat(
     # bot lacks Manage Channels), the operator must see it.
     a2a_channel_id = await _resolver.resolve_or_create(caller_agent_id, target_agent_id)
 
-    caller_persona = Persona(name=caller_spec.display_name, avatar_url=caller_spec.avatar_url)
-    target_persona = Persona(name=target_spec.display_name, avatar_url=target_spec.avatar_url)
+    caller_persona = Persona(name=caller_entry.display_name, avatar_url=caller_entry.avatar_url)
+    target_persona = Persona(name=target_entry.display_name, avatar_url=target_entry.avatar_url)
 
     await _post_projection(
         caller_persona,
@@ -211,12 +227,13 @@ async def private_chat(
             deps={
                 "discord": forwarded_wire.model_dump(mode="json"),
                 "caller_agent_id": caller_agent_id,
+                # Propagate the phonebook so the target (if it chains into
+                # another private_chat) sees the same roster we did.
+                "phonebook": phonebook_to_deps(phonebook),
             },
             output_type=str,
             timeout=_timeout_seconds,
-            temp_instructions=build_temp_instructions(
-                phonebook_from_registry(_registry), target_agent_id
-            ),
+            temp_instructions=build_temp_instructions(phonebook, target_agent_id),
         )
     except asyncio.TimeoutError:
         # Returning as a string (rather than raising) is deliberate: if we
@@ -250,6 +267,13 @@ async def private_chat(
         len(response_text),
     )
     return response_text
+
+
+def _lookup(
+    phonebook: list[PhonebookEntry], agent_id: str
+) -> PhonebookEntry | None:
+    """Find an entry by id. Returns ``None`` if not present."""
+    return next((e for e in phonebook if e.agent_id == agent_id), None)
 
 
 async def _post_projection(
