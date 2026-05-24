@@ -507,16 +507,48 @@ class TestBootValidation:
 
 
 class TestTempInstructions:
-    """Per-call ``temp_instructions`` carries the peer roster for A2A-enabled
-    targets so the LLM knows which peers it can call via ``private_chat``."""
+    """Per-call ``temp_instructions`` carries the channel peer roster and
+    the @-mention rules so the LLM knows which peers it can loop in via
+    ``@<agent_id>`` syntax. The block is tools-independent — the
+    @-mention mechanism lives in the bridge normalizer, not in any tool,
+    so it applies to every channel-invoked agent."""
 
-    async def test_no_instructions_when_target_lacks_private_chat(
+    async def test_instructions_emitted_for_target_without_tools(
         self,
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        """Default ``_registry()`` agents have no tools; no roster injected."""
+        """Default ``_registry()`` agents have no tools; the channel
+        roster + @-mention rules still get injected. Tool-less agents
+        must see the rules so they can use the mechanism — the
+        @-mention path is bridge-level, not tool-gated."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
+        await ingress.handle(_wire(slash_target="scheduler"))
+        instructions = client.invoke_node.call_args.kwargs["temp_instructions"]
+        assert instructions is not None
+        assert "scribe" in instructions  # roster present
+        assert "@<agent_id>" in instructions  # mention block present
+
+    async def test_no_instructions_when_target_has_no_peers(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+    ) -> None:
+        """Single-agent registry → no peers to advertise and nothing
+        to @-mention → ``None``."""
+        solo = AgentRegistry(
+            [
+                AgentDefinition(
+                    agent_id="scheduler",
+                    slash="/scheduler",
+                    display_name="X",
+                    description="Calendar.",
+                    provider="anthropic",
+                    system_prompt="x",
+                ),
+            ]
+        )
+        ingress = BridgeIngress(client, solo, pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
         assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
 
@@ -541,9 +573,10 @@ class TestTempInstructions:
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        """Target with ``private_chat`` in tools sees the peer roster as
-        temp_instructions on this call. Built from the registry per-call so
-        a future hot-add reaches the next invocation immediately."""
+        """Target with ``private_chat`` in tools sees the same channel
+        block as a tool-less target — channel context is tools-
+        independent. Built from the registry per-call so a future
+        hot-add reaches the next invocation immediately."""
         registry = AgentRegistry(
             [
                 AgentDefinition(
@@ -571,3 +604,23 @@ class TestTempInstructions:
         assert instructions is not None
         assert "scribe" in instructions
         assert "scheduler" not in instructions  # self excluded
+        assert "@<agent_id>" in instructions  # mention block present
+
+    async def test_target_missing_from_phonebook_logs_error(
+        self,
+        client: MagicMock,
+        pending_wires: PendingWires,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Mirrors ``TestModelSettings.test_target_missing_from_registry_passes_none``:
+        when ``slash_target`` doesn't resolve in the phonebook, the
+        resolver silently produces ``None`` instructions and the agent
+        would run with no peer roster. The operator-actionable signal
+        is the ERROR log on the call site — without it, the missing
+        target would surface only as "no @-mentions ever fire" with no
+        breadcrumb pointing at the cause."""
+        ingress = BridgeIngress(client, _registry(), pending_wires)
+        with caplog.at_level(logging.ERROR):
+            await ingress.handle(_wire(slash_target="ghost"))
+        assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
+        assert any("missing from phonebook" in r.message for r in caplog.records)

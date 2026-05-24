@@ -18,7 +18,7 @@ Add a field here when a downstream consumer needs it; do not pass
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -109,6 +109,19 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
         for spec in registry.all()
         if spec.role != "router"
     ]
+
+
+def format_roster_lines(entries: Iterable[PhonebookEntry]) -> str:
+    """Render entries as ``- agent_id: description`` lines, newline-joined.
+
+    Shared between :mod:`calfkit_organization.agents.peer_roster`
+    (assistant-facing rosters in slash/@-mention/A2A contexts) and
+    :mod:`calfkit_organization.router.roster` (the router's
+    ambient-fanout roster). Keeping the format in one place means a
+    rewording — switching the bullet character, adding the persona
+    display name, etc. — updates every roster the LLM sees at once.
+    """
+    return "\n".join(f"- {e.agent_id}: {e.description}" for e in entries)
 
 
 def phonebook_to_deps(phonebook: Sequence[PhonebookEntry]) -> list[dict[str, Any]]:

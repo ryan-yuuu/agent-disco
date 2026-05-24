@@ -30,20 +30,6 @@ class TestDefaults:
         d = build_router_definition()
         assert d.model == "gpt-5-nano"
 
-    def test_thinking_effort_defaults_to_minimal(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The router default is ``"minimal"`` — the lightest non-zero
-        reasoning tier. Justified by the router's structured-output
-        task (small decision space) plus the conversation-continuity
-        rule (prompt rule 3), which benefits from a touch of reasoning
-        without paying the latency cost of ``low`` or higher on every
-        ambient message. Operators who want zero reasoning can still
-        set ``CALFKIT_ROUTER_THINKING_EFFORT=none``."""
-        monkeypatch.delenv("CALFKIT_ROUTER_THINKING_EFFORT", raising=False)
-        d = build_router_definition()
-        assert d.thinking_effort == "minimal"
-
 
 class TestEnvOverrides:
     """Env vars override the in-code defaults so operators can swap

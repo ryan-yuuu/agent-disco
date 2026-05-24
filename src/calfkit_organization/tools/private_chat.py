@@ -487,7 +487,7 @@ async def private_chat(
             },
             output_type=str,
             timeout=_timeout_seconds,
-            temp_instructions=build_temp_instructions(phonebook, target_agent_id),
+            temp_instructions=build_temp_instructions(phonebook, target_agent_id, channel=False),
             message_history=message_history,
         )
     except TimeoutError:

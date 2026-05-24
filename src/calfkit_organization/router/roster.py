@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
-from calfkit_organization.agents.phonebook import PhonebookEntry
+from calfkit_organization.agents.phonebook import PhonebookEntry, format_roster_lines
 from calfkit_organization.router.definition import ROUTER_AGENT_ID
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,4 @@ def build_router_temp_instructions(
             len(phonebook),
         )
         return None
-    lines = [f"- {e.agent_id}: {e.description}" for e in candidates]
-    return (
-        "Available agents you can route to:\n"
-        + "\n".join(lines)
-    )
+    return f"Available agents you can route to:\n{format_roster_lines(candidates)}"

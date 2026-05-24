@@ -693,7 +693,22 @@ class BridgeIngress:
         target = wire.slash_target
         if target is None:
             return None
-        return build_temp_instructions(phonebook, target)
+        if not any(e.agent_id == target for e in phonebook):
+            # Mirrors the symmetric log in :meth:`_resolve_model_settings`
+            # below — both ``build_temp_instructions`` and the model-settings
+            # resolver silently degrade when the target isn't in the
+            # phonebook/registry, so the operator-actionable signal has to
+            # live at the call site. The two most plausible causes are a
+            # registry hot-mutation between normalize and publish, or a
+            # future regression where a router-role agent slips past the
+            # phonebook filter and becomes a ``slash_target``.
+            logger.error(
+                "slash_target=%r missing from phonebook event_id=%s; "
+                "agent will run without peer roster or @-mention rules",
+                target,
+                wire.event_id,
+            )
+        return build_temp_instructions(phonebook, target, channel=True)
 
     def _resolve_model_settings(self, wire: WireMessage) -> dict[str, Any] | None:
         """Compute per-call ``model_settings`` for ``wire``, or ``None``.
