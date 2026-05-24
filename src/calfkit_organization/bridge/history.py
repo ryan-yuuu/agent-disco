@@ -268,6 +268,7 @@ class ChannelHistoryFetcher:
         source_channel_id: int,
         before_message_id: int,
         limit: int,
+        bypass_cache: bool = False,
     ) -> list[HistoryRecord]:
         """Fetch up to ``limit`` records older than ``before_message_id``.
 
@@ -285,6 +286,17 @@ class ChannelHistoryFetcher:
                 :data:`_DISCORD_HISTORY_MAX_LIMIT`. ``0`` is treated as
                 "history disabled" and short-circuits without a Discord
                 call.
+            bypass_cache: When ``True`` (default ``False``), skip the
+                read-side LRU lookup AND the write-back. The fetch
+                always goes to Discord (subject to single-flight) and
+                its result is never stored in the LRU. Single-flight
+                registration still happens, so concurrent bypass
+                callers for the same key share one Discord call —
+                preserving the fan-out coalescing invariant. Use this
+                for sources whose freshness matters more than their
+                LRU hit-rate (e.g. A2A thread reads, where the caller's
+                own request was just posted and the LRU's 2-second
+                window would serve stale records).
 
         Returns:
             Oldest-first list of :class:`HistoryRecord`. Empty on any
@@ -299,16 +311,20 @@ class ChannelHistoryFetcher:
 
         key = (source_channel_id, before_message_id, limit)
 
-        # Cache check (fresh) — first try.
-        cached = self._cache.get(key)
-        if cached is not None and monotonic() - cached[0] < self._cache_ttl:
-            self._cache.move_to_end(key)
-            return list(cached[1])
+        # Cache check (fresh) — first try. Skipped on bypass.
+        if not bypass_cache:
+            cached = self._cache.get(key)
+            if cached is not None and monotonic() - cached[0] < self._cache_ttl:
+                self._cache.move_to_end(key)
+                return list(cached[1])
 
         # Single-flight check — if another coroutine is already fetching
         # this same key, join its future instead of starting a parallel
         # Discord call. This is the core of the fan-out coalescing
-        # guarantee documented at :attr:`_in_flight`.
+        # guarantee documented at :attr:`_in_flight`. Bypass callers
+        # still join in-flight fetches so concurrent A2A reads on the
+        # same thread share one Discord round-trip; the resulting list
+        # is fresh-from-Discord either way.
         in_flight = self._in_flight.get(key)
         if in_flight is not None:
             return list(await in_flight)
@@ -322,15 +338,16 @@ class ChannelHistoryFetcher:
                 before_message_id=before_message_id,
                 limit=limit,
             )
-            # Happy path: cache, resolve the shared future for any
-            # concurrent followers, return a defensive copy to the
-            # leader. These steps live INSIDE the try block so that any
-            # exception they raise (cache helper bug, ``set_result``
-            # on a misused future, etc.) flows through the same
-            # contract-enforcing except handlers below — the "fetcher
-            # never raises into invocation path" guarantee covers the
-            # full body, not just the Discord call.
-            self._cache_and_return(key, monotonic(), records)
+            # Happy path: cache (unless bypassed), resolve the shared
+            # future for any concurrent followers, return a defensive
+            # copy to the leader. These steps live INSIDE the try block
+            # so that any exception they raise (cache helper bug,
+            # ``set_result`` on a misused future, etc.) flows through
+            # the same contract-enforcing except handlers below — the
+            # "fetcher never raises into invocation path" guarantee
+            # covers the full body, not just the Discord call.
+            if not bypass_cache:
+                self._cache_and_return(key, monotonic(), records)
             if not future.done():
                 future.set_result(records)
             return list(records)

@@ -50,8 +50,9 @@ def build_temp_instructions(
 
     Returns:
         A short multi-line instructions block listing each peer's id
-        and description, or ``None`` if the target doesn't use A2A
-        tools or has no peers to call.
+        and description plus a note about the thread_id continuation
+        convention, or ``None`` if the target doesn't use A2A tools or
+        has no peers to call.
     """
     target = next((e for e in phonebook if e.agent_id == target_agent_id), None)
     if target is None:
@@ -65,4 +66,11 @@ def build_temp_instructions(
     return (
         "Peer agents you can reach via the private_chat tool:\n"
         + "\n".join(lines)
+        + "\n\n"
+        + "The private_chat tool returns a string that starts with "
+        + "<thread_id>N</thread_id> followed by the peer's reply. To "
+        + "continue an ongoing conversation with the same peer (so they "
+        + "see your prior exchange), pass that thread_id back in on your "
+        + "next call to that peer. Omit thread_id to start a fresh "
+        + "conversation with no prior context."
     )

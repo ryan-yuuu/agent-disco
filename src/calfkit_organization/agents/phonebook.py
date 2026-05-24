@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from calfkit_organization.agents.identifier import AGENT_ID_PATTERN
 
@@ -50,6 +50,17 @@ class PhonebookEntry(BaseModel):
     avatar_url: str | None = None
     description: str
     tools: tuple[str, ...] = ()
+    history_turns: int = Field(default=30, ge=0, le=100)
+    """Mirrors :attr:`AgentDefinition.history_turns`. Carried so the A2A
+    private_chat tool, which has no registry access, can use the target
+    agent's configured history budget when fetching prior turns from a
+    Discord thread on continue. Default ``30`` matches
+    :attr:`AgentDefinition.history_turns`'s own default, so pre-extension
+    phonebook payloads (which lack the field) parse cleanly. ``ge=0/le=100``
+    mirrors :attr:`AgentDefinition.history_turns`'s bounds so a malformed
+    upstream phonebook (negative or above Discord's per-call cap) is
+    rejected at wire-validation time rather than silently disabling
+    history or over-fetching."""
 
     @field_validator("agent_id")
     @classmethod
@@ -61,7 +72,7 @@ class PhonebookEntry(BaseModel):
     @field_validator("description")
     @classmethod
     def _validate_description(cls, v: str) -> str:
-        # 1–100 mirrors AgentDefinition.description (Discord slash-command
+        # 1-100 mirrors AgentDefinition.description (Discord slash-command
         # description limit). A wire-format phonebook that admits a longer
         # string would surface as a Discord error far away from the bridge
         # that emitted it.
@@ -93,6 +104,7 @@ def phonebook_from_registry(registry: AgentRegistry) -> list[PhonebookEntry]:
             avatar_url=spec.avatar_url,
             description=spec.description,
             tools=spec.tools,
+            history_turns=spec.history_turns,
         )
         for spec in registry.all()
         if spec.role != "router"

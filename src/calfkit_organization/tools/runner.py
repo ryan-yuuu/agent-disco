@@ -12,8 +12,9 @@ invocation. The runner wires only the resources that exist on this
 host:
 
 * :class:`DiscordSender` — REST-only client used by
-  :class:`A2AChannelResolver` to discover/create the ``a2a-{x}-{y}``
-  channels. Uses the bot token from this deployment's env.
+  :class:`A2AChannelResolver` to discover/create the unified A2A audit
+  channel (configured via :envvar:`CALFKIT_A2A_CHANNEL_NAME`, default
+  ``a2a-audit``). Uses the bot token from this deployment's env.
 * :class:`DiscordPersonaSender` — webhook-based projector that posts
   request/response audit entries under each agent's persona.
 * :class:`calfkit.client.Client` — connected with a private reply topic
@@ -53,6 +54,12 @@ _REPLY_TOPIC = "calfkit.tools.reply"
 bridge's outbox consumer (which would project them to Discord twice)."""
 _TIMEOUT_ENV = "CALFKIT_TOOLS_TIMEOUT_SECONDS"
 _CATEGORY_ENV = "CALFKIT_A2A_CHANNEL_CATEGORY"
+_CHANNEL_NAME_ENV = "CALFKIT_A2A_CHANNEL_NAME"
+_DEFAULT_CHANNEL_NAME = "a2a-audit"
+"""The single unified A2A audit channel. Every A2A conversation lives
+inside a thread under this channel; operator setup collapses to one
+channel + one permission overwrite. Overridable via
+:data:`_CHANNEL_NAME_ENV`."""
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -89,6 +96,21 @@ def _resolve_category_name() -> str | None:
         return None
     stripped = raw.strip()
     return stripped or None
+
+
+def _resolve_channel_name() -> str:
+    """Read ``CALFKIT_A2A_CHANNEL_NAME`` or fall back to the default.
+
+    Mirrors :func:`_resolve_category_name`'s empty-as-unset normalization
+    so a stray blank line in ``.env`` falls back to
+    :data:`_DEFAULT_CHANNEL_NAME` rather than creating a literally-named
+    channel.
+    """
+    raw = os.getenv(_CHANNEL_NAME_ENV)
+    if raw is None:
+        return _DEFAULT_CHANNEL_NAME
+    stripped = raw.strip()
+    return stripped or _DEFAULT_CHANNEL_NAME
 
 
 def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
@@ -160,6 +182,7 @@ async def _amain() -> None:
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
     timeout_seconds = _resolve_timeout()
     category_name = _resolve_category_name()
+    channel_name = _resolve_channel_name()
 
     async with (
         DiscordSender(settings) as sender,
@@ -176,12 +199,23 @@ async def _amain() -> None:
             await client.broker.start()
 
         resolver = A2AChannelResolver(
-            sender, settings.guild_id, category_name=category_name
+            sender,
+            settings.guild_id,
+            channel_name=channel_name,
+            category_name=category_name,
         )
+        # The thread-history fetch needs a live :class:`discord.Client`.
+        # The persona sender already authenticates one on startup
+        # (REST-only, no gateway) — reuse it rather than spinning up a
+        # second connection just for thread reads. ``persona_sender.client``
+        # raises if start() hasn't been awaited, so a future lifecycle
+        # refactor that lazy-initializes the client will fail fast here
+        # at boot rather than at first invocation.
         private_chat.init(
             client=client,
             persona_sender=persona_sender,
             resolver=resolver,
+            discord_client=persona_sender.client,
             timeout_seconds=timeout_seconds,
         )
 
@@ -189,11 +223,13 @@ async def _amain() -> None:
 
         worker = Worker(client, tool_nodes)
         logger.info(
-            "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s timeout_s=%.1f a2a_category=%s",
+            "starting calfkit-tools worker tools=%s broker=%s reply_topic=%s "
+            "timeout_s=%.1f a2a_channel=%s a2a_category=%s",
             sorted(TOOL_REGISTRY),
             server_urls,
             _REPLY_TOPIC,
             timeout_seconds,
+            channel_name,
             category_name,
         )
         await _run_worker(worker)

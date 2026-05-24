@@ -146,6 +146,7 @@ class TestWireConventionRoundTrip:
                     description="Scheduler.",
                     avatar_url="https://example.com/a.png",
                     tools=("private_chat",),
+                    history_turns=15,
                     system_prompt="x",
                 ),
                 AgentDefinition(
@@ -154,6 +155,7 @@ class TestWireConventionRoundTrip:
                     display_name="Bob Bot",
                     description="Note-taker.",
                     tools=(),
+                    history_turns=42,
                     system_prompt="y",
                 ),
             ]
@@ -191,8 +193,15 @@ class TestWireConventionRoundTrip:
         assert alice.avatar_url == "https://example.com/a.png"
         assert alice.description == "Scheduler."
         assert alice.tools == ("private_chat",)
+        # ``history_turns`` must ride along so the tool's continue-thread
+        # branch can use the target's configured budget when fetching
+        # prior turns. A missing field would silently fall back to the
+        # PhonebookEntry default (30) — invisible drift from the
+        # operator's frontmatter.
+        assert alice.history_turns == 15
 
         # The tool's ``_lookup`` helper would scan the same parsed list.
         looked_up = pc._lookup(parsed, "bob")
         assert looked_up is not None
         assert looked_up.display_name == "Bob Bot"
+        assert looked_up.history_turns == 42

@@ -1,10 +1,12 @@
 """Unit tests for :class:`A2AChannelResolver`.
 
-The resolver lost its ``registry`` constructor arg in the
-decoupled-deployments refactor (callers now validate agent ids against
-the wire-format phonebook before reaching here). These tests pin the
-new contract: no registry, no unknown-id validation, but the self-pair
-invariant and canonicalization remain.
+The resolver was rewritten from a per-pair design (``a2a-{x}-{y}``
+channels indexed by canonical pair) to a unified-channel design (one
+``a2a-audit`` channel hosting a thread per A2A conversation). These
+tests pin the new contract: the resolver caches a single channel id,
+lazily discovers / creates it, and exposes a ``create_anchored_thread``
+helper for the ``private_chat`` tool to anchor each new conversation
+on its first request message.
 """
 
 from __future__ import annotations
@@ -16,19 +18,6 @@ import pytest
 
 from calfkit_organization.bridge.egress import A2AChannelResolver
 from calfkit_organization.discord.sender import DiscordSender
-
-
-def _resolver(*, found_channel_id: int | None = None) -> A2AChannelResolver:
-    """Build a resolver whose discover() returns ``found_channel_id``.
-
-    When ``found_channel_id`` is ``None`` we wire create() to return a
-    fixed id so the full discover→create path is exercisable.
-    """
-    sender = MagicMock(spec=DiscordSender)
-    resolver = A2AChannelResolver(sender, guild_id=42)
-    resolver._discover = AsyncMock(return_value=found_channel_id)  # type: ignore[method-assign]
-    resolver._create = AsyncMock(return_value=999)  # type: ignore[method-assign]
-    return resolver
 
 
 def _category(*, name: str, channel_id: int) -> MagicMock:
@@ -48,6 +37,7 @@ def _text_channel(*, name: str, channel_id: int) -> MagicMock:
 
 def _real_body_resolver(
     *,
+    channel_name: str = "a2a-audit",
     category_name: str | None = None,
     existing_channels: list | None = None,
     created_text_id: int = 999,
@@ -55,12 +45,15 @@ def _real_body_resolver(
 ) -> tuple[A2AChannelResolver, MagicMock, MagicMock]:
     """Build a resolver wired to a mocked discord client chain.
 
-    Unlike :func:`_resolver`, this fixture exercises the real bodies of
-    ``_create`` and ``_resolve_category`` — the helpers it returns let
-    tests assert on calls to ``create_text_channel`` / ``create_category``.
+    The fixture exercises the real bodies of ``_discover``, ``_create``,
+    and ``_resolve_category`` so tests can assert on the actual
+    ``create_text_channel`` / ``create_category`` calls without
+    monkey-patching the resolver's own methods.
     """
     created_text = _text_channel(name="placeholder", channel_id=created_text_id)
-    created_category = _category(name=category_name or "", channel_id=created_category_id)
+    created_category = _category(
+        name=category_name or "", channel_id=created_category_id
+    )
     guild = MagicMock()
     guild.fetch_channels = AsyncMock(return_value=existing_channels or [])
     guild.create_text_channel = AsyncMock(return_value=created_text)
@@ -68,95 +61,273 @@ def _real_body_resolver(
     sender = MagicMock(spec=DiscordSender)
     sender.client = MagicMock()
     sender.client.fetch_guild = AsyncMock(return_value=guild)
-    resolver = A2AChannelResolver(sender, guild_id=42, category_name=category_name)
+    sender.client.fetch_channel = AsyncMock()
+    resolver = A2AChannelResolver(
+        sender,
+        guild_id=42,
+        channel_name=channel_name,
+        category_name=category_name,
+    )
     return resolver, guild, created_category
 
 
 class TestConstructor:
-    def test_accepts_only_sender_and_guild_id(self) -> None:
-        """The registry param was intentionally removed when the tool
-        deployment lost access to agents/*.md. Pin the signature so a
-        future refactor that adds it back fails this test loudly."""
-        sender = MagicMock(spec=DiscordSender)
-        # Positional-only invocation matching the production runner's call
-        # at tools/runner.py:_amain — `A2AChannelResolver(sender, settings.guild_id)`.
-        resolver = A2AChannelResolver(sender, 42)
-        assert resolver is not None
-
-    def test_category_name_is_keyword_only(self) -> None:
-        """Positional ``category_name`` would silently shift any future
+    def test_channel_name_is_keyword_only(self) -> None:
+        """Positional ``channel_name`` would silently shift any future
         third positional arg; pin keyword-only at the signature level."""
         sender = MagicMock(spec=DiscordSender)
         with pytest.raises(TypeError):
-            A2AChannelResolver(sender, 42, "private-a2a")  # type: ignore[misc]
+            A2AChannelResolver(sender, 42, "a2a-audit")  # type: ignore[misc]
 
-    def test_default_category_is_none(self) -> None:
-        """Opt-in: omitting ``category_name`` keeps the pre-feature
+    def test_channel_name_is_required(self) -> None:
+        """The resolver no longer derives the channel name from a pair;
+        it must be supplied. The tools runner is responsible for
+        defaulting to ``a2a-audit`` from the env var."""
+        sender = MagicMock(spec=DiscordSender)
+        with pytest.raises(TypeError):
+            A2AChannelResolver(sender, 42)  # type: ignore[call-arg]
+
+    def test_category_name_defaults_to_none(self) -> None:
+        """Opt-in: omitting ``category_name`` keeps the
         uncategorized-at-root behavior."""
         sender = MagicMock(spec=DiscordSender)
-        resolver = A2AChannelResolver(sender, 42)
+        resolver = A2AChannelResolver(sender, 42, channel_name="a2a-audit")
         assert resolver._category_name is None
         assert resolver._category is None
+        assert resolver._unified_channel_id is None
 
 
-class TestResolveOrCreate:
-    async def test_self_pair_raises_value_error(self) -> None:
-        """The one validation the resolver still owns: ``(a, a)`` is
-        nonsense regardless of where caller validation lives."""
-        resolver = _resolver()
-        with pytest.raises(ValueError, match="cannot have an a2a channel with itself"):
-            await resolver.resolve_or_create("alice", "alice")
+class TestResolveUnifiedChannel:
+    async def test_cache_hit_on_second_call(self) -> None:
+        """After the first resolution, subsequent calls return the
+        cached id without re-fetching the guild."""
+        existing = _text_channel(name="a2a-audit", channel_id=555)
+        resolver, guild, _ = _real_body_resolver(
+            channel_name="a2a-audit",
+            existing_channels=[existing],
+        )
 
-    async def test_unknown_agent_ids_no_longer_validated(self) -> None:
-        """The resolver intentionally does NOT check that the agent ids
-        exist — callers validate against the phonebook before reaching
-        here. Pinning this prevents a future re-add of registry
-        validation from silently breaking the tool deployment."""
-        resolver = _resolver(found_channel_id=555)
-        # Both ids are completely made up; resolver should not care.
-        channel_id = await resolver.resolve_or_create("ghost-a", "ghost-b")
-        assert channel_id == 555
+        first = await resolver.resolve_unified_channel()
+        second = await resolver.resolve_unified_channel()
 
-    async def test_canonicalizes_pair_order(self) -> None:
-        """``(b, a)`` and ``(a, b)`` must resolve to the same channel —
-        the cache is keyed on the sorted pair, so out-of-order calls
-        share a single underlying Discord channel."""
-        resolver = _resolver(found_channel_id=777)
-        first = await resolver.resolve_or_create("alice", "bob")
-        second = await resolver.resolve_or_create("bob", "alice")
-        assert first == second == 777
-        # _discover should only have been called once thanks to the cache
-        # hit on the canonicalized pair.
-        assert resolver._discover.await_count == 1  # type: ignore[attr-defined]
+        assert first == second == 555
+        # Discovery (which hits the guild) only fires once.
+        assert guild.fetch_channels.await_count == 1
 
-    async def test_creates_channel_when_discover_returns_none(self) -> None:
-        """When no existing channel matches the canonical name, the
-        resolver falls through to creating it. The created id is cached
-        for subsequent lookups of the same pair."""
-        resolver = _resolver(found_channel_id=None)
-        first = await resolver.resolve_or_create("alice", "bob")
-        assert first == 999  # the _create mock's return
-        # Second call hits cache; no further _create call.
-        second = await resolver.resolve_or_create("alice", "bob")
-        assert second == 999
-        assert resolver._create.await_count == 1  # type: ignore[attr-defined]
+    async def test_creates_when_missing(self) -> None:
+        """Full miss: ``create_text_channel`` is invoked with the
+        configured ``channel_name`` and the resolved category."""
+        resolver, guild, _ = _real_body_resolver(
+            channel_name="a2a-audit",
+            existing_channels=[],
+            created_text_id=999,
+        )
 
-    async def test_forbidden_from_create_propagates(self) -> None:
-        """If the bot lacks Manage Channels and discover misses, the
-        Forbidden from create must bubble out — projection has nowhere
-        to land, so silent fallback would lose audit entries."""
-        resolver = _resolver(found_channel_id=None)
-        resolver._create = AsyncMock(  # type: ignore[method-assign]
+        channel_id = await resolver.resolve_unified_channel()
+
+        assert channel_id == 999
+        guild.create_text_channel.assert_awaited_once()
+        kwargs = guild.create_text_channel.await_args.kwargs
+        assert kwargs["name"] == "a2a-audit"
+        # No category configured → explicit ``None`` lands at guild root.
+        assert kwargs["category"] is None
+        # The creation reason is operator-facing audit-log context.
+        assert "a2a" in kwargs["reason"].lower()
+
+    async def test_uses_configured_name(self) -> None:
+        """The constructor's ``channel_name`` is what gets looked up
+        and (on miss) created — not a hard-coded default."""
+        existing = _text_channel(name="custom-audit", channel_id=777)
+        decoy = _text_channel(name="a2a-audit", channel_id=111)
+        resolver, guild, _ = _real_body_resolver(
+            channel_name="custom-audit",
+            existing_channels=[decoy, existing],
+        )
+
+        channel_id = await resolver.resolve_unified_channel()
+
+        assert channel_id == 777
+        # Did NOT create — the configured name matched an existing channel.
+        guild.create_text_channel.assert_not_awaited()
+
+    async def test_under_category(self) -> None:
+        """When ``category_name`` is set and the unified channel does
+        not yet exist, the channel is created under the resolved
+        category (re-using the lazy category creation pattern)."""
+        existing_category = _category(name="private-a2a", channel_id=12345)
+        resolver, guild, _ = _real_body_resolver(
+            channel_name="a2a-audit",
+            category_name="private-a2a",
+            existing_channels=[existing_category],
+        )
+
+        await resolver.resolve_unified_channel()
+
+        guild.create_text_channel.assert_awaited_once()
+        kwargs = guild.create_text_channel.await_args.kwargs
+        assert kwargs["name"] == "a2a-audit"
+        assert kwargs["category"] is existing_category
+
+    async def test_under_lazily_created_category(self) -> None:
+        """Cold start: neither category nor unified channel exist.
+        Category is created first, then the channel is placed under it."""
+        resolver, guild, created_category = _real_body_resolver(
+            channel_name="a2a-audit",
+            category_name="private-a2a",
+            existing_channels=[],
+        )
+
+        await resolver.resolve_unified_channel()
+
+        guild.create_category.assert_awaited_once()
+        guild.create_text_channel.assert_awaited_once()
+        kwargs = guild.create_text_channel.await_args.kwargs
+        assert kwargs["category"] is created_category
+
+    async def test_forbidden_propagates(self) -> None:
+        """If the bot lacks Manage Channels and discovery misses, the
+        ``Forbidden`` from ``create_text_channel`` must bubble out so
+        the A2A turn fails loudly rather than silently routing
+        projections to nowhere."""
+        resolver, guild, _ = _real_body_resolver(
+            channel_name="a2a-audit",
+            existing_channels=[],
+        )
+        guild.create_text_channel = AsyncMock(
             side_effect=discord.Forbidden(MagicMock(status=403), "manage channels")
         )
+
         with pytest.raises(discord.Forbidden):
-            await resolver.resolve_or_create("alice", "bob")
+            await resolver.resolve_unified_channel()
+
+    async def test_ignores_same_named_non_text_channel(self) -> None:
+        """A category (or voice channel) with the same name as the
+        configured unified channel must NOT be mistaken for it — only
+        ``discord.TextChannel`` instances match."""
+        decoy = _category(name="a2a-audit", channel_id=99999)
+        resolver, guild, _ = _real_body_resolver(
+            channel_name="a2a-audit",
+            existing_channels=[decoy],
+            created_text_id=999,
+        )
+
+        channel_id = await resolver.resolve_unified_channel()
+
+        # Falls through to creation because the decoy doesn't qualify.
+        assert channel_id == 999
+        guild.create_text_channel.assert_awaited_once()
+
+
+class TestCreateAnchoredThread:
+    """``create_anchored_thread`` fetches the channel, wraps the anchor
+    message id in a :class:`discord.Object`, and calls
+    :meth:`TextChannel.create_thread` — no ``fetch_message`` round-trip."""
+
+    async def test_uses_channel_create_thread(self) -> None:
+        """Assert the call shape: fetches the channel, builds a
+        :class:`discord.Object` for the anchor, calls ``create_thread``,
+        returns the new thread's id from the returned Thread object."""
+        resolver, _, _ = _real_body_resolver()
+
+        # Mock the TextChannel that fetch_channel returns plus the
+        # Thread that create_thread returns.
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 8888
+        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel.create_thread = AsyncMock(return_value=thread)
+        resolver._sender.client.fetch_channel = AsyncMock(return_value=channel)
+
+        thread_id = await resolver.create_anchored_thread(
+            555, 12345, name="conan→scribe: hi"
+        )
+
+        assert thread_id == 8888
+        resolver._sender.client.fetch_channel.assert_awaited_once_with(555)
+        channel.create_thread.assert_awaited_once()
+        kwargs = channel.create_thread.await_args.kwargs
+        assert kwargs["name"] == "conan→scribe: hi"
+        # The anchor is wrapped in a synthetic Snowflake — no
+        # ``fetch_message`` is needed since ``create_thread`` only
+        # reads the .id off the Snowflake.
+        assert isinstance(kwargs["message"], discord.Object)
+        assert kwargs["message"].id == 12345
+
+    async def test_forbidden_propagates(self) -> None:
+        """Operator forgot to grant ``Create Public Threads`` — the
+        ``Forbidden`` must bubble so the tool can surface an actionable
+        error rather than silently swallowing."""
+        resolver, _, _ = _real_body_resolver()
+
+        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel.create_thread = AsyncMock(
+            side_effect=discord.Forbidden(MagicMock(status=403), "no threads")
+        )
+        resolver._sender.client.fetch_channel = AsyncMock(return_value=channel)
+
+        with pytest.raises(discord.Forbidden):
+            await resolver.create_anchored_thread(555, 12345, name="t")
+
+    async def test_not_found_propagates(self) -> None:
+        """Race: the anchor message was deleted between post and
+        anchor. ``discord.NotFound`` must propagate so the tool can
+        surface a recoverable error."""
+        resolver, _, _ = _real_body_resolver()
+
+        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel.create_thread = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404), "gone")
+        )
+        resolver._sender.client.fetch_channel = AsyncMock(return_value=channel)
+
+        with pytest.raises(discord.NotFound):
+            await resolver.create_anchored_thread(555, 12345, name="t")
+
+    async def test_http_exception_propagates(self) -> None:
+        """Discord 5xx during thread creation must propagate so the
+        tool's infra-error handler can re-raise rather than the tool
+        returning a happy-path id with no thread on the other side."""
+        resolver, _, _ = _real_body_resolver()
+
+        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel.create_thread = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(status=500), "boom")
+        )
+        resolver._sender.client.fetch_channel = AsyncMock(return_value=channel)
+
+        with pytest.raises(discord.HTTPException):
+            await resolver.create_anchored_thread(555, 12345, name="t")
+
+    async def test_channel_fetch_forbidden_propagates(self) -> None:
+        """If the bot loses access between resolution and anchor (or
+        was misconfigured for ``View Channel`` from the start),
+        ``fetch_channel`` raises ``Forbidden`` and the tool must see
+        it — not a silent ``None`` return."""
+        resolver, _, _ = _real_body_resolver()
+        resolver._sender.client.fetch_channel = AsyncMock(
+            side_effect=discord.Forbidden(MagicMock(status=403), "view")
+        )
+
+        with pytest.raises(discord.Forbidden):
+            await resolver.create_anchored_thread(555, 12345, name="t")
+
+    async def test_non_text_channel_raises_type_error(self) -> None:
+        """Defense in depth: if an operator points
+        ``CALFKIT_A2A_CHANNEL_NAME`` at the id of a non-text channel
+        (or some future Discord refactor reshapes the return type),
+        ``create_thread`` doesn't exist and the resolver surfaces a
+        clear ``TypeError`` rather than an opaque ``AttributeError``."""
+        resolver, _, _ = _real_body_resolver()
+        # Return a CategoryChannel instead of TextChannel.
+        not_a_text = _category(name="oops", channel_id=555)
+        resolver._sender.client.fetch_channel = AsyncMock(return_value=not_a_text)
+
+        with pytest.raises(TypeError, match="expected TextChannel"):
+            await resolver.create_anchored_thread(555, 12345, name="t")
 
 
 class TestCategoryResolution:
-    """Behavior of ``_resolve_category`` and its interaction with
-    ``_create``. Exercises the real method bodies rather than the
-    public-API stubs used elsewhere in this file."""
+    """Behavior of ``_resolve_category`` — unchanged from the per-pair
+    design, but re-verified under the unified-channel callsite."""
 
     async def test_unconfigured_returns_none_without_io(self) -> None:
         """Default opt-out path must not touch Discord at all — the
@@ -189,7 +360,6 @@ class TestCategoryResolution:
         result = await resolver._resolve_category()
         assert result is created_category
         guild.create_category.assert_awaited_once()
-        # The reason string is operator-facing audit-log context.
         kwargs = guild.create_category.await_args.kwargs
         assert kwargs["name"] == "private-a2a"
         assert "a2a" in kwargs["reason"].lower()
@@ -219,7 +389,6 @@ class TestCategoryResolution:
         first = await resolver._resolve_category()
         second = await resolver._resolve_category()
         assert first is second
-        # Only the first call should have hit the guild.
         assert guild.fetch_channels.await_count == 1
         assert resolver._sender.client.fetch_guild.await_count == 1
 
@@ -236,41 +405,3 @@ class TestCategoryResolution:
         )
         with pytest.raises(discord.Forbidden):
             await resolver._resolve_category()
-
-
-class TestCreateChannelUnderCategory:
-    """``_create`` must pass the resolved category through to
-    ``guild.create_text_channel``. Exercises the real ``_create`` body."""
-
-    async def test_passes_category_when_configured(self) -> None:
-        existing = _category(name="private-a2a", channel_id=12345)
-        resolver, guild, _ = _real_body_resolver(
-            category_name="private-a2a",
-            existing_channels=[existing],
-        )
-        await resolver._create(("alice", "bob"))
-        kwargs = guild.create_text_channel.await_args.kwargs
-        assert kwargs["category"] is existing
-        assert kwargs["name"] == "a2a-alice-bob"
-
-    async def test_passes_none_when_unconfigured(self) -> None:
-        """No category configured → ``category=None`` is passed
-        explicitly so the channel lands at guild root."""
-        resolver, guild, _ = _real_body_resolver(category_name=None)
-        await resolver._create(("alice", "bob"))
-        kwargs = guild.create_text_channel.await_args.kwargs
-        assert kwargs["category"] is None
-
-    async def test_creates_category_then_channel_on_full_cold_start(self) -> None:
-        """End-to-end cold path: configured category, neither category
-        nor channel exist → category created first, then channel placed
-        under it."""
-        resolver, guild, created_category = _real_body_resolver(
-            category_name="private-a2a",
-            existing_channels=[],
-        )
-        await resolver._create(("alice", "bob"))
-        guild.create_category.assert_awaited_once()
-        guild.create_text_channel.assert_awaited_once()
-        kwargs = guild.create_text_channel.await_args.kwargs
-        assert kwargs["category"] is created_category

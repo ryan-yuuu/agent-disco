@@ -1,10 +1,12 @@
 """Unit tests for ``calfkit-tools`` runner helpers.
 
-Covers the pure helpers (``_resolve_timeout``, ``_resolve_tool_nodes``) and
-the ``_run_worker`` shutdown contract. The full ``_amain`` requires
-Discord auth, a Kafka broker, and an agents directory — too heavy for a
-unit test. Operators will see boot failures of those in stderr; the
-contracts worth pinning are the local validation helpers and the
+Covers the pure helpers (``_resolve_timeout``, ``_resolve_channel_name``,
+``_resolve_category_name``, ``_resolve_tool_nodes``) and the
+``_run_worker`` shutdown contract. The full ``_amain`` requires Discord
+auth, a Kafka broker, and an agents directory — too heavy for a unit
+test. Operators will see boot failures of those in stderr; the
+contracts worth pinning are the local validation helpers, the
+init-call shape (so private_chat receives the fetcher), and the
 supervisor-restart invariant.
 """
 
@@ -15,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from calfkit.worker import Worker
 
+from calfkit_organization.bridge.egress import A2AChannelResolver
 from calfkit_organization.tools import private_chat, runner
 
 
@@ -80,6 +83,47 @@ class TestResolveCategoryName:
         assert runner._resolve_category_name() == "private-a2a"
 
 
+class TestResolveChannelName:
+    """``CALFKIT_A2A_CHANNEL_NAME`` reading. Has a default
+    (``"a2a-audit"``) — operators don't need to set it for the system
+    to work, but they can override for multi-tenant deployments."""
+
+    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CALFKIT_A2A_CHANNEL_NAME", raising=False)
+        assert runner._resolve_channel_name() == "a2a-audit"
+
+    def test_env_var_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "foo")
+        assert runner._resolve_channel_name() == "foo"
+
+    def test_default_constant_value(self) -> None:
+        """Pin the literal default — a refactor that silently changes
+        the default channel name would split existing operators' deploys
+        without warning."""
+        assert runner._DEFAULT_CHANNEL_NAME == "a2a-audit"
+
+    def test_empty_string_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty / whitespace-only treated as unset (same posture as
+        ``_resolve_category_name``) so a blank line in ``.env`` doesn't
+        create a literally-named channel."""
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "")
+        assert runner._resolve_channel_name() == "a2a-audit"
+
+    def test_whitespace_only_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "   ")
+        assert runner._resolve_channel_name() == "a2a-audit"
+
+    def test_leading_trailing_whitespace_stripped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "  team-a2a  ")
+        assert runner._resolve_channel_name() == "team-a2a"
+
+
 class TestResolveToolNodes:
     def test_returns_nodes_from_populated_registry(self) -> None:
         node = MagicMock()
@@ -101,6 +145,51 @@ class TestDefaultTimeoutValue:
         a reader to confirm, not a silent edit that passes existing tests
         because they only compared against the constant."""
         assert private_chat.DEFAULT_TIMEOUT_SECONDS == 60.0
+
+
+class TestInitWiringFromRunner:
+    """``private_chat.init`` is the boot-time wiring contract from runner
+    to tool. These tests pin the kwargs the runner passes so a refactor
+    that drops the fetcher (or renames the channel-name kwarg on the
+    resolver) breaks here, not in production where A2A would silently
+    skip history projection.
+    """
+
+    def test_init_signature_accepts_discord_client(self) -> None:
+        """``private_chat.init`` must accept ``discord_client`` as a
+        keyword argument — pinning the signature catches a future
+        rename that would break the runner."""
+        import inspect
+
+        sig = inspect.signature(private_chat.init)
+        assert "discord_client" in sig.parameters
+        # All four singletons must be kwargs-only so call-site renames
+        # don't silently swap them.
+        for name in ("client", "persona_sender", "resolver", "discord_client"):
+            assert sig.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_init_binds_discord_client_into_module_singleton(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end binding: after init() returns, the module-level
+        ``_discord_client`` is the client we passed in."""
+        import discord
+        from calfkit.client import Client as _Client
+
+        from calfkit_organization.discord.persona import (
+            DiscordPersonaSender as _PersonaSender,
+        )
+
+        monkeypatch.setattr(private_chat, "_discord_client", None)
+        discord_client = MagicMock(spec=discord.Client)
+        private_chat.init(
+            client=MagicMock(spec=_Client),
+            persona_sender=MagicMock(spec=_PersonaSender),
+            resolver=MagicMock(spec=A2AChannelResolver),
+            discord_client=discord_client,
+            timeout_seconds=1.0,
+        )
+        assert private_chat._discord_client is discord_client
 
 
 class TestRunWorkerShutdownContract:

@@ -248,6 +248,21 @@ class DiscordPersonaSender:
         self._webhooks: dict[int, discord.Webhook] = {}
         self._discovery_lock = asyncio.Lock()
 
+    @property
+    def client(self) -> discord.Client:
+        """Return the authenticated REST client.
+
+        Raises :class:`RuntimeError` if :meth:`start` has not been awaited.
+        Exposed so deployments sharing this REST connection (e.g. the
+        tools process's thread-history reader) don't reach into the
+        underscore-prefixed attribute.
+        """
+        if self._client is None:
+            raise RuntimeError(
+                "DiscordPersonaSender not started; call start() or use as an async context manager."
+            )
+        return self._client
+
     async def __aenter__(self) -> Self:
         await self.start()
         return self

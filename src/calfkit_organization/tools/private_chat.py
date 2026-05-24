@@ -1,28 +1,38 @@
 """``private_chat`` — A2A tool for agent-to-agent communication over calfkit.
 
 Routes a request from one agent to another via calfkit RPC and projects
-the exchange to a deterministic ``a2a-{x}-{y}`` Discord channel for human
-audit. Kafka is the system of record; Discord is the projection.
+the exchange to a unified ``a2a-audit`` Discord channel for human audit.
+Each A2A conversation gets its own Discord thread anchored on the
+caller's first request message. Kafka is the system of record; Discord
+is the projection.
 
 Flow per invocation:
-    1. Validate caller and target identities against the agent registry.
+    1. Validate caller and target identities against the phonebook
+       supplied by the bridge in ``deps``.
     2. Build a *forwarded* :class:`WireMessage` — a shallow clone of the
        caller's originating wire with ``slash_target=target_agent_id``,
        ``kind="slash"``, and the new ``content``. This makes the target's
        existing ``addressed_to_me`` gate accept the call without any gate
        changes.
-    3. Resolve (or lazily create) the pair's
-       ``a2a-{x}-{y}`` channel via :class:`A2AChannelResolver`.
-    4. Post the request projection as the caller's persona (best-effort —
-       persistent transient failures are logged and the RPC still runs).
+    3. Resolve the unified audit channel via :class:`A2AChannelResolver`.
+    4. Branch on ``thread_id``:
+       * ``None`` (new thread): post the caller's request projection to
+         the unified channel, then anchor a new thread on that message;
+         ``message_history`` is empty.
+       * ``int`` (continue thread): fetch the prior thread history
+         (cache-bypassed), project it from the target's POV, then post
+         the caller's request projection into the existing thread.
     5. ``Client.execute_node`` against ``agent.{target}.in`` with deps
-       ``{"discord": forwarded_wire, "caller_agent_id": <caller>}``.
-       Default 60s timeout — fail-fast on no consumer or timeout.
-    6. Post the response projection as the target's persona. Unlike the
-       request projection this is **not** best-effort: persistent failure
-       raises ``RuntimeError`` so the calling LLM never sees a reply that
-       wasn't projected to humans.
-    7. Return the target's text output to the caller's LLM.
+       ``{"discord": forwarded_wire, "caller_agent_id": <caller>, "phonebook": ...}``
+       and the computed ``message_history``. Default 60s timeout —
+       fail-fast on no consumer or timeout.
+    6. Post the response projection as the target's persona into the
+       thread. Unlike the request projection this is **not** best-effort:
+       persistent failure raises ``RuntimeError`` so the calling LLM
+       never sees a reply that wasn't projected to humans.
+    7. Return the target's text output prefixed with
+       ``<thread_id>{id}</thread_id>\\n`` so the caller's LLM can opt
+       into continuing the same thread on a follow-up call.
 
 The module exposes both the bare async function ``private_chat`` (so
 tests can call it directly without going through calfkit's dispatch) and
@@ -30,7 +40,7 @@ tests can call it directly without going through calfkit's dispatch) and
 that the registry and ``calfkit-tools`` runner wire up.
 
 Runtime dependencies (calfkit client, persona sender, channel resolver,
-agent registry) are injected via :func:`init` at process startup. The
+history fetcher) are injected via :func:`init` at process startup. The
 module-level singletons are populated only in the ``calfkit-tools``
 runner — agent processes import this module solely for the
 ``ToolNodeDef`` schema and never call the function body, so the unset
@@ -41,8 +51,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 
 import discord
+from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.client import Client
 from calfkit.models import ToolContext
 from calfkit.nodes import ToolNodeDef, agent_tool
@@ -51,7 +63,9 @@ from pydantic import ValidationError
 from calfkit_organization.agents.peer_roster import build_temp_instructions
 from calfkit_organization.agents.phonebook import PhonebookEntry, phonebook_from_deps, phonebook_to_deps
 from calfkit_organization.bridge.egress import A2AChannelResolver
+from calfkit_organization.bridge.history import HistoryRecord, project_history
 from calfkit_organization.bridge.wire import WireMessage
+from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.persona import DiscordPersonaSender, Persona
 
 logger = logging.getLogger(__name__)
@@ -82,6 +96,20 @@ _PROJECTION_RETRY_DELAY_SECONDS = 2.0
 — same shape of failure (discord.py's internal budget exhausted), same
 constraint (a single-worker consumer can't afford a long sleep)."""
 
+_THREAD_NAME_MAX_TOTAL = 100
+"""Discord's hard cap on thread names. Exceeding it 400s the thread
+creation. The helper :func:`_build_thread_name` enforces it."""
+
+_THREAD_NAME_CONTENT_MAX = 40
+"""Soft cap on the topic-tail portion of the thread name (the part after
+``caller→target: ``). Tunable; balances "scannable in Discord's
+thread list" against "carries enough of the topic to disambiguate"."""
+
+_THREAD_NAME_EMPTY_PLACEHOLDER = "<empty>"
+"""Substituted into the thread name when the caller's ``content`` is
+empty or whitespace-only after normalization. Prevents the degenerate
+``"alice→bob: "`` trailing-whitespace name."""
+
 # Module-level injected singletons. Populated only by the calfkit-tools
 # runner's startup via init(). Tests overwrite via monkeypatch.
 #
@@ -92,7 +120,13 @@ constraint (a single-worker consumer can't afford a long sleep)."""
 _client: Client | None = None
 _persona_sender: DiscordPersonaSender | None = None
 _resolver: A2AChannelResolver | None = None
+_discord_client: discord.Client | None = None
 _timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+
+_DISCORD_HISTORY_MAX_LIMIT = 100
+"""Discord's per-call REST cap for ``channel.history(limit=...)``. Matches
+:data:`bridge.history._DISCORD_HISTORY_MAX_LIMIT` (duplicated rather than
+re-imported because the bridge symbol is module-private)."""
 
 
 def init(
@@ -100,6 +134,7 @@ def init(
     client: Client,
     persona_sender: DiscordPersonaSender,
     resolver: A2AChannelResolver,
+    discord_client: discord.Client,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> None:
     """Inject the runtime dependencies the tool body uses.
@@ -108,61 +143,183 @@ def init(
     starts consuming. Calling again replaces the singletons — useful for
     tests, surprising in production. Not thread-safe; assumes a single
     asyncio event loop, which is what calfkit's Worker provides.
+
+    ``discord_client`` powers :func:`_fetch_thread_history` on the
+    continue-thread branch. The tools process reuses the persona sender's
+    REST-only client (no second gateway connection) — pass
+    ``persona_sender._client`` here.
     """
-    global _client, _persona_sender, _resolver, _timeout_seconds
+    global _client, _persona_sender, _resolver, _discord_client, _timeout_seconds
     _client = client
     _persona_sender = persona_sender
     _resolver = resolver
+    _discord_client = discord_client
     _timeout_seconds = timeout_seconds
+
+
+def _build_thread_name(caller: str, target: str, content: str) -> str:
+    """Produce a thread name like ``'conan→scribe: please summarize the doc'``.
+
+    Newlines (``\\n``, ``\\r``) and other ASCII control characters in
+    ``content`` are normalized to single spaces, then collapsed so runs
+    of whitespace become one space. The cleaned tail is truncated to
+    :data:`_THREAD_NAME_CONTENT_MAX` characters before assembly. The
+    final string is hard-capped at :data:`_THREAD_NAME_MAX_TOTAL`
+    characters (Discord's limit).
+
+    Uses the unicode arrow ``→`` (U+2192) as the caller→target
+    separator. Discord's thread-name limit is char-based (not byte-
+    based), so the multi-byte arrow does not consume extra budget at
+    the boundary.
+
+    An empty or whitespace-only ``content`` becomes
+    :data:`_THREAD_NAME_EMPTY_PLACEHOLDER` so the resulting name never
+    ends with bare trailing whitespace.
+    """
+    # Replace control chars (including \n, \r, \t) with a space, then
+    # collapse runs of whitespace. ``str.split()`` with no args splits on
+    # any run of whitespace and drops empty segments — cheaper than a
+    # regex for this hot path.
+    cleaned_chars = [c if c.isprintable() else " " for c in content]
+    cleaned = " ".join("".join(cleaned_chars).split())
+    if not cleaned:
+        cleaned = _THREAD_NAME_EMPTY_PLACEHOLDER
+    truncated = cleaned[:_THREAD_NAME_CONTENT_MAX]
+    name = f"{caller}→{target}: {truncated}"
+    return name[:_THREAD_NAME_MAX_TOTAL]
 
 
 async def private_chat(
     ctx: ToolContext,
     target_agent_id: str,
     content: str,
+    thread_id: int | None = None,
 ) -> str:
     """Send a private message to another agent and get their reply.
 
-    Use this to collaborate one-on-one with a peer agent — delegate a
+    Use this to collaborate one-on-one with a peer — delegate a
     sub-task, ask a focused question, or get input only they can
-    provide. The exchange is also posted to a shared audit channel so
-    userss observing the organization can see agents collaborate.
+    provide. The exchange is posted to a shared audit channel (inside
+    a per-conversation thread) so users observing the organization can
+    see agents collaborate.
 
-    The peer receives ``content`` as a fresh user prompt and does not
-    see your prior conversations. Make the message self-contained:
-    include any context, constraints, or examples the peer needs to
-    answer well.
+    ## When not to use
+
+    If you can answer the user yourself, just answer — don't loop
+    through a peer for things you already know. Reserve ``private_chat``
+    for genuine delegation: the peer has expertise, access, or persona
+    you don't, OR you specifically want their take on something.
+
+    Also: ``private_chat`` is for *peer-to-peer* work, not for talking
+    to the human in the room. If the user asked a question, reply
+    directly — don't ping a peer just to relay their answer.
+
+    ## Writing ``content``
+
+    Brief the peer like a smart colleague who just walked into the
+    room — they haven't seen the conversation you're in, don't know
+    what the user asked, don't know what you've already tried. **Make
+    ``content`` self-contained**: include any background, constraints,
+    examples, or references the peer needs to answer well.
+
+    **Never delegate understanding.** Don't forward the user's question
+    verbatim and hope the peer figures it out. Distill what *you* want
+    from the peer, in your own words, with the context they need.
+
+    Good vs. bad:
+
+    * BAD: ``content="summarize that"`` — the peer has no "that" to
+      resolve.
+    * BAD: ``content="<user's literal question>"`` — the peer doesn't
+      know who the user is, what conversation this is, or what you've
+      already established.
+    * GOOD: ``content="The user is choosing between Postgres and SQLite
+      for a 50GB analytics workload with daily batch reads. They've
+      ruled out cloud-managed options for cost. Give me a one-paragraph
+      recommendation focused on the long-term operational burden."``
+
+    The rule of thumb: a peer with zero context should be able to
+    answer your ``content`` without asking a clarifying question.
+
+    ## Continuation
+
+    By default the peer sees only ``content`` — no prior turns. To give
+    them multi-turn context, pass the ``thread_id`` returned from an
+    earlier ``private_chat`` call **with this same target**. The peer
+    will then see the thread's prior turns as ``message_history`` and
+    you can write follow-ups that reference earlier exchanges
+    (``"refine that into bullet points"``, ``"what about the third
+    option?"``).
+
+    Use continuation when your message references something the peer
+    already said, or when you want a back-and-forth on the same topic.
+    Use a fresh thread (omit ``thread_id``) when starting an unrelated
+    request.
 
     Args:
         target_agent_id: The peer agent's id (e.g. ``"scribe"``). Must
             be a registered agent and must not be your own id.
-        content: The message text to send to the peer.
+        content: The message text to send to the peer. See the
+            "Writing ``content``" guidance above.
+        thread_id: When ``None`` (default), start a fresh conversation
+            in a new thread — the peer sees only ``content``. When set
+            to an integer thread id (extracted from the ``<thread_id>``
+            tag of a prior reply from this same target), continue that
+            thread.
 
     Returns:
-        The peer's text reply. May be empty if the peer produced no output.
+        On success, a string of the form::
+
+            <thread_id>1234567890123456</thread_id>
+            sure, here's the summary you asked for: ...
+
+        The first line is a tag carrying the thread id; the peer's
+        actual response begins on line 2. Remember the integer if you
+        might want to continue this conversation later. The response
+        may be empty if the peer produced no output.
+
+        **The ``<thread_id>`` tag is internal — do NOT show it to the
+        user or include it in your own reply.** It's there so YOU can
+        opt into continuation on a later turn; it has no meaning to the
+        human reading your output.
 
         On operational issues the tool returns an error message
-        starting with ``error:`` so you can adapt (retry, pick a
-        different agent, or fall back). Possible errors:
+        starting with ``error:`` (with NO ``<thread_id>`` tag) so you
+        can adapt (retry, pick a different agent, or fall back).
+        Possible errors:
 
         * ``error: unknown agent '<name>'; known agents: ...`` —
           ``target_agent_id`` is not registered. Fix the id and retry.
         * ``error: agent '<self>' cannot privately chat with itself`` —
           pick a different agent.
-        * ``error: target '<name>' did not reply within Ns`` — the peer
-          did not respond in time. Try again or pick another agent.
+        * ``error: target '<name>' did not reply within Ns`` — the
+          peer did not respond in time. Try again or pick another
+          agent.
+        * ``error: thread <id> not accessible; start a new conversation
+          by omitting thread_id`` — the supplied ``thread_id`` was
+          deleted, points at a non-thread channel, or you lack access.
+          Drop the id and call again.
     """
     correlation_id = ctx.deps.correlation_id
-    if _client is None or _persona_sender is None or _resolver is None:
-        _raise_infra("tool not initialized; the calfkit-tools runner must call init() at startup",
-                     correlation_id=correlation_id)
+    if (
+        _client is None
+        or _persona_sender is None
+        or _resolver is None
+        or _discord_client is None
+    ):
+        _raise_infra(
+            "tool not initialized; the calfkit-tools runner must call init() at startup",
+            correlation_id=correlation_id,
+        )
 
     caller_agent_id = ctx.agent_name
     if caller_agent_id is None:
         # ctx.agent_name is set from the inbound x-calf-emitter header.
         # If it's missing, calfkit's dispatch was bypassed somehow.
-        _raise_infra("invoked without emitter_node_id; cannot identify caller",
-                     correlation_id=correlation_id)
+        _raise_infra(
+            "invoked without emitter_node_id; cannot identify caller",
+            correlation_id=correlation_id,
+        )
 
     if caller_agent_id == target_agent_id:
         # Log at INFO so operators tailing the tools log can spot LLMs that
@@ -184,13 +341,22 @@ async def private_chat(
     # so all infra-bug signals are one exception type (the contract).
     phonebook_raw = ctx.deps.provided_deps.get("phonebook")
     if phonebook_raw is None:
-        _raise_infra("invoked without deps['phonebook']; the bridge ingress is expected to populate this key on every publish",
-                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id)
+        _raise_infra(
+            "invoked without deps['phonebook']; the bridge ingress is expected to populate this key on every publish",
+            correlation_id=correlation_id,
+            caller=caller_agent_id,
+            target=target_agent_id,
+        )
     try:
         phonebook = phonebook_from_deps(phonebook_raw)
     except (ValueError, ValidationError) as e:
-        _raise_infra(f"received malformed deps['phonebook']: {e}",
-                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id, cause=e)
+        _raise_infra(
+            f"received malformed deps['phonebook']: {e}",
+            correlation_id=correlation_id,
+            caller=caller_agent_id,
+            target=target_agent_id,
+            cause=e,
+        )
 
     target_entry = _lookup(phonebook, target_agent_id)
     if target_entry is None:
@@ -209,18 +375,32 @@ async def private_chat(
         # tools). A missing phonebook entry is an infrastructure bug, not
         # LLM input — raise so it surfaces in logs rather than silently
         # degrading the projection to no-persona.
-        _raise_infra(f"caller {caller_agent_id!r} is not in the phonebook; cannot resolve persona",
-                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id)
+        _raise_infra(
+            f"caller {caller_agent_id!r} is not in the phonebook; cannot resolve persona",
+            correlation_id=correlation_id,
+            caller=caller_agent_id,
+            target=target_agent_id,
+        )
 
     incoming_wire_dict = ctx.deps.provided_deps.get("discord")
     if not isinstance(incoming_wire_dict, dict):
-        _raise_infra("invoked without deps['discord']; the bridge ingress is expected to populate this key before any agent runs",
-                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id)
+        _raise_infra(
+            "invoked without deps['discord']; the bridge ingress is expected to "
+            "populate this key before any agent runs",
+            correlation_id=correlation_id,
+            caller=caller_agent_id,
+            target=target_agent_id,
+        )
     try:
         incoming_wire = WireMessage.model_validate(incoming_wire_dict)
     except ValidationError as e:
-        _raise_infra(f"received malformed deps['discord']: {e}",
-                     correlation_id=correlation_id, caller=caller_agent_id, target=target_agent_id, cause=e)
+        _raise_infra(
+            f"received malformed deps['discord']: {e}",
+            correlation_id=correlation_id,
+            caller=caller_agent_id,
+            target=target_agent_id,
+            cause=e,
+        )
 
     # Forward a mutated wire to the target: slash_target points at them
     # (so addressed_to_me_gate accepts), kind=slash (so the gate's slash
@@ -243,7 +423,7 @@ async def private_chat(
     # caller/target context at this layer because the resolver only
     # logs the success path.
     try:
-        a2a_channel_id = await _resolver.resolve_or_create(caller_agent_id, target_agent_id)
+        unified_channel_id = await _resolver.resolve_unified_channel()
     except discord.DiscordException:
         logger.error(
             "a2a channel resolution failed caller=%s target=%s correlation_id=%s",
@@ -257,21 +437,41 @@ async def private_chat(
     caller_persona = Persona(name=caller_entry.display_name, avatar_url=caller_entry.avatar_url)
     target_persona = Persona(name=target_entry.display_name, avatar_url=target_entry.avatar_url)
 
-    await _post_projection(
-        caller_persona,
-        a2a_channel_id,
-        content,
-        caller=caller_agent_id,
-        target=target_agent_id,
-        correlation_id=None,
-    )
+    if thread_id is None:
+        message_history, conversation_thread_id = await _start_new_thread(
+            caller_persona=caller_persona,
+            unified_channel_id=unified_channel_id,
+            content=content,
+            caller_agent_id=caller_agent_id,
+            target_agent_id=target_agent_id,
+            correlation_id=correlation_id,
+        )
+    else:
+        continue_result = await _continue_existing_thread(
+            caller_persona=caller_persona,
+            unified_channel_id=unified_channel_id,
+            content=content,
+            thread_id=thread_id,
+            target_entry=target_entry,
+            target_agent_id=target_agent_id,
+            caller_agent_id=caller_agent_id,
+            correlation_id=correlation_id,
+            phonebook=phonebook,
+        )
+        if isinstance(continue_result, str):
+            # Recoverable error path — bare error string (no <thread_id>
+            # tag) so the LLM does not try to continue a dead thread.
+            return continue_result
+        message_history, conversation_thread_id = continue_result
 
     target_topic = _AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=target_agent_id)
     logger.info(
-        "private_chat invoking caller=%s target=%s topic=%s timeout=%.1fs",
+        "private_chat invoking caller=%s target=%s topic=%s thread_id=%s history_len=%d timeout=%.1fs",
         caller_agent_id,
         target_agent_id,
         target_topic,
+        conversation_thread_id,
+        len(message_history),
         _timeout_seconds,
     )
     try:
@@ -288,8 +488,9 @@ async def private_chat(
             output_type=str,
             timeout=_timeout_seconds,
             temp_instructions=build_temp_instructions(phonebook, target_agent_id),
+            message_history=message_history,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # Returning as a string (rather than raising) is deliberate: if we
         # raise, the tool's ReturnCall never fires and the calling agent's
         # execute_node also times out — two timeouts for one logical
@@ -323,21 +524,266 @@ async def private_chat(
 
     await _post_projection(
         target_persona,
-        a2a_channel_id,
+        unified_channel_id,
         response_text,
+        thread_id=conversation_thread_id,
         caller=caller_agent_id,
         target=target_agent_id,
         correlation_id=result.correlation_id,
     )
 
     logger.info(
-        "private_chat completed caller=%s target=%s correlation_id=%s response_len=%d",
+        "private_chat completed caller=%s target=%s thread_id=%s correlation_id=%s response_len=%d",
         caller_agent_id,
         target_agent_id,
+        conversation_thread_id,
         result.correlation_id,
         len(response_text),
     )
-    return response_text
+    return f"<thread_id>{conversation_thread_id}</thread_id>\n{response_text}"
+
+
+async def _start_new_thread(
+    *,
+    caller_persona: Persona,
+    unified_channel_id: int,
+    content: str,
+    caller_agent_id: str,
+    target_agent_id: str,
+    correlation_id: str,
+) -> tuple[list[ModelMessage], int]:
+    """Post the request projection to the unified channel and anchor a new thread on it.
+
+    Returns ``(empty_message_history, new_thread_id)``. Raises
+    ``RuntimeError`` (via :func:`_raise_infra`) if anchoring fails or
+    if the request projection's audit-gap fallback returns ``None`` —
+    we cannot anchor a thread on a phantom message, so a missing
+    anchor breaks the continuation contract.
+    """
+    sent = await _post_projection(
+        caller_persona,
+        unified_channel_id,
+        content,
+        caller=caller_agent_id,
+        target=target_agent_id,
+        correlation_id=None,
+    )
+    if sent is None:
+        # Request-side audit-gap was accepted (persistent transient
+        # failure swallowed by ``_post_projection``). Without an anchor
+        # we cannot create a thread, and without a thread the caller
+        # has no continuation handle for this conversation — escalate
+        # to infra error rather than silently degrade to "no thread".
+        _raise_infra(
+            "request projection accepted an audit gap; no anchor message available to create a thread",
+            caller=caller_agent_id,
+            target=target_agent_id,
+            correlation_id=correlation_id,
+        )
+    try:
+        new_thread_id = await _resolver.create_anchored_thread(  # type: ignore[union-attr]
+            unified_channel_id,
+            sent.id,
+            name=_build_thread_name(caller_agent_id, target_agent_id, content),
+        )
+    except discord.DiscordException as e:
+        # No thread = no future continuation, which is the audit-and-
+        # continuation invariant. The already-posted request projection
+        # is acceptable orphan data; the operator-facing log captures
+        # the failure.
+        _raise_infra(
+            f"create_anchored_thread failed channel={unified_channel_id} anchor={sent.id}: {e}",
+            caller=caller_agent_id,
+            target=target_agent_id,
+            correlation_id=correlation_id,
+            cause=e,
+        )
+    return [], new_thread_id
+
+
+async def _continue_existing_thread(
+    *,
+    caller_persona: Persona,
+    unified_channel_id: int,
+    content: str,
+    thread_id: int,
+    target_entry: PhonebookEntry,
+    target_agent_id: str,
+    caller_agent_id: str,
+    correlation_id: str,
+    phonebook: Sequence[PhonebookEntry],
+) -> tuple[list[ModelMessage], int] | str:
+    """Fetch prior thread history, project it, then post the request projection into the thread.
+
+    Returns either:
+    * ``(message_history, thread_id)`` on success, or
+    * a recoverable error string (no ``<thread_id>`` tag) when the
+      supplied ``thread_id`` is inaccessible — the caller surfaces
+      this directly to the LLM.
+
+    Fetch FIRST, then post: posting first then fetching would put the
+    just-posted request in both ``message_history`` AND ``user_prompt``,
+    which the callee would see as a duplicate.
+    """
+    assert _discord_client is not None  # caller guarded
+    try:
+        records = await _fetch_thread_history(
+            _discord_client,
+            thread_id,
+            limit=target_entry.history_turns,
+            phonebook=phonebook,
+        )
+    except (discord.Forbidden, discord.NotFound, TypeError):
+        # Permanent + LLM-recoverable: the caller passed an id we cannot
+        # read (deleted thread, bot lacks Read Message History, wrong id,
+        # or an id that resolves to a non-messageable channel — e.g. a
+        # category id the LLM hallucinated). Return a documented error
+        # string so the LLM can drop the id and restart the conversation.
+        logger.warning(
+            "private_chat thread fetch failed caller=%s target=%s thread_id=%s "
+            "correlation_id=%s; returning recoverable error",
+            caller_agent_id,
+            target_agent_id,
+            thread_id,
+            correlation_id,
+            exc_info=True,
+        )
+        return (
+            f"error: thread {thread_id} not accessible; "
+            "start a new conversation by omitting thread_id"
+        )
+    except discord.HTTPException as e:
+        # Transient 5xx flavor: not the LLM's bug. Funnel through infra.
+        # Inline ``status``/``text`` for operator triage — the generic
+        # ``_raise_infra`` prefix would otherwise hide them in ``exc_info``.
+        _raise_infra(
+            f"thread history fetch failed thread_id={thread_id} "
+            f"status={e.status} text={e.text!r}: {e}",
+            caller=caller_agent_id,
+            target=target_agent_id,
+            correlation_id=correlation_id,
+            cause=e,
+        )
+    except discord.DiscordException as e:
+        # Catchall for the rest of the ``DiscordException`` family:
+        # :class:`discord.RateLimited` (NOT an :class:`HTTPException`
+        # subclass) plus the :class:`discord.ClientException` branches
+        # (``ConnectionClosed``, ``InvalidData``) we'd otherwise let
+        # propagate raw out of ``private_chat``. Funnel through infra so
+        # the calling LLM sees a ``RuntimeError`` with caller/target
+        # context (the documented infra-bug contract).
+        _raise_infra(
+            f"thread history fetch failed thread_id={thread_id} "
+            f"exc_class={type(e).__name__}: {e}",
+            caller=caller_agent_id,
+            target=target_agent_id,
+            correlation_id=correlation_id,
+            cause=e,
+        )
+    message_history = project_history(records, self_agent_id=target_agent_id)
+    await _post_projection(
+        caller_persona,
+        unified_channel_id,
+        content,
+        thread_id=thread_id,
+        caller=caller_agent_id,
+        target=target_agent_id,
+        correlation_id=None,
+    )
+    return message_history, thread_id
+
+
+async def _fetch_thread_history(
+    discord_client: discord.Client,
+    thread_id: int,
+    *,
+    limit: int,
+    phonebook: Sequence[PhonebookEntry],
+) -> list[HistoryRecord]:
+    """Fetch recent messages from a Discord thread as :class:`HistoryRecord` list.
+
+    Lighter than :class:`bridge.history.ChannelHistoryFetcher`: A2A has no
+    fan-out (so no single-flight coalescing) and no freshness budget (the
+    caller's request was just posted, so any LRU window would serve stale
+    records — we always go to Discord). Identity resolution uses the
+    per-call ``phonebook`` rather than an :class:`AgentRegistry` because
+    the tools process is registry-free by design (see module docstring).
+
+    Unlike the bridge fetcher's fail-safe contract, this helper RAISES on
+    Discord errors. The caller maps :class:`discord.Forbidden` and
+    :class:`discord.NotFound` to the recoverable error string surfaced to
+    the LLM (so it can drop a dead ``thread_id`` and start over), and
+    funnels :class:`discord.HTTPException` (5xx) through ``_raise_infra``.
+
+    Args:
+        discord_client: The bot's REST client (reused from the persona
+            sender; no second gateway connection).
+        thread_id: Discord thread id to read.
+        limit: Maximum records to return. Clamped to Discord's per-call
+            cap (:data:`_DISCORD_HISTORY_MAX_LIMIT`); ``0`` short-circuits.
+        phonebook: Per-invocation roster used to map a webhook author's
+            ``display_name`` back to its ``agent_id``. Non-webhook authors
+            (humans, third-party bots) always get ``author_agent_id=None``.
+
+    Returns:
+        Oldest-first list of :class:`HistoryRecord`. Records mirror the
+        bridge fetcher's shape so :func:`project_history` consumes them
+        identically.
+
+    Raises:
+        discord.Forbidden: Bot lacks Read Message History on the thread.
+        discord.NotFound: Thread does not exist or bot lacks View Channel.
+        discord.HTTPException: Other Discord-side failure (transient 5xx).
+    """
+    if limit <= 0:
+        return []
+    capped = min(limit, _DISCORD_HISTORY_MAX_LIMIT)
+
+    channel = discord_client.get_channel(thread_id)
+    if channel is None:
+        channel = await discord_client.fetch_channel(thread_id)
+
+    # ``thread_id`` is LLM-supplied; a hallucinated/spoofed id pointing at
+    # a ``CategoryChannel`` / ``ForumChannel`` / voice channel would
+    # ``AttributeError`` (or worse, silently return zero messages) inside
+    # the history loop. ``discord.abc.Messageable`` is the protocol
+    # ``Thread`` / ``TextChannel`` / ``DMChannel`` satisfy; non-messageable
+    # types raise the same recoverable error the caller maps to a
+    # documented LLM-facing string. ``TypeError`` (rather than ``NotFound``)
+    # because the channel exists — it's just not usable for history reads.
+    if not isinstance(channel, discord.abc.Messageable):
+        raise TypeError(
+            f"channel id={thread_id} is a {type(channel).__name__}, "
+            "not a messageable channel/thread"
+        )
+
+    display_to_agent: dict[str, str] = {
+        e.display_name: e.agent_id for e in phonebook
+    }
+
+    # ``channel.history`` returns newest-first; we reverse for chronological.
+    messages = [m async for m in channel.history(limit=capped)]
+    records: list[HistoryRecord] = []
+    for msg in reversed(messages):
+        author_display_name = (
+            getattr(msg.author, "display_name", None) or msg.author.name
+        )
+        # Non-webhook messages (humans, third-party bots) always map to
+        # author_agent_id=None — project_history then treats them as
+        # peer messages with a `<display_name>` prefix.
+        author_agent_id: str | None = None
+        if msg.webhook_id is not None:
+            author_agent_id = display_to_agent.get(author_display_name)
+        records.append(
+            HistoryRecord(
+                message_id=msg.id,
+                created_at=msg.created_at,
+                content=msg.content,
+                author_display_name=author_display_name,
+                author_agent_id=author_agent_id,
+            )
+        )
+    return records
 
 
 def _lookup(
@@ -389,10 +835,11 @@ async def _post_projection(
     channel_id: int,
     content: str,
     *,
+    thread_id: int | None = None,
     caller: str,
     target: str,
     correlation_id: str | None,
-) -> None:
+) -> SentMessage | None:
     """Post a projection message with bounded retry; final-failure handling
     depends on whether this is the request or response side.
 
@@ -422,8 +869,16 @@ async def _post_projection(
     :mod:`calfkit_organization.bridge.outbox`.
 
     ``caller``/``target``/``correlation_id`` are logged on failure so an
-    operator finding an audit gap on a particular pair channel can
+    operator finding an audit gap in the unified A2A channel can
     correlate it back to the specific A2A turn.
+
+    Returns:
+        :class:`SentMessage` on successful first-or-retried send. The
+        new-thread branch of :func:`private_chat` uses ``.id`` as the
+        anchor for the freshly-created thread. ``None`` only when the
+        request-side branch accepts an audit gap on persistent
+        failure — callers that need an anchor must guard on ``None``
+        and escalate via :func:`_raise_infra`.
     """
     assert _persona_sender is not None  # guarded by the caller
     # Empty content is legal (some agents may legitimately reply ""), but
@@ -445,8 +900,12 @@ async def _post_projection(
     last_exc: discord.HTTPException | None = None
     for attempt in range(1, _MAX_PROJECTION_ATTEMPTS + 1):
         try:
-            await _persona_sender.send(persona, channel_id=channel_id, content=payload)
-            return
+            return await _persona_sender.send(
+                persona,
+                channel_id=channel_id,
+                content=payload,
+                thread_id=thread_id,
+            )
         except (discord.NotFound, discord.Forbidden):
             # Permanent: channel gone or bot lost Manage Webhooks. Retrying
             # changes nothing; let the caller (and the operator's logs) see
@@ -456,10 +915,12 @@ async def _post_projection(
             last_exc = e
             if attempt < _MAX_PROJECTION_ATTEMPTS:
                 logger.warning(
-                    "projection attempt=%d failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; retrying in %.1fs",
+                    "projection attempt=%d failed persona=%s channel=%s thread_id=%s "
+                    "caller=%s target=%s correlation_id=%s; retrying in %.1fs",
                     attempt,
                     persona.name,
                     channel_id,
+                    thread_id,
                     caller,
                     target,
                     correlation_id,
@@ -475,24 +936,31 @@ async def _post_projection(
                 # ERROR (not WARNING) — permanent audit data loss, not a
                 # transient blip; alerting hooks keyed off ERROR fire.
                 logger.error(
-                    "projection failed persona=%s channel=%s caller=%s target=%s correlation_id=%s; accepting audit gap",
+                    "projection failed persona=%s channel=%s thread_id=%s "
+                    "caller=%s target=%s correlation_id=%s; accepting audit gap",
                     persona.name,
                     channel_id,
+                    thread_id,
                     caller,
                     target,
                     correlation_id,
                     exc_info=True,
                 )
-                return
+                return None
             # Response side: raise so the calling LLM never sees a reply
             # that wasn't projected to humans.
             _raise_infra(
-                f"a2a audit projection failed after {_MAX_PROJECTION_ATTEMPTS} attempts persona={persona.name!r} channel={channel_id}",
+                f"a2a audit projection failed after {_MAX_PROJECTION_ATTEMPTS} attempts "
+                f"persona={persona.name!r} channel={channel_id} thread_id={thread_id}",
                 caller=caller,
                 target=target,
                 correlation_id=correlation_id,
                 cause=last_exc,
             )
+    # Unreachable: every loop iteration either returns or raises. The
+    # explicit ``return None`` keeps mypy from inferring a missing branch
+    # and keeps callers' ``SentMessage | None`` type discipline honest.
+    return None
 
 
 # Calfkit's ``@agent_tool`` decorator wraps the bare async function in a

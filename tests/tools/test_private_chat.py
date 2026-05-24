@@ -6,11 +6,18 @@ singletons are populated via ``monkeypatch.setattr`` per-test (so leak is
 impossible across tests), and the phonebook arrives via ``ctx.deps`` —
 mirroring the bridge ingress, which is the tool's only source of agent
 identity.
+
+The architecture under test is the **unified-channel + per-conversation
+thread** model: every A2A invocation lives inside a Discord thread
+under one shared ``a2a-audit`` channel. ``thread_id=None`` (default)
+forks a fresh thread; passing an int continues an existing one with
+projected history injected as ``message_history``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -24,9 +31,15 @@ from calfkit.models.session_context import Deps
 
 from calfkit_organization.agents.phonebook import PhonebookEntry, phonebook_to_deps
 from calfkit_organization.bridge.egress import A2AChannelResolver
+from calfkit_organization.bridge.history import HistoryRecord
 from calfkit_organization.bridge.wire import WireAuthor, WireMessage
+from calfkit_organization.discord.messages import SentMessage
 from calfkit_organization.discord.persona import DiscordPersonaSender
 from calfkit_organization.tools import private_chat as pc
+
+# Pattern for the success return surface: starts with a `<thread_id>NNN</thread_id>`
+# tag, then a newline, then any (possibly empty, possibly multi-line) response.
+_RETURN_TAG_PATTERN = re.compile(r"^<thread_id>(\d+)</thread_id>\n", re.DOTALL)
 
 
 def _http_exc(exc_cls: type[discord.HTTPException], status: int) -> discord.HTTPException:
@@ -73,19 +86,32 @@ def _wire(
     )
 
 
-def _entry(agent_id: str, *, tools: tuple[str, ...] = ()) -> PhonebookEntry:
+def _entry(
+    agent_id: str,
+    *,
+    tools: tuple[str, ...] = (),
+    history_turns: int = 30,
+) -> PhonebookEntry:
     return PhonebookEntry(
         agent_id=agent_id,
         display_name=f"{agent_id.title()} Bot",
         avatar_url=f"https://example.com/{agent_id}.png",
         description="test",
         tools=tools,
+        history_turns=history_turns,
     )
 
 
 # Default phonebook used by ``_ctx``: just alice and bob, no tools. Tests
 # that need a different roster construct one inline and pass via ``phonebook=``.
 _DEFAULT_PHONEBOOK = [_entry("alice"), _entry("bob")]
+
+# Canonical ids returned by the default resolver / send mocks. Named
+# constants keep the success-path assertions readable.
+_UNIFIED_CHANNEL_ID = 12345
+_REQUEST_SENT_MESSAGE_ID = 555
+_RESPONSE_SENT_MESSAGE_ID = 556
+_NEW_THREAD_ID = 99999
 
 
 def _ctx(
@@ -116,6 +142,21 @@ def _ctx(
     )
 
 
+def _sent_message(message_id: int, *, channel_id: int = _UNIFIED_CHANNEL_ID) -> SentMessage:
+    return SentMessage(id=message_id, channel_id=channel_id)
+
+
+def _sequential_send_mock(*message_ids: int) -> AsyncMock:
+    """An AsyncMock for ``persona_sender.send`` that returns a fresh
+    :class:`SentMessage` per call with the supplied ids in order.
+
+    Most tests need 2 sends (request + response); a handful need 1 (e.g.
+    timeout skips the response). Tests that exercise the retry loop will
+    interleave exceptions and supply their own ``side_effect``.
+    """
+    return AsyncMock(side_effect=[_sent_message(mid) for mid in message_ids])
+
+
 @pytest.fixture
 def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Inject mocks into private_chat's module-level singletons.
@@ -126,27 +167,46 @@ def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     ``monkeypatch.setattr`` restores the originals after the test, so
     one test's ``init`` cannot leak into another's.
+
+    Default resolver returns the unified channel id on
+    :meth:`resolve_unified_channel` and a fresh thread id on
+    :meth:`create_anchored_thread`. Default fetcher returns an empty
+    tuple — overridden by continue-path tests.
     """
     client = MagicMock(spec=Client)
     client.execute_node = AsyncMock()
     persona_sender = MagicMock(spec=DiscordPersonaSender)
-    persona_sender.send = AsyncMock()
+    persona_sender.send = _sequential_send_mock(
+        _REQUEST_SENT_MESSAGE_ID, _RESPONSE_SENT_MESSAGE_ID
+    )
     resolver = MagicMock(spec=A2AChannelResolver)
-    resolver.resolve_or_create = AsyncMock(return_value=12345)
+    resolver.resolve_unified_channel = AsyncMock(return_value=_UNIFIED_CHANNEL_ID)
+    resolver.create_anchored_thread = AsyncMock(return_value=_NEW_THREAD_ID)
+    discord_client = MagicMock(spec=discord.Client)
+    # Mock the module-level helper directly rather than discord.Client's
+    # `get_channel` / `fetch_channel` / `channel.history` chain. The helper
+    # is the boundary the tool body crosses; mocking it lets tests pin the
+    # contract surface (thread_id, limit, phonebook) without dragging
+    # discord.py's async-iterator quirks into every test.
+    fetch_thread_history = AsyncMock(return_value=[])
 
     monkeypatch.setattr(pc, "_client", client)
     monkeypatch.setattr(pc, "_persona_sender", persona_sender)
     monkeypatch.setattr(pc, "_resolver", resolver)
+    monkeypatch.setattr(pc, "_discord_client", discord_client)
+    monkeypatch.setattr(pc, "_fetch_thread_history", fetch_thread_history)
     monkeypatch.setattr(pc, "_timeout_seconds", 30.0)
 
     return {
         "client": client,
         "persona_sender": persona_sender,
         "resolver": resolver,
+        "discord_client": discord_client,
+        "fetch_thread_history": fetch_thread_history,
     }
 
 
-def _result(text: str) -> Any:
+def _result(text: str | None) -> Any:
     """A minimal stand-in for ``NodeResult`` carrying only the fields the
     tool reads. The real type has many more fields irrelevant here."""
     r = MagicMock()
@@ -155,164 +215,644 @@ def _result(text: str) -> Any:
     return r
 
 
-class TestHappyPath:
-    async def test_returns_target_response_text(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("bob's reply")
-        out = await pc.private_chat(_ctx(caller="alice"), "bob", "hello bob")
-        assert out == "bob's reply"
+def _record(content: str, *, author_agent_id: str | None = None) -> HistoryRecord:
+    """Build a minimal :class:`HistoryRecord` for continue-path projection tests."""
+    return HistoryRecord(
+        message_id=1,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content=content,
+        author_display_name=author_agent_id or "ryan",
+        author_agent_id=author_agent_id,
+    )
 
-    async def test_invokes_target_inbox_topic(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
-        await pc.private_chat(_ctx(caller="alice"), "bob", "msg")
-        call = deps["client"].execute_node.await_args
-        assert call.kwargs["topic"] == "agent.bob.in"
 
-    async def test_passes_caller_agent_id_in_deps(
-        self, deps: dict[str, Any]
+def _parse_tag(returned: str) -> int:
+    """Pull the integer thread id out of a success-path return string."""
+    match = _RETURN_TAG_PATTERN.match(returned)
+    assert match is not None, f"return missing <thread_id> tag: {returned!r}"
+    return int(match.group(1))
+
+
+class TestBuildThreadName:
+    """Pure-function coverage for ``_build_thread_name``."""
+
+    def test_basic(self) -> None:
+        out = pc._build_thread_name("conan", "scribe", "please summarize the doc")
+        assert out == "conan→scribe: please summarize the doc"
+
+    def test_truncates_long_content(self) -> None:
+        long = "x" * 200
+        out = pc._build_thread_name("a", "b", long)
+        # caller→target: <40 chars of x>
+        assert out == "a→b: " + "x" * pc._THREAD_NAME_CONTENT_MAX
+        # Topic tail is exactly the cap, no more.
+        assert out.count("x") == pc._THREAD_NAME_CONTENT_MAX
+
+    def test_strips_newlines(self) -> None:
+        out = pc._build_thread_name("a", "b", "line1\nline2\rline3\n\rline4")
+        # Newlines and carriage returns become single spaces; runs collapse.
+        assert "\n" not in out
+        assert "\r" not in out
+        assert out == "a→b: line1 line2 line3 line4"
+
+    def test_total_length_capped_at_100(self) -> None:
+        # Pick caller/target names that consume most of the budget so the
+        # truncation has to land somewhere inside the topic tail.
+        caller = "x" * 40
+        target = "y" * 40
+        # 40 + 1 (arrow) + 40 + 2 (": ") + 40 (content cap) = 123 > 100
+        out = pc._build_thread_name(caller, target, "z" * 200)
+        assert len(out) == pc._THREAD_NAME_MAX_TOTAL
+
+    def test_unicode_arrow_does_not_overflow_byte_limit(self) -> None:
+        """Discord's cap is char-based, not byte-based. The multi-byte
+        arrow consumes 1 char of the budget regardless of its UTF-8
+        encoding length."""
+        out = pc._build_thread_name("a", "b", "c")
+        # 'a' + '→' + 'b' + ': ' + 'c' = 6 chars; arrow encodes as
+        # 3 bytes in UTF-8 (verifying our assumption).
+        assert len(out) == 6
+        assert len(out.encode("utf-8")) > 6  # multi-byte arrow confirmed
+
+    def test_empty_content_uses_placeholder(self) -> None:
+        out = pc._build_thread_name("conan", "scribe", "")
+        assert out == f"conan→scribe: {pc._THREAD_NAME_EMPTY_PLACEHOLDER}"
+        # No trailing whitespace from a bare ": ".
+        assert not out.endswith(" ")
+
+    def test_whitespace_only_content(self) -> None:
+        out = pc._build_thread_name("conan", "scribe", "   \n\t\r ")
+        assert out == f"conan→scribe: {pc._THREAD_NAME_EMPTY_PLACEHOLDER}"
+
+    def test_collapses_internal_whitespace_runs(self) -> None:
+        """Runs of mixed whitespace collapse to one space — keeps the
+        thread name compact and readable."""
+        out = pc._build_thread_name("a", "b", "foo   bar\t\t\tbaz")
+        assert out == "a→b: foo bar baz"
+
+    def test_uses_full_unicode_arrow(self) -> None:
+        """Regression guard against an ascii ``->`` substitution."""
+        out = pc._build_thread_name("a", "b", "x")
+        assert "→" in out
+        assert "->" not in out
+
+
+class TestFetchThreadHistory:
+    """Cover the real ``_fetch_thread_history`` body (the rest of the
+    test file monkeypatches the helper, so its identity-resolution and
+    channel-type validation paths are not exercised elsewhere).
+
+    Verifies the helper's three load-bearing behaviors:
+    * webhook authors are resolved to ``agent_id`` via the phonebook;
+    * non-webhook authors get ``author_agent_id=None`` regardless of
+      whether their display_name happens to match an agent's;
+    * non-messageable channel ids raise ``TypeError`` (the caller maps
+      this to the documented recoverable LLM error string)."""
+
+    @staticmethod
+    def _msg(
+        *,
+        msg_id: int,
+        content: str,
+        display_name: str,
+        webhook_id: int | None,
+    ) -> Any:
+        m = MagicMock()
+        m.id = msg_id
+        m.content = content
+        m.created_at = datetime.fromtimestamp(1_700_000_000 + msg_id, UTC)
+        m.author = MagicMock()
+        m.author.display_name = display_name
+        m.author.name = display_name
+        m.webhook_id = webhook_id
+        return m
+
+    @staticmethod
+    def _messageable_channel_with_history(messages: list[Any]) -> Any:
+        """Build a mock that satisfies ``isinstance(_, discord.abc.Messageable)``
+        and exposes an ``async for`` history iterator returning ``messages``
+        newest-first (discord.py's actual contract)."""
+
+        async def _ait() -> Any:
+            for m in messages:
+                yield m
+
+        channel = MagicMock(spec=discord.abc.Messageable)
+        channel.history = MagicMock(return_value=_ait())
+        return channel
+
+    async def test_webhook_display_name_in_phonebook_resolves_to_agent_id(
+        self,
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
-        await pc.private_chat(_ctx(caller="alice"), "bob", "msg")
-        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
-        assert passed_deps["caller_agent_id"] == "alice"
-
-    async def test_forwarded_wire_overrides_slash_target_and_kind(
-        self, deps: dict[str, Any]
-    ) -> None:
-        """B's existing addressed_to_me gate requires slash_target == B and
-        kind == "slash". The tool must mutate both on the forwarded wire.
-        Starts from a kind=message inbound (slash_target=None per the
-        WireMessage validator) to verify both fields get rewritten."""
-        deps["client"].execute_node.return_value = _result("ok")
-        inbound = _wire(kind="message", content="orig")
-        await pc.private_chat(_ctx(caller="alice", wire=inbound), "bob", "new")
-        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
-        forwarded = passed_deps["discord"]
-        assert forwarded["slash_target"] == "bob"
-        assert forwarded["kind"] == "slash"
-
-    async def test_forwarded_wire_content_is_a2a_payload(
-        self, deps: dict[str, Any]
-    ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
-        inbound = _wire(content="original")
-        await pc.private_chat(
-            _ctx(caller="alice", wire=inbound), "bob", "the a2a request"
+        phonebook = [_entry("alice"), _entry("bob")]
+        channel = self._messageable_channel_with_history(
+            [
+                self._msg(msg_id=2, content="hi from alice", display_name="Alice Bot", webhook_id=999),
+            ]
         )
-        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
-        assert forwarded["content"] == "the a2a request"
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=channel)
+        records = await pc._fetch_thread_history(
+            client, thread_id=777, limit=10, phonebook=phonebook
+        )
+        assert len(records) == 1
+        assert records[0].author_agent_id == "alice"
 
-    async def test_forwarded_wire_preserves_channel_and_author(
+    async def test_webhook_display_name_not_in_phonebook_returns_none(
+        self,
+    ) -> None:
+        phonebook = [_entry("alice")]
+        channel = self._messageable_channel_with_history(
+            [
+                self._msg(msg_id=2, content="hi from unknown", display_name="Ghost", webhook_id=999),
+            ]
+        )
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=channel)
+        records = await pc._fetch_thread_history(
+            client, thread_id=777, limit=10, phonebook=phonebook
+        )
+        assert len(records) == 1
+        assert records[0].author_agent_id is None
+
+    async def test_non_webhook_author_never_resolves_to_agent(self) -> None:
+        """A human happens to be named ``Alice Bot`` (matches the alice
+        agent's display_name exactly) — must NOT be mistaken for the
+        alice agent. The webhook_id branch is the only path that maps
+        to an agent_id; non-webhook authors always stay None."""
+        phonebook = [_entry("alice")]
+        channel = self._messageable_channel_with_history(
+            [
+                self._msg(msg_id=2, content="hi from human alice", display_name="Alice Bot", webhook_id=None),
+            ]
+        )
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=channel)
+        records = await pc._fetch_thread_history(
+            client, thread_id=777, limit=10, phonebook=phonebook
+        )
+        assert len(records) == 1
+        assert records[0].author_agent_id is None
+
+    async def test_history_reversed_to_chronological(self) -> None:
+        """discord.py returns newest-first; the helper must reverse."""
+        phonebook = [_entry("alice")]
+        channel = self._messageable_channel_with_history(
+            [
+                self._msg(msg_id=10, content="newest", display_name="Alice Bot", webhook_id=1),
+                self._msg(msg_id=5, content="oldest", display_name="Alice Bot", webhook_id=1),
+            ]
+        )
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=channel)
+        records = await pc._fetch_thread_history(
+            client, thread_id=777, limit=10, phonebook=phonebook
+        )
+        # Reversed → oldest first.
+        assert [r.content for r in records] == ["oldest", "newest"]
+
+    async def test_limit_zero_short_circuits_no_discord_call(self) -> None:
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock()
+        client.fetch_channel = AsyncMock()
+        records = await pc._fetch_thread_history(
+            client, thread_id=777, limit=0, phonebook=[]
+        )
+        assert records == []
+        client.get_channel.assert_not_called()
+        client.fetch_channel.assert_not_called()
+
+    async def test_limit_negative_short_circuits(self) -> None:
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock()
+        records = await pc._fetch_thread_history(
+            client, thread_id=777, limit=-5, phonebook=[]
+        )
+        assert records == []
+        client.get_channel.assert_not_called()
+
+    async def test_limit_capped_at_discord_max(self) -> None:
+        """``limit`` above Discord's 100-message cap is clamped silently."""
+        phonebook = [_entry("alice")]
+        channel = self._messageable_channel_with_history([])
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=channel)
+        await pc._fetch_thread_history(
+            client, thread_id=777, limit=500, phonebook=phonebook
+        )
+        # discord.py's channel.history(limit=...) — the helper must have
+        # passed 100, not 500.
+        channel.history.assert_called_once()
+        assert channel.history.call_args.kwargs["limit"] == 100
+
+    async def test_get_channel_miss_falls_back_to_fetch_channel(self) -> None:
+        """The bot's in-memory channel cache misses on cold threads (gateway
+        cache doesn't know about every thread). Must fall back to a REST
+        ``fetch_channel`` lookup, not silently return ``[]``."""
+        phonebook = [_entry("alice")]
+        channel = self._messageable_channel_with_history([])
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=None)  # cache miss
+        client.fetch_channel = AsyncMock(return_value=channel)
+        await pc._fetch_thread_history(
+            client, thread_id=777, limit=10, phonebook=phonebook
+        )
+        client.get_channel.assert_called_once_with(777)
+        client.fetch_channel.assert_awaited_once_with(777)
+
+    async def test_non_messageable_channel_raises_type_error(self) -> None:
+        """A spoofed thread_id pointing at e.g. a CategoryChannel must NOT
+        AttributeError into the agent runtime — raise ``TypeError`` so the
+        caller maps it to the recoverable LLM error string."""
+        category = MagicMock()  # NOT spec'd to Messageable → isinstance False
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=category)
+        with pytest.raises(TypeError, match="not a messageable"):
+            await pc._fetch_thread_history(
+                client, thread_id=777, limit=10, phonebook=[]
+            )
+
+
+class TestContinueThreadNonMessageableChannel:
+    """The TypeError from ``_fetch_thread_history`` when an LLM passes a
+    thread_id pointing at a non-messageable channel must surface as the
+    same recoverable error string the LLM already knows how to handle
+    for Forbidden/NotFound — not as a ``RuntimeError`` or a raw raise."""
+
+    async def test_type_error_returns_recoverable_error_string(
         self, deps: dict[str, Any]
     ) -> None:
-        """Channel and original author stay on the forwarded wire — the
-        caller_agent_id key carries the new info; everything else is
-        unchanged Discord context."""
-        deps["client"].execute_node.return_value = _result("ok")
-        inbound = _wire(channel_id=777)
-        await pc.private_chat(_ctx(caller="alice", wire=inbound), "bob", "x")
-        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
-        assert forwarded["channel_id"] == 777
-        assert forwarded["author"]["display_name"] == "ryan"
+        deps["fetch_thread_history"].side_effect = TypeError(
+            "channel id=777 is a CategoryChannel, not a messageable channel/thread"
+        )
+        out = await pc.private_chat(
+            _ctx(caller="alice"), "bob", "follow up", thread_id=777
+        )
+        assert "error:" in out
+        assert "thread 777" in out
+        assert "not accessible" in out
+        # No tag on error — LLM must drop the bad id, not try to continue it.
+        assert "<thread_id>" not in out
+        deps["client"].execute_node.assert_not_called()
 
-    async def test_uses_configured_timeout(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
-        await pc.private_chat(_ctx(), "bob", "x")
-        assert deps["client"].execute_node.await_args.kwargs["timeout"] == 30.0
 
-    async def test_passes_temp_instructions_for_target(
+class TestContinueThreadOtherDiscordExceptions:
+    """The catchall ``except discord.DiscordException`` branch funnels
+    every Discord error class that isn't already handled (Forbidden,
+    NotFound, HTTPException) through ``_raise_infra`` — so RateLimited,
+    ConnectionClosed, and InvalidData no longer propagate raw."""
+
+    async def test_rate_limited_raises_runtime_error(
         self, deps: dict[str, Any]
     ) -> None:
-        """When invoking the target, the tool injects the peer-roster
-        temp_instructions so the target (if A2A-enabled itself) sees who
-        else it can chain-call. Built from the phonebook in deps, so a
-        hot-added agent (in a future registry refresh) reaches the next
-        invocation immediately."""
-        phonebook = [
-            _entry("alice", tools=("private_chat",)),
-            _entry("bob", tools=("private_chat",)),
-            _entry("carol"),
-        ]
-        deps["client"].execute_node.return_value = _result("ok")
-        await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
-        instructions = deps["client"].execute_node.await_args.kwargs["temp_instructions"]
-        assert instructions is not None
-        assert "carol" in instructions
-        assert "bob" not in instructions  # target excluded from its own roster
+        """``discord.RateLimited`` is NOT a ``HTTPException`` subclass —
+        without the catchall it would propagate raw out of private_chat."""
+        deps["fetch_thread_history"].side_effect = discord.RateLimited(retry_after=1.5)
+        with pytest.raises(RuntimeError, match="thread history fetch failed"):
+            await pc.private_chat(
+                _ctx(caller="alice"), "bob", "follow up", thread_id=777
+            )
+        deps["client"].execute_node.assert_not_called()
 
-    async def test_propagates_phonebook_to_target_deps(
-        self, deps: dict[str, Any]
-    ) -> None:
-        """The phonebook must ride along to the target so a chain-calling
-        target (B → C) doesn't lose its view of the organization. The
-        chain target's roster depends on ``tools``, ``display_name``,
-        and ``avatar_url`` per entry — assert the full shape survives,
-        not just the ids."""
-        phonebook = [
-            _entry("alice", tools=("private_chat",)),
-            _entry("bob", tools=("private_chat",)),
-            _entry("carol"),
-        ]
-        deps["client"].execute_node.return_value = _result("ok")
-        await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
-        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
-        propagated = passed_deps["phonebook"]
-        ids = sorted(e["agent_id"] for e in propagated)
-        assert ids == ["alice", "bob", "carol"]
-        # Find bob in the propagated list and confirm full identity rode along.
-        propagated_bob = next(e for e in propagated if e["agent_id"] == "bob")
-        assert propagated_bob["tools"] == ["private_chat"]
-        assert propagated_bob["display_name"] == "Bob Bot"
-        assert propagated_bob["avatar_url"] == "https://example.com/bob.png"
 
-    async def test_resolves_pair_channel_for_caller_and_target(
+class TestNewThreadPath:
+    """Coverage for the default ``thread_id=None`` branch."""
+
+    async def test_resolves_unified_channel_once(self, deps: dict[str, Any]) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        deps["resolver"].resolve_unified_channel.assert_awaited_once_with()
+
+    async def test_returns_tagged_response(self, deps: dict[str, Any]) -> None:
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        out = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        # Format pinned: <thread_id>NNN</thread_id>\n{response}.
+        assert out == f"<thread_id>{_NEW_THREAD_ID}</thread_id>\nbob's reply"
+
+    async def test_first_send_to_unified_channel_without_thread_id(
         self, deps: dict[str, Any]
     ) -> None:
         deps["client"].execute_node.return_value = _result("ok")
-        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        deps["resolver"].resolve_or_create.assert_awaited_once_with("alice", "bob")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        # First call = caller's request projection. Posted to the unified
+        # channel (no thread_id) so it can serve as the thread anchor.
+        first = deps["persona_sender"].send.await_args_list[0]
+        assert first.kwargs["channel_id"] == _UNIFIED_CHANNEL_ID
+        assert first.kwargs.get("thread_id") is None
 
-    async def test_posts_both_projections(self, deps: dict[str, Any]) -> None:
+    async def test_create_anchored_thread_called_with_sent_id_and_name(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "summarize the spec")
+        deps["resolver"].create_anchored_thread.assert_awaited_once()
+        call = deps["resolver"].create_anchored_thread.await_args
+        # Channel id and anchor message id positional, name kwarg.
+        assert call.args == (_UNIFIED_CHANNEL_ID, _REQUEST_SENT_MESSAGE_ID)
+        assert call.kwargs["name"] == "alice→bob: summarize the spec"
+
+    async def test_execute_node_receives_empty_message_history(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        assert (
+            deps["client"].execute_node.await_args.kwargs["message_history"] == []
+        )
+
+    async def test_response_posted_into_new_thread(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        # Second call = target's response projection, posted into the
+        # newly-anchored thread.
+        second = deps["persona_sender"].send.await_args_list[1]
+        assert second.kwargs["channel_id"] == _UNIFIED_CHANNEL_ID
+        assert second.kwargs["thread_id"] == _NEW_THREAD_ID
+
+    async def test_fetch_thread_history_never_called_on_new_thread(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Default branch must not touch the fetcher — no thread exists yet
+        to read from."""
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        deps["fetch_thread_history"].assert_not_called()
+
+    async def test_return_value_matches_documented_pattern(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("multi\nline\nreply")
+        out = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        # The DOTALL pattern in the docstring must match the actual return.
+        match = _RETURN_TAG_PATTERN.match(out)
+        assert match is not None
+        assert int(match.group(1)) == _NEW_THREAD_ID
+
+    async def test_caller_persona_sent_first(self, deps: dict[str, Any]) -> None:
         deps["client"].execute_node.return_value = _result("bob's reply")
         await pc.private_chat(_ctx(caller="alice"), "bob", "alice asks")
-        sent = deps["persona_sender"].send
-        assert sent.await_count == 2
-        # First call: caller persona + request text. Second: target persona +
-        # response text.
-        first_persona = sent.await_args_list[0].args[0]
-        first_content = sent.await_args_list[0].kwargs["content"]
-        second_persona = sent.await_args_list[1].args[0]
-        second_content = sent.await_args_list[1].kwargs["content"]
+        first_persona = deps["persona_sender"].send.await_args_list[0].args[0]
         assert first_persona.name == "Alice Bot"
+        first_content = deps["persona_sender"].send.await_args_list[0].kwargs["content"]
         assert first_content == "alice asks"
+
+    async def test_target_persona_sent_second(self, deps: dict[str, Any]) -> None:
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "alice asks")
+        second_persona = deps["persona_sender"].send.await_args_list[1].args[0]
         assert second_persona.name == "Bob Bot"
+        second_content = deps["persona_sender"].send.await_args_list[1].kwargs["content"]
         assert second_content == "bob's reply"
 
-    async def test_empty_target_response_projects_placeholder(
-        self, deps: dict[str, Any]
-    ) -> None:
-        """Discord rejects empty content; an empty A2A reply still needs an
-        audit entry, so the projection substitutes a visible placeholder."""
-        deps["client"].execute_node.return_value = _result("")
-        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        second_content = (
-            deps["persona_sender"].send.await_args_list[1].kwargs["content"]
-        )
-        assert second_content == "(empty response)"
 
-    async def test_none_target_response_treated_as_empty(
+class TestContinueThreadPath:
+    """Coverage for the ``thread_id=<int>`` continuation branch."""
+
+    async def test_fetcher_called_with_target_history_turns_and_phonebook(
         self, deps: dict[str, Any]
     ) -> None:
-        """``NodeResult.output`` is ``OutputT | None`` per calfkit's type —
-        the ``output is not None`` guard at the response site needs its own
-        test so a future ``result.output or ""`` refactor (which would
-        coerce falsy values differently) doesn't slip through."""
-        deps["client"].execute_node.return_value = _result(None)
-        out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        assert out == ""
-        second_content = (
-            deps["persona_sender"].send.await_args_list[1].kwargs["content"]
+        phonebook = [_entry("alice"), _entry("bob", history_turns=15)]
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(
+            _ctx(caller="alice", phonebook=phonebook), "bob", "follow up", thread_id=777
         )
-        assert second_content == "(empty response)"
+        deps["fetch_thread_history"].assert_awaited_once()
+        call = deps["fetch_thread_history"].await_args
+        # _fetch_thread_history(discord_client, thread_id, *, limit, phonebook)
+        assert call.args[0] is deps["discord_client"]
+        assert call.args[1] == 777
+        assert call.kwargs["limit"] == 15
+        # `phonebook` is required so the helper can map webhook display_name → agent_id.
+        assert "phonebook" in call.kwargs
+
+    async def test_fetcher_called_strictly_before_request_projection(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Continue-path ordering invariant: history MUST be fetched
+        BEFORE the caller's request is posted into the thread. Posting
+        first then fetching would put the just-posted request in both
+        ``message_history`` AND ``user_prompt``, surfacing as a duplicate
+        to the callee. Pins the ordering so a refactor swap can't
+        silently regress."""
+        call_order: list[str] = []
+
+        async def record_fetch(*args: Any, **kwargs: Any) -> list[Any]:
+            call_order.append("fetch")
+            return []
+
+        async def record_send(*args: Any, **kwargs: Any) -> SentMessage:
+            call_order.append("send")
+            return SentMessage(id=_REQUEST_SENT_MESSAGE_ID, channel_id=_UNIFIED_CHANNEL_ID)
+
+        deps["fetch_thread_history"].side_effect = record_fetch
+        deps["persona_sender"].send = record_send
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
+        # First two events are exactly fetch → send (then more sends for the response).
+        assert call_order[0] == "fetch"
+        assert call_order[1] == "send"
+
+    async def test_resolve_unified_channel_called(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Even on continue we still resolve the channel — the cache makes
+        this cheap after the first call but the call still happens (the
+        request projection needs the channel id)."""
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
+        deps["resolver"].resolve_unified_channel.assert_awaited_once_with()
+
+    async def test_create_anchored_thread_never_called_on_continue(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
+        deps["resolver"].create_anchored_thread.assert_not_called()
+
+    async def test_message_history_projected_from_target_pov(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Prior records authored by the target become :class:`ModelResponse`;
+        all others become :class:`ModelRequest`. The projection function
+        is tested exhaustively in ``tests/bridge/test_history.py``;
+        here we just confirm the tool wires the right ``self_agent_id``."""
+        deps["fetch_thread_history"].return_value = [
+            _record("alice asked", author_agent_id="alice"),
+            _record("bob replied", author_agent_id="bob"),
+        ]
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
+        passed_history = deps["client"].execute_node.await_args.kwargs["message_history"]
+        # Two records, one from each side; passes both through.
+        assert len(passed_history) == 2
+
+    async def test_message_history_passed_to_execute_node(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Distinct from the per-POV projection test — pins that the
+        history actually rides on the ``execute_node`` kwarg."""
+        deps["fetch_thread_history"].return_value = [
+            _record("alice asked", author_agent_id="alice"),
+        ]
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
+        history = deps["client"].execute_node.await_args.kwargs["message_history"]
+        assert len(history) == 1
+
+    async def test_request_projection_posted_into_thread(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
+        first = deps["persona_sender"].send.await_args_list[0]
+        assert first.kwargs["channel_id"] == _UNIFIED_CHANNEL_ID
+        assert first.kwargs["thread_id"] == 777
+
+    async def test_response_projection_posted_into_same_thread(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
+        second = deps["persona_sender"].send.await_args_list[1]
+        assert second.kwargs["channel_id"] == _UNIFIED_CHANNEL_ID
+        assert second.kwargs["thread_id"] == 777
+
+    async def test_return_tag_carries_same_thread_id(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("bob's reply")
+        out = await pc.private_chat(
+            _ctx(caller="alice"), "bob", "follow up", thread_id=777
+        )
+        assert _parse_tag(out) == 777
+
+
+class TestContinueThreadFetcherErrors:
+    async def test_fetcher_forbidden_returns_recoverable_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """``discord.Forbidden`` on the thread fetch is LLM-recoverable —
+        the caller's id is invalid. The tool returns the documented
+        error string with no ``<thread_id>`` tag so the LLM doesn't try
+        to continue a dead thread."""
+        deps["fetch_thread_history"].side_effect = _http_exc(discord.Forbidden, 403)
+        out = await pc.private_chat(
+            _ctx(caller="alice"), "bob", "follow up", thread_id=777
+        )
+        assert "error:" in out
+        assert "thread 777" in out
+        assert "not accessible" in out
+        assert "omitting thread_id" in out
+        # No tag on error.
+        assert "<thread_id>" not in out
+        # execute_node was never reached.
+        deps["client"].execute_node.assert_not_called()
+
+    async def test_fetcher_not_found_returns_recoverable_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["fetch_thread_history"].side_effect = _http_exc(discord.NotFound, 404)
+        out = await pc.private_chat(
+            _ctx(caller="alice"), "bob", "follow up", thread_id=777
+        )
+        assert "error:" in out
+        assert "thread 777" in out
+        assert "<thread_id>" not in out
+        deps["client"].execute_node.assert_not_called()
+
+    async def test_fetcher_http_5xx_raises_runtime_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Transient 5xx is infrastructure, not LLM input — funnel through
+        ``_raise_infra``."""
+        deps["fetch_thread_history"].side_effect = _http_exc(discord.HTTPException, 503)
+        with pytest.raises(RuntimeError, match="thread history fetch failed"):
+            await pc.private_chat(
+                _ctx(caller="alice"), "bob", "follow up", thread_id=777
+            )
+        deps["client"].execute_node.assert_not_called()
+
+    async def test_fetcher_error_logs_caller_target_thread(
+        self,
+        deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The WARN log on a recoverable fetch failure must include
+        caller/target/thread_id so an operator can correlate."""
+        import logging as _logging
+
+        deps["fetch_thread_history"].side_effect = _http_exc(discord.Forbidden, 403)
+        with caplog.at_level(_logging.WARNING):
+            await pc.private_chat(
+                _ctx(caller="alice"), "bob", "follow up", thread_id=777
+            )
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "caller=alice" in joined
+        assert "target=bob" in joined
+        assert "thread_id=777" in joined
+
+
+class TestNewThreadAnchorFailure:
+    async def test_anchor_failure_raises_runtime_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """``create_anchored_thread`` raising any Discord exception means
+        the conversation has no thread and continuation is impossible —
+        infra escalation. The already-posted request projection is an
+        acceptable orphan (audit gap, not failure)."""
+        deps["resolver"].create_anchored_thread = AsyncMock(
+            side_effect=_http_exc(discord.Forbidden, 403)
+        )
+        with pytest.raises(RuntimeError, match="create_anchored_thread failed"):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        # The first persona.send (request projection) happened; that's
+        # acceptable orphan data.
+        assert deps["persona_sender"].send.await_count >= 1
+        # The execute_node call never happened.
+        deps["client"].execute_node.assert_not_called()
+
+    async def test_anchor_failure_on_not_found_raises(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Anchor message disappeared between post and create_thread (race)."""
+        deps["resolver"].create_anchored_thread = AsyncMock(
+            side_effect=_http_exc(discord.NotFound, 404)
+        )
+        with pytest.raises(RuntimeError, match="create_anchored_thread failed"):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+
+    async def test_anchor_failure_on_http_exception_raises(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """5xx on anchor creation is still infra — no thread, no continuation."""
+        deps["resolver"].create_anchored_thread = AsyncMock(
+            side_effect=_http_exc(discord.HTTPException, 503)
+        )
+        with pytest.raises(RuntimeError, match="create_anchored_thread failed"):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+
+    async def test_request_projection_audit_gap_raises_runtime_error(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """If the request projection exhausts retries and accepts an
+        audit gap (returns None), the new-thread branch has no anchor
+        message id — there is nothing to call ``create_thread`` on, so
+        the tool must escalate via ``_raise_infra`` rather than skip
+        thread creation silently."""
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 503),  # request attempt 1
+                _http_exc(discord.HTTPException, 503),  # request attempt 2
+            ]
+        )
+        with patch(
+            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
+        ), pytest.raises(RuntimeError, match="no anchor message available"):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        deps["resolver"].create_anchored_thread.assert_not_called()
+        deps["client"].execute_node.assert_not_called()
 
 
 class TestInputErrors:
@@ -320,9 +860,10 @@ class TestInputErrors:
         self, deps: dict[str, Any]
     ) -> None:
         """LLM-recoverable error: returned as a string so the calling LLM
-        can adapt rather than aborting the whole turn."""
+        can adapt rather than aborting the whole turn. No tag on error."""
         out = await pc.private_chat(_ctx(caller="alice"), "alice", "x")
         assert "cannot privately chat with itself" in out
+        assert "<thread_id>" not in out
         deps["client"].execute_node.assert_not_called()
 
     async def test_unknown_target_returns_error_with_known_list(
@@ -332,6 +873,7 @@ class TestInputErrors:
         assert "unknown agent" in out
         assert "alice" in out
         assert "bob" in out
+        assert "<thread_id>" not in out
         deps["client"].execute_node.assert_not_called()
 
 
@@ -344,21 +886,27 @@ class TestInfraErrors:
         monkeypatch.setattr(pc, "_client", None)
         monkeypatch.setattr(pc, "_persona_sender", None)
         monkeypatch.setattr(pc, "_resolver", None)
+        monkeypatch.setattr(pc, "_discord_client", None)
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await pc.private_chat(_ctx(), "bob", "x")
+
+    async def test_missing_discord_client_alone_raises(
+        self, deps: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even with every other singleton set, an absent discord client
+        must still fail-fast — pin the contract that ``init`` validates
+        all four."""
+        monkeypatch.setattr(pc, "_discord_client", None)
         with pytest.raises(RuntimeError, match="not initialized"):
             await pc.private_chat(_ctx(), "bob", "x")
 
     async def test_missing_emitter_node_id_raises(self, deps: dict[str, Any]) -> None:
-        """``ctx.agent_name`` should be set from the x-calf-emitter header
-        in calfkit dispatch; missing implies a bypass."""
         ctx = _ctx()
         ctx.agent_name = None  # simulate missing emitter
         with pytest.raises(RuntimeError, match="emitter_node_id"):
             await pc.private_chat(ctx, "bob", "x")
 
     async def test_missing_phonebook_dep_raises(self, deps: dict[str, Any]) -> None:
-        """The bridge ingress is contractually required to populate
-        ``deps['phonebook']`` on every publish — its absence indicates the
-        invocation bypassed the bridge, not an LLM input error."""
         ctx = ToolContext(
             deps=Deps(correlation_id="c", provided_deps={}),
             agent_name="alice",
@@ -367,8 +915,6 @@ class TestInfraErrors:
             await pc.private_chat(ctx, "bob", "x")
 
     async def test_missing_discord_dep_raises(self, deps: dict[str, Any]) -> None:
-        """Same contract as phonebook: bridge populates ``deps['discord']``
-        on every publish."""
         ctx = ToolContext(
             deps=Deps(
                 correlation_id="c",
@@ -380,10 +926,6 @@ class TestInfraErrors:
             await pc.private_chat(ctx, "bob", "x")
 
     async def test_unknown_caller_raises(self, deps: dict[str, Any]) -> None:
-        """If the phonebook doesn't include the caller, persona resolution
-        would fall back to nothing — surface this as an infrastructure bug,
-        not as an error string the LLM could accidentally suppress."""
-        # Phonebook contains bob but not the caller ("ghost").
         phonebook = [_entry("bob")]
         with pytest.raises(RuntimeError, match="not in the phonebook"):
             await pc.private_chat(
@@ -393,16 +935,11 @@ class TestInfraErrors:
     async def test_malformed_phonebook_wrapped_as_runtime_error(
         self, deps: dict[str, Any]
     ) -> None:
-        """Pydantic ValidationError from a malformed phonebook entry must
-        be normalized to RuntimeError so the infra-bug contract holds —
-        upstream code distinguishes infra bugs from LLM-recoverable
-        errors by exception type, not by string parsing."""
         ctx = ToolContext(
             deps=Deps(
                 correlation_id="c",
                 provided_deps={
                     "discord": _wire().model_dump(mode="json"),
-                    # Schema-invalid entry: missing required fields.
                     "phonebook": [{"agent_id": "alice"}],
                 },
             ),
@@ -414,10 +951,6 @@ class TestInfraErrors:
     async def test_non_list_phonebook_wrapped_as_runtime_error(
         self, deps: dict[str, Any]
     ) -> None:
-        """``phonebook_from_deps`` raises a plain ``ValueError`` for a
-        non-list payload; the tool must also normalize that to
-        RuntimeError so callers don't have to handle two exception
-        families for the same infra bug."""
         ctx = ToolContext(
             deps=Deps(
                 correlation_id="c",
@@ -434,13 +967,11 @@ class TestInfraErrors:
     async def test_malformed_wire_wrapped_as_runtime_error(
         self, deps: dict[str, Any]
     ) -> None:
-        """Same normalization for a malformed discord wire — a missing
-        required field should not leak ``ValidationError`` to the LLM."""
         ctx = ToolContext(
             deps=Deps(
                 correlation_id="c",
                 provided_deps={
-                    "discord": {"only": "garbage"},  # missing every required field
+                    "discord": {"only": "garbage"},
                     "phonebook": phonebook_to_deps(_DEFAULT_PHONEBOOK),
                 },
             ),
@@ -450,95 +981,103 @@ class TestInfraErrors:
             await pc.private_chat(ctx, "bob", "x")
 
 
-class TestProjectionBestEffort:
-    """Request-side projection (pre-RPC) is best-effort: the calfkit RPC
-    runs even if it fails, so the LLM still gets a reply. README documents
-    this. Response-side projection lives in :class:`TestResponseProjectionRaises`.
+class TestRequestProjectionBestEffort:
+    """Request-side projection (pre-RPC) is best-effort *on continue*: the
+    calfkit RPC runs even if it fails. README documents this. Response-side
+    projection raises (see :class:`TestResponseProjectionRaises`).
+
+    Note: on the *new-thread* branch a persistent request failure must
+    raise instead — see
+    :meth:`TestNewThreadAnchorFailure.test_request_projection_audit_gap_raises_runtime_error`
+    — because we cannot anchor a thread on a phantom message.
     """
 
-    async def test_request_projection_transient_failure_does_not_abort(
+    async def test_continue_request_transient_failure_does_not_abort(
         self, deps: dict[str, Any]
     ) -> None:
-        """A persistent transient Discord error on the *request* projection
-        is logged and accepted; the tool still completes the RPC and returns
-        the reply. Response projection then succeeds normally."""
+        """On continue, a persistent transient request projection failure
+        is logged and accepted; the RPC still runs."""
         deps["client"].execute_node.return_value = _result("bob's reply")
-        # First projection (request, correlation_id=None): both attempts fail.
-        # Second projection (response, correlation_id set): both attempts succeed.
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _http_exc(discord.HTTPException, 503),  # request attempt 1
                 _http_exc(discord.HTTPException, 503),  # request attempt 2
-                None,  # response attempt 1
+                _sent_message(_RESPONSE_SENT_MESSAGE_ID),  # response attempt 1
             ]
         )
-        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
-            out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        assert out == "bob's reply"
+        with patch(
+            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
+        ):
+            out = await pc.private_chat(
+                _ctx(caller="alice"), "bob", "x", thread_id=777
+            )
+        assert _parse_tag(out) == 777
+        assert out.endswith("bob's reply")
 
-    async def test_request_projection_persistent_failure_logs_accepting_gap(
+    async def test_continue_request_failure_logs_accepting_gap(
         self,
         deps: dict[str, Any],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """When the *request* projection exhausts both attempts the final
-        log line includes the ``accepting audit gap`` marker so operators
-        can spot the per-channel data loss. Severity is ERROR so alerting
-        hooks fire — this is permanent audit loss, not a transient blip.
-        Response side is mocked to succeed so we isolate request-side
-        behavior here.
-        """
         import logging as _logging
 
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
-                _http_exc(discord.HTTPException, 503),  # request attempt 1
-                _http_exc(discord.HTTPException, 503),  # request attempt 2
-                None,  # response attempt 1 succeeds
+                _http_exc(discord.HTTPException, 503),
+                _http_exc(discord.HTTPException, 503),
+                _sent_message(_RESPONSE_SENT_MESSAGE_ID),
             ]
         )
-        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
-            with caplog.at_level(_logging.WARNING):
-                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        # 2 attempts on request projection + 1 attempt on response = 3 send calls.
-        assert deps["persona_sender"].send.await_count == 3
+        with patch(
+            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
+        ), caplog.at_level(_logging.WARNING):
+            await pc.private_chat(
+                _ctx(caller="alice"), "bob", "x", thread_id=777
+            )
         final = [r for r in caplog.records if "accepting audit gap" in r.message]
-        assert final, "expected a final-failure log line for the request projection"
+        assert final, "expected the audit-gap log on persistent request failure"
         assert all(r.levelno >= _logging.ERROR for r in final)
         joined = " ".join(r.getMessage() for r in final)
         assert "caller=alice" in joined
         assert "target=bob" in joined
+        assert "thread_id=777" in joined
 
     async def test_projection_succeeds_on_retry(self, deps: dict[str, Any]) -> None:
-        """First attempt fails with a transient HTTP error, second succeeds:
-        the retry actually works. Pins the ``return`` inside the retry loop
-        so a refactor that broke the early-return would surface here."""
+        """First attempt fails transient, second succeeds. Pins that the
+        retry loop still returns the eventual ``SentMessage`` (needed for
+        the new-thread anchor)."""
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
-                _http_exc(discord.HTTPException, 503),  # request attempt 1 fails
-                None,  # request attempt 2 succeeds
-                None,  # response attempt 1 succeeds
+                _http_exc(discord.HTTPException, 503),
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),
+                _sent_message(_RESPONSE_SENT_MESSAGE_ID),
             ]
         )
-        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
-            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        with patch(
+            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
+        ):
+            out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Three sends: request attempt 1 (fail), request attempt 2 (ok),
+        # response attempt (ok).
         assert deps["persona_sender"].send.await_count == 3
+        # The retry's SentMessage flowed through as the anchor — verified
+        # by create_anchored_thread receiving the retried message id.
+        call = deps["resolver"].create_anchored_thread.await_args
+        assert call.args[1] == _REQUEST_SENT_MESSAGE_ID
+        # And the return is properly tagged.
+        assert _parse_tag(out) == _NEW_THREAD_ID
 
     async def test_retry_sleeps_with_module_constant(
         self, deps: dict[str, Any]
     ) -> None:
-        """Backoff between attempts must use ``_PROJECTION_RETRY_DELAY_SECONDS``.
-        Pins the constant so a future refactor that drops the sleep (or
-        changes the value silently) breaks here rather than at runtime
-        where a tight retry loop would stall the worker on a 5xx burst."""
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
-                _http_exc(discord.HTTPException, 503),  # request attempt 1 fails
-                None,  # request attempt 2 succeeds
-                None,  # response attempt 1 succeeds
+                _http_exc(discord.HTTPException, 503),
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),
+                _sent_message(_RESPONSE_SENT_MESSAGE_ID),
             ]
         )
         with patch(
@@ -551,9 +1090,6 @@ class TestProjectionBestEffort:
     async def test_non_discord_projection_error_propagates(
         self, deps: dict[str, Any]
     ) -> None:
-        """RuntimeError / TypeError from the persona sender indicate
-        infrastructure misconfiguration (sender not started, channel id not
-        a text channel) — they must NOT be swallowed as "best-effort"."""
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=RuntimeError("sender not started")
@@ -564,24 +1100,17 @@ class TestProjectionBestEffort:
     async def test_forbidden_propagates_without_retry(
         self, deps: dict[str, Any]
     ) -> None:
-        """``discord.Forbidden`` is a permanent operator-actionable signal
-        (bot lost Manage Webhooks). Retrying changes nothing; the catch
-        must let it propagate immediately so the original exception type
-        reaches the logs."""
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=_http_exc(discord.Forbidden, 403)
         )
         with pytest.raises(discord.Forbidden):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        # Exactly one send call — no retry on permanent permission failures.
         assert deps["persona_sender"].send.await_count == 1
 
     async def test_not_found_propagates_without_retry(
         self, deps: dict[str, Any]
     ) -> None:
-        """Same principle as Forbidden — ``discord.NotFound`` (channel /
-        webhook deleted) is permanent; retrying is pointless."""
         deps["client"].execute_node.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=_http_exc(discord.NotFound, 404)
@@ -600,28 +1129,19 @@ class TestResponseProjectionRaises:
     async def test_response_projection_persistent_failure_raises_infra(
         self, deps: dict[str, Any]
     ) -> None:
-        """Both response-projection attempts fail → ``RuntimeError`` whose
-        message names the retry budget exhaustion, and whose ``__cause__``
-        chains back to the original ``discord.HTTPException`` for debug.
-        The caller/target/correlation triple is verified in
-        :meth:`test_response_projection_failure_logs_correlation_caller_target`
-        — the log line is the operator-facing surface; the exception
-        message stays focused on the failure mode."""
         deps["client"].execute_node.return_value = _result("bob's reply")
-        original = _http_exc(discord.HTTPException, 503)
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
-                None,  # request projection succeeds
-                original,  # response attempt 1
-                _http_exc(discord.HTTPException, 503),  # response attempt 2
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),
+                _http_exc(discord.HTTPException, 503),
+                _http_exc(discord.HTTPException, 503),
             ]
         )
-        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
-            with pytest.raises(RuntimeError, match="a2a audit projection failed") as ei:
-                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        with patch(
+            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
+        ), pytest.raises(RuntimeError, match="a2a audit projection failed") as ei:
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert isinstance(ei.value.__cause__, discord.HTTPException)
-        # Message names the retry budget so a refactor that changes the
-        # attempt count surfaces here.
         assert f"after {pc._MAX_PROJECTION_ATTEMPTS} attempts" in str(ei.value)
 
     async def test_response_projection_failure_logs_correlation_caller_target(
@@ -629,58 +1149,57 @@ class TestResponseProjectionRaises:
         deps: dict[str, Any],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The ERROR log emitted by ``_raise_infra`` must carry the
-        caller/target/correlation_id triple — that's the only way an
-        operator finding an audit gap can match the failure to a turn."""
         import logging as _logging
 
         deps["client"].execute_node.return_value = _result("bob's reply")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
-                None,  # request projection succeeds
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),
                 _http_exc(discord.HTTPException, 503),
                 _http_exc(discord.HTTPException, 503),
             ]
         )
-        with patch("calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()):
-            with caplog.at_level(_logging.ERROR):
-                with pytest.raises(RuntimeError):
-                    await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        with patch(
+            "calfkit_organization.tools.private_chat.asyncio.sleep", new=AsyncMock()
+        ), caplog.at_level(_logging.ERROR), pytest.raises(RuntimeError):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "caller=alice" in joined
         assert "target=bob" in joined
-        # ``result.correlation_id == "tool-corr"`` per ``_result`` helper.
         assert "correlation_id=tool-corr" in joined
 
 
 class TestInit:
     """``init()`` is the only path the runner uses to wire dependencies.
-    A regression that swapped parameters (e.g. persona_sender vs resolver)
-    would silently break A2A at runtime — pin the bindings."""
+    A regression that swapped parameters would silently break A2A at
+    runtime — pin the bindings."""
 
     def test_init_binds_each_arg_to_its_singleton(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Reset to sentinel state so we observe init's writes.
         monkeypatch.setattr(pc, "_client", None)
         monkeypatch.setattr(pc, "_persona_sender", None)
         monkeypatch.setattr(pc, "_resolver", None)
+        monkeypatch.setattr(pc, "_discord_client", None)
         monkeypatch.setattr(pc, "_timeout_seconds", -1.0)
 
         client = MagicMock(spec=Client)
         persona_sender = MagicMock(spec=DiscordPersonaSender)
         resolver = MagicMock(spec=A2AChannelResolver)
+        discord_client = MagicMock(spec=discord.Client)
 
         pc.init(
             client=client,
             persona_sender=persona_sender,
             resolver=resolver,
+            discord_client=discord_client,
             timeout_seconds=42.0,
         )
 
         assert pc._client is client
         assert pc._persona_sender is persona_sender
         assert pc._resolver is resolver
+        assert pc._discord_client is discord_client
         assert pc._timeout_seconds == 42.0
 
 
@@ -688,42 +1207,29 @@ class TestExecuteNodeFailures:
     async def test_timeout_returns_error_string_not_raise(
         self, deps: dict[str, Any]
     ) -> None:
-        """``execute_node`` timeout is operational, not LLM-input — but if
-        we raise, the tool's ReturnCall never fires and the calling agent's
-        own execute also times out (double timeout). Returning a string
-        lets the calling LLM see the failure and adapt."""
-        deps["client"].execute_node.side_effect = asyncio.TimeoutError()
+        deps["client"].execute_node.side_effect = TimeoutError()
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert "did not reply" in out
         assert "bob" in out
+        # Timeout is an error path — no tag.
+        assert "<thread_id>" not in out
 
     async def test_timeout_skips_response_projection(
         self, deps: dict[str, Any]
     ) -> None:
-        """On timeout, only the request projection has been posted; the
-        response projection must not run (there's no response). Pins that
-        the second send call is skipped."""
-        deps["client"].execute_node.side_effect = asyncio.TimeoutError()
+        deps["client"].execute_node.side_effect = TimeoutError()
         await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        # Only the request projection attempted (1 send call).
+        # Only the request projection ran (1 send call).
         assert deps["persona_sender"].send.await_count == 1
 
     async def test_connection_error_wrapped_as_runtime_error(
         self, deps: dict[str, Any]
     ) -> None:
-        """A broker ``ConnectionError`` (Kafka unreachable, FastStream lost
-        the connection, etc.) is an infra failure that must funnel through
-        ``_raise_infra`` so the documented "infra → RuntimeError" contract
-        holds. The original exception is preserved as ``__cause__`` for
-        debuggability."""
         original = ConnectionError("kafka unreachable")
         deps["client"].execute_node.side_effect = original
         with pytest.raises(RuntimeError, match="execute_node failed") as ei:
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         msg = str(ei.value)
-        # Caller/target/correlation context isn't in the exception message
-        # itself (``_raise_infra`` logs it at ERROR severity) — the topic
-        # is, which carries the target agent id. Pin both layers.
         assert "agent.bob.in" in msg
         assert ei.value.__cause__ is original
 
@@ -732,34 +1238,22 @@ class TestExecuteNodeFailures:
         deps: dict[str, Any],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A generic ``RuntimeError`` from inside ``execute_node`` (e.g. a
-        calfkit internal) is re-wrapped via ``_raise_infra`` — same caller/
-        target/correlation context appears in the ERROR log, and the
-        wrapped exception's ``__cause__`` is the original."""
         import logging as _logging
 
         original = RuntimeError("some calfkit internal")
         deps["client"].execute_node.side_effect = original
-        with caplog.at_level(_logging.ERROR):
-            with pytest.raises(RuntimeError) as ei:
-                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        # Wrapped, not the same instance.
+        with caplog.at_level(_logging.ERROR), pytest.raises(RuntimeError) as ei:
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert ei.value is not original
         assert ei.value.__cause__ is original
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "caller=alice" in joined
         assert "target=bob" in joined
-        # ``ctx.deps.correlation_id == "corr-1"`` (set by ``_ctx``).
         assert "correlation_id=corr-1" in joined
 
     async def test_cancelled_error_propagates_untouched(
         self, deps: dict[str, Any]
     ) -> None:
-        """``asyncio.CancelledError`` inherits from ``BaseException`` in
-        3.11+, not ``Exception``. The infra-funnel catch must not swallow
-        cancellation — a cancelled task that gets converted to
-        ``RuntimeError`` looks like a real infra bug to upstream callers
-        and breaks structured-concurrency semantics."""
         deps["client"].execute_node.side_effect = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
@@ -769,35 +1263,209 @@ class TestResolverFailure:
     async def test_resolver_failure_propagates_and_skips_invocation(
         self, deps: dict[str, Any]
     ) -> None:
-        """Channel resolution is intentionally NOT best-effort: without an
-        audit channel there's nowhere to project, and the audit invariant
-        is part of the design. The error must propagate, and the target
-        agent must never be invoked under a half-broken setup."""
-        deps["resolver"].resolve_or_create.side_effect = discord.Forbidden(
+        deps["resolver"].resolve_unified_channel.side_effect = discord.Forbidden(
             MagicMock(status=403), "missing permission"
         )
         with pytest.raises(discord.Forbidden):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         deps["client"].execute_node.assert_not_called()
         deps["persona_sender"].send.assert_not_called()
+        deps["resolver"].create_anchored_thread.assert_not_called()
 
     async def test_resolver_failure_logs_caller_and_target(
         self,
         deps: dict[str, Any],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The resolver itself logs only the success path. The
-        private_chat layer adds caller/target context on failure so an
-        operator looking at the tools log knows which A2A turn was
-        affected."""
         import logging as _logging
 
-        deps["resolver"].resolve_or_create.side_effect = discord.Forbidden(
+        deps["resolver"].resolve_unified_channel.side_effect = discord.Forbidden(
             MagicMock(status=403), "missing permission"
         )
-        with caplog.at_level(_logging.ERROR):
-            with pytest.raises(discord.Forbidden):
-                await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        with caplog.at_level(_logging.ERROR), pytest.raises(discord.Forbidden):
+            await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "caller=alice" in joined
         assert "target=bob" in joined
+
+
+class TestEmptyResponseInsideThread:
+    async def test_empty_response_posts_placeholder_into_new_thread(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Empty content placeholder behavior still applies inside a
+        thread — regression for the projection's empty-content branch
+        when posting to a thread_id."""
+        deps["client"].execute_node.return_value = _result("")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        second = deps["persona_sender"].send.await_args_list[1]
+        assert second.kwargs["content"] == "(empty response)"
+        assert second.kwargs["thread_id"] == _NEW_THREAD_ID
+
+    async def test_empty_response_posts_placeholder_into_continued_thread(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "x", thread_id=777)
+        second = deps["persona_sender"].send.await_args_list[1]
+        assert second.kwargs["content"] == "(empty response)"
+        assert second.kwargs["thread_id"] == 777
+
+    async def test_none_response_treated_as_empty(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result(None)
+        out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        # Return surface: tag + newline + empty string. We assert the
+        # tag is present and the post-newline body is empty.
+        match = _RETURN_TAG_PATTERN.match(out)
+        assert match is not None
+        assert out[match.end():] == ""
+        second_content = (
+            deps["persona_sender"].send.await_args_list[1].kwargs["content"]
+        )
+        assert second_content == "(empty response)"
+
+
+class TestReturnTagFormat:
+    async def test_success_return_starts_with_tag(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("hello")
+        out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert out.startswith(f"<thread_id>{_NEW_THREAD_ID}</thread_id>\n")
+
+    async def test_error_returns_have_no_tag(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Every recoverable error string is bare — the LLM must not try
+        to continue an error response."""
+        # self-target
+        out = await pc.private_chat(_ctx(caller="alice"), "alice", "x")
+        assert "<thread_id>" not in out
+        # unknown target
+        out = await pc.private_chat(_ctx(caller="alice"), "carol", "x")
+        assert "<thread_id>" not in out
+        # timeout
+        deps["client"].execute_node.side_effect = TimeoutError()
+        out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
+        assert "<thread_id>" not in out
+
+    async def test_tagged_thread_id_round_trip(
+        self, deps: dict[str, Any]
+    ) -> None:
+        """Call with thread_id=None, parse the returned thread id, call
+        again with that id and assert the fetcher received it."""
+        deps["client"].execute_node.return_value = _result("first reply")
+        first = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        returned_thread_id = _parse_tag(first)
+        assert returned_thread_id == _NEW_THREAD_ID
+
+        # Second call: use that id. Reset the send mock to have enough
+        # SentMessage returns for the second invocation.
+        deps["persona_sender"].send = _sequential_send_mock(
+            _REQUEST_SENT_MESSAGE_ID + 100, _RESPONSE_SENT_MESSAGE_ID + 100
+        )
+        await pc.private_chat(
+            _ctx(caller="alice"), "bob", "follow up", thread_id=returned_thread_id
+        )
+        deps["fetch_thread_history"].assert_awaited_once()
+        call = deps["fetch_thread_history"].await_args
+        # _fetch_thread_history(discord_client, thread_id, *, limit, phonebook)
+        assert call.args[0] is deps["discord_client"]
+        assert call.args[1] == returned_thread_id
+
+
+class TestForwardedWire:
+    """The wire forwarded to the target preserves Discord context but
+    rewrites slash_target/kind/content. Regression coverage from the
+    pre-thread implementation; the architecture change does not affect
+    this surface."""
+
+    async def test_forwarded_wire_overrides_slash_target_and_kind(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        inbound = _wire(kind="message", content="orig")
+        await pc.private_chat(_ctx(caller="alice", wire=inbound), "bob", "new")
+        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
+        assert forwarded["slash_target"] == "bob"
+        assert forwarded["kind"] == "slash"
+
+    async def test_forwarded_wire_content_is_a2a_payload(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        inbound = _wire(content="original")
+        await pc.private_chat(
+            _ctx(caller="alice", wire=inbound), "bob", "the a2a request"
+        )
+        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
+        assert forwarded["content"] == "the a2a request"
+
+    async def test_forwarded_wire_preserves_channel_and_author(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        inbound = _wire(channel_id=777)
+        await pc.private_chat(_ctx(caller="alice", wire=inbound), "bob", "x")
+        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
+        assert forwarded["channel_id"] == 777
+        assert forwarded["author"]["display_name"] == "ryan"
+
+    async def test_passes_caller_agent_id_in_deps(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "msg")
+        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
+        assert passed_deps["caller_agent_id"] == "alice"
+
+    async def test_invokes_target_inbox_topic(
+        self, deps: dict[str, Any]
+    ) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "msg")
+        call = deps["client"].execute_node.await_args
+        assert call.kwargs["topic"] == "agent.bob.in"
+
+    async def test_uses_configured_timeout(self, deps: dict[str, Any]) -> None:
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(), "bob", "x")
+        assert deps["client"].execute_node.await_args.kwargs["timeout"] == 30.0
+
+    async def test_passes_temp_instructions_for_target(
+        self, deps: dict[str, Any]
+    ) -> None:
+        phonebook = [
+            _entry("alice", tools=("private_chat",)),
+            _entry("bob", tools=("private_chat",)),
+            _entry("carol"),
+        ]
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
+        instructions = deps["client"].execute_node.await_args.kwargs[
+            "temp_instructions"
+        ]
+        assert instructions is not None
+        assert "carol" in instructions
+        assert "bob" not in instructions
+
+    async def test_propagates_phonebook_to_target_deps(
+        self, deps: dict[str, Any]
+    ) -> None:
+        phonebook = [
+            _entry("alice", tools=("private_chat",)),
+            _entry("bob", tools=("private_chat",)),
+            _entry("carol"),
+        ]
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
+        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
+        propagated = passed_deps["phonebook"]
+        ids = sorted(e["agent_id"] for e in propagated)
+        assert ids == ["alice", "bob", "carol"]
+        propagated_bob = next(e for e in propagated if e["agent_id"] == "bob")
+        assert propagated_bob["tools"] == ["private_chat"]
+        assert propagated_bob["display_name"] == "Bob Bot"
+        assert propagated_bob["avatar_url"] == "https://example.com/bob.png"

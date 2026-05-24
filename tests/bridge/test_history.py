@@ -918,3 +918,150 @@ class TestChannelHistoryFetcher:
         assert any(
             "failed to project messages" in r.message for r in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# bypass_cache kwarg (A2A thread reads)
+# ---------------------------------------------------------------------------
+
+
+class TestBypassCache:
+    """``bypass_cache=True`` is used by ``private_chat`` when continuing an
+    existing thread: the caller has just posted into the thread (or is
+    about to), and an LRU hit from a fan-out a moment ago would either
+    omit the just-posted message or, worse, include it as both
+    ``message_history`` AND ``user_prompt`` (causing a duplicate-prompt
+    bug). These tests pin the contract: bypass skips the read AND the
+    write, but never the single-flight registration.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bypass_cache_skips_read(self) -> None:
+        """A bypass fetch must NOT serve a cache-hit, even when a fresh
+        entry from a prior default fetch exists for the same key."""
+        client = MagicMock()
+        client.get_channel.return_value = _FakeChannel(
+            messages=[_fake_discord_message(message_id=1)]
+        )
+        fetcher = ChannelHistoryFetcher(
+            client, _registry_with_scribe(), cache_ttl_seconds=60.0
+        )
+
+        # Populate the cache via a default fetch.
+        await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
+        assert client.get_channel.call_count == 1
+
+        # Bypass fetch with identical key must NOT hit the cache —
+        # Discord is queried again.
+        await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=10, bypass_cache=True
+        )
+        assert client.get_channel.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_bypass_cache_skips_write(self) -> None:
+        """A bypass fetch must NOT populate the LRU, so a subsequent
+        default fetch with the same key still misses and hits Discord."""
+        client = MagicMock()
+        client.get_channel.return_value = _FakeChannel(
+            messages=[_fake_discord_message(message_id=1)]
+        )
+        fetcher = ChannelHistoryFetcher(
+            client, _registry_with_scribe(), cache_ttl_seconds=60.0
+        )
+
+        await fetcher.fetch(
+            source_channel_id=100, before_message_id=999, limit=10, bypass_cache=True
+        )
+        assert client.get_channel.call_count == 1
+
+        # The bypass fetch did not write to the cache; default fetch
+        # must still go to Discord.
+        await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
+        assert client.get_channel.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_bypass_cache_still_uses_single_flight(self) -> None:
+        """Two concurrent bypass fetches with the same key must coalesce
+        into ONE Discord call. Bypass only opts out of the LRU, not the
+        single-flight invariant.
+        """
+        import asyncio as _asyncio
+
+        gate = _asyncio.Event()
+
+        class _SlowChannel:
+            def history(self, *, limit: int, before: Any) -> Any:
+                async def _gen() -> Any:
+                    await gate.wait()
+                    return
+                    yield  # type: ignore[unreachable]
+
+                return _gen()
+
+        client = MagicMock()
+        client.get_channel.return_value = _SlowChannel()
+        fetcher = ChannelHistoryFetcher(client, _registry_with_scribe())
+
+        async def _race() -> tuple[list[HistoryRecord], ...]:
+            return await _asyncio.gather(
+                fetcher.fetch(
+                    source_channel_id=100,
+                    before_message_id=1,
+                    limit=10,
+                    bypass_cache=True,
+                ),
+                fetcher.fetch(
+                    source_channel_id=100,
+                    before_message_id=1,
+                    limit=10,
+                    bypass_cache=True,
+                ),
+            )
+
+        task = _asyncio.create_task(_race())
+        # Yield to let both call sites pass the (skipped) cache check
+        # and register themselves in the in-flight map.
+        await _asyncio.sleep(0)
+        await _asyncio.sleep(0)
+        gate.set()
+        results = await task
+
+        assert len(results) == 2
+        # Single-flight: only one Discord channel resolution.
+        assert client.get_channel.call_count == 1
+        # And the LRU was never populated (bypass).
+        assert len(fetcher._cache) == 0
+
+    @pytest.mark.asyncio
+    async def test_default_path_unaffected(self) -> None:
+        """Regression: the default ``bypass_cache=False`` path must be
+        byte-identical to today — read from cache when fresh, write
+        back on miss. Calling without the kwarg and with ``False``
+        produce the same observable behavior.
+        """
+        client = MagicMock()
+        client.get_channel.return_value = _FakeChannel(
+            messages=[_fake_discord_message(message_id=1)]
+        )
+        fetcher = ChannelHistoryFetcher(
+            client, _registry_with_scribe(), cache_ttl_seconds=60.0
+        )
+
+        # Cold call writes to cache.
+        await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
+        assert client.get_channel.call_count == 1
+        assert len(fetcher._cache) == 1
+
+        # Warm default call hits the cache — no Discord call.
+        await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
+        assert client.get_channel.call_count == 1
+
+        # Explicit bypass_cache=False is identical to the omitted-kwarg call.
+        await fetcher.fetch(
+            source_channel_id=100,
+            before_message_id=999,
+            limit=10,
+            bypass_cache=False,
+        )
+        assert client.get_channel.call_count == 1

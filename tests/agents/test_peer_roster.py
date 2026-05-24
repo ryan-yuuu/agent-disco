@@ -75,3 +75,18 @@ class TestBuildTempInstructions:
         result = build_temp_instructions(phonebook, "alice")
         assert result is not None
         assert "bob" in result
+
+    def test_includes_thread_id_continuation_convention(self) -> None:
+        """A2A-enabled agents need the thread_id return-tag explanation
+        in their per-invocation context so they can choose to continue a
+        prior conversation. Verified inline so the convention can't drift
+        silently."""
+        phonebook = [
+            _entry("alice", tools=("private_chat",)),
+            _entry("bob"),
+        ]
+        result = build_temp_instructions(phonebook, "alice")
+        assert result is not None
+        assert "<thread_id>" in result
+        assert "</thread_id>" in result
+        assert "Omit thread_id" in result
