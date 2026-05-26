@@ -17,10 +17,12 @@ network egress posture, recommended `.env` handling — see
 keeps the report off the public issue tracker until there's a fix to
 disclose.
 
-<!-- Maintainer: replace [INSERT CONTACT METHOD] below with a monitored email or other private channel before publishing. -->
-**Backup path: [INSERT CONTACT METHOD].** Use this if GitHub Security
-Advisories is unavailable to you (e.g. you don't have a GitHub account
-and can't create one).
+**No email backup.** GHSA is the only private reporting path. If you
+don't have a GitHub account, create one — it's free, and the private
+advisory flow is far better than email for coordinated disclosure. If
+that's impossible for you, open a regular issue saying "I have a
+security concern; please open a private channel" and a maintainer
+will respond there.
 
 What to expect:
 
@@ -68,8 +70,9 @@ The deployment plumbing around those processes is also in scope:
   logs `DISCORD_BOT_TOKEN` or an LLM API key, whether a tool can
   exfiltrate them.
 - The Kafka wire format between processes.
-- The A2A audit channel mechanism (`a2a-<a>-<b>` channels and category
-  permission inheritance).
+- The A2A audit mechanism: the unified `a2a-audit` Discord channel,
+  the per-conversation thread projection, and Discord category
+  permission inheritance.
 
 ## What's NOT in scope
 

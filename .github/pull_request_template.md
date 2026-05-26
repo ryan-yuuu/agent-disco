@@ -13,7 +13,7 @@ See CONTRIBUTING.md for full PR expectations.
 
 ## Test plan
 
-- [ ] `uv run pytest -q` passes (953-test baseline or higher)
+- [ ] `uv run pytest -q` passes (no regression vs. the latest `main` CI run)
 - [ ] `uv run ruff check <changed files>` clean for new code
 - [ ] Manually exercised the change end-to-end in (deployment mode):
 

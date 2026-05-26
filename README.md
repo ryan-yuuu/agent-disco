@@ -14,7 +14,7 @@ Four independent processes, each safe to deploy on its own host:
 - **`calfkit-router`** — the ambient-channel router. Decides which agent (if any) should handle a non-@-mentioned message in a watched channel. See `docs/ambient-routing.md`.
 - **`calfkit-tools`** — runs the A2A `private_chat` tool plus the builtin filesystem / shell / search / web / todo tools. Intentionally decoupled from the bridge (see below).
 
-All four communicate exclusively through Kafka. The only Discord-touching processes are the bridge (gateway + outbox) and the tools runner (projection of A2A exchanges to a per-pair audit channel).
+All four communicate exclusively through Kafka. The only Discord-touching processes are the bridge (gateway + outbox) and the tools runner (projection of A2A exchanges to a per-conversation thread under the unified `a2a-audit` channel).
 
 ## Decoupled deployment
 
@@ -65,7 +65,7 @@ Field summary:
 - `provider` — `anthropic` or `openai`. Falls back to `CALFKIT_AGENT_DEFAULT_PROVIDER` env, then `anthropic`.
 - `model` — provider-specific model id. The provider-default fallback chain lives in `agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`).
 - `tools` — optional list of tool names from the [Tools](#tools) section below; resolved against `TOOL_REGISTRY` at agent build time.
-- `thinking_effort` — `none` | `low` | `medium` | `high` | `xhigh` | `max`. Maps to provider-specific reasoning parameters. Runtime-tunable via the `/thinking-effort` slash command.
+- `thinking_effort` — `none` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max`. Maps to provider-specific reasoning parameters. Runtime-tunable via the `/thinking-effort` slash command. See [`docs/authoring-agents.md`](./docs/authoring-agents.md) for the per-provider mapping.
 
 For a deeper walkthrough of the agent file format (every field, channel-subscription mechanics, debugging tips), see [`docs/authoring-agents.md`](./docs/authoring-agents.md).
 
@@ -95,11 +95,13 @@ The `private_chat` tool lets one agent's LLM send a message to another agent and
 
 When agent A calls `private_chat(target_agent_id="bob", content="…")`:
 
-1. The tool resolves (or creates) the pair's `a2a-alice-bob` Discord channel via `A2AChannelResolver`.
-2. The tool posts the request as A's persona in that channel (best-effort, retried once on transient Discord errors).
+1. The tool resolves the unified `a2a-audit` Discord channel via `A2AChannelResolver` (override its name with `CALFKIT_A2A_CHANNEL_NAME`).
+2. For a fresh conversation: the tool posts A's request as A's persona, then anchors a new Discord **thread** on that message (the thread name encodes the caller→target pair and a topic snippet). For a follow-up: A passes the prior `thread_id` and the tool posts into the existing thread plus fetches recent thread history for context.
 3. The tool invokes `agent.bob.in` via calfkit RPC, with a 60-second default timeout.
-4. On reply, the tool posts B's response as B's persona in the same audit channel.
-5. The tool returns the response text to A's LLM.
+4. On reply, the tool posts B's response as B's persona into the same thread.
+5. The tool returns the response text to A's LLM, prefixed with a `<thread_id>…</thread_id>` tag so A can continue the same thread on a later call.
+
+See [`docs/a2a-threads.md`](./docs/a2a-threads.md) for the full thread-projection design.
 
 Correlation is handled natively by calfkit. Timeouts return as LLM-readable error strings so the calling LLM can adapt; infrastructure failures raise `RuntimeError` with caller/target/correlation context.
 
@@ -124,7 +126,7 @@ Per-agent runtime state lives in `state/agents/<name>.json` (channel subscriptio
 
 Tools timeout override: `CALFKIT_TOOLS_TIMEOUT_SECONDS` (default 60).
 
-A2A category override: `CALFKIT_A2A_CHANNEL_CATEGORY` (default unset). When set, the tools process places every newly-created `a2a-<x>-<y>` audit channel under a Discord category with that name, creating the category lazily on first use. Edit the category's permission overwrites once in the Discord UI to lock down audit visibility — child channels inherit those overwrites. Existing channels with the canonical name are reused regardless of their current category, so this is non-disruptive to enable on a running deployment.
+A2A category override: `CALFKIT_A2A_CHANNEL_CATEGORY` (default unset). When set, the tools process places the unified `a2a-audit` channel under a Discord category with that name, creating the category lazily on first use. Edit the category's permission overwrites once in the Discord UI to lock down audit visibility — the channel (and all its threads) inherit those overwrites. The unified channel is reused regardless of its current category, so this is non-disruptive to enable on a running deployment. A2A channel name itself is overridable via `CALFKIT_A2A_CHANNEL_NAME` (default `a2a-audit`).
 
 ## Running
 
@@ -173,7 +175,7 @@ The `localhost:19092` port is Redpanda's external listener (the published port i
 
 Anything in between works too: run the bridge in compose while you iterate on the agent locally, or the other way around. Each process reads `.env` independently, and a shared Kafka broker is the only wire-format contract between them. Native-side processes still need `CALF_HOST_URL=localhost:19092` in `.env` (see section 2); containerized services pick up `redpanda:9092` from compose's per-service environment block.
 
-In Discord, `@scribe hello` invokes the scribe agent via the bridge. The agent's reply appears as a webhook message under the agent's persona. If the agent's LLM uses `private_chat`, the exchange shows up in the `a2a-<a>-<b>` channel between the two personas.
+In Discord, `@scribe hello` invokes the scribe agent via the bridge. The agent's reply appears as a webhook message under the agent's persona. If the agent's LLM uses `private_chat`, the exchange shows up in a thread under the unified `a2a-audit` channel — one thread per conversation, the thread name encoding the caller→target pair.
 
 ### Security model
 

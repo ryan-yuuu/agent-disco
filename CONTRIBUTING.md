@@ -12,13 +12,15 @@ calfcord is a Python 3.12+ project. Dependencies are managed with `uv`
 `uv add <pkg>` so the lockfile stays canonical.
 
 ```bash
-uv sync                   # install pinned deps into .venv
-uv run pytest -q          # 953 tests should pass on a clean checkout
+uv sync --frozen          # install pinned deps into .venv (matches CI)
+uv run pytest -q          # the test suite should pass on a clean checkout
 ```
 
-The 953-test baseline is the contract. If your branch lands below that
-without an explicit "this test is removed because X" note in the PR,
-something regressed.
+Your branch should not regress the test count vs. `main`. The latest
+CI run on `main` is the canonical baseline — check the CI badge at the
+top of the README. If your branch lands below `main` without an
+explicit "this test is removed because X" note in the PR, something
+regressed.
 
 For running calfcord end-to-end, the README documents three deployment
 modes — quick-start Docker Compose, native (`uv run` each process), and
@@ -91,12 +93,14 @@ merge is where the convention lands.
 ## PR expectations
 
 - **Tests for new code.** New behavior ships with at least one test
-  that exercises it. The pre-PR baseline is 953 passing; your branch
-  should be at least that, and ideally above it.
+  that exercises it. Run `uv run pytest -q` locally; your branch
+  should not regress the count vs. the latest `main` CI run.
 - **Ruff clean for new files.** Run `uv run ruff check <your-files>`
-  and fix anything it flags. The repo has 25 pre-existing ruff errors
-  in older modules; don't add to that count and don't try to fix
-  unrelated ones in the same PR.
+  and fix anything it flags. The repo has a small number of
+  pre-existing ruff errors in older modules; don't add to that count
+  and don't try to fix unrelated ones in the same PR. The CI lint job
+  is advisory (`continue-on-error: true`) while the baseline is being
+  cleared, but new errors should still be cleaned up before merge.
 - **One logical change per PR.** A refactor and a feature are two PRs.
   Reviewers can absorb 200 lines of focused diff; 2,000 lines of mixed
   intent get rubber-stamped or sit unreviewed.

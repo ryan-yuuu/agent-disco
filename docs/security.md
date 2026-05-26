@@ -270,8 +270,8 @@ matters in practice.
 - **Rotate the Discord bot token on suspected compromise.** Discord's
   bot token is the single secret that, if leaked, gives an attacker
   full control of the bot's actions in every guild it's in. Rotate
-  via the Discord developer portal; update `DISCORD_TOKEN` in `.env`;
-  restart `calfkit-bridge`.
+  via the Discord developer portal; update `DISCORD_BOT_TOKEN` in
+  `.env`; restart `calfkit-bridge`.
 - **Rotate provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
   on suspected compromise.** These have billing implications.
 

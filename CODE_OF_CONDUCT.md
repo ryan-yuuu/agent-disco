@@ -36,8 +36,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-<!-- Maintainer: replace [INSERT CONTACT METHOD] below with the project's reporting channel (e.g. a dedicated email address or a private form URL) before publishing. -->
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at [INSERT CONTACT METHOD]. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement by contacting [@ryan-yuuu on GitHub](https://github.com/ryan-yuuu) — open a [Private Vulnerability Report](https://github.com/ryan-yuuu/calfcord/security/advisories/new) (despite the security framing, the private-advisory flow is the safest text channel that GitHub provides between two users) and note in the body that it's a Code of Conduct report rather than a security issue. All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 
