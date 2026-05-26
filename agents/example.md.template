@@ -63,10 +63,28 @@ provider: anthropic
 model: claude-sonnet-4-5
 
 # ----------------------------------------------------------------------------
-# Tools (optional — declared for future use; not wired in v1)
+# Tools (optional). Each name resolves against TOOL_REGISTRY at boot —
+# unknown names fail fast with a "known tools: ..." error.
 # ----------------------------------------------------------------------------
 
-# List of tool names. Currently logged as a warning and otherwise ignored.
+# Available builtins (see src/calfkit_organization/tools/builtin/ for source):
+#   - private_chat   one-on-one A2A conversation with another agent
+#   - shell          run a shell command on the calfkit-tools host
+#   - read_file      view a file's contents (with line numbers)
+#   - write_file     create or overwrite a file
+#   - edit_file      exact-string edit (replace_all optional)
+#   - grep           search file contents (ripgrep-backed)
+#   - glob           find files by name pattern
+#   - web_fetch      fetch a URL and convert to markdown
+#   - web_search     DuckDuckGo search
+#   - todo_view      view the agent's task list
+#   - todo_write     replace the agent's task list
+#
+# Filesystem/shell tools share one workspace on the calfkit-tools host
+# (CALFCORD_WORKSPACE_DIR, default state/workspace/). Every agent that
+# declares them can read/edit any file in that workspace. See the
+# project README's "Security model" section before adding shell/file
+# tools to an agent that takes input from untrusted users.
 tools: []
 
 # ----------------------------------------------------------------------------

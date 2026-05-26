@@ -6,7 +6,7 @@ model: gpt-5-mini
 name: scribe
 provider: openai
 slash: /scribe
-thinking_effort: none
+thinking_effort: medium
 tools: [private_chat]
 ---
 

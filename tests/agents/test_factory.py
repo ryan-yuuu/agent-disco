@@ -597,6 +597,44 @@ class TestToolsWiring:
         assert "calndar" in str(excinfo.value)
         assert "emial" in str(excinfo.value)
 
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "shell",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "grep",
+            "glob",
+            "web_fetch",
+            "web_search",
+            "todo_view",
+            "todo_write",
+        ],
+    )
+    def test_builtin_tool_resolves_through_default_registry(self, tool_name: str) -> None:
+        """Each builtin tool name listed in an agent's ``.md`` resolves
+        against the in-tree :data:`TOOL_REGISTRY` (no per-test override).
+        This is the smoke test that catches builtin-registration drift —
+        if a new tool is added to the registry but a wrapper isn't, or
+        vice versa, this test will fail.
+        """
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            # tool_registry=None → use the real TOOL_REGISTRY.
+        )
+        worker = factory.build(
+            _definition(tools=(tool_name,)),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        resolved = worker._nodes[0].tools
+        assert resolved is not None and len(resolved) == 1
+        assert resolved[0].tool_schema.name == tool_name
+
 
 def _router_definition(
     *,

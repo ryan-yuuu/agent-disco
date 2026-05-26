@@ -3,13 +3,16 @@ name = "calfkit-organization"
 version = "0.1.0"
 description = "Multi-agent organization on Discord."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "calfkit~=0.3.1",
     "discord-py>=2.7.1",
+    "openhands-sdk>=1.23.1",
+    "openhands-tools>=1.23.1",
     "pydantic-settings>=2.14.1",
     "python-dotenv>=1.2.2",
     "python-frontmatter>=1.1.0,<2",
+    "smolagents>=1.25.0",
     "uuid-utils>=0.15.0",
 ]
 
@@ -35,7 +38,7 @@ markers = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py312"
 src = ["src", "examples"]
 
 [tool.ruff.lint]

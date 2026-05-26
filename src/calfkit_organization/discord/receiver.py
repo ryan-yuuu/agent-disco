@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TypeAlias
 
 import discord
 
@@ -23,7 +22,7 @@ from calfkit_organization.discord.settings import DiscordSettings
 
 logger = logging.getLogger(__name__)
 
-MessageHandler: TypeAlias = Callable[[IncomingMessage], Awaitable[None]]
+type MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
 
 
 class DiscordReceiver:
