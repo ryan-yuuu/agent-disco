@@ -152,32 +152,55 @@ class TestBuildTempInstructionsChannel:
         assert "@-mentioning yourself" in result  # silent-drop warning
 
     def test_mention_block_warns_against_referential_use(self) -> None:
-        """The mention block must teach the LLM that `@<id>` is an
-        INVOCATION verb, not a soft reference. Without this, agents
-        trained on social-media corpora default to writing `@scribe`
-        whenever they NAME the peer in a sentence, which silently
-        spawns unintended agent-to-agent loops in shared channels.
+        """The mention block must teach the LLM that `@<id>` is a verb
+        (specifically a handoff verb), not a noun or soft reference.
+        Without this, agents trained on social-media corpora default
+        to writing `@scribe` whenever they NAME the peer in a
+        sentence, which silently spawns unintended agent-to-agent
+        loops in shared channels.
 
-        The verb/noun framing, the explicit CRITICAL marker, and at
-        least one concrete WRONG/RIGHT example pair are pinned here
-        so a future tightening of the prompt cannot silently drop
-        the rule that motivated the prompt's existence."""
+        The verb/noun framing and a concrete WRONG/FIX example pair
+        are pinned here so a future tightening of the prompt cannot
+        silently drop the rule that motivated the prompt's
+        existence."""
         phonebook = [_entry("alice"), _entry("bob")]
         result = build_temp_instructions(phonebook, "alice", channel=True)
         assert result is not None
-        # The load-bearing framing.
-        assert "INVOCATION verb" in result
-        assert "NOT a soft reference" in result
-        # Both halves of the noun-vs-verb distinction.
-        assert "plain name is a noun" in result
-        assert "`@name` is a verb" in result
-        # Concrete WRONG / RIGHT example scaffolding so the LLM sees
-        # contrasting patterns rather than abstract rules alone.
+        # Both halves of the verb/noun distinction.
+        assert "is a VERB" in result
+        assert "is the noun" in result
+        # Concrete WRONG / FIX / RIGHT example scaffolding so the LLM
+        # sees contrasting patterns rather than abstract rules alone.
         assert "WRONG" in result
+        assert "FIX" in result
         assert "RIGHT" in result
         # The consequence is named so the LLM can reason about why
         # the rule matters at edge cases not covered by the examples.
         assert "back-and-forth" in result or "unintended invocations" in result
+
+    def test_mention_block_pins_handoff_semantics(self) -> None:
+        """The mention block must teach the LLM that `@<id>` is a
+        HANDOFF — the mentioning agent loses the turn and the
+        receiving agent takes over. Without this, agents treat `@`
+        as a "ping" or "cc" and assume they will get a follow-up
+        turn to incorporate the peer's reply, which silently breaks
+        the user's flow.
+
+        It must also teach that the receiving agent shares the same
+        channel, which is what justifies the 1-2 line conciseness
+        rule for handoff messages: re-briefing the peer is wasted
+        typing that pollutes the channel."""
+        phonebook = [_entry("alice"), _entry("bob")]
+        result = build_temp_instructions(phonebook, "alice", channel=True)
+        assert result is not None
+        # The handoff framing — turn loss is the core mechanic.
+        assert "HAND OFF" in result
+        assert "I am done; you take over" in result
+        # The receiver-shares-channel fact justifies conciseness.
+        assert "SAME channel" in result
+        # The conciseness rule itself and its mnemonic.
+        assert "1-2 lines" in result
+        assert "Hand off, don't hand over" in result
 
     def test_returns_none_when_target_is_filtered_out_of_phonebook(self) -> None:
         """Defense-in-depth for the router-exclusion invariant. The

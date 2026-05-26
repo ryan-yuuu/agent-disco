@@ -33,60 +33,98 @@ from calfkit_organization.agents.phonebook import PhonebookEntry, format_roster_
 _PRIVATE_CHAT_TOOL_NAME = "private_chat"
 
 _MENTION_BLOCK = """\
-You can invoke another agent into THIS conversation by writing
-`@<agent_id>` in your reply (e.g. `@scribe`). The mentioned agent
-runs immediately and posts a reply into this channel, exactly as if
-the user had typed the @-mention themselves.
+In this channel you have the power to HAND OFF the user's task to
+another agent by writing `@<agent_id>` (e.g. `@scribe`). This is a
+heavy, one-way action — use it sparingly, and when you do use it,
+keep the handoff message short.
 
-CRITICAL: `@<agent_id>` is an INVOCATION verb, NOT a soft reference.
+Casual `@` use spawns back-and-forth invocations the user did not
+ask for; verbose `@`-handoffs clog the channel with redundant
+context. Both pollute the user's view of the conversation.
 
-Use `@<agent_id>` ONLY when you genuinely want that agent to respond
-on this turn. When you are merely talking ABOUT another agent —
-naming them in a sentence, listing options, describing capabilities,
-recapping who said what, asking the user whether to involve them —
-use their plain display name (e.g. `Scribe`, `Conan`) WITHOUT the
-`@`. The plain name is a noun; `@name` is a verb.
+`@<agent_id>` is a VERB, not a noun, label, or tag. Specifically, it
+means "I am done; you take over." It is NOT `cc`, NOT `mention`, NOT
+`ping`, NOT `loop in`. The plain display name (e.g. `Scribe`,
+`Conan`) is the noun — use it whenever you are talking ABOUT a peer
+rather than handing them the task.
 
-Failing to make this distinction will spam unintended invocations
-and create back-and-forth agent loops the user did not ask for.
+WHAT HAPPENS WHEN YOU WRITE `@<agent_id>`:
+- Your message is posted to the channel in full, exactly as written.
+- The mentioned agent runs immediately and replies in the channel.
+- The next thing the user sees is the OTHER agent's reply.
+- You do NOT get to continue, follow up, incorporate their answer,
+  or finish what you started on this turn.
+- A SINGLE valid `@<agent_id>` ANYWHERE in your message — start,
+  middle, end, in a parenthetical, inside a bullet, after a long
+  reply — fires the handoff. There is no safe position. Putting it
+  at the end is NOT "send my reply first, then loop them in"; your
+  reply is posted AND the handoff fires.
+- The receiving agent reads the SAME channel as you. They already
+  see every message in this conversation — including the user's
+  request and anything you wrote before handing off.
 
-WRONG (each line below fires an unintended invocation):
-- "I'll bring @scribe into this conversation"
-- "Option (a): bring @scribe in for a tag-team"
-- "I asked @scribe earlier and they said..."
-- "@conan handles humor and @scribe handles prose"
-- "Should I loop in @scribe?"
-- "Want me to bring @conan in, or write it myself?"
+Therefore: if you want a peer's input but plan to keep working on
+the task yourself, the `@<agent_id>` token must NOT appear in your
+message at all. Use the plain name, ask the user, or just finish
+your own reply.
 
-RIGHT (referring to peers WITHOUT invoking them):
-- "I'll bring Scribe into this conversation"
-- "Option (a): bring Scribe in for a tag-team"
-- "I asked Scribe earlier and they said..."
-- "Conan handles humor and Scribe handles prose"
-- "Should I loop in Scribe?"
-- "Want me to bring Conan in, or write it myself?"
+WRONG — each fires an unintended handoff. The wording shows the
+agent is NOT trying to invoke, yet the `@` commits anyway:
+- "Would you like me to reach out to @marketer to work on this?"
+- "Maybe @scribe should handle this part."
+- "Two options: keep going myself, or pass to @scribe — your call."
+- "Let me know if you want me to ask @conan to take this."
 
-RIGHT (intentional invocation — you actually want them to respond now):
-- "@scribe — can you help me tighten the prose here?"
-- "If you want a second take: @scribe ?"
-- "@conan, take it from here."
+FIX — drop the `@`; these are nouns, not verbs:
+- "Would you like me to reach out to Marketer to work on this?"
+- "Maybe Scribe should handle this part."
+- "Two options: keep going myself, or pass to Scribe — your call."
+- "Let me know if you want me to ask Conan to take this."
+
+ALSO WRONG — these DO intend to invoke, but they assume a follow-up
+turn that will never happen:
+- "@scribe, can you polish this? I'll integrate your edits below."
+   (there is no "below" — your message is final)
+- "Step 1: @scribe drafts. Step 2: I write the conclusion."
+   (step 1 fires; step 2 never gets a chance)
+- "@scribe, draft section 1; I'll write section 2 in parallel."
+   (there is no parallel — the handoff is sequential)
+
+WHEN YOU DO HAND OFF — keep it to 1-2 lines. The receiving agent
+already has every message in this channel; briefing them, restating
+the user's request, or re-summarizing the task wastes tokens and
+clutters the conversation for the user. Hand off, don't hand over.
+
+WRONG — bloated handoff that re-briefs the receiving agent:
+- "Hey @scribe, the user is writing a blog post and asked me to
+   help. Here's what I gathered: [paragraph of requirements]. The
+   tone they want is [paragraph]. I've outlined the structure but
+   think the prose needs polish — can you handle that? Let me know
+   if you have questions about any of the requirements above."
+   → @scribe saw the user's request and your prior messages already.
+     Everything before the `@` was wasted typing.
+
+RIGHT — terse handoff, same channel context applies:
+- "@scribe — take it from here."
+- "This is more your area than mine. @scribe ?"
+- "The prose side is yours: @scribe"
 
 Mechanics (so you can predict exactly what will fire):
 - The `@` token must be at the very start of the message OR
   directly preceded by whitespace to count. `foo@scribe` and
   `me@scribe.com` do NOT invoke anything.
 - Mentions are case-insensitive (`@Scribe` == `@scribe`).
-- EVERY `@<name>` token in your message is validated — including
-  ones after the first. If any one of them does not match an
-  agent_id from the roster above, an error is shown to the user
-  and nothing fires. Keep all `@`-tokens to valid ids, or omit
-  them entirely.
-- When a message contains multiple valid `@<agent_id>` tokens,
-  only the first invokes a peer; later valid mentions are inert
-  decorative text.
-- @-mentioning yourself has no effect: your own gate silently
-  drops the message and no reply is posted — to the user it looks
-  like you ignored them."""
+- EVERY `@<name>` token in your message is validated. If any one
+  does not match an agent_id from the roster above, an error is
+  shown to the user and nothing fires. Keep all `@`-tokens to valid
+  ids, or omit them entirely.
+- When a message contains multiple valid `@<agent_id>` tokens, only
+  the FIRST invokes a peer; later valid mentions are inert text. So
+  even an "extra" `@<agent>` you intended as decoration commits the
+  first one as a real handoff.
+- @-mentioning yourself has no effect: your own gate silently drops
+  the message and no reply is posted — to the user it looks like you
+  ignored them."""
 
 
 def build_temp_instructions(
