@@ -127,25 +127,31 @@ def run_build(
         )
         return 127
 
+    # Widen the try-block to cover mkdtemp + write_text as well as the
+    # buildx call: a fast Ctrl-C landing between mkdtemp and
+    # subprocess.run would otherwise orphan the tempdir on disk without
+    # the operator seeing the retained-at message. The `tempdir` local
+    # is initialised before the try so the except can name it
+    # regardless of when the interrupt arrives.
     tempdir = Path(tempfile.mkdtemp(prefix="calfcord-package-"))
     dockerfile_path = tempdir / "Dockerfile"
-    dockerfile_path.write_text(dockerfile_content, encoding="utf-8")
-
-    cmd = [
-        "docker",
-        "buildx",
-        "build",
-        "--tag",
-        tag,
-        "--file",
-        str(dockerfile_path),
-        str(context),
-    ]
-    if verbose:
-        sys.stderr.write(f"+ {' '.join(cmd)}\n")
-        sys.stderr.write(f"  (Dockerfile staged at {dockerfile_path})\n")
-
     try:
+        dockerfile_path.write_text(dockerfile_content, encoding="utf-8")
+
+        cmd = [
+            "docker",
+            "buildx",
+            "build",
+            "--tag",
+            tag,
+            "--file",
+            str(dockerfile_path),
+            str(context),
+        ]
+        if verbose:
+            sys.stderr.write(f"+ {' '.join(cmd)}\n")
+            sys.stderr.write(f"  (Dockerfile staged at {dockerfile_path})\n")
+
         result = subprocess.run(cmd, check=False)
     except OSError as e:
         sys.stderr.write(f"error: failed to invoke docker: {e}\n")

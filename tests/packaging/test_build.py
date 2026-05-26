@@ -145,6 +145,130 @@ class TestBuildSuccess:
         assert "docker push" in err
 
 
+class TestKeyboardInterrupt:
+    def test_writes_retained_path_to_stderr_and_reraises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A Ctrl-C during ``subprocess.run`` must print the retained
+        Dockerfile path to stderr AND re-raise ``KeyboardInterrupt``
+        unchanged. The retained-path message is the operator's only
+        handle to inspect what was being built; the re-raise preserves
+        the standard SIGINT semantics so calling shells exit with the
+        expected 130. A regression that swallows the interrupt or
+        omits the path would silently regress operator UX."""
+        captured: dict[str, Path] = {}
+
+        def fake_run(cmd, check):
+            idx = cmd.index("--file")
+            captured["dockerfile"] = Path(cmd[idx + 1])
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/docker")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(KeyboardInterrupt):
+            _build.run_build(
+                dockerfile_content="FROM scratch\n",
+                tag="x:1",
+                context=tmp_path,
+                dry_run=False,
+                verbose=False,
+            )
+
+        err = capsys.readouterr().err
+        assert "interrupted" in err
+        # The retained Dockerfile must still be on disk AND named in
+        # the message — both are necessary for the operator to recover.
+        assert "dockerfile" in captured
+        assert captured["dockerfile"].is_file()
+        assert str(captured["dockerfile"]) in err
+        shutil.rmtree(captured["dockerfile"].parent, ignore_errors=True)
+
+
+class TestOSError:
+    def test_returns_1_and_retains_tempdir_on_oserror(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """If ``subprocess.run`` itself fails to spawn (PermissionError,
+        ENOENT for a buildx plugin, etc.) the SUT must return 1, write
+        an actionable message, and retain the tempdir for forensics.
+        The handler exists at ``_build.py:150-153`` but was previously
+        unpinned by tests — a refactor that drops the ``except OSError``
+        would let the exception escape as a raw traceback."""
+        captured: dict[str, Path] = {}
+
+        def fake_run(cmd, check):
+            idx = cmd.index("--file")
+            captured["dockerfile"] = Path(cmd[idx + 1])
+            raise PermissionError("docker daemon socket not writable")
+
+        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/docker")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        exit_code = _build.run_build(
+            dockerfile_content="FROM scratch\n",
+            tag="x:1",
+            context=tmp_path,
+            dry_run=False,
+            verbose=False,
+        )
+
+        assert exit_code == 1
+        err = capsys.readouterr().err
+        assert "failed to invoke docker" in err
+        assert "dockerfile" in captured
+        assert captured["dockerfile"].is_file()
+        assert str(captured["dockerfile"]) in err
+        shutil.rmtree(captured["dockerfile"].parent, ignore_errors=True)
+
+
+class TestBuildxCommandShape:
+    def test_invokes_docker_buildx_build_with_tag(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Pin the exact buildx-command prefix and that ``--tag <tag>``
+        is wired through. A regression that swaps ``buildx build`` for
+        plain ``docker build`` would silently lose the multi-arch path
+        documented in ``docs/distributed-deployment.md`` — and no other
+        test would catch it because both shapes return the same exit
+        codes."""
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(cmd, check):
+            captured["cmd"] = list(cmd)
+            return _fake_completed(returncode=0)
+
+        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/docker")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        _build.run_build(
+            dockerfile_content="FROM scratch\n",
+            tag="my-image:7.0",
+            context=tmp_path,
+            dry_run=False,
+            verbose=False,
+        )
+
+        cmd = captured["cmd"]
+        # First three tokens must be exactly the buildx prefix.
+        assert cmd[:3] == ["docker", "buildx", "build"]
+        # --tag <tag> must be wired in adjacent positions.
+        assert "--tag" in cmd
+        tag_idx = cmd.index("--tag")
+        assert cmd[tag_idx + 1] == "my-image:7.0"
+        # --file <dockerfile> and the context path must also be present.
+        assert "--file" in cmd
+        assert str(tmp_path) in cmd
+
+
 class TestDryRun:
     def test_emits_dockerfile_to_stdout_and_does_not_invoke_docker(
         self,

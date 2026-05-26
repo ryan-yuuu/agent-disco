@@ -104,6 +104,38 @@ class TestNameValidation:
         assert code == 2
         assert "cannot load agents" in stderr
 
+    def test_malformed_yaml_syntax_surfaces_as_exit_2(self, tmp_path: Path) -> None:
+        """An ``agents/<name>.md`` with YAML-parser-level breakage (not
+        just field-validation breakage) must still fail with the
+        friendly ``cannot load agents`` message. The previous
+        regex-validation test exercises ``ValueError`` from Pydantic;
+        this one exercises ``yaml.YAMLError`` from PyYAML — a different
+        code path that escaped the narrowed ``except`` in cli_agents
+        until ``parse_agent_md`` started normalising it to
+        ``ValueError``. Without this case a future change that drops
+        the normalisation would silently regress operator UX (raw
+        traceback in place of the actionable message)."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        # Unterminated single-quoted string in YAML frontmatter — PyYAML
+        # raises ``yaml.scanner.ScannerError`` (a ``YAMLError`` subclass).
+        # The CLI's narrowed except catches ``ValueError`` only, so this
+        # only succeeds if ``parse_agent_md`` normalises the YAMLError.
+        (agents_dir / "broken.md").write_text(
+            "---\n"
+            "name: 'broken\n"
+            "slash: /broken\n"
+            "display_name: Broken\n"
+            "description: broken YAML for testing.\n"
+            "---\n"
+            "Body.\n"
+        )
+        code, _, stderr = _run(
+            ["broken", "--tag", "x:1", "--dry-run", "--context", str(tmp_path)],
+        )
+        assert code == 2
+        assert "cannot load agents" in stderr
+
 
 class TestArgparseSurface:
     def test_help_shows_usage(self) -> None:

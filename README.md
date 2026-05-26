@@ -126,7 +126,7 @@ CALF_HOST_URL=localhost          # Kafka bootstrap
 
 Per-agent runtime state lives in `state/agents/<name>.json` (channel subscriptions, atomically written). On first boot of an agent, channels are seeded from `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` or `DISCORD_DEFAULT_CHANNEL_ID`.
 
-Tools timeout override: `CALFKIT_TOOLS_TIMEOUT_SECONDS` (default 60).
+A2A timeout override: `CALFKIT_TOOLS_TIMEOUT_SECONDS` (default 60s, applies to `private_chat` only — other builtin tools have no default per-call timeout at the calfkit layer).
 
 A2A category override: `CALFKIT_A2A_CHANNEL_CATEGORY` (default unset). When set, the tools process places the unified `a2a-audit` channel under a Discord category with that name, creating the category lazily on first use. Edit the category's permission overwrites once in the Discord UI to lock down audit visibility — the channel (and all its threads) inherit those overwrites. The unified channel is reused regardless of its current category, so this is non-disruptive to enable on a running deployment. A2A channel name itself is overridable via `CALFKIT_A2A_CHANNEL_NAME` (default `a2a-audit`).
 

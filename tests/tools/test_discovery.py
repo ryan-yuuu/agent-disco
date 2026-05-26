@@ -555,9 +555,11 @@ def test_include_filter_does_not_short_circuit_import_errors(
     monkeypatch.syspath_prepend(str(tmp_path))
     pkg = _import_fresh(pkg_name)
 
-    # Filter would skip ``broken`` even by name, but it's processed
-    # alphabetically BEFORE alpha, so its import error fires before
-    # the filter ever gets to consider it.
+    # ``alpha`` registers first (alphabetical iteration); ``broken``'s
+    # import then raises ImportError before the filter has a chance to
+    # short-circuit it. The contract under test is that the filter does
+    # NOT swallow import failures regardless of whether the offending
+    # module would have been filtered out — broken code is always loud.
     monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "alpha")
     registry: dict[str, ToolNodeDef] = {}
     with pytest.raises(ImportError, match="intentionally broken"):

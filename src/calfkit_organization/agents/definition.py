@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Literal
 
 import frontmatter
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from calfkit_organization.agents.identifier import AGENT_ID_PATTERN
@@ -243,7 +244,16 @@ def parse_agent_md(path: Path) -> AgentDefinition:
             the name does not match the filename stem, or any field fails
             validation.
     """
-    post = frontmatter.load(path)
+    try:
+        post = frontmatter.load(path)
+    except yaml.YAMLError as e:
+        # ``frontmatter.load`` lets ``yaml.YAMLError`` propagate unchanged,
+        # which would escape callers that catch only ``ValueError`` (e.g.
+        # ``calfcord-package-agents``'s narrowed ``except``). Re-raise as
+        # ``ValueError`` so the docstring's contract holds and the
+        # malformed-YAML path is indistinguishable from a malformed-name
+        # path at the caller's seam.
+        raise ValueError(f"{path}: malformed YAML frontmatter: {e}") from e
     metadata = dict(post.metadata)
     body = post.content
 

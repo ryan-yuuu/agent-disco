@@ -138,6 +138,37 @@ class TestResolveToolNodes:
         with pytest.raises(SystemExit, match="empty"):
             runner._resolve_tool_nodes({})
 
+    def test_empty_registry_message_names_include_filter_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty-registry is most often caused by a typo in
+        ``CALFCORD_TOOLS_INCLUDE`` (per-tool images). The SystemExit
+        message must NAME the env var and surface its value so the
+        operator can short-circuit a ``why is my registry empty`` hunt.
+        A regression that strips the env-var attribution would pass
+        the broader ``match='empty'`` guard above but silently revert
+        the cleanup's UX improvement — this test pins it."""
+        monkeypatch.setenv("CALFCORD_TOOLS_INCLUDE", "definitely_not_a_real_tool")
+        with pytest.raises(SystemExit) as exc_info:
+            runner._resolve_tool_nodes({})
+        message = str(exc_info.value)
+        assert "CALFCORD_TOOLS_INCLUDE=" in message
+        assert "definitely_not_a_real_tool" in message
+
+    def test_empty_registry_message_handles_unset_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``CALFCORD_TOOLS_INCLUDE`` is unset, the message must
+        still surface the env var with an explicit ``<unset>`` marker
+        rather than an ambiguous empty string — a future log-aggregation
+        regex that anchors on ``CALFCORD_TOOLS_INCLUDE=\\S+`` would
+        otherwise miss the unset case silently."""
+        monkeypatch.delenv("CALFCORD_TOOLS_INCLUDE", raising=False)
+        with pytest.raises(SystemExit) as exc_info:
+            runner._resolve_tool_nodes({})
+        message = str(exc_info.value)
+        assert "CALFCORD_TOOLS_INCLUDE=<unset>" in message
+
 
 class TestDefaultTimeoutValue:
     def test_default_is_60_seconds(self) -> None:

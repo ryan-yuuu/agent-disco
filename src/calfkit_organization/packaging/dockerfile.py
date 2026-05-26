@@ -1,7 +1,7 @@
 """Render slim per-agent / per-tool Dockerfiles.
 
 The shape mirrors the project's canonical ``Dockerfile`` exactly,
-varying these things:
+varying these four things:
 
 1. The runtime stage's ``apt-get install`` list — narrowed by the
    per-tool OS-dep mapping (e.g. no ``tmux`` if ``shell`` isn't
@@ -15,6 +15,11 @@ varying these things:
    tools at boot. Also bakes ``OPENHANDS_SUPPRESS_BANNER=1`` so the
    container's boot logs aren't drowned in the openhands SDK ASCII
    banner.
+4. The default ``CMD`` — ``calfkit-tools`` for tools images and
+   ``calfkit-agent`` for agents images. The canonical Dockerfile
+   defaults to ``calfkit-bridge`` because it's the only entry point
+   that makes sense for an all-in-one image; the slim images each
+   default to the runner that matches their payload.
 
 If the canonical ``Dockerfile`` is ever restructured, the constants in
 this module must be updated to match. Tests in
@@ -31,17 +36,18 @@ from collections.abc import Iterable
 
 # Always-on OS packages for TOOLS images. ``ca-certificates`` is needed
 # by any tool that talks HTTPS (web_fetch, web_search, and any
-# third-party tool an operator might add later). ``git`` is small (~5MB)
-# and the ``shell`` tool's most common ergonomic use — agents asking
-# for ``git status`` / ``git log`` — only works if the binary is
-# present. Removing either to save a few MB would trade image size for
+# third-party tool an operator might add later). ``git`` is kept because
+# the ``shell`` tool's most common ergonomic use — agents asking for
+# ``git status`` / ``git log`` — only works if the binary is present.
+# Removing either to save image size would trade a few tens of MB for
 # "works in dev, fails in prod" surprises.
 _ALWAYS_ON_TOOL_OS_DEPS: tuple[str, ...] = ("ca-certificates", "git")
 
 # Always-on OS packages for AGENTS images. Narrower than the tools set:
-# agent containers don't host tool bodies, so ``git`` is dead weight
-# (~30MB on disk). Keep ``ca-certificates`` because the LLM-provider
-# HTTP clients (anthropic, openai SDKs) need a trust store.
+# agent containers don't host tool bodies, so ``git`` (plus its
+# transitive Debian deps — perl, libs, ~30MB installed) is dead weight.
+# Keep ``ca-certificates`` because the LLM-provider HTTP clients
+# (anthropic, openai SDKs) need a trust store.
 _ALWAYS_ON_AGENT_OS_DEPS: tuple[str, ...] = ("ca-certificates",)
 
 # Per-tool OS-dep mapping. Tools not listed here imply no extra OS
@@ -178,8 +184,9 @@ WORKDIR /app
 # banner. The banner is operationally noise (printed on every import
 # of the openhands package, before any calfcord work begins) and
 # pollutes both compose-logs output and ad-hoc ``docker run`` sessions
-# operators use to inspect the registry. The override survives any
-# ``-e OPENHANDS_SUPPRESS_BANNER=0`` the operator passes at run time.
+# operators use to inspect the registry. Operators who want the banner
+# can restore it with ``-e OPENHANDS_SUPPRESS_BANNER=0`` at run time —
+# Docker ``-e`` overrides image ``ENV``.
 ENV PATH=/app/.venv/bin:$PATH \\
     PYTHONUNBUFFERED=1 \\
     PYTHONDONTWRITEBYTECODE=1 \\
