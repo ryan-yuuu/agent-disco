@@ -1,0 +1,60 @@
+# GitHub CodeQL static analysis for security issues.
+#
+# Runs on every push to main, every pull request against main, and once
+# per week on a fixed schedule (so latent issues surface even when the
+# repo is quiet). Findings show up under the repo's Security → Code
+# scanning tab.
+#
+# The most useful surface for CodeQL on this codebase is the input
+# validation around the ``shell`` and ``web_fetch`` tools — anywhere
+# LLM-supplied strings flow into ``subprocess``, ``httpx``, or other
+# external interpreters. The trusted-workspace security model
+# (documented in docs/security.md) intentionally accepts a wide tool
+# surface, so CodeQL flags here are advisory: a finding means "an
+# operator deploying calfcord without sandboxing should know about
+# this," not "this is a bug."
+#
+# Security: this workflow uses no untrusted user input in ``run:``
+# steps. The ``${{ ... }}`` expressions only reference fixed
+# GitHub-controlled metadata; none of the workflow-injection vectors
+# at https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+# apply.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly Monday at 13:32 UTC (off-peak, avoids the round-hour
+    # stampede on GitHub-hosted runners).
+    - cron: "32 13 * * 1"
+
+permissions:
+  security-events: write   # write findings to the Code Scanning tab
+  actions: read
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # ``security-extended`` includes the default suite plus
+          # additional security-relevant queries; the
+          # ``security-and-quality`` suite adds maintainability checks
+          # that would be noisy here.
+          queries: security-extended
+
+      - name: Run analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

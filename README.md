@@ -1,5 +1,8 @@
 # calfcord
 
+[![CI](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+
 A multi-agent organization that lives on Discord. Each agent is an LLM-backed [calfkit](https://github.com/calf-ai/calfkit-sdk) node with its own Discord persona; agents collaborate with one another over Kafka, and humans interact with them through normal Discord channels and slash commands.
 
 ## Architecture
@@ -61,8 +64,30 @@ Field summary:
 - `avatar_url` — optional persona avatar.
 - `provider` — `anthropic` or `openai`. Falls back to `CALFKIT_AGENT_DEFAULT_PROVIDER` env, then `anthropic`.
 - `model` — provider-specific model id. The provider-default fallback chain lives in `agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`).
-- `tools` — optional list of tool names. Resolved against `calfkit_organization.tools.TOOL_REGISTRY` at agent build time. See that module for the live list of registered tools.
+- `tools` — optional list of tool names from the [Tools](#tools) section below; resolved against `TOOL_REGISTRY` at agent build time.
 - `thinking_effort` — `none` | `low` | `medium` | `high` | `xhigh` | `max`. Maps to provider-specific reasoning parameters. Runtime-tunable via the `/thinking-effort` slash command.
+
+For a deeper walkthrough of the agent file format (every field, channel-subscription mechanics, debugging tips), see [`docs/authoring-agents.md`](./docs/authoring-agents.md).
+
+## Tools
+
+Calfcord ships 11 builtin tools out of the box. Declare them in an agent's `tools:` frontmatter list to enable. The tool's body runs in the `calfkit-tools` process — see the [Security model](#security-model) for what that implies.
+
+| Name | What it does |
+|---|---|
+| `private_chat` | One-on-one A2A conversation with another agent over Kafka. Audit log in Discord. |
+| `shell` | Run a shell command on the `calfkit-tools` host. Persistent session via tmux when available. |
+| `read_file` | View a file's contents with `cat -n` style line numbers; optional `view_range`. |
+| `write_file` | Create or overwrite a file at a workspace-relative or absolute path. |
+| `edit_file` | Exact-string replace with optional `replace_all`. Single-match required by default. |
+| `grep` | Search file contents by regex; ripgrep-backed when present, Python fallback otherwise. |
+| `glob` | Find files by name pattern (`**/*.py`, `src/**/*.ts`, etc.). |
+| `web_fetch` | Fetch a URL and return Markdown-converted page content. |
+| `web_search` | DuckDuckGo search (no API key required). |
+| `todo_view` | Show the calling agent's task list. |
+| `todo_write` | Replace the calling agent's task list. |
+
+Tools are auto-discovered from `src/calfkit_organization/tools/builtin/` at boot — drop a `.py` file there with a `*_tool: ToolNodeDef = agent_tool(...)` at module bottom and the next `calfkit-tools` restart picks it up. Full authoring guide: [`docs/authoring-tools.md`](./docs/authoring-tools.md).
 
 ## Agent-to-agent communication
 
@@ -166,17 +191,28 @@ Implications:
 
 ```
 src/calfkit_organization/
-├── agents/        # definition, factory, runner, state, peer_roster, phonebook
-├── bridge/        # gateway, ingress, outbox, egress (A2A channel resolver), normalizer, registry
-├── discord/       # client wrappers (sender, persona, receiver, settings)
+├── agents/        # definition, factory, runner, state, gates, routing,
+│                  # peer_roster, phonebook, thinking, identifier,
+│                  # loader, md_writer
+├── bridge/        # gateway, ingress, outbox, egress, normalizer,
+│                  # registry, history, slash, synthesized, wire,
+│                  # pending_wires
+├── discord/       # client wrappers (sender, persona, receiver,
+│                  # settings, messages, retry_feedback)
+├── router/        # ambient-channel routing agent (definition, runner,
+│                  # roster, fanout, prompt)
 └── tools/
-    ├── builtin/   # shipped tools (shell, fs, search, web, todos, private_chat)
-    ├── discovery.py  # auto-discovery loader (walks builtin/ at import time)
+    ├── builtin/   # shipped tools — fs, search, shell, web, todos,
+    │              # private_chat, plus _observation / workspace helpers
+    ├── discovery.py  # auto-discovery loader (walks builtin/ at import)
     └── runner.py     # calfkit-tools entry point
 
-agents/            # agent .md definitions (live)
-state/agents/      # per-agent runtime state
-tests/             # pytest suite
+agents/                 # agent .md definitions (live)
+state/agents/           # per-agent runtime state (channel subscriptions)
+docs/                   # authoring guides + security model + design archive
+.github/                # CI/CD workflows + Dependabot + issue/PR templates
+Dockerfile, docker-compose.yml  # deployment
+tests/                  # pytest suite
 ```
 
 ## Development
@@ -185,8 +221,25 @@ tests/             # pytest suite
 - Dependencies managed with `uv`. Use `uv add <pkg>` rather than editing `pyproject.toml` directly.
 - Conventional commit prefixes on commits to `main` (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`).
 - Run the suite: `uv run pytest`.
-- Authoring a new tool: see `docs/authoring-tools.md`.
+- Authoring a new agent: see [`docs/authoring-agents.md`](./docs/authoring-agents.md).
+- Authoring a new tool: see [`docs/authoring-tools.md`](./docs/authoring-tools.md).
+- Full contribution guide: [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+## Documentation index
+
+- [`docs/authoring-agents.md`](./docs/authoring-agents.md) — adding and configuring agents.
+- [`docs/authoring-tools.md`](./docs/authoring-tools.md) — adding a builtin tool.
+- [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.
+- [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent threading via `private_chat`.
+- [`docs/ambient-routing.md`](./docs/ambient-routing.md) — the router process.
+- [`docs/design/`](./docs/design/) — historical design notes.
+
+## Project governance
+
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — setup, commit conventions, PR expectations.
+- [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
+- [`SECURITY.md`](./SECURITY.md) — vulnerability reporting.
 
 ## License
 
-See `LICENSE`.
+Apache-2.0. See [`LICENSE`](./LICENSE).

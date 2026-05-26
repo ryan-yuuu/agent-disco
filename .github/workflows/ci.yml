@@ -1,0 +1,83 @@
+# Continuous integration for pushes to main and pull-requests against main.
+#
+# Three jobs run in parallel:
+#   lint  — ruff check (project baseline is 25 pre-existing errors; the
+#           job is informational rather than gating until that's cleared
+#           in a follow-up cleanup pass).
+#   test  — pytest. Baseline is 953 passing / 2 skipped at the time PR 4
+#           lands. Regressions fail CI.
+#   build — docker build (no push). Catches Dockerfile drift even when
+#           Python tests pass.
+#
+# Concurrency: pull-request runs cancel themselves when superseded by a
+# newer commit on the same PR branch, so we don't burn minutes verifying
+# stale code.
+#
+# Security: this workflow uses no untrusted user input (no
+# github.event.issue.*, github.event.pull_request.title/body, etc.) in
+# ``run:`` steps, so the workflow-injection patterns documented at
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+# do not apply.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv (+ Python 3.12)
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+          # Cache the uv-managed venv + downloads keyed on uv.lock so
+          # repeat runs don't redownload every dependency.
+          enable-cache: true
+      - name: Run ruff
+        # ``uvx`` keeps ruff out of the project deps; mirrors the local
+        # developer workflow documented in CONTRIBUTING.md.
+        run: uvx ruff check .
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv (+ Python 3.12)
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run pytest
+        run: uv run pytest -q
+
+  build:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build calfcord image
+        # No ``push``; this job exists to catch Dockerfile breakage early.
+        # ``type=gha`` cache keeps subsequent runs cheap.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

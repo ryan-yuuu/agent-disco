@@ -1,0 +1,44 @@
+# Dependabot configuration.
+#
+# Three ecosystems tracked:
+#   uv             — Python dependencies pinned in pyproject.toml /
+#                    uv.lock. Weekly check, max 5 open PRs at a time so
+#                    a noisy upstream doesn't flood the PR queue.
+#   docker         — Base images referenced in the Dockerfile
+#                    (python:3.12-slim, ghcr.io/astral-sh/uv:latest).
+#                    Weekly.
+#   github-actions — Action versions in .github/workflows/*.yml.
+#                    Pinned at major versions today; Dependabot opens
+#                    PRs when a new major or patch ships. Weekly.
+
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      # Match the project's conventional-commit prefixes.
+      prefix: "chore"
+      include: "scope"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
