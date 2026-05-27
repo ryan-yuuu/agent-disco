@@ -78,6 +78,19 @@ ARG GID=1000
 RUN groupadd --gid ${GID} calfcord \
  && useradd  --uid ${UID} --gid ${GID} --create-home --shell /bin/bash calfcord
 
+# Pre-create the calfcord user's XDG-style dirs that the codex provider
+# writes to (auth credentials + prompt cache). Without this, when a
+# named volume is mounted onto either path Docker initializes it with
+# root:root 0o755 ownership and the calfcord user inside the container
+# cannot write — chmod fails (operation not permitted), filelock fails
+# (permission denied). With the dirs pre-created as calfcord:calfcord
+# 0o700, the named volume inherits the owner+perms on first mount.
+# A host-bind-mounted dir on macOS still works regardless via Docker
+# Desktop's UID translation.
+RUN install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.calfcord \
+ && install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.calfcord/auth \
+ && install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.calfcord/codex_prompts
+
 WORKDIR /app
 
 # PATH puts the venv's bin first so the entry-point scripts resolve
