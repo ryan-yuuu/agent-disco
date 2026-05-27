@@ -120,9 +120,12 @@ services:
   # Codex subscription agents (``provider: openai-codex``) require an
   # OAuth login performed on the HOST before the container starts:
   #   uv run calfkit-auth codex login
-  # Credentials persist to ``~/.calfcord/auth/`` on the host; bind-mount
-  # that dir into the agent container via docker-compose.override.yml.
-  # See docs/codex-auth.md for the full prerequisite flow.
+  # Credentials persist to ``~/.calfcord/auth/`` on the host and are
+  # bind-mounted into the container below. Docker auto-creates the
+  # source directories if they don't exist yet, so non-Codex deploys
+  # boot cleanly — a Codex-opted-in agent will simply fail at first
+  # invocation with ``CodexNotLoggedInError`` until ``calfkit-auth
+  # codex login`` runs on the host. See docs/codex-auth.md.
   agent:
     <<: *calfcord-base
     command: calfkit-agent
@@ -145,6 +148,15 @@ services:
       # first write; .gitignore excludes its contents from source
       # control.
       - ./agent-memory:/app/agent-memory
+      # Codex subscription OAuth tokens. Shared with the host CLI
+      # (``uv run calfkit-auth codex ...``) so token rotation that
+      # happens inside the container writes back through the bind
+      # mount and the host CLI always sees the latest state.
+      - ${HOME}/.calfcord/auth:/home/calfcord/.calfcord/auth
+      # Codex CLI system-prompt cache. Sharing with every other
+      # container means a single ``calfkit-auth codex refresh-prompts``
+      # primes all services' caches at once.
+      - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
 
   # The ambient-channel router. Subscribes to discord.ambient.in,
   # selects which agent (if any) should handle a non-@-mentioned
@@ -164,6 +176,15 @@ services:
     command: calfkit-router
     environment:
       CALF_HOST_URL: redpanda:9092
+    volumes:
+      # Codex subscription auth — required when
+      # ``CALFKIT_ROUTER_PROVIDER=openai-codex``. Without these mounts
+      # the router boots and immediately fails with
+      # ``CodexNotLoggedInError``. Mirrors the agent service's Codex
+      # mounts; see that block for the rationale and the host-login
+      # prerequisite (docs/codex-auth.md).
+      - ${HOME}/.calfcord/auth:/home/calfcord/.calfcord/auth
+      - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
 
   # The A2A + builtin-tool runner. This is the service that runs the
   # shell / fs / grep / glob / web tools — it has the trusted shared
