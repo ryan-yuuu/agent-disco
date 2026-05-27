@@ -178,7 +178,6 @@ Add the tool to an agent by listing it in the agent's `.md` frontmatter
 ```yaml
 ---
 name: librarian
-slash: /librarian
 display_name: Librarian
 description: Looks up Python packages and library docs.
 tools:

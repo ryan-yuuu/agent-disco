@@ -38,7 +38,6 @@ from calfkit_organization.tools.builtin.private_chat import private_chat_tool
 def _definition(tools: tuple[str, ...]) -> AgentDefinition:
     return AgentDefinition(
         agent_id="scheduler",
-        slash="/scheduler",
         display_name="Scheduler Bot",
         description="test",
         tools=tools,
@@ -141,7 +140,6 @@ class TestWireConventionRoundTrip:
             [
                 AgentDefinition(
                     agent_id="alice",
-                    slash="/alice",
                     display_name="Alice Bot",
                     description="Scheduler.",
                     avatar_url="https://example.com/a.png",
@@ -151,7 +149,6 @@ class TestWireConventionRoundTrip:
                 ),
                 AgentDefinition(
                     agent_id="bob",
-                    slash="/bob",
                     display_name="Bob Bot",
                     description="Note-taker.",
                     tools=(),

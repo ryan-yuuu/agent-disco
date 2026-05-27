@@ -52,7 +52,6 @@ def _write_agent_md(
     """Write a minimal valid .md file and return its path."""
     meta = {
         "name": agent_id,
-        "slash": f"/{agent_id}",
         "display_name": agent_id.capitalize(),
         "description": f"Test agent {agent_id}.",
         "provider": provider,

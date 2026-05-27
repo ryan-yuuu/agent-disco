@@ -26,7 +26,6 @@ def build_state_event(
     """
     return AgentStateEvent(
         agent_id=definition.agent_id,
-        slash=definition.slash,
         display_name=definition.display_name,
         description=definition.description,
         avatar_url=definition.avatar_url,
@@ -57,7 +56,6 @@ def state_event_to_definition(event: AgentStateEvent) -> AgentDefinition:
         # AgentDefinition uses ``alias="name"`` for agent_id; populate_by_name=True
         # in its model_config means we can pass either; use the field name here.
         agent_id=event.agent_id,
-        slash=event.slash,
         display_name=event.display_name,
         description=event.description,
         avatar_url=event.avatar_url,

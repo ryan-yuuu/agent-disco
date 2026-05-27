@@ -74,7 +74,6 @@ def _registry() -> AgentRegistry:
         [
             AgentDefinition(
                 agent_id="scheduler",
-                slash="/scheduler",
                 display_name="Aksel (Scheduler)",
                 description="Calendar mechanics.",
                 avatar_url=None,
@@ -83,7 +82,6 @@ def _registry() -> AgentRegistry:
             ),
             AgentDefinition(
                 agent_id="scribe",
-                slash="/scribe",
                 display_name="Scribe",
                 description="Note-taking.",
                 avatar_url=None,

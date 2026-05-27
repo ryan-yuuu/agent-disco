@@ -295,7 +295,7 @@ class SlashCommandManager:
             return callback
 
         return app_commands.Command(
-            name=spec.slash.lstrip("/"),
+            name=spec.agent_id,
             description=spec.description[:100],
             callback=_make_callback(spec),
         )
@@ -315,7 +315,7 @@ class SlashCommandManager:
         try:
             await interaction.response.defer(ephemeral=False)
             followup = await interaction.followup.send(
-                f"**/{spec.slash[1:]}** {message}",
+                f"**/{spec.agent_id}** {message}",
                 wait=True,
             )
             assert followup is not None, "followup.send with wait=True must return a Message"

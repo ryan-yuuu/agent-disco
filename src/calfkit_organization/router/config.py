@@ -7,7 +7,7 @@ environment variables. Env vars still work as a runtime override
 layer so an operator can stage a swap without editing files.
 
 The file is intentionally narrow — model configuration only. The
-router's identity (``agent_id``, ``slash``, ``display_name``, ``role``,
+router's identity (``agent_id``, ``display_name``, ``role``,
 ``publish_topic``, ``tools``, ``system_prompt``) is project
 infrastructure and not operator-tunable; reserved fields appearing in
 the YAML are rejected at load time via ``extra="forbid"`` so an
@@ -63,8 +63,8 @@ class RouterConfig(BaseModel):
     :mod:`calfkit_organization.router.definition`.
 
     ``extra="forbid"`` rejects any unknown key so a typo
-    (``provder: openai``) or a reserved field (``slash:``,
-    ``system_prompt:``) surfaces at boot rather than silently dropping
+    (``provder: openai``) or a reserved field (``system_prompt:``,
+    ``display_name:``) surfaces at boot rather than silently dropping
     on the floor.
     """
 

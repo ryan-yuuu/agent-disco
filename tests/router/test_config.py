@@ -7,9 +7,9 @@ The loader has three layers of behavior:
 2. Parsing — empty / malformed / non-mapping content must produce a
    ``ValueError`` whose message names the offending file.
 3. Schema — pydantic ``extra="forbid"`` rejects unknown keys (typos
-   like ``provder:`` and reserved fields like ``slash:`` /
-   ``system_prompt:``), and field validators reject invalid enum
-   values + out-of-range ints.
+   like ``provder:`` and reserved fields like ``system_prompt:``),
+   and field validators reject invalid enum values + out-of-range
+   ints.
 
 Each class targets one layer to keep failure diagnoses scoped.
 """
@@ -164,7 +164,7 @@ class TestSchema:
 
     @pytest.mark.parametrize(
         "reserved_key",
-        ["name", "slash", "display_name", "description", "role",
+        ["name", "display_name", "description", "role",
          "publish_topic", "tools", "system_prompt", "avatar_url"],
     )
     def test_reserved_field_rejected(

@@ -89,7 +89,6 @@ async def test_publish_state_event_targets_state_topic() -> None:
     client = _FakeClient()
     event = AgentStateEvent(
         agent_id="scribe",
-        slash="/scribe",
         display_name="Scribe",
         description="Takes notes.",
         role="assistant",

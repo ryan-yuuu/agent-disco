@@ -35,7 +35,6 @@ def _write_agent_md(dir_: Path, name: str) -> None:
     body = (
         "---\n"
         f"name: {name}\n"
-        f"slash: /{name}\n"
         f"display_name: {name.title()}\n"
         f"description: Test agent {name}.\n"
         "---\n"
@@ -236,7 +235,6 @@ class TestBuildNodeOrBootstrapError:
     def _definition() -> AgentDefinition:
         return AgentDefinition(
             agent_id="echo",
-            slash="/echo",
             display_name="Echo",
             description="Test.",
             system_prompt="Test echo.",
@@ -647,7 +645,6 @@ def _make_ref(agent_id: str) -> AgentDefinitionRef:
     return AgentDefinitionRef(
         current=AgentDefinition(
             agent_id=agent_id,
-            slash=f"/{agent_id}",
             display_name=agent_id.title(),
             description=f"Test agent {agent_id}.",
             system_prompt=f"You are {agent_id}.",

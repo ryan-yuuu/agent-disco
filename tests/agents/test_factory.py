@@ -30,7 +30,6 @@ def _definition(
 ) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
-        slash=f"/{agent_id}",
         display_name=f"Test ({agent_id})",
         description="A test agent.",
         provider=provider,
@@ -668,7 +667,6 @@ def _router_definition(
 ) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
-        slash=f"/{agent_id}",
         display_name="Router",
         description="Internal routing agent",
         provider=provider,
@@ -824,7 +822,6 @@ class TestRouterDefinitionValidation:
         with pytest.raises(ValidationError, match="must declare no tools"):
             AgentDefinition(
                 agent_id="_router",
-                slash="/_router",
                 display_name="Router",
                 description="x",
                 role="router",
@@ -839,7 +836,6 @@ class TestRouterDefinitionValidation:
         with pytest.raises(ValidationError, match="must declare a publish_topic"):
             AgentDefinition(
                 agent_id="_router",
-                slash="/_router",
                 display_name="Router",
                 description="x",
                 role="router",
@@ -851,7 +847,6 @@ class TestRouterDefinitionValidation:
         """Default role='assistant' allows tools and no publish_topic."""
         AgentDefinition(
             agent_id="scribe",
-            slash="/scribe",
             display_name="Scribe",
             description="x",
             tools=("private_chat",),
@@ -868,7 +863,6 @@ class TestRouterDefinitionValidation:
         with pytest.raises(ValidationError, match="publish_topic is reserved for routers"):
             AgentDefinition(
                 agent_id="scribe",
-                slash="/scribe",
                 display_name="Scribe",
                 description="x",
                 publish_topic="some.topic",
@@ -885,7 +879,6 @@ class TestRouterDefinitionValidation:
         with pytest.raises(ValidationError):
             AgentDefinition(
                 agent_id="_router",
-                slash="/_router",
                 display_name="Router",
                 description="x",
                 role="router",

@@ -68,7 +68,6 @@ def _registry() -> AgentRegistry:
         [
             AgentDefinition(
                 agent_id="scheduler",
-                slash="/scheduler",
                 display_name="Aksel (Scheduler)",
                 description="Calendar.",
                 avatar_url="https://example.com/aksel.png",
@@ -221,7 +220,6 @@ class TestHappyPath:
             [
                 AgentDefinition(
                     agent_id="scheduler",
-                    slash="/scheduler",
                     display_name="Aksel",
                     description="Calendar.",
                     avatar_url="https://example.com/aksel.png",
@@ -229,7 +227,6 @@ class TestHappyPath:
                 ),
                 AgentDefinition(
                     agent_id="finance",
-                    slash="/finance",
                     display_name="Finn",
                     description="Bookkeeping.",
                     avatar_url="https://example.com/finn.png",

@@ -42,7 +42,6 @@ class _StubRegistry:
 def _state_event(agent_id: str = "scribe", **overrides: object) -> AgentStateEvent:
     base: dict[str, object] = {
         "agent_id": agent_id,
-        "slash": f"/{agent_id}",
         "display_name": agent_id.capitalize(),
         "description": "Takes notes.",
         "role": "assistant",

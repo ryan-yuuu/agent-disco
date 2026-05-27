@@ -16,7 +16,6 @@ from calfkit_organization.control_plane.schema import AgentStateEvent
 def _make_definition(**overrides: object) -> AgentDefinition:
     base: dict[str, object] = {
         "agent_id": "scribe",
-        "slash": "/scribe",
         "display_name": "Scribe",
         "description": "Takes notes.",
         "avatar_url": "https://example.com/a.png",
@@ -39,7 +38,6 @@ def test_build_state_event_projects_all_visible_fields() -> None:
 
     assert event.kind == "state"
     assert event.agent_id == "scribe"
-    assert event.slash == "/scribe"
     assert event.display_name == "Scribe"
     assert event.description == "Takes notes."
     assert event.avatar_url == "https://example.com/a.png"
@@ -73,7 +71,6 @@ def test_state_event_to_definition_produces_valid_definition() -> None:
 
     event = AgentStateEvent(
         agent_id="scribe",
-        slash="/scribe",
         display_name="Scribe",
         description="Takes notes.",
         avatar_url=None,
@@ -87,7 +84,6 @@ def test_state_event_to_definition_produces_valid_definition() -> None:
 
     defn = state_event_to_definition(event)
     assert defn.agent_id == "scribe"
-    assert defn.slash == "/scribe"
     assert defn.display_name == "Scribe"
     assert defn.description == "Takes notes."
     assert defn.role == "assistant"
@@ -108,7 +104,6 @@ def test_round_trip_definition_to_event_to_definition() -> None:
     rebuilt = state_event_to_definition(event)
 
     assert rebuilt.agent_id == original.agent_id
-    assert rebuilt.slash == original.slash
     assert rebuilt.display_name == original.display_name
     assert rebuilt.description == original.description
     assert rebuilt.role == original.role
@@ -125,7 +120,6 @@ def test_state_event_to_definition_assistant_has_no_publish_topic() -> None:
 
     event = AgentStateEvent(
         agent_id="scribe",
-        slash="/scribe",
         display_name="Scribe",
         description="d",
         role="assistant",

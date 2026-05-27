@@ -23,7 +23,6 @@ def _agent(
 ) -> AgentDefinition:
     return AgentDefinition(
         agent_id=agent_id,
-        slash=f"/{agent_id}",
         display_name=agent_id.title(),
         description=description,
         avatar_url=avatar_url,
@@ -64,7 +63,6 @@ class TestFromRegistry:
         ``role=router`` defensively."""
         router = AgentDefinition(
             agent_id="_router",
-            slash="/_router",
             display_name="Router",
             description="Internal routing agent",
             role="router",

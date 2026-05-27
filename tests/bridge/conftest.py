@@ -24,14 +24,12 @@ def agent_registry() -> AgentRegistry:
         [
             AgentDefinition(
                 agent_id="scheduler",
-                slash="/scheduler",
                 display_name="Aksel (Scheduler)",
                 description="Calendar.",
                 system_prompt="Test scheduler.",
             ),
             AgentDefinition(
                 agent_id="finance",
-                slash="/finance",
                 display_name="Finn (Finance)",
                 description="Bookkeeping.",
                 system_prompt="Test finance.",

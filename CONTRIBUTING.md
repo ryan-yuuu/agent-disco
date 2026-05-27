@@ -40,8 +40,9 @@ just works.
 ## Adding an agent
 
 An agent is a single Markdown file under `agents/`. The frontmatter is
-identity (name, slash command, persona) plus runtime hints (provider,
-model, tool list, thinking effort); the body is the LLM's system prompt.
+identity (name, persona) plus runtime hints (provider, model, tool
+list, thinking effort); the body is the LLM's system prompt. The
+Discord slash command is always `/<name>`.
 The bridge auto-discovers every file in that directory at boot.
 
 The full reference — every frontmatter field, the provider-default

@@ -44,7 +44,6 @@ def _seed_md(
 ) -> Path:
     meta: dict[str, str] = {
         "name": agent_id,
-        "slash": f"/{agent_id}",
         "display_name": agent_id.capitalize(),
         "description": f"Test {agent_id}.",
         "provider": provider,

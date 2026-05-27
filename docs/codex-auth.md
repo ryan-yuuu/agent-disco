@@ -56,7 +56,6 @@ In `agents/<name>.md`:
 ```markdown
 ---
 name: codex_demo
-slash: /codex
 display_name: Codex
 description: Demonstration agent backed by ChatGPT subscription.
 provider: openai-codex

@@ -9,9 +9,10 @@ time so downstream consumers (factory, phonebook, peer_roster) see a
 concrete tuple of tool names rather than the ``None`` sentinel. See
 :attr:`AgentDefinition.tools` for the explicit / implicit semantics.
 
-Cross-agent uniqueness of ``slash`` and ``display_name`` is the
+Cross-agent uniqueness of ``display_name`` is the
 :class:`AgentRegistry`'s concern, not the loader's. The filesystem itself
-prevents duplicate ``agent_id`` (one ``.md`` file per name).
+prevents duplicate ``agent_id`` (one ``.md`` file per name); the slash
+command is always ``/<agent_id>``.
 """
 
 from __future__ import annotations

@@ -92,7 +92,6 @@ class TestNameValidation:
         (agents_dir / "bad.md").write_text(
             "---\n"
             "name: 'bad name with spaces'\n"
-            "slash: /bad\n"
             "display_name: Bad\n"
             "description: malformed for testing.\n"
             "---\n"
@@ -124,7 +123,6 @@ class TestNameValidation:
         (agents_dir / "broken.md").write_text(
             "---\n"
             "name: 'broken\n"
-            "slash: /broken\n"
             "display_name: Broken\n"
             "description: broken YAML for testing.\n"
             "---\n"

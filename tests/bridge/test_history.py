@@ -339,7 +339,6 @@ def _registry_with_scribe() -> AgentRegistry:
         [
             AgentDefinition(
                 agent_id="scribe",
-                slash="/scribe",
                 display_name="Scribe",
                 description="Scribe agent.",
                 system_prompt="You are Scribe.",

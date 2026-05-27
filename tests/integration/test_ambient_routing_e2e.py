@@ -89,7 +89,6 @@ def _registry() -> AgentRegistry:
         [
             AgentDefinition(
                 agent_id="scribe",
-                slash="/scribe",
                 display_name="Scribe",
                 description="Note-taking assistant.",
                 provider="openai",
@@ -97,7 +96,6 @@ def _registry() -> AgentRegistry:
             ),
             AgentDefinition(
                 agent_id="conan",
-                slash="/conan",
                 display_name="Conan",
                 description="Conversational comedian.",
                 provider="openai",

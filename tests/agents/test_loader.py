@@ -12,7 +12,6 @@ from calfkit_organization.agents.loader import load_agents_dir
 def _write_agent(dir_: Path, name: str, **frontmatter_extra) -> None:
     fields = {
         "name": name,
-        "slash": f"/{name}",
         "display_name": name.title(),
         "description": f"Test agent {name}.",
     }
@@ -51,7 +50,7 @@ class TestLoadAgentsDir:
         _write_agent(tmp_path, "scheduler")
         # A draft file starting with a dot should be ignored.
         (tmp_path / ".draft.md").write_text(
-            "---\nname: draft\nslash: /draft\ndisplay_name: Draft\ndescription: Draft.\n---\nBody.\n"
+            "---\nname: draft\ndisplay_name: Draft\ndescription: Draft.\n---\nBody.\n"
         )
         defs = load_agents_dir(tmp_path)
         assert [d.agent_id for d in defs] == ["scheduler"]

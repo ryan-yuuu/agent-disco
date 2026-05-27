@@ -135,14 +135,12 @@ class TestMentionParsing:
             [
                 AgentDefinition(
                     agent_id="scheduler",
-                    slash="/scheduler",
                     display_name="Aksel",
                     description="x",
                     system_prompt="x",
                 ),
                 AgentDefinition(
                     agent_id="_router",
-                    slash="/_router",
                     display_name="Router",
                     description="Internal routing agent",
                     role="router",

@@ -84,7 +84,6 @@ malicious system prompt and a broad tool list:
 ```yaml
 ---
 name: helper
-slash: /helper
 display_name: Helper
 description: General helper.
 tools: [shell, write_file, read_file]

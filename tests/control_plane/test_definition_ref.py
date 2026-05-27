@@ -11,7 +11,6 @@ from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
 def _make_definition(agent_id: str = "scribe", **overrides: object) -> AgentDefinition:
     base: dict[str, object] = {
         "agent_id": agent_id,
-        "slash": f"/{agent_id}",
         "display_name": agent_id.capitalize(),
         "description": "Test.",
         "provider": "anthropic",

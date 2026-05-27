@@ -58,7 +58,6 @@ def _registry(
         [
             AgentDefinition(
                 agent_id="scheduler",
-                slash="/scheduler",
                 display_name="Aksel (Scheduler)",
                 description="Calendar.",
                 avatar_url="https://example.com/aksel.png",
@@ -68,7 +67,6 @@ def _registry(
             ),
             AgentDefinition(
                 agent_id="scribe",
-                slash="/scribe",
                 display_name="Scribe",
                 description="Notes.",
                 avatar_url="https://example.com/scribe.png",
@@ -364,7 +362,6 @@ class TestModelSettings:
         post = frontmatter.Post(
             "Body.",
             name="scheduler",
-            slash="/scheduler",
             display_name="Aksel (Scheduler)",
             description="Calendar.",
             provider="anthropic",
@@ -399,7 +396,6 @@ class TestBootValidation:
             [
                 AgentDefinition(
                     agent_id="scheduler",
-                    slash="/scheduler",
                     display_name="Aksel (Scheduler)",
                     description="Calendar.",
                     provider="anthropic",
@@ -423,7 +419,6 @@ class TestBootValidation:
             [
                 AgentDefinition(
                     agent_id="scheduler",
-                    slash="/scheduler",
                     display_name="Aksel",
                     description="Calendar.",
                     provider="anthropic",
@@ -432,7 +427,6 @@ class TestBootValidation:
                 ),
                 AgentDefinition(
                     agent_id="scribe",
-                    slash="/scribe",
                     display_name="Scribe",
                     description="Notes.",
                     provider="openai",
@@ -458,7 +452,6 @@ class TestBootValidation:
             [
                 AgentDefinition(
                     agent_id="scribe",
-                    slash="/scribe",
                     display_name="Scribe",
                     description="Notes.",
                     provider="openai",
@@ -492,7 +485,6 @@ class TestBootValidation:
             [
                 AgentDefinition(
                     agent_id="scribe",
-                    slash="/scribe",
                     display_name="Scribe",
                     description="Notes.",
                     provider="openai",
@@ -540,7 +532,6 @@ class TestTempInstructions:
             [
                 AgentDefinition(
                     agent_id="scheduler",
-                    slash="/scheduler",
                     display_name="X",
                     description="Calendar.",
                     provider="anthropic",
@@ -581,7 +572,6 @@ class TestTempInstructions:
             [
                 AgentDefinition(
                     agent_id="scheduler",
-                    slash="/scheduler",
                     display_name="Aksel (Scheduler)",
                     description="Calendar.",
                     provider="anthropic",
@@ -590,7 +580,6 @@ class TestTempInstructions:
                 ),
                 AgentDefinition(
                     agent_id="scribe",
-                    slash="/scribe",
                     display_name="Scribe",
                     description="Notes.",
                     provider="openai",

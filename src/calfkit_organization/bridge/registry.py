@@ -1,17 +1,18 @@
 """Static agent roster, indexed for the bridge's lookups.
 
-The registry is the single source of truth for which agents exist, what
-slash command each one owns, and what display name to attribute a
-persona-webhook message to. It is populated dynamically from
-``agent.state`` events published by agent processes (see PR 3 cutover);
-prior to that, the bridge read ``agents/*.md`` directly.
+The registry is the single source of truth for which agents exist and
+what display name to attribute a persona-webhook message to. It is
+populated dynamically from ``agent.state`` events published by agent
+processes (see PR 3 cutover); prior to that, the bridge read
+``agents/*.md`` directly.
 
 The agent definitions themselves originate either from in-process code
 (the built-in router, :func:`build_router_definition`) or from agent
 processes that announce themselves over Kafka via the control plane.
-This module owns the *index* the bridge uses (O(1) lookups by id, slash,
-and display name, plus rejection of duplicate ``slash`` or
-``display_name`` across agents) and three mutators:
+This module owns the *index* the bridge uses (O(1) lookups by id and
+display name, plus rejection of duplicate ``display_name`` across
+agents — ``agent_id`` uniqueness implies slash uniqueness since the
+slash is always ``/<agent_id>``) and three mutators:
 
 * :meth:`upsert_from_state_event` — projection of an ``agent.state``
   event into the registry. Returns ``True`` on first-seen, ``False`` on
@@ -50,17 +51,16 @@ class AgentRegistry:
 
     def __init__(self, definitions: Sequence[AgentDefinition]) -> None:
         self._by_id: dict[str, AgentDefinition] = {}
-        self._by_slash: dict[str, AgentDefinition] = {}
         self._by_display_name: dict[str, AgentDefinition] = {}
         self._all: list[AgentDefinition] = list(definitions)
 
         for d in self._all:
             self._index(d)
 
-        # Multi-router detection runs after indexing so duplicate-id
-        # /slash/display_name errors (which also fire if two routers
-        # share those fields) take precedence — operators see the more
-        # actionable "duplicate slash" message before the role error.
+        # Multi-router detection runs after indexing so duplicate-id /
+        # display_name errors (which also fire if two routers share those
+        # fields) take precedence — operators see the more actionable
+        # "duplicate" message before the role error.
         # Zero-router is NOT rejected here: the "exactly one router"
         # invariant applies to the production load path
         # (the bridge constructs the registry with
@@ -83,19 +83,16 @@ class AgentRegistry:
             )
 
     def _index(self, definition: AgentDefinition) -> None:
-        """Insert ``definition`` into all three indexes, rejecting duplicates."""
+        """Insert ``definition`` into both indexes, rejecting duplicates."""
         if definition.agent_id in self._by_id:
             raise ValueError(f"duplicate agent_id: {definition.agent_id!r}")
-        if definition.slash in self._by_slash:
-            raise ValueError(f"duplicate slash: {definition.slash!r}")
         if definition.display_name in self._by_display_name:
             raise ValueError(f"duplicate display_name: {definition.display_name!r}")
         self._by_id[definition.agent_id] = definition
-        self._by_slash[definition.slash] = definition
         self._by_display_name[definition.display_name] = definition
 
     def _unindex(self, definition: AgentDefinition) -> None:
-        """Remove ``definition`` from all three indexes.
+        """Remove ``definition`` from both indexes.
 
         Caller is responsible for also removing it from ``self._all``
         (because the order of operations differs between :meth:`remove`
@@ -103,26 +100,23 @@ class AgentRegistry:
         :meth:`upsert_from_state_event`).
         """
         self._by_id.pop(definition.agent_id, None)
-        self._by_slash.pop(definition.slash, None)
         self._by_display_name.pop(definition.display_name, None)
 
     def _replace(self, old: AgentDefinition, new: AgentDefinition) -> None:
         """Swap an existing entry. Keys must match; only mutable fields change.
 
         The asserts guard an internal invariant rather than user input.
-        Callers must have already verified that ``agent_id``, ``slash``,
-        and ``display_name`` are unchanged — :meth:`upsert_from_state_event`
-        handles key-field changes via remove-then-insert rather than
+        Callers must have already verified that ``agent_id`` and
+        ``display_name`` are unchanged — :meth:`upsert_from_state_event`
+        handles display-name changes via remove-then-insert rather than
         calling here, and :meth:`apply_local_thinking_effort_override`
         only mutates ``thinking_effort``. Under ``python -O`` these
         asserts vanish; the soft-handle path lives in
         :meth:`upsert_from_state_event`.
         """
         assert old.agent_id == new.agent_id, "agent_id is immutable"
-        assert old.slash == new.slash, "slash is immutable"
         assert old.display_name == new.display_name, "display_name is immutable"
         self._by_id[new.agent_id] = new
-        self._by_slash[new.slash] = new
         self._by_display_name[new.display_name] = new
         idx = self._all.index(old)
         self._all[idx] = new
@@ -139,8 +133,8 @@ class AgentRegistry:
         registry instance loaded from disk includes the singleton router
         without any user-side opt-in. A user-defined ``agents/_router.md``
         file would collide with the built-in's ``agent_id`` (or its
-        reserved ``slash``/``display_name``) and the duplicate-detection
-        in :meth:`_index` would raise at construction time.
+        reserved ``display_name``) and the duplicate-detection in
+        :meth:`_index` would raise at construction time.
 
         Used in test fixtures and any non-bridge code paths that still
         load definitions from disk. The bridge itself (PR 3 onwards)
@@ -185,9 +179,6 @@ class AgentRegistry:
     def by_id(self, agent_id: str) -> AgentDefinition | None:
         return self._by_id.get(agent_id)
 
-    def by_slash(self, slash: str) -> AgentDefinition | None:
-        return self._by_slash.get(slash)
-
     def by_display_name(self, name: str) -> AgentDefinition | None:
         return self._by_display_name.get(name)
 
@@ -204,13 +195,13 @@ class AgentRegistry:
         incoming event with the router's id indicates a misconfigured
         deployment.
 
-        Key-field changes (``slash``, ``display_name``) for an existing
+        Key-field changes (``display_name``) for an existing
         ``agent_id`` are handled by remove-then-insert rather than
-        :meth:`_replace` (whose asserts treat those as immutable). In
+        :meth:`_replace` (whose asserts treat that as immutable). In
         practice agents don't rename mid-run, but defending here avoids
         a hard crash on a misconfigured deployment. If the new
-        ``slash``/``display_name`` collides with a *different* agent
-        already in the registry, the old indexes are restored and the
+        ``display_name`` collides with a *different* agent already in
+        the registry, the old indexes are restored and the
         :class:`ValueError` propagates so the caller (state consumer)
         can log and skip.
         """
@@ -231,20 +222,16 @@ class AgentRegistry:
             self._index(definition)
             self._all.append(definition)
             return True
-        # Key-field changes (slash, display_name) need full re-index, not
-        # _replace.
-        if (
-            existing.slash != definition.slash
-            or existing.display_name != definition.display_name
-        ):
+        # display_name changes need full re-index, not _replace.
+        if existing.display_name != definition.display_name:
             self._unindex(existing)
             try:
                 self._index(definition)
             except ValueError:
-                # New slash/display_name collides with a DIFFERENT agent
-                # already in the registry. Restore the old definition's
-                # indexes to keep the registry consistent, and re-raise so
-                # the caller (state consumer) logs and skips.
+                # New display_name collides with a DIFFERENT agent already
+                # in the registry. Restore the old definition's indexes to
+                # keep the registry consistent, and re-raise so the caller
+                # (state consumer) logs and skips.
                 self._index(existing)
                 raise
             idx = self._all.index(existing)

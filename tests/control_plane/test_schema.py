@@ -80,7 +80,6 @@ def test_envelope_unknown_op_raises() -> None:
 def test_agent_state_event_round_trip() -> None:
     event = AgentStateEvent(
         agent_id="scribe",
-        slash="/scribe",
         display_name="Scribe",
         description="Takes notes.",
         avatar_url="https://example.com/avatar.png",
@@ -111,7 +110,6 @@ def test_state_message_discriminator_state() -> None:
     adapter = TypeAdapter(AgentStateMessage)
     event = AgentStateEvent(
         agent_id="scribe",
-        slash="/scribe",
         display_name="Scribe",
         description="Takes notes.",
         role="assistant",
@@ -156,7 +154,6 @@ def test_schema_version_default_on_envelope() -> None:
 def test_schema_version_default_on_state_event() -> None:
     event = AgentStateEvent(
         agent_id="scribe",
-        slash="/scribe",
         display_name="Scribe",
         description="d",
         role="assistant",

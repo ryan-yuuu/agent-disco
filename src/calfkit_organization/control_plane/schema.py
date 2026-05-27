@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from calfkit_organization.agents.definition import AgentRole, Provider, ThinkingEffort
 
-CONTROL_PLANE_SCHEMA_VERSION = 1
+CONTROL_PLANE_SCHEMA_VERSION = 2
 
 
 # --- Bridge -> agent commands ---
@@ -58,7 +58,6 @@ class AgentStateEvent(BaseModel):
     kind: Literal["state"] = "state"
     schema_version: int = CONTROL_PLANE_SCHEMA_VERSION
     agent_id: str
-    slash: str
     display_name: str
     description: str
     avatar_url: str | None = None

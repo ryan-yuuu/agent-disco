@@ -151,12 +151,6 @@ class TestFieldInvariants:
         d = build_router_definition()
         assert d.agent_id == ROUTER_AGENT_ID == "_router"
 
-    def test_slash_is_underscore_router(self) -> None:
-        """The slash is reserved (never registered with Discord) but
-        must satisfy the schema validator's ``/<name>`` format."""
-        d = build_router_definition()
-        assert d.slash == "/_router"
-
     def test_display_name_is_router(self) -> None:
         d = build_router_definition()
         assert d.display_name == "Router"

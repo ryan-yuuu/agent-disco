@@ -105,7 +105,6 @@ def _registry_with_router(
         [
             AgentDefinition(
                 agent_id="scheduler",
-                slash="/scheduler",
                 display_name="Aksel (Scheduler)",
                 description="Calendar.",
                 provider="anthropic",
@@ -114,7 +113,6 @@ def _registry_with_router(
             ),
             AgentDefinition(
                 agent_id="scribe",
-                slash="/scribe",
                 display_name="Scribe",
                 description="Notes.",
                 provider="openai",
@@ -492,7 +490,6 @@ class TestAmbientHistory:
             [
                 AgentDefinition(
                     agent_id="scribe",
-                    slash="/scribe",
                     display_name="Scribe",
                     description="Notes.",
                     provider="openai",
@@ -502,7 +499,6 @@ class TestAmbientHistory:
                 # Build a router with history_turns=0 (override via direct construction).
                 AgentDefinition(
                     agent_id="_router",
-                    slash="/_router",
                     display_name="Router",
                     description="Internal routing agent (not user-invocable)",
                     avatar_url=None,

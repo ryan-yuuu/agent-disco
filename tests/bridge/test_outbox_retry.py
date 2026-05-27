@@ -95,7 +95,6 @@ def _registry() -> AgentRegistry:
         [
             AgentDefinition(
                 agent_id="scribe",
-                slash="/scribe",
                 display_name="Scribe",
                 description="Scribe agent.",
                 avatar_url="https://example.com/scribe.png",

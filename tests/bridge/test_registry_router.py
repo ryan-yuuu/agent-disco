@@ -21,7 +21,6 @@ from calfkit_organization.router.definition import ROUTER_AGENT_ID, build_router
 def _write_agent(dir_: Path, name: str, **frontmatter_extra: str) -> None:
     fields = {
         "name": name,
-        "slash": f"/{name}",
         "display_name": name.title(),
         "description": f"Test agent {name}.",
     }
@@ -96,7 +95,6 @@ class TestRouterAccessor:
             [
                 AgentDefinition(
                     agent_id="scribe",
-                    slash="/scribe",
                     display_name="Scribe",
                     description="Notes.",
                     system_prompt="x",
@@ -116,7 +114,6 @@ class TestRouterAccessor:
             [
                 AgentDefinition(
                     agent_id="scribe",
-                    slash="/scribe",
                     display_name="Scribe",
                     description="Notes.",
                     system_prompt="x",
@@ -136,7 +133,6 @@ class TestMultiRouterRejection:
         router_a = build_router_definition()
         router_b = AgentDefinition(
             agent_id="custom_router",
-            slash="/custom_router",
             display_name="Custom Router",
             description="Another router.",
             role="router",
@@ -146,27 +142,26 @@ class TestMultiRouterRejection:
         with pytest.raises(ValueError, match="multiple router"):
             AgentRegistry([router_a, router_b])
 
-    def test_duplicate_slash_precedence_over_multi_router(self) -> None:
+    def test_duplicate_display_name_precedence_over_multi_router(self) -> None:
         """:class:`AgentRegistry`'s constructor docstring documents
-        that duplicate-key errors (slash / display_name / agent_id)
-        take precedence over the multi-router check, because the
+        that duplicate-key errors (display_name / agent_id) take
+        precedence over the multi-router check, because the
         duplicate-key message is more operator-actionable.
         Indexing runs first; the role check follows. Pin the
         ordering so a future refactor doesn't silently swap them
         and produce the less-helpful 'multiple router' error when
-        the real fix is a slash rename."""
+        the real fix is a display_name rename."""
         router_a = build_router_definition()
-        # Collide on slash, not just role.
+        # Collide on display_name, not just role.
         router_b = AgentDefinition(
             agent_id="custom_router",
-            slash=router_a.slash,  # duplicate
-            display_name="Custom Router",
+            display_name=router_a.display_name,  # duplicate
             description="Another router.",
             role="router",
             publish_topic="custom.topic",
             system_prompt="x",
         )
-        with pytest.raises(ValueError, match="duplicate slash"):
+        with pytest.raises(ValueError, match="duplicate display_name"):
             AgentRegistry([router_a, router_b])
 
 
@@ -198,28 +193,30 @@ class TestPhonebookExcludesRouter:
         assert "scribe" in ids
 
 
-class TestSlashAndDisplayNameCollisionWithRouter:
+class TestAgentIdAndDisplayNameCollisionWithRouter:
     """User-defined agents that collide with the router's reserved
-    ``slash`` (``/_router``) or ``display_name`` (``Router``) fail at
+    ``agent_id`` (``_router``) or ``display_name`` (``Router``) fail at
     construction time via the existing duplicate-detection in
     :meth:`_index`. We pin this here so a future relaxation of those
-    checks doesn't silently break the router's reservation."""
+    checks doesn't silently break the router's reservation.
 
-    def test_user_agent_with_router_slash_collides(self) -> None:
+    The slash command is always ``/<agent_id>``, so agent_id
+    uniqueness implicitly reserves the router's slash too — no
+    separate slash-collision test is needed."""
+
+    def test_user_agent_with_router_agent_id_collides(self) -> None:
         user_agent = AgentDefinition(
-            agent_id="my_router",
-            slash="/_router",  # collides with router's reserved slash
+            agent_id=ROUTER_AGENT_ID,  # collides with router's reserved id
             display_name="MyRouter",
             description="x",
             system_prompt="x",
         )
-        with pytest.raises(ValueError, match="duplicate slash"):
+        with pytest.raises(ValueError, match="duplicate agent_id"):
             AgentRegistry([user_agent, build_router_definition()])
 
     def test_user_agent_with_router_display_name_collides(self) -> None:
         user_agent = AgentDefinition(
             agent_id="my_router",
-            slash="/my_router",
             display_name="Router",  # collides with router's reserved name
             description="x",
             system_prompt="x",

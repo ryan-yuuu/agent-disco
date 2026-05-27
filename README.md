@@ -40,7 +40,6 @@ Each agent is one Markdown file under `agents/`:
 ```markdown
 ---
 name: scribe
-slash: /scribe
 display_name: Scribe
 description: Friendly assistant that answers concisely.
 avatar_url: https://api.dicebear.com/9.x/glass/png?seed=scribe
@@ -53,12 +52,11 @@ thinking_effort: medium
 You are Scribe, a friendly AI agent. Be helpful and reply concisely (1–3 sentences).
 ```
 
-The YAML frontmatter declares identity and runtime hints; the body is the LLM system prompt. The filename stem must match `name`.
+The YAML frontmatter declares identity and runtime hints; the body is the LLM system prompt. The filename stem must match `name`. The Discord slash command is always `/<name>`.
 
 Field summary:
 
-- `name` — unique agent id; lowercase, `[a-z0-9_-]{1,32}`.
-- `slash` — slash-command name (must start with `/`).
+- `name` — unique agent id; lowercase, `[a-z0-9_-]{1,32}`. Also the Discord slash command (`/<name>`).
 - `display_name` — webhook persona name (1–80 chars, Discord rejects literal `Clyde`).
 - `description` — short summary (1–100 chars). Shown to peers in the A2A roster.
 - `avatar_url` — optional persona avatar.

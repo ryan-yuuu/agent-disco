@@ -237,15 +237,16 @@ Loader behavior at boot:
 | File present, empty / whitespace-only             | Boot error — almost always a half-finished edit.             |
 | File present, malformed YAML                      | Boot error with file path and parse-error location.          |
 | File present, unknown key (e.g. typo `provder:`)  | Boot error from pydantic `extra="forbid"`.                   |
-| File present, reserved key (`slash`, `role`, etc.)| Same — the router's identity is not operator-tunable.        |
+| File present, reserved key (`role`, `name`, etc.) | Same — the router's identity is not operator-tunable.        |
 
-**What's NOT in the schema** by design: `name`, `slash`, `display_name`,
+**What's NOT in the schema** by design: `name`, `display_name`,
 `description`, `avatar_url`, `role`, `publish_topic`, `tools`, and
 `system_prompt`. These are router-singleton invariants (`agent_id =
-"_router"`, reserved slash, `role="router"`, etc.) — the registry
-depends on them being fixed. Operators who need to change the routing
-prompt should edit `src/calfkit_organization/router/prompt.py` and
-re-deploy.
+"_router"`, `role="router"`, etc.) — the registry depends on them
+being fixed. The Discord slash command is always `/<name>` (i.e.
+`/_router` for the router), so the slash is implicitly reserved with
+the agent_id. Operators who need to change the routing prompt should
+edit `src/calfkit_organization/router/prompt.py` and re-deploy.
 
 **Container deploys:** the docker-compose `router:` service does NOT
 bind-mount `router.yml` by default — Docker would silently create a

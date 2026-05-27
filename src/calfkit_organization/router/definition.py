@@ -5,11 +5,13 @@ The router definition is constructed in code rather than parsed from an
 
 * It is project infrastructure, not a user-customizable persona. A
   user-editable ``agents/_router.md`` would invite operators to remove
-  it or tweak its slash/display_name, both of which would break the
+  it or tweak its agent_id/display_name, both of which would break the
   registry's "exactly one router" invariant.
-* Its ``slash``/``display_name`` are reserved (``/_router`` / ``Router``)
-  and not user-overridable. Embedding the constants here pins the
-  contract.
+* Its ``agent_id``/``display_name`` are reserved (``_router`` /
+  ``Router``) and not user-overridable. Embedding the constants here
+  pins the contract. The Discord slash command is always
+  ``/<agent_id>``, so reserving the agent_id implicitly reserves the
+  slash.
 * Provider/model/thinking_effort are environment-driven so operators
   can swap out the LLM without editing source — same lever the rest of
   the project uses for tunable runtime params.
@@ -35,13 +37,6 @@ ROUTER_AGENT_ID = "_router"
 other modules that need to defensively self-filter (the fan-out
 consumer skips this id when republishing) or to look the router up in
 the registry (:meth:`AgentRegistry.router`)."""
-
-_ROUTER_SLASH = "/_router"
-"""Schema-satisfying slash command for the router definition. Never
-registered with Discord — the bridge does not invoke
-``CommandTree.add_command`` for the router (it is not a user-invocable
-agent). Reserved here so user-defined agents cannot accidentally
-collide via their own ``.md`` ``slash:`` field."""
 
 _ROUTER_DISPLAY_NAME = "Router"
 """Reserved display_name for the singleton router. User-defined agents
@@ -117,7 +112,7 @@ def build_router_definition() -> AgentDefinition:
     The returned definition satisfies the router invariants enforced by
     :class:`AgentDefinition`'s validators: ``role="router"``, empty
     ``tools``, non-empty ``publish_topic``, and the strict
-    name/slash/display_name format constraints.
+    name/display_name format constraints.
 
     Returns:
         A frozen :class:`AgentDefinition` ready to be appended to the
@@ -150,7 +145,6 @@ def build_router_definition() -> AgentDefinition:
 
     return AgentDefinition(
         agent_id=ROUTER_AGENT_ID,
-        slash=_ROUTER_SLASH,
         display_name=_ROUTER_DISPLAY_NAME,
         description=_ROUTER_DESCRIPTION,
         avatar_url=None,
