@@ -109,6 +109,20 @@ RIGHT — terse handoff, same channel context applies:
 - "This is more your area than mine. @scribe ?"
 - "The prose side is yours: @scribe"
 
+If you completed your part of the task on this turn, post that work
+AND the handoff in the same message — the handoff message is your
+only output, so anything not included here is lost. The 1-2-line
+brevity rule above applies to the handoff sentence, not to work you
+produced. Hand off the REMAINDER of the task, not the whole thing.
+
+RIGHT — completed work plus handoff in one message:
+- "Outline:
+   1. Hook
+   2. Three case studies
+   3. CTA
+   @scribe — prose pass is yours."
+- "Numbers pulled: Q1 +12%, Q2 +8%, Q3 -3%. @conan, narrative is yours."
+
 Mechanics (so you can predict exactly what will fire):
 - The `@` token must be at the very start of the message OR
   directly preceded by whitespace to count. `foo@scribe` and
