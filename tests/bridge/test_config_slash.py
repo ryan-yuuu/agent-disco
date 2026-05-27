@@ -18,6 +18,7 @@ can assert the published topic and payload (same pattern as
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -98,8 +99,10 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(self, payload: str, *, topic: str) -> None:
-        self.calls.append({"topic": topic, "payload": payload})
+    async def publish(
+        self, payload: str, *, topic: str, key: bytes | None = None
+    ) -> None:
+        self.calls.append({"topic": topic, "payload": payload, "key": key})
 
 
 class _FakeCalfkitClient:
@@ -405,3 +408,72 @@ class TestScheduleResync:
         remove_calls.assert_called_once_with(_THINKING_EFFORT_COMMAND_NAME)
         add_calls.assert_called_once()
         assert sync_calls == [manager._guild_id]
+
+    async def test_event_during_inflight_sync_chains_followup_cycle(
+        self,
+        manager: SlashCommandManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression test for H2: an event that arrives DURING an
+        in-flight sync (after the debounce sleep, before sync() returns)
+        used to be silently dropped because ``_resync_task.done()`` was
+        False and the leading-edge guard short-circuited. The trailing-
+        edge debounce sets ``_resync_pending`` and chains a follow-up
+        cycle from the finally block.
+        """
+        # No debounce sleep so the test doesn't pay an extra second.
+        manager._resync_debounce_s = 0.0
+
+        remove_calls = MagicMock()
+        add_calls = MagicMock()
+        manager._tree.remove_command = remove_calls  # type: ignore[method-assign]
+        manager._tree.add_command = add_calls  # type: ignore[method-assign]
+
+        sync_started = asyncio.Event()
+        sync_release = asyncio.Event()
+        sync_count = 0
+
+        async def _hanging_sync(_guild_id: int | None) -> None:
+            nonlocal sync_count
+            sync_count += 1
+            sync_started.set()
+            await sync_release.wait()
+            sync_release.clear()
+            sync_started.clear()
+
+        monkeypatch.setattr(manager, "sync", _hanging_sync)
+
+        # 1. Kick off the first resync. It'll skip the (zero-second)
+        #    sleep and block on _hanging_sync.
+        manager.schedule_resync("scribe")
+        first_task = manager._resync_task
+        assert first_task is not None
+        await sync_started.wait()
+
+        # 2. While the first sync is mid-flight, simulate a new agent
+        #    arriving. With the OLD leading-edge debounce, this call
+        #    would be a silent no-op; with the trailing-edge fix it
+        #    sets ``_resync_pending`` so a follow-up cycle chains.
+        manager.schedule_resync("echo")
+        assert manager._resync_pending is True
+
+        # 3. Release the first sync. Its finally block observes
+        #    _resync_pending and schedules a follow-up task.
+        sync_release.set()
+        await first_task
+
+        followup_task = manager._resync_task
+        assert followup_task is not None
+        assert followup_task is not first_task
+        assert manager._resync_pending is False
+
+        # 4. Run the follow-up cycle to completion.
+        await sync_started.wait()
+        sync_release.set()
+        await followup_task
+
+        # Two distinct sync cycles fired — the "echo" event was not
+        # dropped.
+        assert sync_count == 2
+        assert remove_calls.call_count == 2
+        assert add_calls.call_count == 2

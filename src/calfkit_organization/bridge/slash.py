@@ -78,7 +78,14 @@ class SlashCommandManager:
         # ``schedule_resync`` on every first-seen / departure event; we
         # coalesce bursts into a single rebuild+sync to avoid hammering
         # Discord's slash-sync endpoint when many agents come up at once.
+        #
+        # Trailing-edge: an event that arrives DURING an in-flight sync
+        # sets ``_resync_pending`` so the in-flight task schedules a
+        # follow-up cycle after it completes. Without this, agents that
+        # joined mid-sync would never make it into the slash choice list
+        # until the next unrelated event.
         self._resync_task: asyncio.Task[None] | None = None
+        self._resync_pending: bool = False
         self._resync_debounce_s: float = 1.0
 
     def register_all(self) -> None:
@@ -211,28 +218,37 @@ class SlashCommandManager:
     def schedule_resync(self, agent_id: str) -> None:
         """Schedule a debounced re-sync of ``/thinking-effort``.
 
-        Reflects the current agent roster to Discord. Idempotent:
-        multiple calls within the debounce window coalesce into one
-        re-sync. Called by the state consumer's ``on_first_seen`` and
-        ``on_departed`` callbacks. The ``agent_id`` argument is logged
-        but not otherwise used — the rebuild reads from the registry.
+        Reflects the current agent roster to Discord. Trailing-edge
+        debounce: while a sync is in flight, additional calls flip a
+        ``_resync_pending`` flag and the running task chains a follow-up
+        cycle so events arriving mid-sync are not dropped. Called by the
+        state consumer's ``on_first_seen`` and ``on_departed`` callbacks.
+        The ``agent_id`` argument is logged but not otherwise used --
+        the rebuild reads the current registry.
         """
         if self._resync_task is not None and not self._resync_task.done():
-            # A debounced resync is already pending; it'll pick up the
-            # new registry state when it fires.
+            # A debounced resync is already pending or in-flight. Mark
+            # that another cycle is needed: if the task hasn't finished
+            # its sleep yet it picks up the latest registry state when
+            # it builds the command; if the task is already past its
+            # sleep (mid-sync), the ``_resync_pending`` flag will be
+            # observed in its finally block and a follow-up cycle is
+            # chained. Either way, the new agent gets reflected.
+            self._resync_pending = True
             return
+        self._resync_pending = False
         self._resync_task = asyncio.create_task(self._debounced_resync())
 
     async def _debounced_resync(self) -> None:
         try:
-            await asyncio.sleep(self._resync_debounce_s)
-        except asyncio.CancelledError:
-            raise
-        try:
+            try:
+                await asyncio.sleep(self._resync_debounce_s)
+            except asyncio.CancelledError:
+                raise
             try:
                 self._tree.remove_command(_THINKING_EFFORT_COMMAND_NAME)
             except Exception:
-                # Not registered yet or some other transient — proceed
+                # Not registered yet or some other transient -- proceed
                 # to add.
                 logger.debug("remove_command(/thinking-effort) raised; proceeding")
             self._tree.add_command(self._build_thinking_effort_command())
@@ -248,6 +264,17 @@ class SlashCommandManager:
             raise
         except Exception:
             logger.exception("debounced slash resync failed")
+        finally:
+            # Trailing-edge: if any schedule_resync calls came in during
+            # the rebuild+sync above, chain another cycle so we don't
+            # drop their roster updates. The next cycle observes the
+            # current registry state, so multiple coalesced events all
+            # get reflected by the one follow-up sync.
+            if self._resync_pending:
+                self._resync_pending = False
+                self._resync_task = asyncio.create_task(
+                    self._debounced_resync()
+                )
 
     async def sync(self, guild_id: int | None) -> None:
         """Push the command tree to Discord. Idempotent; safe to call on every boot."""

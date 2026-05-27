@@ -31,8 +31,10 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(self, payload: str, *, topic: str) -> None:
-        self.calls.append({"topic": topic, "payload": payload})
+    async def publish(
+        self, payload: str, *, topic: str, key: bytes | None = None
+    ) -> None:
+        self.calls.append({"topic": topic, "payload": payload, "key": key})
 
 
 class _FakeClient:
@@ -54,6 +56,9 @@ async def test_publish_control_command_targets_agent_topic() -> None:
     assert len(client._connection.calls) == 1
     call = client._connection.calls[0]
     assert call["topic"] == "agent.scribe.control.in"
+    # H1/M2: per-agent partition key keeps ordered command delivery on
+    # multi-partition control topics.
+    assert call["key"] == b"scribe"
 
     parsed = AgentControlEnvelope.model_validate_json(call["payload"])
     assert isinstance(parsed.command, SetThinkingEffortOp)
@@ -70,6 +75,9 @@ async def test_publish_discovery_ping_targets_broadcast_topic() -> None:
     assert len(client._connection.calls) == 1
     call = client._connection.calls[0]
     assert call["topic"] == "bridge.discovery"
+    # Discovery is broadcast: not keyed so each agent (sole member of its
+    # own consumer group) reads every partition.
+    assert call["key"] is None
 
     parsed = AgentControlEnvelope.model_validate_json(call["payload"])
     assert isinstance(parsed.command, DiscoveryPingOp)
@@ -97,6 +105,9 @@ async def test_publish_state_event_targets_state_topic() -> None:
     assert len(client._connection.calls) == 1
     call = client._connection.calls[0]
     assert call["topic"] == "agent.state"
+    # H1: per-agent partition key so state events and the eventual
+    # departure event share a partition and stay ordered for the bridge.
+    assert call["key"] == b"scribe"
 
     parsed = AgentStateEvent.model_validate_json(call["payload"])
     assert parsed == event
@@ -109,6 +120,9 @@ async def test_publish_departure_targets_state_topic_with_departure_kind() -> No
     assert len(client._connection.calls) == 1
     call = client._connection.calls[0]
     assert call["topic"] == "agent.state"
+    # H1: shares the partition key of this agent's state events so the
+    # bridge sees the departure AFTER any prior state events.
+    assert call["key"] == b"scribe"
 
     # Verify ``kind="departure"`` is on the wire (discriminator field).
     raw = json.loads(call["payload"])

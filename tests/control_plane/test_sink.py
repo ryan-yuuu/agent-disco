@@ -23,8 +23,10 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(self, payload: str, *, topic: str) -> None:
-        self.calls.append({"topic": topic, "payload": payload})
+    async def publish(
+        self, payload: str, *, topic: str, key: bytes | None = None
+    ) -> None:
+        self.calls.append({"topic": topic, "payload": payload, "key": key})
 
 
 class _FakeClient:

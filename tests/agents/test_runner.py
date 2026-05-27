@@ -700,8 +700,10 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def publish(self, payload: str, *, topic: str) -> None:
-        self.calls.append({"topic": topic, "payload": payload})
+    async def publish(
+        self, payload: str, *, topic: str, key: bytes | None = None
+    ) -> None:
+        self.calls.append({"topic": topic, "payload": payload, "key": key})
 
 
 class _FakeClient:
@@ -712,7 +714,9 @@ class _FakeClient:
 class _StuckConnection:
     """publish() never completes — simulates a hung Kafka producer."""
 
-    async def publish(self, payload: str, *, topic: str) -> None:
+    async def publish(
+        self, payload: str, *, topic: str, key: bytes | None = None
+    ) -> None:
         await asyncio.Event().wait()  # never returns
 
 
@@ -724,7 +728,9 @@ class _StuckClient:
 class _RaisingConnection:
     """publish() always raises."""
 
-    async def publish(self, payload: str, *, topic: str) -> None:
+    async def publish(
+        self, payload: str, *, topic: str, key: bytes | None = None
+    ) -> None:
         raise RuntimeError("simulated kafka outage")
 
 
