@@ -465,7 +465,7 @@ books and preps meetings."
 ### 8.3 The audit channel
 
 Every A2A exchange is projected to a unified Discord audit channel
-(default `a2a-audit`, overridable via `CALFKIT_A2A_CHANNEL_NAME`). The
+(default `private-a2a-chats`, overridable via `CALFKIT_A2A_CHANNEL_NAME`). The
 caller's request and the target's reply each appear as the appropriate
 persona's webhook message, anchored in a per-conversation thread. See
 `docs/a2a-threads.md` and

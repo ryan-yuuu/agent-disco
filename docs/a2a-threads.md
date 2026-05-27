@@ -67,7 +67,7 @@ calfkit-tools process
 
 | Var | Required | Default | Purpose |
 |---|---|---|---|
-| `CALFKIT_A2A_CHANNEL_NAME` | no | `a2a-audit` | Name of the unified audit channel. Lazy-created in the guild on first A2A call if absent. |
+| `CALFKIT_A2A_CHANNEL_NAME` | no | `private-a2a-chats` | Name of the unified audit channel. Lazy-created in the guild on first A2A call if absent. |
 | `CALFKIT_A2A_CHANNEL_CATEGORY` | no | unset | If set, the unified channel is placed under this category. Category is lazy-created too. |
 | `DISCORD_GUILD_ID` | yes | — | The guild that hosts the unified channel. Already required for the tools process. |
 
@@ -116,7 +116,7 @@ conversation, posted as the caller persona. Each one is the starter
 message for a thread.
 
 ```
-[#a2a-audit]
+[#private-a2a-chats]
 ─────────────────────────────────────────
 [Conan]   please summarize the design doc for...
           ↪ Thread: "conan→scribe: please summarize the design doc..."

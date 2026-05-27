@@ -2,7 +2,7 @@
 
 The resolver was rewritten from a per-pair design (``a2a-{x}-{y}``
 channels indexed by canonical pair) to a unified-channel design (one
-``a2a-audit`` channel hosting a thread per A2A conversation). These
+``private-a2a-chats`` channel hosting a thread per A2A conversation). These
 tests pin the new contract: the resolver caches a single channel id,
 lazily discovers / creates it, and exposes a ``create_anchored_thread``
 helper for the ``private_chat`` tool to anchor each new conversation
@@ -37,7 +37,7 @@ def _text_channel(*, name: str, channel_id: int) -> MagicMock:
 
 def _real_body_resolver(
     *,
-    channel_name: str = "a2a-audit",
+    channel_name: str = "private-a2a-chats",
     category_name: str | None = None,
     existing_channels: list | None = None,
     created_text_id: int = 999,
@@ -77,12 +77,12 @@ class TestConstructor:
         third positional arg; pin keyword-only at the signature level."""
         sender = MagicMock(spec=DiscordSender)
         with pytest.raises(TypeError):
-            A2AChannelResolver(sender, 42, "a2a-audit")  # type: ignore[misc]
+            A2AChannelResolver(sender, 42, "private-a2a-chats")  # type: ignore[misc]
 
     def test_channel_name_is_required(self) -> None:
         """The resolver no longer derives the channel name from a pair;
         it must be supplied. The tools runner is responsible for
-        defaulting to ``a2a-audit`` from the env var."""
+        defaulting to ``private-a2a-chats`` from the env var."""
         sender = MagicMock(spec=DiscordSender)
         with pytest.raises(TypeError):
             A2AChannelResolver(sender, 42)  # type: ignore[call-arg]
@@ -91,7 +91,7 @@ class TestConstructor:
         """Opt-in: omitting ``category_name`` keeps the
         uncategorized-at-root behavior."""
         sender = MagicMock(spec=DiscordSender)
-        resolver = A2AChannelResolver(sender, 42, channel_name="a2a-audit")
+        resolver = A2AChannelResolver(sender, 42, channel_name="private-a2a-chats")
         assert resolver._category_name is None
         assert resolver._category is None
         assert resolver._unified_channel_id is None
@@ -101,9 +101,9 @@ class TestResolveUnifiedChannel:
     async def test_cache_hit_on_second_call(self) -> None:
         """After the first resolution, subsequent calls return the
         cached id without re-fetching the guild."""
-        existing = _text_channel(name="a2a-audit", channel_id=555)
+        existing = _text_channel(name="private-a2a-chats", channel_id=555)
         resolver, guild, _ = _real_body_resolver(
-            channel_name="a2a-audit",
+            channel_name="private-a2a-chats",
             existing_channels=[existing],
         )
 
@@ -118,7 +118,7 @@ class TestResolveUnifiedChannel:
         """Full miss: ``create_text_channel`` is invoked with the
         configured ``channel_name`` and the resolved category."""
         resolver, guild, _ = _real_body_resolver(
-            channel_name="a2a-audit",
+            channel_name="private-a2a-chats",
             existing_channels=[],
             created_text_id=999,
         )
@@ -128,7 +128,7 @@ class TestResolveUnifiedChannel:
         assert channel_id == 999
         guild.create_text_channel.assert_awaited_once()
         kwargs = guild.create_text_channel.await_args.kwargs
-        assert kwargs["name"] == "a2a-audit"
+        assert kwargs["name"] == "private-a2a-chats"
         # No category configured → explicit ``None`` lands at guild root.
         assert kwargs["category"] is None
         # The creation reason is operator-facing audit-log context.
@@ -138,7 +138,7 @@ class TestResolveUnifiedChannel:
         """The constructor's ``channel_name`` is what gets looked up
         and (on miss) created — not a hard-coded default."""
         existing = _text_channel(name="custom-audit", channel_id=777)
-        decoy = _text_channel(name="a2a-audit", channel_id=111)
+        decoy = _text_channel(name="private-a2a-chats", channel_id=111)
         resolver, guild, _ = _real_body_resolver(
             channel_name="custom-audit",
             existing_channels=[decoy, existing],
@@ -156,7 +156,7 @@ class TestResolveUnifiedChannel:
         category (re-using the lazy category creation pattern)."""
         existing_category = _category(name="private-a2a", channel_id=12345)
         resolver, guild, _ = _real_body_resolver(
-            channel_name="a2a-audit",
+            channel_name="private-a2a-chats",
             category_name="private-a2a",
             existing_channels=[existing_category],
         )
@@ -165,14 +165,14 @@ class TestResolveUnifiedChannel:
 
         guild.create_text_channel.assert_awaited_once()
         kwargs = guild.create_text_channel.await_args.kwargs
-        assert kwargs["name"] == "a2a-audit"
+        assert kwargs["name"] == "private-a2a-chats"
         assert kwargs["category"] is existing_category
 
     async def test_under_lazily_created_category(self) -> None:
         """Cold start: neither category nor unified channel exist.
         Category is created first, then the channel is placed under it."""
         resolver, guild, created_category = _real_body_resolver(
-            channel_name="a2a-audit",
+            channel_name="private-a2a-chats",
             category_name="private-a2a",
             existing_channels=[],
         )
@@ -190,7 +190,7 @@ class TestResolveUnifiedChannel:
         the A2A turn fails loudly rather than silently routing
         projections to nowhere."""
         resolver, guild, _ = _real_body_resolver(
-            channel_name="a2a-audit",
+            channel_name="private-a2a-chats",
             existing_channels=[],
         )
         guild.create_text_channel = AsyncMock(
@@ -204,9 +204,9 @@ class TestResolveUnifiedChannel:
         """A category (or voice channel) with the same name as the
         configured unified channel must NOT be mistaken for it — only
         ``discord.TextChannel`` instances match."""
-        decoy = _category(name="a2a-audit", channel_id=99999)
+        decoy = _category(name="private-a2a-chats", channel_id=99999)
         resolver, guild, _ = _real_body_resolver(
-            channel_name="a2a-audit",
+            channel_name="private-a2a-chats",
             existing_channels=[decoy],
             created_text_id=999,
         )
@@ -233,7 +233,7 @@ class TestCreateAnchoredThread:
         # Thread that create_thread returns.
         thread = MagicMock(spec=discord.Thread)
         thread.id = 8888
-        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel = _text_channel(name="private-a2a-chats", channel_id=555)
         channel.create_thread = AsyncMock(return_value=thread)
         resolver._sender.client.fetch_channel = AsyncMock(return_value=channel)
 
@@ -258,7 +258,7 @@ class TestCreateAnchoredThread:
         error rather than silently swallowing."""
         resolver, _, _ = _real_body_resolver()
 
-        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel = _text_channel(name="private-a2a-chats", channel_id=555)
         channel.create_thread = AsyncMock(
             side_effect=discord.Forbidden(MagicMock(status=403), "no threads")
         )
@@ -273,7 +273,7 @@ class TestCreateAnchoredThread:
         surface a recoverable error."""
         resolver, _, _ = _real_body_resolver()
 
-        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel = _text_channel(name="private-a2a-chats", channel_id=555)
         channel.create_thread = AsyncMock(
             side_effect=discord.NotFound(MagicMock(status=404), "gone")
         )
@@ -288,7 +288,7 @@ class TestCreateAnchoredThread:
         returning a happy-path id with no thread on the other side."""
         resolver, _, _ = _real_body_resolver()
 
-        channel = _text_channel(name="a2a-audit", channel_id=555)
+        channel = _text_channel(name="private-a2a-chats", channel_id=555)
         channel.create_thread = AsyncMock(
             side_effect=discord.HTTPException(MagicMock(status=500), "boom")
         )

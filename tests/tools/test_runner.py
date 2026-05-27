@@ -86,12 +86,12 @@ class TestResolveCategoryName:
 
 class TestResolveChannelName:
     """``CALFKIT_A2A_CHANNEL_NAME`` reading. Has a default
-    (``"a2a-audit"``) — operators don't need to set it for the system
+    (``"private-a2a-chats"``) — operators don't need to set it for the system
     to work, but they can override for multi-tenant deployments."""
 
     def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_A2A_CHANNEL_NAME", raising=False)
-        assert runner._resolve_channel_name() == "a2a-audit"
+        assert runner._resolve_channel_name() == "private-a2a-chats"
 
     def test_env_var_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "foo")
@@ -101,7 +101,7 @@ class TestResolveChannelName:
         """Pin the literal default — a refactor that silently changes
         the default channel name would split existing operators' deploys
         without warning."""
-        assert runner._DEFAULT_CHANNEL_NAME == "a2a-audit"
+        assert runner._DEFAULT_CHANNEL_NAME == "private-a2a-chats"
 
     def test_empty_string_falls_back_to_default(
         self, monkeypatch: pytest.MonkeyPatch
@@ -110,13 +110,13 @@ class TestResolveChannelName:
         ``_resolve_category_name``) so a blank line in ``.env`` doesn't
         create a literally-named channel."""
         monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "")
-        assert runner._resolve_channel_name() == "a2a-audit"
+        assert runner._resolve_channel_name() == "private-a2a-chats"
 
     def test_whitespace_only_falls_back_to_default(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("CALFKIT_A2A_CHANNEL_NAME", "   ")
-        assert runner._resolve_channel_name() == "a2a-audit"
+        assert runner._resolve_channel_name() == "private-a2a-chats"
 
     def test_leading_trailing_whitespace_stripped(
         self, monkeypatch: pytest.MonkeyPatch

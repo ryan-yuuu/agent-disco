@@ -1,7 +1,8 @@
 """``private_chat`` — A2A tool for agent-to-agent communication over calfkit.
 
 Routes a request from one agent to another via calfkit RPC and projects
-the exchange to a unified ``a2a-audit`` Discord channel for human audit.
+the exchange to a unified ``private-a2a-chats`` Discord channel for human
+audit (channel name configurable via :envvar:`CALFKIT_A2A_CHANNEL_NAME`).
 Each A2A conversation gets its own Discord thread anchored on the
 caller's first request message. Kafka is the system of record; Discord
 is the projection.

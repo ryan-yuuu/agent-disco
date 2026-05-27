@@ -9,7 +9,7 @@ identity.
 
 The architecture under test is the **unified-channel + per-conversation
 thread** model: every A2A invocation lives inside a Discord thread
-under one shared ``a2a-audit`` channel. ``thread_id=None`` (default)
+under one shared ``private-a2a-chats`` channel. ``thread_id=None`` (default)
 forks a fresh thread; passing an int continues an existing one with
 projected history injected as ``message_history``.
 """

@@ -14,7 +14,7 @@ host:
 * :class:`DiscordSender` — REST-only client used by
   :class:`A2AChannelResolver` to discover/create the unified A2A audit
   channel (configured via :envvar:`CALFKIT_A2A_CHANNEL_NAME`, default
-  ``a2a-audit``). Uses the bot token from this deployment's env.
+  ``private-a2a-chats``). Uses the bot token from this deployment's env.
 * :class:`DiscordPersonaSender` — webhook-based projector that posts
   request/response audit entries under each agent's persona.
 * :class:`calfkit.client.Client` — connected with a private reply topic
@@ -56,7 +56,7 @@ bridge's outbox consumer (which would project them to Discord twice)."""
 _TIMEOUT_ENV = "CALFKIT_TOOLS_TIMEOUT_SECONDS"
 _CATEGORY_ENV = "CALFKIT_A2A_CHANNEL_CATEGORY"
 _CHANNEL_NAME_ENV = "CALFKIT_A2A_CHANNEL_NAME"
-_DEFAULT_CHANNEL_NAME = "a2a-audit"
+_DEFAULT_CHANNEL_NAME = "private-a2a-chats"
 """The single unified A2A audit channel. Every A2A conversation lives
 inside a thread under this channel; operator setup collapses to one
 channel + one permission overwrite. Overridable via

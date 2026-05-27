@@ -4,7 +4,7 @@ Provides a small helper that resolves (and lazily creates) the single
 Discord text channel where every agent-to-agent conversation lives, plus
 a helper for anchoring a public thread on a specific message in that
 channel. There is one such channel per guild, sourced from
-``CALFKIT_A2A_CHANNEL_NAME`` (default ``a2a-audit``) — collapsing the
+``CALFKIT_A2A_CHANNEL_NAME`` (default ``private-a2a-chats``) — collapsing the
 former per-pair ``a2a-{x}-{y}`` design to a flat directory of threads
 inside one channel.
 
