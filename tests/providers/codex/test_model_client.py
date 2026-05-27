@@ -122,6 +122,30 @@ class TestConstruction:
         # The setting is keyed as openai_send_reasoning_ids on OpenAIResponsesModelSettings
         assert client.model_settings.get("openai_send_reasoning_ids") is False
 
+    @pytest.mark.parametrize("field", ["temperature", "max_tokens", "parallel_tool_calls"])
+    def test_codex_rejected_fields_are_absent_not_none(self, tmp_path: Path, field: str) -> None:
+        """Regression guard for ``400 Unsupported parameter: <field>``.
+
+        pydantic-ai's ``_responses_create`` reads these settings via
+        ``model_settings.get(field, OMIT)``. If the field is present with
+        ``None``, it serializes to ``null`` on the wire and the Codex
+        backend rejects the entire request. The field must be absent so
+        ``get(..., OMIT)`` returns the omit sentinel and pydantic-ai
+        drops it from the request body entirely.
+        """
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
+
+        # ``in`` on a TypedDict tests for key presence — what we care about.
+        assert field not in client.model_settings, (
+            f"{field!r} must not be a key in model_settings (even with value "
+            f"None) — Codex backend rejects the field in the request body"
+        )
+
     def test_underlying_provider_uses_codex_bearer_auth(self, tmp_path: Path) -> None:
         """The OpenAI SDK's httpx client must have our _CodexBearerAuth attached
         as its auth — this is the hook that rotates the OAuth bearer on every

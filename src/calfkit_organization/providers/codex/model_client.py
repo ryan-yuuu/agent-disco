@@ -184,15 +184,20 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
         if account_id:
             extra_headers["chatgpt-account-id"] = account_id
 
+        # NOTE on omitted keys: do NOT pass ``temperature``, ``max_tokens``,
+        # ``parallel_tool_calls`` here — even with value ``None``. The Codex
+        # backend rejects any of those fields appearing in the request body
+        # (returns ``400 Unsupported parameter: max_output_tokens`` etc).
+        # pydantic-ai's ``_responses_create`` reads them via
+        # ``model_settings.get('max_tokens', OMIT)`` — present-but-None
+        # serializes to ``null`` on the wire, but absent (so .get returns
+        # the OMIT sentinel) gets dropped from the JSON body entirely.
         settings = OpenAIResponsesModelSettings(  # type: ignore[typeddict-item]
             # Codex backend persists nothing server-side when store=False;
             # required so reasoning items don't get stored and then 404 on the
             # next turn (a documented OpenHands bug we sidestep).
             extra_body={"store": False},
             extra_headers=extra_headers,
-            # Codex rejects these; pass None to drop them from request bodies.
-            temperature=None,
-            max_tokens=None,
             # Skip sending stored reasoning IDs back on follow-up turns; with
             # ``store=False`` they would 404. Calfkit/pydantic-ai already
             # supports this knob — using it avoids the OpenHands workaround
