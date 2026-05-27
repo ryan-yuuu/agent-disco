@@ -244,6 +244,141 @@ class TestImpersonationTransformation:
         assert new_instructions == "SPECIFIC GPT-5.2"
 
 
+class TestForcedStreaming:
+    """The Codex backend requires ``stream=True`` on every request; the
+    pydantic-ai ``request()`` path asks for non-streaming. We override
+    ``_responses_create`` to always stream and reconstruct a Response from
+    the stream events. If this stops working the backend returns
+    ``400 'Stream must be set to true'``."""
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_call_forces_stream_and_reconstructs(
+        self, tmp_path: Path
+    ) -> None:
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
+
+        # Mock super()._responses_create to capture how it's called and
+        # return a fake stream of events. We intercept at the
+        # OpenAIResponsesModel level (the immediate parent of our override).
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        captured_stream_arg: list[bool] = []
+
+        class _FakeEvent:
+            def __init__(self, type_: str, item: Any = None, response: Any = None):
+                self.type = type_
+                self.item = item
+                self.response = response
+
+        class _FakeResponse:
+            def __init__(self):
+                self.output: list[Any] = []  # Codex quirk: arrives empty
+
+        fake_item_a = object()
+        fake_item_b = object()
+        completed_response = _FakeResponse()
+
+        async def _fake_super_create(self, *, messages, stream, model_settings, model_request_parameters):
+            captured_stream_arg.append(stream)
+
+            async def _gen():
+                yield _FakeEvent("response.output_item.done", item=fake_item_a)
+                yield _FakeEvent("response.output_text.delta")  # ignored
+                yield _FakeEvent("response.output_item.done", item=fake_item_b)
+                yield _FakeEvent("response.completed", response=completed_response)
+
+            return _gen()
+
+        # Patch the parent class's method so our override delegates to the fake.
+        original = OpenAIResponsesModel._responses_create
+        OpenAIResponsesModel._responses_create = _fake_super_create
+        try:
+            result = await client._responses_create(
+                messages=[],
+                stream=False,  # caller wants non-streaming
+                model_settings=client.model_settings,
+                model_request_parameters=None,
+            )
+        finally:
+            OpenAIResponsesModel._responses_create = original
+
+        # Even though the caller asked stream=False, we forced True on the wire.
+        assert captured_stream_arg == [True]
+        # Returned object is the reconstructed Response with output patched in.
+        assert result is completed_response
+        assert result.output == [fake_item_a, fake_item_b]
+
+    @pytest.mark.asyncio
+    async def test_streaming_call_passes_through_unchanged(self, tmp_path: Path) -> None:
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
+
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        sentinel_stream = object()
+
+        async def _fake_super_create(self, *, messages, stream, model_settings, model_request_parameters):
+            assert stream is True
+            return sentinel_stream
+
+        original = OpenAIResponsesModel._responses_create
+        OpenAIResponsesModel._responses_create = _fake_super_create
+        try:
+            result = await client._responses_create(
+                messages=[],
+                stream=True,  # caller already wants a stream
+                model_settings=client.model_settings,
+                model_request_parameters=None,
+            )
+        finally:
+            OpenAIResponsesModel._responses_create = original
+
+        assert result is sentinel_stream
+
+    @pytest.mark.asyncio
+    async def test_missing_completed_event_raises(self, tmp_path: Path) -> None:
+        """If the stream ends without a ``response.completed`` event, we'd
+        have no Response to return — surface that loudly rather than
+        returning None which would crash downstream pydantic-ai code with
+        a less clear error."""
+        store = _seed(tmp_path, account_id="x")
+        client = CodexSubscriptionModelClient(
+            model_name="gpt-5.2-codex",
+            store=store,
+            resolver=_loaded_resolver(tmp_path),
+        )
+
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
+
+        async def _fake_super_create(self, *, messages, stream, model_settings, model_request_parameters):
+            async def _gen():
+                if False:  # empty stream
+                    yield None
+            return _gen()
+
+        original = OpenAIResponsesModel._responses_create
+        OpenAIResponsesModel._responses_create = _fake_super_create
+        try:
+            with pytest.raises(RuntimeError, match="response.completed"):
+                await client._responses_create(
+                    messages=[],
+                    stream=False,
+                    model_settings=client.model_settings,
+                    model_request_parameters=None,
+                )
+        finally:
+            OpenAIResponsesModel._responses_create = original
+
+
 class TestCodexBearerAuth:
     """``_CodexBearerAuth`` is the per-request hook that overrides whatever
     Authorization header the OpenAI SDK sets (which would be the placeholder

@@ -251,3 +251,66 @@ class CodexSubscriptionModelClient(OpenAIResponsesModelClient):
         # real system prompt into a synthetic leading user message.
         transform_for_subscription(system_chunks, openai_messages)
         return self._codex_instructions, openai_messages
+
+    async def _responses_create(
+        self,
+        messages: Any,
+        stream: bool,
+        model_settings: Any,
+        model_request_parameters: Any,
+    ) -> Any:
+        """Force ``stream=True`` on every wire request; reconstruct a Response
+        for non-streaming callers.
+
+        The Codex backend mandates streaming (returns
+        ``400 'Stream must be set to true'`` otherwise). But pydantic-ai's
+        ``Agent.run()`` calls the model's ``request()`` path, which asks
+        for a non-streaming Response object. Solution: always open the
+        stream, drain it, and reconstruct a Response from the events.
+
+        Codex sends a ``response.completed`` event whose embedded Response
+        has an empty ``.output`` list — the actual output items arrive
+        as ``response.output_item.done`` events along the way. We
+        accumulate them and patch them onto the final Response before
+        returning.
+
+        Streaming callers (``request_stream()``) pass through unchanged.
+        """
+        if stream:
+            return await super()._responses_create(
+                messages=messages,
+                stream=True,
+                model_settings=model_settings,
+                model_request_parameters=model_request_parameters,
+            )
+
+        stream_obj = await super()._responses_create(
+            messages=messages,
+            stream=True,
+            model_settings=model_settings,
+            model_request_parameters=model_request_parameters,
+        )
+
+        final_response: Any = None
+        output_items: list[Any] = []
+        async for event in stream_obj:
+            event_type = getattr(event, "type", None)
+            if event_type == "response.output_item.done":
+                item = getattr(event, "item", None)
+                if item is not None:
+                    output_items.append(item)
+            elif event_type == "response.completed":
+                final_response = getattr(event, "response", None)
+
+        if final_response is None:
+            raise RuntimeError(
+                "Codex stream ended without a response.completed event; "
+                "cannot reconstruct a non-streaming Response."
+            )
+
+        # Patch accumulated items onto the Response if the completed event
+        # came back with an empty output list (Codex backend quirk).
+        if not getattr(final_response, "output", None) and output_items:
+            final_response.output = output_items
+
+        return final_response
