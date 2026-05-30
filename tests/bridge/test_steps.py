@@ -7,8 +7,8 @@ agent's running pydantic_ai conversation. The tests exercise:
 * delta extraction across multiple hops (cursor advances correctly);
 * initial cursor seed from ``PendingEntry.initial_message_history_length``;
 * thread create-on-first-render + persona post sequence;
-* terminal-hop renders the prior-tool-return delta before locking;
-* terminal hop locks + marks correlation completed (outbox-retry dedup);
+* terminal-hop renders the prior-tool-return delta before archiving;
+* terminal hop archives + marks correlation completed (outbox-retry dedup);
 * the various skip paths (no wire, non-agent emitter, unknown agent,
   thread-originated wire);
 * the v1 render rules (TextPart + ToolCallPart + ToolReturnPart only,
@@ -150,7 +150,7 @@ def _http_exc(exc_cls: type[discord.HTTPException], status: int) -> discord.HTTP
 
 def _fake_bot_client(thread_id: int = _THREAD_ID) -> MagicMock:
     """Build a fake REST-only discord.Client supporting fetch_channel,
-    message.create_thread, and thread.edit(locked=True)."""
+    message.create_thread, and thread.edit(archived=True)."""
     thread = MagicMock(spec=discord.Thread)
     thread.id = thread_id
     thread.edit = AsyncMock(return_value=None)
@@ -479,7 +479,7 @@ class TestMultiHop:
 
 
 class TestTerminalHop:
-    async def test_terminal_hop_locks_thread_and_pops(
+    async def test_terminal_hop_archives_thread_and_pops(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
@@ -511,14 +511,14 @@ class TestTerminalHop:
 
         # Did not post (the outbox posts the final reply).
         persona_sender.send.assert_not_called()
-        # Thread lock was attempted.
+        # Thread archive was attempted.
         persona_sender.client._fake_thread.edit.assert_awaited_once_with(
-            locked=True, archived=True,
+            archived=True,
         )
         # State entry released.
         assert steps_state.get(_CORRELATION_ID) is None
 
-    async def test_terminal_hop_without_thread_skips_lock(
+    async def test_terminal_hop_without_thread_skips_archive(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
@@ -535,7 +535,7 @@ class TestTerminalHop:
             headers=_headers(),
             broker=broker,
         )
-        # No state entry → nothing to lock.
+        # No state entry → nothing to archive.
         persona_sender.client._fake_thread.edit.assert_not_called()
 
 
@@ -875,10 +875,10 @@ class TestThreadName:
 
 class TestTerminalDelta:
     """The terminal hop must render the prior-tool-return delta in the
-    transcript thread before locking. Only the trailing final
+    transcript thread before archiving. Only the trailing final
     ``ModelResponse`` (the answer text the outbox posts) is suppressed."""
 
-    async def test_terminal_hop_renders_tool_return_then_locks(
+    async def test_terminal_hop_renders_tool_return_then_archives(
         self,
         persona_sender: AsyncMock,
         pending_wires: PendingWires,
@@ -926,9 +926,9 @@ class TestTerminalDelta:
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
         assert any("**`weather` returned**" in c for c in contents)
         assert not any("It's 18 degrees in Tokyo." in c for c in contents)
-        # Lock fired.
+        # Archive fired.
         persona_sender.client._fake_thread.edit.assert_awaited_once_with(
-            locked=True, archived=True,
+            archived=True,
         )
         # Entry popped + marked completed.
         assert steps_state.get(_CORRELATION_ID) is None
@@ -1252,7 +1252,7 @@ class TestCoTenantPeerEnvelopes:
 
 
 class TestOutboxRetryDedup:
-    """A retry hop on a correlation whose terminal already locked the
+    """A retry hop on a correlation whose terminal already archived the
     thread must NOT create a second thread."""
 
     async def test_completed_correlation_is_skipped(

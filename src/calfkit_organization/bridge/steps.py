@@ -44,15 +44,15 @@ does not get re-rendered as fresh steps (a bug class the
   in the parent channel and that's the end of it.
 * **Append** — every subsequent hop's delta is rendered and posted
   into the thread under the agent's normal persona.
-* **Close** — on the terminal hop (``state.final_output_parts`` is
-  set), the thread is **locked AND archived**
-  (``Thread.edit(locked=True, archived=True)``) so it disappears from
-  the channel sidebar's active-threads list and users cannot post in
-  it. Lock is the load-bearing guard against accidental user posts;
-  archive is the cosmetic disappearance from the sidebar. Both flags
-  are set in one PATCH; the call is idempotent if the thread had
-  already auto-archived mid-run (Discord's 60-minute default — see
-  :data:`THREAD_AUTO_ARCHIVE_MINUTES`).
+* **Archive** — on the terminal hop (``state.final_output_parts`` is
+  set), the thread is archived (``Thread.edit(archived=True)``) so it
+  disappears from the channel sidebar's active-threads list. The
+  thread is not locked: posting in an archived thread auto-unarchives
+  it, so this is not enforcement against accidental user posts — that
+  relies on the documented "users do not post in step threads"
+  assumption below. Archive only requires the bot to own the thread
+  (which it does, having created it), so unlike locking we do not
+  need ``Manage Threads`` permission.
 
 **Terminal hop also renders the prior delta.** When the agent emits a
 ``ToolCall`` then a ``ToolReturn`` then a final ``TextPart`` in three
@@ -75,8 +75,9 @@ agent (the persona's ``display_name`` matches the registered agent).
 The LLM would see narrative descriptions of past tool calls without
 the structured ``ToolCallPart`` / ``ToolReturnPart``, and the
 response would degrade. We accept this as documented undefined
-behavior; locking the thread on the terminal hop is the
-defense-in-depth.
+behavior. Archiving the thread on the terminal hop makes it less
+discoverable (it leaves the active-threads sidebar) but does not
+prevent posts.
 
 **Source-was-already-a-thread.** When the inbound wire originated
 inside a Discord thread, the bridge's normalizer flattens
@@ -136,9 +137,9 @@ restart finds no entry, logs DEBUG, and skips. The agent's final
 reply still posts (the outbox path is independent and re-derives the
 wire from :class:`PendingWires`, which has the same restart
 vulnerability — accepted v1 trade-off shared across both paths). The
-load-bearing thread lock is the one casualty: any thread that was
-created but whose terminal hop arrived during the down window stays
-open. Operators can sweep these manually if needed.
+terminal-hop archive is the one casualty: any thread whose terminal
+hop arrived during the down window stays in the active-threads
+sidebar. Operators can archive these manually if needed.
 
 **Partition-key requirement.**
 :data:`AGENT_STEPS_TOPIC` MUST be configured with a single partition
@@ -149,7 +150,7 @@ calfkit handler's plain ``Response`` return without a key, so on a
 multi-partition topic the hops for one ``correlation_id`` can
 round-robin partitions and arrive out of order — cursor jumps swallow
 deltas, and an intermediate hop arriving after a terminal hop would
-create a second unlocked thread. The bridge's direct
+create a second un-archived thread. The bridge's direct
 :meth:`calfkit.Client.publish` calls do stamp the key (see
 ``calfkit/nodes/base.py``); the gap is only the publisher-decorator
 mirror path that ``publish_topic=AGENT_STEPS_TOPIC`` activates.
@@ -315,8 +316,8 @@ def build_steps_consumer(
         persona_sender: The bridge's REST-only Discord client. Used to
             post step messages under the agent's persona via the
             per-channel webhook. The underlying ``persona_sender.client``
-            is also used for thread create/lock REST calls — webhooks
-            cannot create or modify threads themselves.
+            is also used for thread create/archive REST calls —
+            webhooks cannot create or modify threads themselves.
         registry: Roster of agents. Resolves
             ``NodeResult.emitter_node_id`` to a :class:`Persona`. An
             unknown emitter id is logged and skipped.
@@ -336,10 +337,11 @@ def build_steps_consumer(
         A :class:`ConsumerNodeDef` ready to register on a
         :class:`~calfkit.Worker`.
     """
-    # Bounded log-dedup for thread create/lock Forbidden errors, sized
-    # identically to history.py's _FORBIDDEN_LOG_DEDUP_MAX. Intentionally
-    # duplicated rather than imported to keep steps.py independent of
-    # history.py internals; keep numerically in sync if you retune.
+    # Bounded log-dedup for thread create/archive Forbidden errors,
+    # sized identically to history.py's _FORBIDDEN_LOG_DEDUP_MAX.
+    # Intentionally duplicated rather than imported to keep steps.py
+    # independent of history.py internals; keep numerically in sync if
+    # you retune.
     _forbidden_log_dedup: OrderedDict[int, None] = OrderedDict()
     _forbidden_log_dedup_max = 4096
 
@@ -355,7 +357,7 @@ def build_steps_consumer(
             "channel_id=%d: Forbidden on %s; "
             "step transcript will be incomplete for this and future invocations "
             "until permission is granted. Grant the bot 'Create Public Threads' "
-            "and 'Manage Threads' to enable.",
+            "to enable.",
             channel_id,
             action,
         )
@@ -442,52 +444,49 @@ def build_steps_consumer(
         )
         return thread.id
 
-    async def _lock_thread(thread_id: int, channel_id: int) -> None:
-        """Lock the transcript thread so users cannot post in it.
+    async def _archive_thread(thread_id: int, channel_id: int) -> None:
+        """Archive the transcript thread so it leaves the active-threads
+        sidebar.
 
         Best-effort; failures are logged and swallowed. Catches
-        ``DiscordException`` so ``RateLimited`` doesn't escape.
+        ``DiscordException`` so ``RateLimited`` doesn't escape. Does
+        not lock — see the module docstring's Archive section.
         """
         client = persona_sender.client
         try:
             thread = await client.fetch_channel(thread_id)
         except discord.NotFound:
-            # Thread was deleted between create and lock. Operationally
+            # Thread was deleted between create and archive. Operationally
             # uninteresting; DEBUG.
             logger.debug(
-                "steps: lock fetch_channel thread_id=%d not found", thread_id,
+                "steps: archive fetch_channel thread_id=%d not found", thread_id,
             )
             return
         except discord.Forbidden:
-            # Operator-actionable permission regression — split from
-            # NotFound so it surfaces at WARNING via the dedup helper.
-            _log_forbidden_once(channel_id, "fetch_channel (lock)")
+            _log_forbidden_once(channel_id, "fetch_channel (archive)")
             return
         except discord.DiscordException as e:
             logger.warning(
-                "steps: lock fetch_channel thread_id=%d status=%s: %s",
+                "steps: archive fetch_channel thread_id=%d status=%s: %s",
                 thread_id, getattr(e, "status", None), e,
             )
             return
 
         if not isinstance(thread, discord.Thread):
             logger.debug(
-                "steps: thread_id=%d is %s, not a Thread; skipping lock",
+                "steps: thread_id=%d is %s, not a Thread; skipping archive",
                 thread_id, type(thread).__name__,
             )
             return
 
         try:
-            # Lock + archive in one PATCH: lock prevents accidental user
-            # posts; archive hides the thread from the channel's active-
-            # threads sidebar. See the module docstring's Close section.
-            await thread.edit(locked=True, archived=True)
-            logger.info("steps: locked + archived thread_id=%d", thread_id)
+            await thread.edit(archived=True)
+            logger.info("steps: archived thread_id=%d", thread_id)
         except discord.Forbidden:
-            _log_forbidden_once(channel_id, "thread.edit(locked=True, archived=True)")
+            _log_forbidden_once(channel_id, "thread.edit(archived=True)")
         except discord.DiscordException as e:
             logger.warning(
-                "steps: lock thread_id=%d status=%s: %s",
+                "steps: archive thread_id=%d status=%s: %s",
                 thread_id, getattr(e, "status", None), e,
             )
 
@@ -605,7 +604,7 @@ def build_steps_consumer(
         if is_terminal:
             popped = steps_state.pop_and_mark_completed(correlation_id)
             if popped is not None and popped.thread_id is not None:
-                await _lock_thread(
+                await _archive_thread(
                     popped.thread_id, popped.parent_channel_id,
                 )
 
