@@ -44,15 +44,15 @@ does not get re-rendered as fresh steps (a bug class the
   in the parent channel and that's the end of it.
 * **Append** — every subsequent hop's delta is rendered and posted
   into the thread under the agent's normal persona.
-* **Lock** — on the terminal hop (``state.final_output_parts`` is
-  set), the thread is locked (``Thread.edit(locked=True,
-  archived=False)``) so users cannot accidentally post in it after
-  the transcript closes. ``archived=False`` is load-bearing: Discord
-  auto-archives threads (60 minutes by default; see
-  :data:`THREAD_AUTO_ARCHIVE_MINUTES`), and locking an already-archived
-  thread leaves it read-only-by-auto-archive instead of locked. We
-  always pass both so a long-running agent whose thread auto-archived
-  mid-run still ends up explicitly locked.
+* **Close** — on the terminal hop (``state.final_output_parts`` is
+  set), the thread is **locked AND archived**
+  (``Thread.edit(locked=True, archived=True)``) so it disappears from
+  the channel sidebar's active-threads list and users cannot post in
+  it. Lock is the load-bearing guard against accidental user posts;
+  archive is the cosmetic disappearance from the sidebar. Both flags
+  are set in one PATCH; the call is idempotent if the thread had
+  already auto-archived mid-run (Discord's 60-minute default — see
+  :data:`THREAD_AUTO_ARCHIVE_MINUTES`).
 
 **Terminal hop also renders the prior delta.** When the agent emits a
 ``ToolCall`` then a ``ToolReturn`` then a final ``TextPart`` in three
@@ -191,7 +191,8 @@ THREAD_AUTO_ARCHIVE_MINUTES: Final[int] = 60
 is well above expected agent turn duration; the alternates (``1440``,
 ``4320``, ``10080``) are valid for all guilds since Discord dropped
 the boost-tier gating in 2022. Bump if agents routinely exceed an
-hour and you want threads to stay un-archived until lock."""
+hour. Note the terminal hop explicitly archives the thread anyway, so
+this only matters for the rare case where the agent run exceeds it."""
 
 THREAD_NAME_MAX_LEN: Final[int] = 100
 """Discord's hard limit on thread names."""
@@ -477,14 +478,13 @@ def build_steps_consumer(
             return
 
         try:
-            # archived=False is load-bearing: a thread that auto-archived
-            # mid-run must be explicitly un-archived in the same call,
-            # otherwise locking leaves it read-only-by-auto-archive
-            # instead of locked. See the module docstring.
-            await thread.edit(locked=True, archived=False)
-            logger.info("steps: locked thread_id=%d", thread_id)
+            # Lock + archive in one PATCH: lock prevents accidental user
+            # posts; archive hides the thread from the channel's active-
+            # threads sidebar. See the module docstring's Close section.
+            await thread.edit(locked=True, archived=True)
+            logger.info("steps: locked + archived thread_id=%d", thread_id)
         except discord.Forbidden:
-            _log_forbidden_once(channel_id, "thread.edit(locked=True)")
+            _log_forbidden_once(channel_id, "thread.edit(locked=True, archived=True)")
         except discord.DiscordException as e:
             logger.warning(
                 "steps: lock thread_id=%d status=%s: %s",

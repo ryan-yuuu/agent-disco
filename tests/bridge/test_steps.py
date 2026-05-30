@@ -513,7 +513,7 @@ class TestTerminalHop:
         persona_sender.send.assert_not_called()
         # Thread lock was attempted.
         persona_sender.client._fake_thread.edit.assert_awaited_once_with(
-            locked=True, archived=False,
+            locked=True, archived=True,
         )
         # State entry released.
         assert steps_state.get(_CORRELATION_ID) is None
@@ -928,7 +928,7 @@ class TestTerminalDelta:
         assert not any("It's 18 degrees in Tokyo." in c for c in contents)
         # Lock fired.
         persona_sender.client._fake_thread.edit.assert_awaited_once_with(
-            locked=True, archived=False,
+            locked=True, archived=True,
         )
         # Entry popped + marked completed.
         assert steps_state.get(_CORRELATION_ID) is None
