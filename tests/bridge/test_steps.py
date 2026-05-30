@@ -491,14 +491,12 @@ class TestTerminalHop:
     ) -> None:
         # Seed a state entry as if previous hops happened.
         from calfkit_organization.bridge.steps_state import StepsEntry
-        from calfkit_organization.discord.persona import Persona
 
         steps_state.put(
             _CORRELATION_ID,
             StepsEntry(
                 parent_channel_id=_CHANNEL_ID,
                 parent_message_id=_MESSAGE_ID,
-                persona=Persona(name="Aksel", avatar_url=None),
                 thread_id=_THREAD_ID,
                 history_cursor=2,
             ),
@@ -767,7 +765,6 @@ class TestTerminalDelta:
         broker: MagicMock,
     ) -> None:
         from calfkit_organization.bridge.steps_state import StepsEntry
-        from calfkit_organization.discord.persona import Persona
 
         # Seed an entry as if a prior tool-call hop happened.
         steps_state.put(
@@ -775,7 +772,6 @@ class TestTerminalDelta:
             StepsEntry(
                 parent_channel_id=_CHANNEL_ID,
                 parent_message_id=_MESSAGE_ID,
-                persona=Persona(name="Aksel", avatar_url=None),
                 thread_id=_THREAD_ID,
                 history_cursor=2,
             ),
@@ -925,9 +921,8 @@ class TestCoTenantPeerEnvelopes:
             headers=_headers(emitter="conan"),
             broker=broker,
         )
-        # Nothing posted, no entry seeded — peer cannot claim it.
+        # Peer didn't post (no delta to render).
         persona_sender.send.assert_not_called()
-        assert steps_state.get(_CORRELATION_ID) is None
 
         # Real emitter's first hop with rendered content.
         await consumer.handler(
@@ -938,7 +933,8 @@ class TestCoTenantPeerEnvelopes:
             headers=_headers(emitter="codex"),
             broker=broker,
         )
-        # Persona is Codex's, not Conan's.
+        # Persona is Codex's, not Conan's — the entry carries no persona,
+        # so the peer's earlier hop could not have claimed it.
         personas = [
             c.kwargs["persona"].name
             for c in persona_sender.send.call_args_list

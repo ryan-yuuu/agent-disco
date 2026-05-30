@@ -13,9 +13,6 @@ envelope as a stateless delta against the cursor.
 * ``parent_channel_id`` / ``parent_message_id`` — the user's original
   Discord message. The thread is created off this message; intermediate
   step posts target ``parent_channel_id`` with ``thread_id``.
-* ``persona`` — the agent's own persona (display name + avatar).
-  Resolved once on the first hop from :class:`AgentRegistry` and cached
-  so subsequent hops can post without a registry lookup.
 * ``thread_id`` — populated lazily on the first hop that produces a
   rendered step. ``None`` until then so a pure-text agent reply (no
   intermediates) does not create an empty thread.
@@ -23,7 +20,15 @@ envelope as a stateless delta against the cursor.
   The consumer advances this on each hop so the next delta is
   ``message_history[history_cursor:]``.
 
-``StepsEntry`` is **mutable** (not frozen) because ``thread_id`` and
+The agent's persona deliberately lives **off** the entry. Co-tenant
+agents on an ambient channel topic all publish to ``agent.steps`` via
+FastStream's publisher mirror (gated-out peers included), so any
+field cached at seed time would risk being written under the wrong
+emitter's identity. The consumer resolves persona per-hop from
+``result.emitter_node_id`` at post time — the same pattern
+:mod:`calfkit_organization.bridge.outbox` uses.
+
+``StepsEntry`` is **mutable** because ``thread_id`` and
 ``history_cursor`` advance across hops. Entries are popped on the
 terminal hop (the one carrying ``state.final_output_parts``), so a
 clean run never leaves an entry behind. Bridge restarts strand entries
@@ -31,10 +36,9 @@ in-process; the next hop after restart finds nothing and skips with a
 DEBUG log.
 
 Thread safety: the bridge runs on a single asyncio event loop and the
-steps consumer is single-worker by default
-(:attr:`Worker._max_workers`), so all mutations are effectively
-serialized. Do not share an instance across event loops or threads
-without an external lock.
+steps consumer is single-worker by default, so all mutations are
+effectively serialized. Do not share an instance across event loops
+or threads without an external lock.
 """
 
 from __future__ import annotations
@@ -43,8 +47,6 @@ import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Final
-
-from calfkit_organization.discord.persona import Persona
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +57,13 @@ DEFAULT_CAPACITY: Final[int] = 1024
 class StepsEntry:
     """Per-correlation state for an in-flight agent invocation's step stream.
 
-    See module docstring for field rationale. Mutable because
-    ``thread_id`` and ``history_cursor`` advance across hops.
-
-    ``slots=True`` catches accidental typo-creates-new-attribute bugs
-    (``entry.histroy_cursor = 7`` raises instead of silently shadowing).
-
-    Persona is captured at the first renderable hop and held for the
-    correlation's lifetime so transcript identity is stable across hops;
-    a registry rename during an in-flight invocation only takes effect on
-    the next invocation.
+    See module docstring for field rationale. ``slots=True`` catches
+    accidental typo-creates-new-attribute bugs (``entry.histroy_cursor = 7``
+    raises instead of silently shadowing).
     """
 
     parent_channel_id: int
     parent_message_id: int
-    persona: Persona
     thread_id: int | None = None
     history_cursor: int = 0
 

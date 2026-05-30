@@ -100,21 +100,22 @@ consumer guards against this by checking
 marks the correlation completed even when no thread was ever created
 (so retries of pure-text replies are also suppressed).
 
-**Co-tenant peer envelopes — deferred seeding.** Every agent that
-subscribes to the inbound channel topic flows through calfkit's
-``handler()`` (``calfkit/nodes/base.py:268-278``). When a peer's
-gates filter the envelope, the handler still returns
-``Response(body=envelope_unchanged, headers=self._emitter_headers())``,
-and FastStream's ``@publisher`` decorator mirrors that to
-``agent.steps`` with the **peer's** emitter headers. If the steps
-consumer eagerly created a :class:`StepsEntry` on first-arrival, the
-peer's no-delta envelope would claim the entry under the peer's
-persona before the real emitter's content-bearing hop arrived — and
-the transcript would post under the wrong agent. The consumer
-therefore defers entry creation until it has rendered content
-(``_render_delta`` produced a non-empty list) or the hop is terminal.
-Gated-out peer envelopes carry the inbound envelope unchanged, so
-their delta is empty and they cannot claim the entry.
+**Co-tenant peer envelopes — persona resolved per hop.** Every agent
+subscribed to the inbound channel topic flows through calfkit's
+``handler()`` (``calfkit/nodes/base.py:268-278``), including peers
+whose gates filtered the envelope — those still return
+``Response(body=envelope_unchanged, headers=self._emitter_headers())``
+and FastStream's ``@publisher`` decorator mirrors them to
+``agent.steps`` with the *peer's* emitter headers. The consumer
+sidesteps the "which agent owns this entry" question by not caching
+persona on :class:`StepsEntry` at all: each post resolves persona
+from ``result.emitter_node_id`` at post time, matching the outbox's
+pattern. A peer envelope with an empty message-history delta produces
+no posts and therefore no persona writes; the entry it may have
+seeded is just channel/message/cursor scaffolding. The real emitter's
+first content-bearing hop posts under its own identity. As a
+secondary benefit the consumer skips no-delta non-terminal envelopes
+before rendering, which removes most of the gated-out peer cost.
 
 **Failure semantics.** Every Discord operation is wrapped in a
 try/except that catches the common Discord error subclasses
@@ -487,25 +488,20 @@ def build_steps_consumer(
                 thread_id, getattr(e, "status", None), e,
             )
 
-    async def _post_in_thread(entry: StepsEntry, content: str) -> None:
-        """Post one rendered step under the agent's persona in the thread.
+    async def _post_in_thread(
+        entry: StepsEntry, persona: Persona, content: str,
+    ) -> None:
+        """Post one rendered step in the thread under ``persona``.
 
-        Catches ``DiscordException`` (covers ``RateLimited`` too) and
-        the documented sender errors (``RuntimeError`` if the sender
-        was never started, ``TypeError`` if a wire pointed at a
-        non-text channel). All failures are swallowed — they must not
+        Catches ``DiscordException`` (covers ``RateLimited``) plus
+        ``RuntimeError`` (sender not started) and ``TypeError`` (wrong
+        channel kind). All failures are swallowed — they must not
         affect the final-reply path.
         """
-        if entry.thread_id is None:
-            # Defensive — caller guarantees the thread is created first.
-            logger.error(
-                "steps: _post_in_thread called with thread_id=None for channel=%d",
-                entry.parent_channel_id,
-            )
-            return
+        assert entry.thread_id is not None  # caller invariant
         try:
             await persona_sender.send(
-                persona=entry.persona,
+                persona=persona,
                 channel_id=entry.parent_channel_id,
                 content=content,
                 thread_id=entry.thread_id,
@@ -521,34 +517,15 @@ def build_steps_consumer(
 
         if result.emitter_node_kind != "agent" or not result.emitter_node_id:
             return
-
-        # Outbox-retry dedup. ``is_completed`` is True for any correlation
-        # whose terminal hop has already been processed by this consumer;
-        # the outbox's _publish_retry path reuses the same correlation_id,
-        # so without this guard the retry's first hop would seed a fresh
-        # transcript thread (the original is now locked).
         if steps_state.is_completed(correlation_id):
             return
 
         is_terminal = bool(result.output_parts)
 
-        # Resolve the cursor without seeding yet. Co-tenant agents on the
-        # same ambient channel topic all publish to ``agent.steps``: peers
-        # whose gates filter the inbound envelope still flow through
-        # calfkit's handler (base.py:268-278), which returns the unchanged
-        # envelope with the *peer's* emitter headers. FastStream then
-        # mirrors that to ``agent.steps``. If we seeded on first-arrival,
-        # the peer would claim the entry under its persona before the real
-        # emitter's content-bearing hop arrived — and the transcript
-        # would post under the wrong agent. Defer seeding until we
-        # actually have rendered content, so a no-delta peer envelope
-        # cannot poison the persona for the real emitter.
         entry = steps_state.get(correlation_id)
-        cursor: int
-        pending_for_seed = None
         if entry is None:
-            pending_for_seed = pending_wires.get(correlation_id)
-            if pending_for_seed is None:
+            pending = pending_wires.get(correlation_id)
+            if pending is None:
                 logger.debug(
                     "steps: no pending wire for correlation_id=%s; skipping hop",
                     correlation_id,
@@ -556,7 +533,7 @@ def build_steps_consumer(
                 if is_terminal:
                     steps_state.pop_and_mark_completed(correlation_id)
                 return
-            wire = pending_for_seed.wire
+            wire = pending.wire
             if (
                 wire.source_channel_id is not None
                 and wire.source_channel_id != wire.channel_id
@@ -570,80 +547,59 @@ def build_steps_consumer(
                 if is_terminal:
                     steps_state.pop_and_mark_completed(correlation_id)
                 return
-            cursor = pending_for_seed.initial_message_history_length
-        else:
-            cursor = entry.history_cursor
+            entry = StepsEntry(
+                parent_channel_id=wire.channel_id,
+                parent_message_id=wire.message_id,
+                history_cursor=pending.initial_message_history_length,
+            )
+            steps_state.put(correlation_id, entry)
 
         history = result.message_history
-        # On terminal hop, drop the trailing ModelResponse from the
-        # delta — that's the final answer the outbox is about to post
-        # to the parent channel; rendering it here would duplicate it
-        # in the thread. Tool returns and any earlier intermediate
-        # text in this same delta still render.
+        # Terminal hop drops the trailing ModelResponse — the outbox
+        # posts its text to the parent channel; rendering it here would
+        # duplicate it. Tool returns earlier in the same delta still
+        # render.
         new_messages = (
-            history[cursor:-1]
+            history[entry.history_cursor:-1]
             if is_terminal and history
-            else history[cursor:]
+            else history[entry.history_cursor:]
         )
+
+        # No new content and not closing — gated-out peer mirror or
+        # a publish hop the agent loop didn't grow history on. Skip
+        # the render walk and the cursor write entirely.
+        if not new_messages and not is_terminal:
+            return
 
         try:
             rendered = _render_delta(new_messages)
         except Exception:
-            # Most likely ``ToolCallPart.args_as_json_str`` on a
-            # malformed payload. Log and treat as empty so the cursor
-            # still advances past the bad message; otherwise we'd loop
-            # on every subsequent hop.
+            # ToolCallPart.args_as_json_str can raise on malformed
+            # payloads; advancing the cursor still happens below so
+            # the next hop doesn't re-trip the same bad message.
             logger.exception(
                 "steps: _render_delta raised on correlation_id=%s; "
                 "skipping this hop's delta", correlation_id,
             )
             rendered = []
 
-        # Seed only when the delta itself is non-empty (so there is
-        # progress to track) OR this is the terminal hop (which must
-        # mark completion). Gated-out peer envelopes pass the inbound
-        # envelope unchanged, so their ``new_messages`` is empty and
-        # they cannot claim the entry. Note we key on ``new_messages``
-        # rather than ``rendered`` so that whitespace-only text and
-        # rendering exceptions (where ``new_messages`` is non-empty
-        # but ``rendered`` is empty) still seed the entry — otherwise
-        # the next hop would re-walk and re-trip the same bad message.
-        if entry is None and (new_messages or is_terminal):
-            assert pending_for_seed is not None  # set above when entry is None
-            spec = registry.by_id(result.emitter_node_id or "")
-            if spec is None:
-                logger.warning(
-                    "steps: unknown emitter=%s correlation_id=%s",
-                    result.emitter_node_id, correlation_id,
-                )
-                if is_terminal:
-                    steps_state.pop_and_mark_completed(correlation_id)
-                return
-            entry = StepsEntry(
-                parent_channel_id=pending_for_seed.wire.channel_id,
-                parent_message_id=pending_for_seed.wire.message_id,
-                persona=Persona(
-                    name=spec.display_name, avatar_url=spec.avatar_url,
-                ),
-                history_cursor=cursor,
-            )
-            steps_state.put(correlation_id, entry)
-
-        # Advance the cursor on the live entry (if one exists). For
-        # peer-only no-delta envelopes the entry is still None here;
-        # nothing to advance, and the next hop will recompute the cursor
-        # from the pending wire's initial_message_history_length anyway.
-        if entry is not None:
+        if new_messages:
             entry.history_cursor = len(history)
 
-        if entry is not None and rendered:
-            await _ensure_thread_and_post(
-                entry, result.emitter_node_id, rendered,
-            )
+        if rendered:
+            spec = registry.by_id(result.emitter_node_id)
+            if spec is None:
+                logger.warning(
+                    "steps: unknown emitter=%s correlation_id=%s; "
+                    "skipping post", result.emitter_node_id, correlation_id,
+                )
+            else:
+                persona = Persona(
+                    name=spec.display_name, avatar_url=spec.avatar_url,
+                )
+                await _ensure_thread_and_post(entry, persona, rendered)
 
         if is_terminal:
-            # Pop + mark completed even when no thread was ever created,
-            # so an outbox retry of this correlation doesn't seed one now.
             popped = steps_state.pop_and_mark_completed(correlation_id)
             if popped is not None and popped.thread_id is not None:
                 await _lock_thread(
@@ -651,30 +607,24 @@ def build_steps_consumer(
                 )
 
     async def _ensure_thread_and_post(
-        entry: StepsEntry,
-        emitter_node_id: str,
-        rendered: list[str],
+        entry: StepsEntry, persona: Persona, rendered: list[str],
     ) -> None:
         """Create the thread on first renderable content, then post all steps.
 
-        On thread-create failure: the entry is left in place (no pop) so
-        the cursor stays advanced; future hops can retry creation
-        without re-walking already-processed deltas. ``_log_forbidden_once``
-        prevents the retries from spamming logs.
+        On thread-create failure the entry is retained (cursor stays
+        advanced) so the next hop can try again without re-walking the
+        already-processed delta. ``_log_forbidden_once`` prevents the
+        retries from spamming logs.
         """
         if entry.thread_id is None:
-            spec = registry.by_id(emitter_node_id)
-            display_name = (
-                spec.display_name if spec is not None else emitter_node_id
-            )
-            thread_id = await _create_thread(entry, display_name)
+            thread_id = await _create_thread(entry, persona.name)
             if thread_id is None:
                 return
             entry.thread_id = thread_id
-            await _post_in_thread(entry, THREAD_HEADER)
+            await _post_in_thread(entry, persona, THREAD_HEADER)
 
         for step_content in rendered:
-            await _post_in_thread(entry, step_content)
+            await _post_in_thread(entry, persona, step_content)
 
     # No gate — we want every hop. ConsumerNodeDef defaults to no gates,
     # which gives us the full transition stream on this topic.

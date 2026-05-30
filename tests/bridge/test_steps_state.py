@@ -8,14 +8,12 @@ import logging
 import pytest
 
 from calfkit_organization.bridge.steps_state import StepsEntry, StepsState
-from calfkit_organization.discord.persona import Persona
 
 
 def _entry(thread_id: int | None = None, history_cursor: int = 0) -> StepsEntry:
     return StepsEntry(
         parent_channel_id=10,
         parent_message_id=20,
-        persona=Persona(name="agent", avatar_url=None),
         thread_id=thread_id,
         history_cursor=history_cursor,
     )
@@ -151,11 +149,7 @@ class TestLRU:
 
 class TestEntry:
     def test_default_thread_id_and_cursor(self) -> None:
-        e = StepsEntry(
-            parent_channel_id=1,
-            parent_message_id=2,
-            persona=Persona(name="x", avatar_url=None),
-        )
+        e = StepsEntry(parent_channel_id=1, parent_message_id=2)
         assert e.thread_id is None
         assert e.history_cursor == 0
 
