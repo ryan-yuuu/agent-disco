@@ -834,6 +834,52 @@ class TestTerminalDelta:
         )
         assert steps_state.is_completed(_CORRELATION_ID)
 
+    async def test_terminal_marks_completed_when_no_pending_wire(
+        self,
+        persona_sender: AsyncMock,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        """Bridge restart + outbox retry: original terminal hop's wire is
+        gone from PendingWires. The terminal hop must still mark the
+        correlation completed; otherwise the retry would seed a fresh
+        transcript."""
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), PendingWires(), steps_state,
+        )
+        await consumer.handler(
+            envelope=_envelope(final_text="hello"),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        assert steps_state.is_completed(_CORRELATION_ID)
+
+    async def test_terminal_marks_completed_when_wire_is_thread_originated(
+        self,
+        persona_sender: AsyncMock,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        """Thread-originated wires skip transcript creation, but a
+        terminal hop on one must still mark completion so a retry
+        doesn't seed."""
+        pw = PendingWires()
+        pw.put(
+            _CORRELATION_ID,
+            make_pending_entry(_wire(source_channel_id=999999)),
+        )
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pw, steps_state,
+        )
+        await consumer.handler(
+            envelope=_envelope(final_text="hello"),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        assert steps_state.is_completed(_CORRELATION_ID)
+
 
 class TestThreadOriginatedWire:
     """When the inbound wire originated inside a Discord thread,
@@ -940,6 +986,148 @@ class TestCoTenantPeerEnvelopes:
             for c in persona_sender.send.call_args_list
         ]
         assert all(name == "Codex" for name in personas)
+
+    async def test_persona_flips_between_distinct_real_emitters(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        """Hop A from emitter X posts under X's persona; hop B (same
+        correlation, distinct emitter Y) posts under Y's persona. This
+        pins the per-hop persona-resolution invariant directly — a
+        regression that re-introduced persona caching on ``StepsEntry``
+        would still pass ``test_peer_no_delta_envelope_does_not_claim_persona``
+        (because the peer never posts) but would fail this one."""
+        registry = AgentRegistry([
+            AgentDefinition(
+                agent_id="codex",
+                display_name="Codex",
+                description="Coder.",
+                avatar_url="https://example.com/codex.png",
+                system_prompt="A.",
+            ),
+            AgentDefinition(
+                agent_id="conan",
+                display_name="Conan",
+                description="Detective.",
+                avatar_url="https://example.com/conan.png",
+                system_prompt="B.",
+            ),
+        ])
+        consumer = build_steps_consumer(
+            persona_sender, registry, pending_wires, steps_state,
+        )
+        await consumer.handler(
+            envelope=_envelope(message_history=[
+                ModelResponse(parts=[TextPart(content="from codex")]),
+            ]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter="codex"),
+            broker=broker,
+        )
+        await consumer.handler(
+            envelope=_envelope(message_history=[
+                ModelResponse(parts=[TextPart(content="from codex")]),
+                ModelResponse(parts=[TextPart(content="from conan")]),
+            ]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter="conan"),
+            broker=broker,
+        )
+        contents_and_personas = [
+            (c.kwargs["content"], c.kwargs["persona"].name)
+            for c in persona_sender.send.call_args_list
+        ]
+        # [(header, Codex), ("from codex", Codex), ("from conan", Conan)]
+        assert ("from codex", "Codex") in contents_and_personas
+        assert ("from conan", "Conan") in contents_and_personas
+
+    async def test_peer_envelope_after_real_emitter_does_not_regress_cursor(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        """Real-emitter hop advances cursor; a later peer envelope with a
+        SHORTER message_history must not rewind the cursor (otherwise
+        the next real hop would re-render everything). Pins the
+        ``if new_messages:`` guard on the cursor-advance line."""
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state,
+        )
+        hop1_history = [
+            ModelResponse(parts=[TextPart(content="real hop 1")]),
+            ModelResponse(parts=[TextPart(content="real hop 1 cont.")]),
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=hop1_history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter="scheduler"),
+            broker=broker,
+        )
+        cursor_after_real = steps_state.get(_CORRELATION_ID).history_cursor
+        assert cursor_after_real == len(hop1_history)
+
+        # Peer envelope: shorter history (zero items — gated-out path).
+        await consumer.handler(
+            envelope=_envelope(message_history=[]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter="scheduler"),
+            broker=broker,
+        )
+        # Cursor must be unchanged.
+        assert steps_state.get(_CORRELATION_ID).history_cursor == cursor_after_real
+
+        # Next real hop appends — only the new entries should render.
+        hop2_history = [
+            *hop1_history,
+            ModelResponse(parts=[TextPart(content="real hop 2 new")]),
+        ]
+        send_count_before = persona_sender.send.await_count
+        await consumer.handler(
+            envelope=_envelope(message_history=hop2_history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(emitter="scheduler"),
+            broker=broker,
+        )
+        # Exactly one new post; not three.
+        assert persona_sender.send.await_count == send_count_before + 1
+        assert (
+            persona_sender.send.call_args_list[-1].kwargs["content"]
+            == "real hop 2 new"
+        )
+
+    async def test_early_skip_bypasses_render_delta(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The early-skip path on no-delta non-terminal hops short-
+        circuits before ``_render_delta`` runs. Proven by spying on the
+        module-level helper — the existing ``send.assert_not_called``
+        assertion is necessary but not sufficient (it would pass even
+        if rendering still walked the empty slice)."""
+        import calfkit_organization.bridge.steps as steps_mod
+
+        spy = MagicMock(return_value=[])
+        monkeypatch.setattr(steps_mod, "_render_delta", spy)
+
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state,
+        )
+        await consumer.handler(
+            envelope=_envelope(message_history=[]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        spy.assert_not_called()
 
 
 class TestOutboxRetryDedup:

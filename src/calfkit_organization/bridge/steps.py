@@ -111,11 +111,12 @@ sidesteps the "which agent owns this entry" question by not caching
 persona on :class:`StepsEntry` at all: each post resolves persona
 from ``result.emitter_node_id`` at post time, matching the outbox's
 pattern. A peer envelope with an empty message-history delta produces
-no posts and therefore no persona writes; the entry it may have
-seeded is just channel/message/cursor scaffolding. The real emitter's
-first content-bearing hop posts under its own identity. As a
-secondary benefit the consumer skips no-delta non-terminal envelopes
-before rendering, which removes most of the gated-out peer cost.
+no posts and therefore no persona writes; any entry it seeds is just
+channel/message/cursor scaffolding that the real emitter's first
+content-bearing hop reuses. The real emitter's hops post under their
+own identity. As a secondary benefit the consumer skips no-delta
+non-terminal envelopes before rendering, which removes most of the
+gated-out peer cost.
 
 **Failure semantics.** Every Discord operation is wrapped in a
 try/except that catches the common Discord error subclasses
@@ -566,8 +567,7 @@ def build_steps_consumer(
         )
 
         # No new content and not closing — gated-out peer mirror or
-        # a publish hop the agent loop didn't grow history on. Skip
-        # the render walk and the cursor write entirely.
+        # a publish hop the agent loop didn't grow history on.
         if not new_messages and not is_terminal:
             return
 
@@ -626,8 +626,8 @@ def build_steps_consumer(
         for step_content in rendered:
             await _post_in_thread(entry, persona, step_content)
 
-    # No gate — we want every hop. ConsumerNodeDef defaults to no gates,
-    # which gives us the full transition stream on this topic.
+    # No gate — we want every hop, including gated-out peer mirrors so
+    # the cursor stays consistent across all co-tenants.
     return ConsumerNodeDef[str](
         node_id=node_id,
         subscribe_topics=subscribe_topic,
