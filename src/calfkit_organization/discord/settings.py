@@ -6,6 +6,8 @@ pydantic-settings. All env vars are prefixed with ``DISCORD_``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,6 +23,9 @@ class DiscordSettings(BaseSettings):
                                                 slash command sync. ``None`` means
                                                 global sync (~1h propagation).
     - ``DISCORD_DEFAULT_CHANNEL_ID`` (optional) Channel used by example scripts.
+    - ``DISCORD_TRANSCRIPT_DB_PATH`` (optional) Path to the bridge-local SQLite
+                                                transcript store. Must sit on a
+                                                persistent volume in production.
     """
 
     model_config = SettingsConfigDict(
@@ -51,4 +56,10 @@ class DiscordSettings(BaseSettings):
         default=None,
         description="Discord user ID of the human owner. The bridge normalizer sets "
         "WireAuthor.is_human_owner when message.author.id matches this value.",
+    )
+    transcript_db_path: Path = Field(
+        default=Path("state/transcripts.sqlite3"),
+        description="Filesystem path to the bridge-local SQLite transcript store "
+        "(step transcripts + tool-call replay). The bridge is the sole reader/writer; "
+        "must reside on a persistent volume so transcripts survive restarts.",
     )
