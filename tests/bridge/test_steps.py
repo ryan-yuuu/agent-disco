@@ -54,7 +54,7 @@ from calfkit_organization.agents.definition import AgentDefinition
 from calfkit_organization.bridge.pending_wires import PendingWires, make_pending_entry
 from calfkit_organization.bridge.registry import AgentRegistry
 from calfkit_organization.bridge.steps import (
-    THREAD_HEADER,
+    THREAD_FALLBACK_NAME,
     build_steps_consumer,
 )
 from calfkit_organization.bridge.steps_state import StepsState
@@ -224,11 +224,10 @@ class TestRenderDelta:
             broker=broker,
         )
 
-        # Thread created exactly once + header + the text content = 2 posts.
-        assert persona_sender.send.await_count == 2
+        # Thread created exactly once; the rendered text content posts in it.
+        assert persona_sender.send.await_count == 1
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
-        assert contents[0] == THREAD_HEADER
-        assert contents[1] == "Let me check."
+        assert contents[0] == "Let me check."
         # All posts target the thread.
         for c in persona_sender.send.call_args_list:
             assert c.kwargs["thread_id"] == _THREAD_ID
@@ -266,11 +265,10 @@ class TestRenderDelta:
         )
 
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
-        # [header, tool-call]
-        assert len(contents) == 2
-        assert "**Calling `weather_lookup`**" in contents[1]
-        assert '"city"' in contents[1]
-        assert "```json" in contents[1]
+        assert len(contents) == 1
+        assert "**Calling `weather_lookup`**" in contents[0]
+        assert '"city"' in contents[0]
+        assert "```json" in contents[0]
 
     async def test_text_and_tool_call_in_same_response(
         self,
@@ -302,10 +300,9 @@ class TestRenderDelta:
         )
 
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
-        # [header, text, tool-call]
-        assert len(contents) == 3
-        assert contents[1] == "Let me look that up."
-        assert "**Calling `weather_lookup`**" in contents[2]
+        assert len(contents) == 2
+        assert contents[0] == "Let me look that up."
+        assert "**Calling `weather_lookup`**" in contents[1]
 
     async def test_whitespace_only_text_part_skipped(
         self,
@@ -330,8 +327,8 @@ class TestRenderDelta:
             broker=broker,
         )
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
-        # header + only the tool call (text was whitespace-only).
-        assert len(contents) == 2
+        # Only the tool call posted; text was whitespace-only so it was skipped.
+        assert len(contents) == 1
 
     async def test_user_and_system_prompts_are_not_echoed(
         self,
@@ -391,7 +388,7 @@ class TestRenderDelta:
             broker=broker,
         )
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
-        body = contents[1]
+        body = contents[0]
         assert "… (truncated)" in body
         # Whole content stays well under Discord's 2000 char cap.
         assert len(body) < 2000
@@ -422,7 +419,7 @@ class TestRenderDelta:
             broker=broker,
         )
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
-        body = contents[1]
+        body = contents[0]
         assert "**`weather_lookup` returned**" in body
         assert "temp 18, cloudy" in body
 
@@ -745,11 +742,135 @@ class TestInitialCursorSeed:
             headers=_headers(),
             broker=broker,
         )
-        # 2 posts only: header + the one new TextPart. Prior 3 are skipped.
-        assert persona_sender.send.await_count == 2
+        # One post only: the one new TextPart. Prior 3 are skipped.
+        assert persona_sender.send.await_count == 1
         contents = [c.kwargs["content"] for c in persona_sender.send.call_args_list]
-        assert contents[0] == THREAD_HEADER
-        assert contents[1] == "this turn"
+        assert contents[0] == "this turn"
+
+
+class TestThreadName:
+    """The transcript thread's name is derived from the user's prompt
+    content (the wire snapshot), not hardcoded around the agent
+    display name."""
+
+    async def test_thread_name_uses_user_prompt(
+        self,
+        persona_sender: AsyncMock,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        prompt = "lookup the weather in Tokyo"
+        wire = WireMessage(
+            event_id=_CORRELATION_ID,
+            kind="message",
+            slash_target=None,
+            message_id=_MESSAGE_ID,
+            channel_id=_CHANNEL_ID,
+            guild_id=4242,
+            content=prompt,
+            author=WireAuthor(
+                discord_user_id=111,
+                display_name="alice",
+                is_bot=False,
+                is_webhook=False,
+            ),
+            created_at=datetime.now(UTC),
+        )
+        pw = PendingWires()
+        pw.put(_CORRELATION_ID, make_pending_entry(wire))
+
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pw, steps_state,
+        )
+        await consumer.handler(
+            envelope=_envelope(message_history=[
+                ModelResponse(parts=[TextPart(content="hi")]),
+            ]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        persona_sender.client._fake_message.create_thread.assert_awaited_once()
+        kwargs = persona_sender.client._fake_message.create_thread.await_args.kwargs
+        assert kwargs["name"] == prompt
+
+    async def test_thread_name_truncated_at_100_chars(
+        self,
+        persona_sender: AsyncMock,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        prompt = "x" * 250
+        wire = WireMessage(
+            event_id=_CORRELATION_ID,
+            kind="message",
+            slash_target=None,
+            message_id=_MESSAGE_ID,
+            channel_id=_CHANNEL_ID,
+            guild_id=4242,
+            content=prompt,
+            author=WireAuthor(
+                discord_user_id=111,
+                display_name="alice",
+                is_bot=False,
+                is_webhook=False,
+            ),
+            created_at=datetime.now(UTC),
+        )
+        pw = PendingWires()
+        pw.put(_CORRELATION_ID, make_pending_entry(wire))
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pw, steps_state,
+        )
+        await consumer.handler(
+            envelope=_envelope(message_history=[
+                ModelResponse(parts=[TextPart(content="hi")]),
+            ]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        kwargs = persona_sender.client._fake_message.create_thread.await_args.kwargs
+        assert len(kwargs["name"]) == 100
+        assert kwargs["name"].endswith("…")
+
+    async def test_empty_prompt_falls_back_to_fallback_name(
+        self,
+        persona_sender: AsyncMock,
+        steps_state: StepsState,
+        broker: MagicMock,
+    ) -> None:
+        wire = WireMessage(
+            event_id=_CORRELATION_ID,
+            kind="message",
+            slash_target=None,
+            message_id=_MESSAGE_ID,
+            channel_id=_CHANNEL_ID,
+            guild_id=4242,
+            content="   \n  ",  # whitespace-only (e.g. attachment-only message)
+            author=WireAuthor(
+                discord_user_id=111,
+                display_name="alice",
+                is_bot=False,
+                is_webhook=False,
+            ),
+            created_at=datetime.now(UTC),
+        )
+        pw = PendingWires()
+        pw.put(_CORRELATION_ID, make_pending_entry(wire))
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pw, steps_state,
+        )
+        await consumer.handler(
+            envelope=_envelope(message_history=[
+                ModelResponse(parts=[TextPart(content="hi")]),
+            ]),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        kwargs = persona_sender.client._fake_message.create_thread.await_args.kwargs
+        assert kwargs["name"] == THREAD_FALLBACK_NAME
 
 
 class TestTerminalDelta:

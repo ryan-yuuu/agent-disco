@@ -13,6 +13,10 @@ envelope as a stateless delta against the cursor.
 * ``parent_channel_id`` / ``parent_message_id`` — the user's original
   Discord message. The thread is created off this message; intermediate
   step posts target ``parent_channel_id`` with ``thread_id``.
+* ``source_content`` — snapshot of the user's prompt content from the
+  inbound wire, used as the thread title at create time. Snapshotted
+  rather than re-fetched so an edit between invocation and thread
+  creation doesn't change what the transcript is titled.
 * ``thread_id`` — populated lazily on the first hop that produces a
   rendered step. ``None`` until then so a pure-text agent reply (no
   intermediates) does not create an empty thread.
@@ -64,6 +68,7 @@ class StepsEntry:
 
     parent_channel_id: int
     parent_message_id: int
+    source_content: str = ""
     thread_id: int | None = None
     history_cursor: int = 0
 

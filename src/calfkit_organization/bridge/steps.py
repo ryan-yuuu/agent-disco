@@ -205,9 +205,10 @@ fits in one message even after the tool name pushes the header longer."""
 
 TRUNCATION_MARKER: Final[str] = "\n… (truncated)"
 
-THREAD_HEADER: Final[str] = "_Step transcript — read-only._"
-"""Soft visual cue posted as the first message in the thread. Lock-on-
-completion is the load-bearing guard; this is just operator hint."""
+THREAD_FALLBACK_NAME: Final[str] = "Agent steps"
+"""Thread title used when the user's prompt content is empty (e.g.
+attachment-only messages). The normal title is the truncated user
+prompt — see :func:`_thread_name`."""
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -281,18 +282,21 @@ def _render_delta(messages: Sequence[ModelMessage]) -> list[str]:
     return out
 
 
-def _thread_name(display_name: str) -> str:
-    """Build a thread name within Discord's 100-char cap.
+def _thread_name(source_content: str) -> str:
+    """Build a thread name from the user's prompt content.
 
-    Falls back to a generic ``"agent steps"`` when the display name is
-    empty or whitespace-only (Discord rejects empty thread names with
-    a 400).
+    Whitespace is collapsed onto one line (Discord renders thread names
+    on a single line and would otherwise show ``\\n`` as a space anyway).
+    Falls back to :data:`THREAD_FALLBACK_NAME` when the content is
+    empty or whitespace-only — Discord rejects empty thread names
+    with a 400.
     """
-    base = (display_name or "").strip() or "agent"
-    raw = f"{base} steps"
-    if len(raw) <= THREAD_NAME_MAX_LEN:
-        return raw
-    return raw[: THREAD_NAME_MAX_LEN - 1] + "…"
+    text = " ".join(source_content.split())
+    if not text:
+        return THREAD_FALLBACK_NAME
+    if len(text) <= THREAD_NAME_MAX_LEN:
+        return text
+    return text[: THREAD_NAME_MAX_LEN - 1] + "…"
 
 
 def build_steps_consumer(
@@ -355,9 +359,7 @@ def build_steps_consumer(
             action,
         )
 
-    async def _create_thread(
-        entry: StepsEntry, display_name: str,
-    ) -> int | None:
+    async def _create_thread(entry: StepsEntry) -> int | None:
         """Create the transcript thread off the user's parent message.
 
         Returns the new thread id, or ``None`` on any Discord error.
@@ -418,7 +420,7 @@ def build_steps_consumer(
 
         try:
             thread = await message.create_thread(
-                name=_thread_name(display_name),
+                name=_thread_name(entry.source_content),
                 auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
             )
         except discord.Forbidden:
@@ -551,6 +553,7 @@ def build_steps_consumer(
             entry = StepsEntry(
                 parent_channel_id=wire.channel_id,
                 parent_message_id=wire.message_id,
+                source_content=wire.content,
                 history_cursor=pending.initial_message_history_length,
             )
             steps_state.put(correlation_id, entry)
@@ -617,11 +620,10 @@ def build_steps_consumer(
         retries from spamming logs.
         """
         if entry.thread_id is None:
-            thread_id = await _create_thread(entry, persona.name)
+            thread_id = await _create_thread(entry)
             if thread_id is None:
                 return
             entry.thread_id = thread_id
-            await _post_in_thread(entry, persona, THREAD_HEADER)
 
         for step_content in rendered:
             await _post_in_thread(entry, persona, step_content)
