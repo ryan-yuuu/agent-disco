@@ -26,6 +26,9 @@ class DiscordSettings(BaseSettings):
     - ``DISCORD_TRANSCRIPT_DB_PATH`` (optional) Path to the bridge-local SQLite
                                                 transcript store. Must sit on a
                                                 persistent volume in production.
+    - ``DISCORD_TRANSCRIPT_RETENTION_DAYS`` (optional) Prune transcript rows older
+                                                than this many days on startup
+                                                (default 30; 0 disables pruning).
     """
 
     model_config = SettingsConfigDict(
@@ -62,4 +65,9 @@ class DiscordSettings(BaseSettings):
         description="Filesystem path to the bridge-local SQLite transcript store "
         "(step transcripts + tool-call replay). The bridge is the sole reader/writer; "
         "must reside on a persistent volume so transcripts survive restarts.",
+    )
+    transcript_retention_days: int = Field(
+        default=30,
+        description="Age (in days) beyond which transcript rows are pruned on bridge "
+        "startup. Set to 0 (or negative) to keep transcripts forever (no pruning).",
     )

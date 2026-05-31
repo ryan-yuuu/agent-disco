@@ -34,6 +34,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 from collections import OrderedDict
 
 import discord
@@ -408,6 +409,20 @@ def main() -> None:
                     # right after the connection opens and before the
                     # gateway/consumers are built.
                     ingress.set_transcript_store(transcript_store)
+                    # Retention: drop transcript rows older than the
+                    # configured window on startup. The bridge is the sole
+                    # writer and restarts on every deploy, so a startup sweep
+                    # bounds growth without a background task. Disabled when
+                    # the setting is <= 0 (keep forever).
+                    if settings.transcript_retention_days > 0:
+                        cutoff = int(time.time()) - settings.transcript_retention_days * 86400
+                        pruned = await transcript_store.prune_older_than(cutoff)
+                        if pruned:
+                            logger.info(
+                                "pruned %d transcript row(s) older than %d days",
+                                pruned,
+                                settings.transcript_retention_days,
+                            )
                     # Construct the gateway early so its SlashCommandManager
                     # exists before we register the state consumer — the
                     # state consumer's callbacks must point at
