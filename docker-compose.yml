@@ -207,16 +207,19 @@ services:
       CALFCORD_WORKSPACE_DIR: /workspace
       CALFKIT_A2A_CHANNEL_NAME: private-a2a
     volumes:
-      # Trusted shared workspace: the entire project root, read-write.
-      # Agents can read/edit any file in the checkout (agents/*.md,
-      # src/, state/, etc.). Because this mount includes state/ at
-      # /workspace/state, the tools service does NOT separately mount
-      # ./state at /app/state — the data is already reachable through
-      # the project-root mount. To narrow this (e.g. only a scratch
-      # dir) or widen it (e.g. mount $HOME), drop a
-      # compose.override.yml next to this file with a ``volumes:``
-      # override.
-      - .:/workspace
+      # Trusted shared workspace: a DEDICATED ``./workspace`` dir,
+      # read-write — NOT the whole project root. The builtin
+      # fs/shell/grep/glob tools resolve their root from
+      # ``CALFCORD_WORKSPACE_DIR=/workspace`` (see
+      # ``tools/builtin/workspace.py``), so confining the mount to a
+      # scratch dir sandboxes them there instead of exposing agents/*.md,
+      # src/, state/, etc. The host dir is tracked via
+      # ``./workspace/.gitkeep`` (its contents are gitignored), so the
+      # mount point always exists and is owned by the host user (no
+      # root-owned auto-create). To widen it (e.g. mount the whole
+      # checkout or $HOME), drop a compose.override.yml next to this file
+      # with a ``volumes:`` override.
+      - ./workspace:/workspace
 
 # Named volume for Redpanda data so it survives ``docker compose down``.
 # ``docker compose down -v`` wipes it; that DESTROYS all Kafka topic

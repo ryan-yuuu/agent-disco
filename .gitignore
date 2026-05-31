@@ -225,6 +225,14 @@ CLAUDE.md
 # Calfkit per-agent runtime state (channel subscriptions, etc.)
 state/
 
+# Dedicated tools workspace (bind-mounted at /workspace in the tools
+# service). Runtime scratch the fs/shell tools write into; the dir itself
+# is tracked via .gitkeep, its contents are not source-controlled.
+# Use ``/workspace/*`` (not ``/workspace/``) so git still descends into the
+# dir and the ``!`` negation can re-include .gitkeep.
+/workspace/*
+!/workspace/.gitkeep
+
 # Local memory dir for in-flight agent context. Populated at runtime;
 # never source-controlled.
 agent-memory/
