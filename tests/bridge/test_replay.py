@@ -18,8 +18,9 @@ Coverage (see
 * The router (``self_agent_id=None``) never sees tool calls.
 * A self reply with no stored row, and a reply ``/clear`` truncated out of
   the records, are both never spliced.
-* Oversized ``str`` tool returns are truncated; short and non-``str`` ones
-  are not.
+* Oversized tool returns are truncated by their model-facing string —
+  covering ``str``, non-``str`` (structured) and ``BuiltinToolReturnPart``
+  content; short returns are left untouched.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from calfkit._vendor.pydantic_ai.messages import (
+    BuiltinToolReturnPart,
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
@@ -216,6 +218,61 @@ class TestProjectHistoryHydration:
         # The reply's own final text comes LAST.
         assert isinstance(out[3], ModelResponse)
         assert out[3].parts[0].content == "It's 18C."
+
+    def test_multi_row_hydration_pairs_each_delta_with_its_own_reply(self) -> None:
+        """Two distinct self replies (ids 2 and 4) each carry their OWN
+        persisted delta. Each delta must splice IMMEDIATELY BEFORE its own
+        reply's ModelResponse — never cross-contaminate the other reply.
+        """
+        records = [
+            _record(message_id=1, content="first question", author_display_name="ryan"),
+            _record(
+                message_id=2,
+                content="first answer",
+                author_display_name="Scribe",
+                author_agent_id="scribe",
+            ),
+            _record(message_id=3, content="second question", author_display_name="ryan"),
+            _record(
+                message_id=4,
+                content="second answer",
+                author_display_name="Scribe",
+                author_agent_id="scribe",
+            ),
+        ]
+        # Two DISTINCT deltas with different tool names so cross-pairing is
+        # detectable by object identity AND by content.
+        delta_a = _tool_delta(tool_name="alpha", content="A-result")
+        delta_b = _tool_delta(tool_name="beta", content="B-result")
+        out = project_history(
+            records,
+            self_agent_id="scribe",
+            hydration={2: delta_a, 4: delta_b},
+        )
+
+        # req1, [delta_a call, delta_a return], reply2,
+        # req3, [delta_b call, delta_b return], reply4 → 8 entries.
+        assert len(out) == 8
+        # First turn: ryan's request, then delta_a spliced before reply 2.
+        assert isinstance(out[0], ModelRequest)
+        assert out[0].parts[0].content == "<ryan> first question"
+        assert out[1] is delta_a[0]
+        assert out[2] is delta_a[1]
+        assert isinstance(out[3], ModelResponse)
+        assert out[3].parts[0].content == "first answer"
+        # Second turn: ryan's request, then delta_b spliced before reply 4.
+        assert isinstance(out[4], ModelRequest)
+        assert out[4].parts[0].content == "<ryan> second question"
+        assert out[5] is delta_b[0]
+        assert out[6] is delta_b[1]
+        assert isinstance(out[7], ModelResponse)
+        assert out[7].parts[0].content == "second answer"
+        # No cross-contamination: delta_a's objects never appear in the
+        # second turn's slice, and delta_b's never in the first turn's.
+        assert delta_b[0] not in out[1:3]
+        assert delta_b[1] not in out[1:3]
+        assert delta_a[0] not in out[5:7]
+        assert delta_a[1] not in out[5:7]
 
     def test_none_hydration_is_byte_identical(self) -> None:
         """hydration=None reproduces the no-replay projection exactly."""
@@ -546,15 +603,52 @@ class TestTruncateReplayToolReturns:
         assert out[0] is delta[0]
         assert out[0].parts[0].content == "18C"
 
-    def test_non_str_return_untouched(self) -> None:
+    def test_oversized_non_str_return_is_truncated(self) -> None:
+        """A structured (dict) tool return whose JSON-serialized form exceeds
+        the cap IS truncated — the model only ever sees
+        ``model_response_str()``, so swapping the dict for the truncated str
+        is lossless from the model's POV. (The old ``str``-only check missed
+        this entirely.)"""
         payload = {"temp": 18, "unit": "C", "blob": "y" * (REPLAY_TOOL_RETURN_MAX_CHARS + 100)}
         delta = [
             ModelRequest(parts=[ToolReturnPart(tool_name="t", content=payload, tool_call_id="t1")])
         ]
         out = _truncate_replay_tool_returns(delta)
-        # Non-str content is left entirely alone (no truncation logic applies).
+        content = out[0].parts[0].content
+        # Content is now a TRUNCATED STR (the JSON render, capped), not the dict.
+        assert isinstance(content, str)
+        assert len(content) <= REPLAY_TOOL_RETURN_MAX_CHARS
+        assert content.endswith("…(truncated)")
+        # Original delta is untouched (immutable copy; the dict is preserved).
+        assert delta[0].parts[0].content == payload
+
+    def test_small_non_str_return_untouched(self) -> None:
+        """A structured tool return whose serialized form is well under the
+        cap is left entirely alone (same object, dict content preserved)."""
+        payload = {"temp": 18, "unit": "C"}
+        delta = [
+            ModelRequest(parts=[ToolReturnPart(tool_name="t", content=payload, tool_call_id="t1")])
+        ]
+        out = _truncate_replay_tool_returns(delta)
         assert out[0] is delta[0]
         assert out[0].parts[0].content == payload
+
+    def test_oversized_builtin_tool_return_is_truncated(self) -> None:
+        """A ``BuiltinToolReturnPart`` (also a ``BaseToolReturnPart``) is
+        truncated by the same model-facing-string rule — the old check only
+        matched plain ``ToolReturnPart`` and missed this subtype."""
+        big = "b" * (REPLAY_TOOL_RETURN_MAX_CHARS + 200)
+        delta = [
+            ModelRequest(
+                parts=[BuiltinToolReturnPart(tool_name="web", content=big, tool_call_id="t1")]
+            )
+        ]
+        out = _truncate_replay_tool_returns(delta)
+        part = out[0].parts[0]
+        # Same subtype is preserved (dataclasses.replace keeps the class).
+        assert isinstance(part, BuiltinToolReturnPart)
+        assert len(part.content) <= REPLAY_TOOL_RETURN_MAX_CHARS
+        assert part.content.endswith("…(truncated)")
 
     def test_mixed_parts_only_oversized_str_trimmed(self) -> None:
         big = "z" * (REPLAY_TOOL_RETURN_MAX_CHARS + 10)

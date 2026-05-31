@@ -238,7 +238,16 @@ async def test_callback_swallows_edit_http_exception(store: TranscriptStore) -> 
 
 async def test_callback_expand_too_long_reply_shows_placeholder(store: TranscriptStore) -> None:
     """When the reply nearly fills the cap, the steps block degrades to a
-    short placeholder rather than an empty/garbled render."""
+    short placeholder rather than an empty/garbled render — and the final
+    expanded content is hard-clamped to the Discord 2000-char limit so the
+    edit never 400s.
+
+    A 1990-char reply is the chunked-first-chunk scenario: ``reply + sep +
+    placeholder`` is 2043 chars, which overflows 2000. Without the clamp the
+    ``edit_original_response`` payload would exceed the cap and Discord would
+    reject it (and the callback swallows the HTTPException), so the toggle
+    would silently fail to expand.
+    """
     try:
         view = StepsToggleView(store)
         button = _button(view)
@@ -246,7 +255,11 @@ async def test_callback_expand_too_long_reply_shows_placeholder(store: Transcrip
         interaction = _fake_interaction(content=long_reply)
         await button.callback(interaction)
         content = interaction.edit_original_response.call_args.kwargs["content"]
-        assert content.startswith(long_reply + _STEPS_SEP)
-        assert content.endswith(steps_toggle._STEPS_TOO_LONG_BLOCK)
+        # The reply text itself survives intact at the head; the separator +
+        # placeholder tail is what the clamp cuts when the total overflows.
+        assert content.startswith(long_reply)
+        # The load-bearing invariant: the edited content NEVER exceeds the
+        # Discord message cap (would fail before the clamp at 2043 chars).
+        assert len(content) <= steps_toggle._DISCORD_MESSAGE_LIMIT
     finally:
         await store.close()

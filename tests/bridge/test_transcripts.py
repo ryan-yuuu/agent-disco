@@ -107,6 +107,18 @@ async def test_close_when_not_connected_is_safe(tmp_path: pathlib.Path) -> None:
     await store.close()
 
 
+async def test_methods_before_connect_raise_runtime_error(tmp_path: pathlib.Path) -> None:
+    # A store that was never connected has no live aiosqlite connection, so
+    # every DB method must fail fast with RuntimeError (via _require_conn)
+    # rather than dereferencing a None connection — guarding the documented
+    # "call connect() first" contract on BOTH a read and a write path.
+    store = TranscriptStore(_db_path(tmp_path))
+    with pytest.raises(RuntimeError):
+        await store.get_by_final_message_id("msg-9001")
+    with pytest.raises(RuntimeError):
+        await store.write_turn(_row())
+
+
 async def test_write_then_get_round_trips_all_fields(tmp_path: pathlib.Path) -> None:
     store = TranscriptStore(_db_path(tmp_path))
     async with store:
@@ -130,6 +142,9 @@ async def test_write_then_get_round_trips_all_fields(tmp_path: pathlib.Path) -> 
 
 
 async def test_insert_or_replace_idempotent_latest_wins(tmp_path: pathlib.Path) -> None:
+    # write_turn now uses ON CONFLICT(correlation_id) DO UPDATE; a retry
+    # under the SAME correlation_id must still overwrite the prior row in
+    # place (PK-idempotent), latest values winning.
     store = TranscriptStore(_db_path(tmp_path))
     async with store:
         await store.write_turn(_row(correlation_id="corr-dup", final_message_id="msg-A", created_at=10))
@@ -201,12 +216,12 @@ async def test_unique_final_message_id_index_enforced(tmp_path: pathlib.Path) ->
     # an existing final_message_id must therefore raise — this is the
     # direct proof the unique index exists and is enforced.
     #
-    # NB: ``write_turn`` deliberately uses INSERT OR REPLACE (idempotent
-    # on the correlation_id PK for outbox retries). REPLACE resolves *any*
-    # uniqueness conflict — including this secondary index — by deleting
-    # the conflicting row rather than aborting, so it would NOT raise here;
-    # that REPLACE behavior is asserted separately below. Hence we go
-    # straight to the connection with a plain INSERT to exercise the index.
+    # NB: ``write_turn`` uses INSERT ... ON CONFLICT(correlation_id) DO
+    # UPDATE — its conflict target is only the correlation_id PK, so a
+    # secondary-index (final_message_id) collision is NOT resolved by it
+    # and propagates as IntegrityError too; that behavior is asserted
+    # directly via ``write_turn`` below. Here we go straight to the
+    # connection with a plain INSERT to exercise the index in isolation.
     store = TranscriptStore(_db_path(tmp_path))
     async with store:
         await store.write_turn(_row(correlation_id="corr-X", final_message_id="shared-msg"))
@@ -220,24 +235,23 @@ async def test_unique_final_message_id_index_enforced(tmp_path: pathlib.Path) ->
             )
 
 
-async def test_write_turn_replace_collapses_duplicate_final_message_id(tmp_path: pathlib.Path) -> None:
-    # Because write_turn is INSERT OR REPLACE, a different correlation_id
-    # that reuses an existing final_message_id does not raise — REPLACE
-    # deletes the conflicting (unique-index) row. The invariant the index
-    # guarantees still holds: the table never carries two rows sharing a
-    # final_message_id. The original correlation_id's row is gone.
+async def test_write_turn_rejects_duplicate_final_message_id_across_correlations(tmp_path: pathlib.Path) -> None:
+    # write_turn's ON CONFLICT target is only the correlation_id PK, so a
+    # DIFFERENT correlation_id that reuses an existing final_message_id
+    # violates the secondary UNIQUE index and is rejected LOUDLY with an
+    # IntegrityError — rather than the old INSERT OR REPLACE behavior that
+    # silently evicted the prior row (and its transcript) to make room.
     store = TranscriptStore(_db_path(tmp_path))
     async with store:
         await store.write_turn(_row(correlation_id="corr-X", final_message_id="shared-msg", created_at=1))
-        await store.write_turn(_row(correlation_id="corr-Y", final_message_id="shared-msg", created_at=2))
+        with pytest.raises(sqlite3.IntegrityError):
+            await store.write_turn(_row(correlation_id="corr-Y", final_message_id="shared-msg", created_at=2))
 
+        # The original row is untouched — nothing was silently evicted.
         surviving = await store.get_by_final_message_id("shared-msg")
         assert surviving is not None
-        assert surviving.correlation_id == "corr-Y"
-        assert surviving.created_at == 2
-        # The displaced correlation_id no longer has any row.
-        all_rows = await store.get_by_final_message_ids(["shared-msg"])
-        assert len(all_rows) == 1
+        assert surviving.correlation_id == "corr-X"
+        assert surviving.created_at == 1
 
 
 async def test_prune_older_than_deletes_strictly_older(tmp_path: pathlib.Path) -> None:

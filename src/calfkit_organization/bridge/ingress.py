@@ -62,9 +62,9 @@ from typing import Any, Final
 
 import uuid_utils
 from calfkit._vendor.pydantic_ai.messages import (
+    BaseToolReturnPart,
     ModelMessage,
     ModelMessagesTypeAdapter,
-    ToolReturnPart,
 )
 from calfkit.client import Client, InvocationHandle
 
@@ -124,18 +124,26 @@ cut rather than genuinely short."""
 
 
 def _truncate_replay_tool_returns(messages: list[ModelMessage]) -> list[ModelMessage]:
-    """Cap oversized ``str`` tool-return payloads in a replayed delta.
+    """Cap oversized tool-return payloads in a replayed delta.
 
-    Walks ``messages`` (the deserialized structured slice of a prior
-    turn) and, for every :class:`ToolReturnPart` whose ``content`` is a
-    ``str`` longer than :data:`REPLAY_TOOL_RETURN_MAX_CHARS`, replaces the
-    part with an immutable copy carrying the truncated string (plus
-    :data:`_REPLAY_TRUNCATION_MARKER`). Non-``str`` contents (structured
-    payloads) and already-short strings are left untouched; messages with
-    no oversized tool returns are returned unchanged (the same object),
-    and a message that does need trimming is rebuilt with
-    :func:`dataclasses.replace` on the affected parts so the deserialized
-    objects are never mutated in place.
+    Walks ``messages`` (the deserialized structured slice of a prior turn)
+    and, for every :class:`BaseToolReturnPart` (so both plain
+    :class:`ToolReturnPart` *and* :class:`BuiltinToolReturnPart`) whose
+    model-facing string — ``part.model_response_str()`` — exceeds
+    :data:`REPLAY_TOOL_RETURN_MAX_CHARS`, replaces the part with an
+    immutable copy whose ``content`` is the truncated string (plus
+    :data:`_REPLAY_TRUNCATION_MARKER`). This catches the cases the old
+    ``str``-only check missed: a non-``str`` ``content`` (a structured
+    payload) that serializes large, and ``BuiltinToolReturnPart``. Swapping
+    a structured ``content`` for a truncated ``str`` is acceptable because
+    the model only ever sees ``model_response_str()`` regardless — and a
+    ``str`` round-trips through that method unchanged.
+
+    Already-small returns are left untouched; messages with no oversized
+    tool returns are returned unchanged (the same object), and a message
+    that does need trimming is rebuilt with :func:`dataclasses.replace` on
+    the affected parts so the deserialized objects are never mutated in
+    place.
 
     Returns a NEW list — callers can splice it into the hydration map
     without worrying about aliasing the input. The non-mutating contract
@@ -149,16 +157,14 @@ def _truncate_replay_tool_returns(messages: list[ModelMessage]) -> list[ModelMes
         parts = getattr(msg, "parts", None)
         if parts is not None:
             for idx, part in enumerate(parts):
-                if (
-                    isinstance(part, ToolReturnPart)
-                    and isinstance(part.content, str)
-                    and len(part.content) > REPLAY_TOOL_RETURN_MAX_CHARS
-                ):
-                    if new_parts is None:
-                        new_parts = list(parts)
-                    head = REPLAY_TOOL_RETURN_MAX_CHARS - len(_REPLAY_TRUNCATION_MARKER)
-                    truncated = part.content[: max(head, 0)] + _REPLAY_TRUNCATION_MARKER
-                    new_parts[idx] = dataclasses.replace(part, content=truncated)
+                if isinstance(part, BaseToolReturnPart):
+                    rendered = part.model_response_str()
+                    if len(rendered) > REPLAY_TOOL_RETURN_MAX_CHARS:
+                        if new_parts is None:
+                            new_parts = list(parts)
+                        head = REPLAY_TOOL_RETURN_MAX_CHARS - len(_REPLAY_TRUNCATION_MARKER)
+                        truncated = rendered[: max(head, 0)] + _REPLAY_TRUNCATION_MARKER
+                        new_parts[idx] = dataclasses.replace(part, content=truncated)
         if new_parts is None:
             out.append(msg)
         else:

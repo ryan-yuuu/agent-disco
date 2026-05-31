@@ -255,6 +255,16 @@ class StepsToggleView(discord.ui.View):
             else:
                 steps_text, _count = render_steps(row.delta_json, limit=limit)
             new_content = reply_text + _STEPS_SEP + steps_text
+            # Defensive clamp: when the reply alone is already near the
+            # 2000-char cap, the placeholder branch
+            # (``steps_text = _STEPS_TOO_LONG_BLOCK``) still appends the
+            # separator + placeholder and can push ``new_content`` past the
+            # limit — Discord 400s the edit and we'd swallow it. Hard-cap to
+            # the message limit so the expand always lands. (The render
+            # branch already budgets to fit, so this only bites the
+            # placeholder branch in practice.)
+            if len(new_content) > _DISCORD_MESSAGE_LIMIT:
+                new_content = new_content[:_DISCORD_MESSAGE_LIMIT]
             new_button_label = _EXPANDED_LABEL
 
         view = discord.ui.View(timeout=None)

@@ -183,13 +183,31 @@ class TranscriptStore:
     async def write_turn(self, row: TranscriptRow) -> None:
         """Upsert a transcript row, keyed on ``correlation_id``.
 
-        Uses ``INSERT OR REPLACE`` so an outbox retry that re-posts under
-        the same ``correlation_id`` overwrites the prior row rather than
-        erroring or duplicating. The query is fully parameterized.
+        Uses ``INSERT ... ON CONFLICT(correlation_id) DO UPDATE`` so an
+        outbox retry that re-posts under the **same** ``correlation_id``
+        overwrites the prior row in place (PK-idempotent for retries),
+        rather than erroring or duplicating. The query is fully
+        parameterized.
+
+        Unlike the previous ``INSERT OR REPLACE``, a conflict on the
+        *secondary* ``UNIQUE`` index ``ix_transcripts_final`` — i.e. a
+        **different** ``correlation_id`` reusing an existing
+        ``final_message_id`` — is NOT silently resolved by evicting the
+        conflicting row. The conflict target names only the
+        ``correlation_id`` PK, so any other uniqueness violation propagates
+        as :class:`sqlite3.IntegrityError`. That makes a final-message-id
+        collision (which should never happen — Discord ids are unique)
+        loud rather than silently dropping a prior turn's transcript.
         """
         conn = self._require_conn()
         await conn.execute(
-            f"INSERT OR REPLACE INTO transcripts ({_COLUMN_LIST}) VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO transcripts ({_COLUMN_LIST}) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(correlation_id) DO UPDATE SET "
+            "conversation_key=excluded.conversation_key, "
+            "agent_id=excluded.agent_id, "
+            "final_message_id=excluded.final_message_id, "
+            "delta_json=excluded.delta_json, "
+            "created_at=excluded.created_at",
             (
                 row.correlation_id,
                 row.conversation_key,

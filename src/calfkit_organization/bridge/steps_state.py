@@ -129,7 +129,10 @@ class StepsState:
         Last-writer-wins on a duplicate id. If at capacity, evicts the
         oldest entry and logs a WARNING — its subsequent hops, if any
         later arrive, will be quietly dropped by the consumer (no entry
-        to look up).
+        to look up). The evicted entry's in-flight debounce task (if any)
+        is cancelled so it doesn't leak: its progress message is abandoned
+        anyway, and leaving the task pending would strand a coroutine that
+        edits a message no entry tracks.
         """
         if correlation_id in self._entries:
             self._entries[correlation_id] = entry
@@ -137,7 +140,12 @@ class StepsState:
             return
         self._entries[correlation_id] = entry
         if len(self._entries) > self._capacity:
-            evicted_id, _ = self._entries.popitem(last=False)
+            evicted_id, evicted = self._entries.popitem(last=False)
+            # Cancel (don't await — this is a sync method) the evicted
+            # entry's trailing-edit task so the orphaned debounce coroutine
+            # doesn't linger after its tracking entry is gone.
+            if evicted.debounce_task is not None and not evicted.debounce_task.done():
+                evicted.debounce_task.cancel()
             logger.warning(
                 "steps_state evicted correlation_id=%s (cap=%d); any further hops for this invocation will be skipped",
                 evicted_id,

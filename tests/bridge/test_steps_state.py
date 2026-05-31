@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -148,6 +149,29 @@ class TestLRU:
         with caplog.at_level(logging.WARNING):
             s.put("b", _entry())
         assert any("steps_state evicted" in r.message and "correlation_id=a" in r.message for r in caplog.records)
+
+    async def test_eviction_cancels_evicted_debounce_task(self) -> None:
+        """The oldest entry's in-flight debounce task is cancelled on
+        eviction so the orphaned trailing-edit coroutine doesn't leak after
+        its tracking entry is gone."""
+        s = StepsState(capacity=1)
+        # A real pending task standing in for the entry's live debounce
+        # timer (a long sleep that will never naturally fire in the test).
+        pending = asyncio.create_task(asyncio.sleep(3600))
+        try:
+            victim = _entry()
+            victim.debounce_task = pending
+            s.put("a", victim)
+            assert not pending.cancelled()  # still alive while resident
+            # Push past capacity → "a" is evicted and its task cancelled.
+            s.put("b", _entry())
+            # cancel() is synchronous request; let the loop process it so
+            # the task transitions to the cancelled state.
+            await asyncio.sleep(0)
+            assert pending.cancelled()
+        finally:
+            if not pending.done():
+                pending.cancel()
 
 
 class TestEntry:

@@ -317,10 +317,15 @@ class DiscordPersonaSender:
                 message (e.g. the step-transcript expand toggle). They are
                 appended to the ``reply_to`` button view when one exists,
                 otherwise carried on a fresh view. Clicks dispatch via the
-                persistent view registered on the gateway client, matched by
-                ``custom_id`` — not by the throwaway view created here, which
-                only emits the component JSON and is garbage-collected after
-                its default timeout.
+                SEPARATE persistent view registered on the gateway client
+                (matched by ``custom_id``), NOT by the throwaway view created
+                here. That throwaway view emits the component JSON and is
+                itself registered into this persona client's view store on
+                every send; it is auto-evicted by discord.py once its
+                ~180-second default timeout elapses (it is not merely emitted
+                and immediately garbage-collected). Persistence of the button
+                across the throwaway view's expiry is what makes the
+                gateway-side persistent view the actual click handler.
 
         Returns:
             :class:`SentMessage`. Its ``channel_id`` field is ``thread_id``
@@ -393,6 +398,8 @@ class DiscordPersonaSender:
         Raises:
             RuntimeError: If :meth:`start` has not been called.
             discord.NotFound: If the message no longer exists.
+            discord.Forbidden: If the bot lacks ``Manage Webhooks`` and a
+                webhook does not yet exist in the channel.
             discord.HTTPException: For other Discord-side failures.
         """
         if self._client is None:
@@ -410,6 +417,8 @@ class DiscordPersonaSender:
         Raises:
             RuntimeError: If :meth:`start` has not been called.
             discord.NotFound: If the message was already deleted.
+            discord.Forbidden: If the bot lacks ``Manage Webhooks`` and a
+                webhook does not yet exist in the channel.
             discord.HTTPException: For other Discord-side failures.
         """
         if self._client is None:
