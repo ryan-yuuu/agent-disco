@@ -252,6 +252,32 @@ def build_outbox_consumer(
                 turn_delta=delta if rendered and transcript_store.enabled else None,
             )
             return
+        except (TypeError, RuntimeError) as e:
+            # ``DiscordPersonaSender.send`` raises two NON-Discord,
+            # operator-actionable errors that ``except DiscordException``
+            # above does not catch: ``TypeError`` when ``wire.channel_id``
+            # resolves to a non-text channel (webhooks need a parent text
+            # channel — see ``persona._fetch_text_channel``) and
+            # ``RuntimeError`` when the sender was never started. Neither is
+            # agent-fixable or transient, and ``classify_error`` only
+            # understands Discord exceptions, so route them to a loud drop
+            # here rather than letting a raw traceback escape into the
+            # calfkit consumer — which would forfeit this consumer's
+            # structured per-failure logging and its best-effort
+            # never-raises contract, and (depending on redelivery) risk a
+            # re-consume that double-posts. No transcript row is written
+            # (the post never landed), so the (never-posted) reply's toggle
+            # has nothing to read — the documented missing-row degradation.
+            logger.error(
+                "outbox post failed channel_id=%s event_id=%s agent=%s: "
+                "non-retryable sender error type=%s (%s); dropping",
+                wire.channel_id,
+                wire.event_id,
+                result.emitter_node_id,
+                type(e).__name__,
+                e,
+            )
+            return
 
         # Successful post. If the turn used tools (and the store is
         # enabled), persist the transcript row keyed on correlation_id
@@ -870,7 +896,18 @@ async def _post_chunked_fallback(
                     final_message_id=sent.id,
                     delta=turn_delta,
                 )
-        except discord.DiscordException as e:
+        except (discord.DiscordException, TypeError, RuntimeError) as e:
+            # Also catch the NON-Discord ``TypeError`` / ``RuntimeError``
+            # ``persona_sender.send`` can raise (non-text channel, sender
+            # not started). This is the last-resort path, so a per-chunk
+            # failure of ANY recognized kind must be recorded and the loop
+            # must continue — otherwise one bad chunk aborts the rest and
+            # the "all chunks failed" summary below never fires, defeating
+            # the independent-partial-delivery guarantee. Still
+            # ``Exception``-bounded (never ``BaseException``) so a shutdown
+            # ``CancelledError`` propagates. ``getattr(..., "status", None)``
+            # yields ``None`` for the non-HTTP errors, which the summary
+            # tolerates.
             status = getattr(e, "status", None)
             failure_statuses.append(status)
             logger.error(

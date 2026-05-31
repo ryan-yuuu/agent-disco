@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import sqlite3
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -77,13 +78,14 @@ class _SpyNullStore(NullTranscriptStore):
 _CORRELATION_ID = "evt-1"
 
 
-def _wire() -> WireMessage:
+def _wire(*, source_channel_id: int | None = None) -> WireMessage:
     return WireMessage(
         event_id=_CORRELATION_ID,
         kind="message",
         slash_target=None,
         message_id=12345,
         channel_id=6789,
+        source_channel_id=source_channel_id,
         guild_id=4242,
         content="hello",
         author=WireAuthor(
@@ -864,3 +866,305 @@ class TestTranscriptAndToggle:
         assert chunk_calls[0].kwargs["extra_buttons"] is None
         # No transcript write was attempted against the disabled store.
         assert null_store.write_calls == []
+
+    async def test_failed_post_writes_no_row(
+        self,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tool-using turn whose reply post FAILS terminally (403, not
+        retryable) must write NO transcript row: the write is reached only
+        after a successful post. Otherwise the store would accumulate
+        orphaned rows keyed to message ids that were never posted, and a
+        later click would surface steps for a reply the user never saw."""
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        persona_sender = AsyncMock()
+        persona_sender.send = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
+
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        with caplog.at_level(logging.WARNING):
+            await consumer.handler(
+                envelope=_envelope(
+                    final_text="It's 18 degrees in Tokyo.",
+                    message_history=_tool_using_history(),
+                ),
+                correlation_id=_CORRELATION_ID,
+                headers=_headers(),
+                broker=broker,
+            )
+
+        # The post was attempted (and the toggle WAS built for it), but no
+        # row exists for the would-be reply id, nor for any other id.
+        persona_sender.send.assert_awaited_once()
+        assert await transcript_store.get_by_final_message_id("99999") is None
+
+    async def test_chunked_fallback_first_chunk_failure_writes_no_row(
+        self,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """In the chunked fallback, a FIRST-chunk failure writes no row (there
+        is no host message id to key it on) — but the loop still attempts the
+        remaining chunks (independent partial delivery). Drives a real
+        ``turn_delta`` so the transcript branch is live (the existing
+        chunk-2-fails test runs with ``turn_delta=None``)."""
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+
+        for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
+            pending_wires.increment_retry(_CORRELATION_ID)
+
+        persona_sender = AsyncMock()
+        second_chunk = SentMessage(id=70002, channel_id=6789)
+        # Main reply fails agent-fixably → chunk fallback. Chunk 0 fails;
+        # chunk 1 succeeds.
+        persona_sender.send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 400),
+                _http_exc(discord.HTTPException, 403),
+                second_chunk,
+            ]
+        )
+
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(
+                final_text="x" * 3000,  # forces ≥2 chunks
+                message_history=_tool_using_history(),
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        # No row written: chunk 0 (the only toggle-bearing chunk) never
+        # landed a message id, and chunk 1 doesn't carry the toggle/write.
+        assert await transcript_store.get_by_final_message_id("70002") is None
+        # The loop still attempted the second chunk after the first failed
+        # (main + 2 chunks = 3 sends) — partial delivery preserved.
+        assert persona_sender.send.await_count == 3
+
+    async def test_write_transcript_failure_is_swallowed(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+        calfkit_client: MagicMock,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """A ``write_turn`` that RAISES (e.g. ``sqlite3.OperationalError`` on a
+        full disk, or the deliberate ``IntegrityError`` on a final-message-id
+        collision) must never crash the consumer or undo the already-posted
+        reply: ``_write_transcript`` swallows + logs it. The reply is treated
+        as successfully posted; only the (toggle's) row is missing."""
+
+        class _RaisingStore(TranscriptStore):
+            async def write_turn(self, row: TranscriptRow) -> None:
+                raise sqlite3.OperationalError("disk I/O error")
+
+        store = _RaisingStore(tmp_path / "state" / "transcripts.sqlite3")
+        await store.connect()
+        try:
+            consumer = build_outbox_consumer(
+                persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=store
+            )
+            with caplog.at_level(logging.ERROR):
+                # Must not raise out of the handler.
+                await consumer.handler(
+                    envelope=_envelope(
+                        final_text="It's 18 degrees in Tokyo.",
+                        message_history=_tool_using_history(),
+                    ),
+                    correlation_id=_CORRELATION_ID,
+                    headers=_headers(),
+                    broker=broker,
+                )
+
+            # The reply posted (with the toggle); the write failure was
+            # logged but did not escape.
+            persona_sender.send.assert_awaited_once()
+            assert persona_sender.send.call_args.kwargs["extra_buttons"] is not None
+            assert any("step toggle will have no row to expand" in r.message for r in caplog.records)
+        finally:
+            await store.close()
+
+    async def test_thread_reply_uses_source_channel_id_as_conversation_key(
+        self,
+        persona_sender: AsyncMock,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+    ) -> None:
+        """``conversation_key`` is the replay read scope: for a thread-origin
+        wire it must be ``source_channel_id`` (not the parent ``channel_id``),
+        or tool-call replay silently fails to hydrate in threads. Every other
+        outbox test exercises only the ``channel_id`` fallback."""
+        thread_pw = PendingWires()
+        thread_pw.put(_CORRELATION_ID, make_pending_entry(_wire(source_channel_id=55555)))
+
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), thread_pw, calfkit_client, transcript_store=transcript_store
+        )
+        await consumer.handler(
+            envelope=_envelope(
+                final_text="It's 18 degrees in Tokyo.",
+                message_history=_tool_using_history(),
+            ),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        row = await transcript_store.get_by_final_message_id("99999")
+        assert row is not None
+        assert row.conversation_key == "55555"  # source_channel_id wins over channel_id (6789)
+
+    async def test_render_failure_posts_reply_without_toggle_or_row(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The outbox-side ``_render_step_count`` guard: if ``_render_delta``
+        raises (``ToolCallPart.args_as_json_str`` blows up on malformed args)
+        the step count degrades to 0 — so the reply STILL posts, just without
+        the toggle and without a transcript row (degraded, not fatal). Mirrors
+        the toggle callback's render guard."""
+
+        def _boom(_messages: object) -> list[str]:
+            raise ValueError("malformed tool-call args")
+
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._render_delta", _boom)
+
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        with caplog.at_level(logging.ERROR):
+            await consumer.handler(
+                envelope=_envelope(
+                    final_text="It's 18 degrees in Tokyo.",
+                    message_history=_tool_using_history(),
+                ),
+                correlation_id=_CORRELATION_ID,
+                headers=_headers(),
+                broker=broker,
+            )
+
+        # Reply posted, but with no toggle and no row.
+        persona_sender.send.assert_awaited_once()
+        assert persona_sender.send.call_args.kwargs["extra_buttons"] is None
+        assert await transcript_store.get_by_final_message_id("99999") is None
+        assert any("posting reply without toggle/transcript" in r.message for r in caplog.records)
+
+
+class TestNonDiscordSenderErrors:
+    """``DiscordPersonaSender.send`` raises two NON-Discord, operator-actionable
+    errors that the Discord-only catch must not let escape into the calfkit
+    consumer: ``TypeError`` (``wire.channel_id`` is not a text channel) and
+    ``RuntimeError`` (sender not started). They are dropped with a loud log on
+    the main path, and tolerated per-chunk on the last-resort fallback."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+
+    @pytest.mark.parametrize(
+        ("exc", "type_name"),
+        [
+            (TypeError("Channel 6789 is a ForumChannel, not a TextChannel"), "TypeError"),
+            (RuntimeError("DiscordPersonaSender not started"), "RuntimeError"),
+        ],
+    )
+    async def test_non_discord_sender_error_drops_without_raising(
+        self,
+        exc: Exception,
+        type_name: str,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+    ) -> None:
+        """A non-Discord sender error drops with an operator-actionable ERROR
+        (not a raw traceback into calfkit), writes no row, and never raises —
+        upholding the outbox's best-effort never-raises contract for a class
+        ``except discord.DiscordException`` does not cover."""
+        persona_sender = AsyncMock()
+        persona_sender.send = AsyncMock(side_effect=exc)
+
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        with caplog.at_level(logging.ERROR):
+            # Must not raise.
+            await consumer.handler(
+                envelope=_envelope(
+                    final_text="It's 18 degrees in Tokyo.",
+                    message_history=_tool_using_history(),
+                ),
+                correlation_id=_CORRELATION_ID,
+                headers=_headers(),
+                broker=broker,
+            )
+
+        persona_sender.send.assert_awaited_once()
+        assert await transcript_store.get_by_final_message_id("99999") is None
+        assert any("non-retryable sender error" in r.message and type_name in r.message for r in caplog.records)
+
+    async def test_chunked_fallback_continues_past_non_discord_chunk_error(
+        self,
+        pending_wires: PendingWires,
+        broker: MagicMock,
+        calfkit_client: MagicMock,
+        transcript_store: TranscriptStore,
+    ) -> None:
+        """A non-Discord error on an EARLY chunk must not abort the loop: the
+        broadened per-chunk catch records it and the remaining chunks still
+        post (independent partial delivery). Regression guard for the
+        ``(DiscordException, TypeError, RuntimeError)`` chunk catch."""
+        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+
+        for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
+            pending_wires.increment_retry(_CORRELATION_ID)
+
+        persona_sender = AsyncMock()
+        second_chunk = SentMessage(id=70002, channel_id=6789)
+        # Main reply 400 → chunk fallback. Chunk 0 raises a non-Discord
+        # TypeError; chunk 1 still posts.
+        persona_sender.send = AsyncMock(
+            side_effect=[
+                _http_exc(discord.HTTPException, 400),
+                TypeError("Channel 6789 is a ForumChannel, not a TextChannel"),
+                second_chunk,
+            ]
+        )
+
+        consumer = build_outbox_consumer(
+            persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
+        )
+        # Must not raise even though a chunk send raised a non-Discord error.
+        await consumer.handler(
+            envelope=_envelope(final_text="x" * 3000),  # forces ≥2 chunks
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+
+        # main + 2 chunks: the loop continued past the TypeError on chunk 0.
+        assert persona_sender.send.await_count == 3

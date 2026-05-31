@@ -21,6 +21,7 @@ repo runs under ``asyncio_mode = "auto"`` (see ``pyproject.toml``), so
 from __future__ import annotations
 
 import pathlib
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -42,7 +43,11 @@ from calfkit_organization.bridge.steps_toggle import (
     build_toggle_button,
     render_steps,
 )
-from calfkit_organization.bridge.transcripts import TranscriptRow, TranscriptStore
+from calfkit_organization.bridge.transcripts import (
+    NullTranscriptStore,
+    TranscriptRow,
+    TranscriptStore,
+)
 
 _FINAL_MESSAGE_ID = 90001
 _REPLY_TEXT = "It's 18 degrees in Tokyo."
@@ -266,7 +271,9 @@ async def test_callback_missing_row_sends_ephemeral_followup(tmp_path: pathlib.P
         interaction.followup.send.assert_awaited_once()
         kwargs = interaction.followup.send.call_args.kwargs
         assert kwargs["ephemeral"] is True
-        assert kwargs["content"] == "Step details are no longer available."
+        assert kwargs["content"] == (
+            "Step details aren't available for this response (it may still be saving, or has expired)."
+        )
     finally:
         await store.close()
 
@@ -393,3 +400,44 @@ async def test_callback_aborts_when_defer_fails(store: TranscriptStore) -> None:
         interaction.followup.send.assert_not_awaited()
     finally:
         await store.close()
+
+
+async def test_callback_store_read_failure_sends_error_followup() -> None:
+    """A store read that RAISES (e.g. aiosqlite/sqlite3 disk I/O error, a
+    malformed WAL, or a lock timeout) must NOT escape the callback after the
+    defer — that would hang the ephemeral "thinking" spinner until the
+    interaction token expires. The read is guarded like ``render_steps``: the
+    callback logs, sends ONE ephemeral error followup, and never raises."""
+    store = MagicMock()
+    store.get_by_final_message_id = AsyncMock(side_effect=sqlite3.OperationalError("disk I/O error"))
+    view = StepsToggleView(store)
+    button = _button(view)
+    interaction = _fake_interaction()
+    # Must not raise.
+    await button.callback(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+    interaction.followup.send.assert_awaited_once()
+    kwargs = interaction.followup.send.call_args.kwargs
+    assert kwargs["ephemeral"] is True
+    assert kwargs["content"] == "Could not load the steps for this response."
+
+
+async def test_callback_null_store_degrades_to_unavailable_followup() -> None:
+    """The reader path never branches on ``store.enabled`` — it relies on the
+    :class:`NullTranscriptStore`'s no-op read returning ``None``. Handing the
+    view the real failed-open substitute must therefore degrade to the
+    ephemeral "not available" followup rather than crash, proving the
+    Null-Object reader contract end-to-end (not just the surface)."""
+    view = StepsToggleView(NullTranscriptStore())
+    button = _button(view)
+    interaction = _fake_interaction()
+    await button.callback(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+    interaction.followup.send.assert_awaited_once()
+    kwargs = interaction.followup.send.call_args.kwargs
+    assert kwargs["ephemeral"] is True
+    assert kwargs["content"] == (
+        "Step details aren't available for this response (it may still be saving, or has expired)."
+    )

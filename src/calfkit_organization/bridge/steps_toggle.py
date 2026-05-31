@@ -151,9 +151,15 @@ class StepsToggleView(discord.ui.View):
            ephemeral flag is IGNORED (verified in discord.py 2.7.1). This
            acknowledges the click and lifts the 3-second deadline off the
            DB read below.
-        2. Look up the transcript row by the clicked message's id. If it's
-           gone (pruned / pre-restart / never written), send an ephemeral
-           "no longer available" followup and stop.
+        2. Look up the transcript row by the clicked message's id. The read
+           is GUARDED: it is a live aiosqlite call (a dedicated-thread DB
+           query) that can raise on disk I/O, a malformed WAL, or a lock
+           timeout — none of which is a :class:`discord.HTTPException`, so
+           without the guard it would escape AFTER the defer and hang the
+           spinner. On a read error we log + send an error followup. A clean
+           miss (pruned / pre-restart / never-written / disabled store)
+           sends the ephemeral "not available for this response" followup
+           and stops.
         3. Render the FULL steps text. When it fits the Discord message
            cap, send it inline as an ephemeral followup; otherwise attach
            the full transcript as a ``steps.md`` file (nothing truncated).
@@ -182,9 +188,34 @@ class StepsToggleView(discord.ui.View):
             await self._safe_followup(interaction, content="Step details are unavailable for this message.")
             return
 
-        row = await self._store.get_by_final_message_id(str(message.id))
+        # The store read is the one DB call between the defer and a
+        # followup; guard it like render_steps below. aiosqlite runs on a
+        # dedicated thread and can raise (sqlite3.OperationalError on disk
+        # I/O, a malformed WAL, or a lock beyond busy_timeout) — none of
+        # which is a discord.HTTPException, so an unguarded raise would
+        # escape the callback AFTER the defer and hang the ephemeral
+        # "thinking" spinner until the interaction token expires (~15 min).
+        # except Exception (not BaseException) so a shutdown CancelledError
+        # still propagates.
+        try:
+            row = await self._store.get_by_final_message_id(str(message.id))
+        except Exception:
+            logger.exception(
+                "steps view: store read failed message_id=%s; "
+                "sending an error followup instead of hanging the interaction",
+                message.id,
+            )
+            await self._safe_followup(interaction, content="Could not load the steps for this response.")
+            return
         if row is None:
-            await self._safe_followup(interaction, content="Step details are no longer available.")
+            # A clean miss: the row was pruned, predates a restart, was
+            # never written (write-after-post race / swallowed write
+            # failure), or the store is a disabled NullTranscriptStore.
+            # Worded so it doesn't claim the data "was" there and vanished.
+            await self._safe_followup(
+                interaction,
+                content="Step details aren't available for this response (it may still be saving, or has expired).",
+            )
             return
 
         # render_steps can raise: ModelMessagesTypeAdapter.validate_json

@@ -1,10 +1,13 @@
 # Step Transcripts, Live Step Streaming & Tool-Call Replay — Implementation Plan
 
-**Status**: Finalized v2 — reviewed by 4 agents; decision D-1a chosen (2026-05-30)
+**Status**: Finalized v2 — reviewed by 4 agents; decision D-1a chosen (2026-05-30).
+**Superseded by v3** (see the v3 changelog below): the inline expand/collapse toggle
+shipped as **ephemeral step display** (the reply is never edited).
 **Scope**: bridge process only. Introduces the project's first persistence layer
 (local SQLite). Replaces the step-thread transcript with a live-updating progress
-message + an on-demand inline expand/collapse toggle, and hydrates each agent's
-reconstructed history with the tool calls it made on prior turns.
+message + an on-demand step-transcript button (v3: an ephemeral followup, was an
+inline expand/collapse toggle), and hydrates each agent's reconstructed history with
+the tool calls it made on prior turns.
 **Touches**: `bridge/steps.py`, `bridge/steps_state.py`, `bridge/outbox.py`,
 `bridge/gateway.py`, `bridge/history.py`, `bridge/ingress.py`,
 `discord/persona.py`, `discord/settings.py`, new `bridge/transcripts.py`,
@@ -39,8 +42,10 @@ reconstructed history with the tool calls it made on prior turns.
 2. **Live step streaming, minimized** — while an agent works, a single compact
    in-channel progress message under the agent persona (`⚙ running… N steps`),
    edited live (debounced).
-3. **On-demand inline expand** — a toggle reveals the steps inline (truncated to
-   the Discord limit) and collapses back.
+3. **On-demand step transcript** — a button on the reply reveals the turn's steps.
+   *(v3 shipped this as an **ephemeral followup** visible only to the clicker — full
+   render, oversized transcripts attached as `steps.md`, the reply never edited —
+   superseding the inline expand/collapse toggle described in §7.5/§8.)*
 4. **Tool-call replay** — on later turns, hydrate the agent's reconstructed
    `message_history` window with prior turns' structured tool calls/returns.
 
