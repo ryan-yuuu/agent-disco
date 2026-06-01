@@ -74,6 +74,7 @@ from calfkit_organization._compat.invoke import (
 )
 from calfkit_organization.agents.definition import Provider
 from calfkit_organization.agents.factory import DEFAULT_PROVIDER, resolve_provider
+from calfkit_organization.agents.memory import MEMORY_PROMPT_DEPS_KEY, load_memory_prompt
 from calfkit_organization.agents.peer_roster import build_temp_instructions
 from calfkit_organization.agents.phonebook import (
     PhonebookEntry,
@@ -236,6 +237,11 @@ class BridgeIngress:
         # isn't set yet, so a Discord event arriving before the store opens
         # never crashes the invocation path. Mirrors :attr:`_fetcher`.
         self._transcript_store: TranscriptStoreLike | None = None
+        # Whether the memory-prompt load has already failed once this process —
+        # gates the one-shot error log in :meth:`_memory_prompt_deps` (re-armed
+        # on a later successful load). Same late-bound-state idiom as the two
+        # fields above.
+        self._memory_prompt_load_failed = False
         # Validate every agent's provider at boot so a typo'd
         # CALFKIT_AGENT_DEFAULT_PROVIDER surfaces here (fail-fast) rather
         # than as an uncaught ValueError inside every targeted invocation.
@@ -468,6 +474,7 @@ class BridgeIngress:
                     deps={
                         "discord": wire.model_dump(mode="json"),
                         "phonebook": phonebook_to_deps(phonebook),
+                        **self._memory_prompt_deps(),
                     },
                     output_type=str,
                     model_settings=model_settings,
@@ -844,6 +851,46 @@ class BridgeIngress:
                 exc,
             )
             return 0
+
+    def _memory_prompt_deps(self) -> dict[str, str]:
+        """Return the memory-prompt ``deps`` entry, or ``{}`` when not applicable.
+
+        The bridge is the single reader of the memory-prompt template. It ships
+        the raw (un-localized) template under
+        :data:`~calfkit_organization.agents.memory.MEMORY_PROMPT_DEPS_KEY`
+        whenever the registry holds at least one memory-enabled agent — so it
+        reaches every agent and propagates through A2A (``private_chat``
+        forwards ``deps``), and each memory agent's instructions hook localizes
+        it. Returns ``{}`` when:
+
+        * no agent opts into memory (existing deployments stay byte-identical,
+          no template read, no wire cost); or
+        * the template can't be loaded (a bad ``CALFCORD_MEMORY_PROMPT_PATH``);
+          the error is logged once and memory agents degrade to no memory block
+          rather than the bridge failing every invocation. The loader re-reads
+          on failure, so a fixed path self-heals on the next invocation (no
+          restart needed); the recovery is logged once and the one-shot error
+          log re-arms.
+        """
+        if not any(spec.memory for spec in self._registry.all()):
+            return {}
+        try:
+            template = load_memory_prompt()
+        except ValueError as exc:
+            if not self._memory_prompt_load_failed:
+                self._memory_prompt_load_failed = True
+                logger.error(
+                    "failed to load the memory prompt (%s); memory-enabled agents "
+                    "will run without their memory instructions until it loads "
+                    "successfully",
+                    exc,
+                    exc_info=True,
+                )
+            return {}
+        if self._memory_prompt_load_failed:
+            self._memory_prompt_load_failed = False
+            logger.info("memory prompt loaded successfully; memory instructions restored")
+        return {MEMORY_PROMPT_DEPS_KEY: template}
 
     def _resolve_temp_instructions(
         self,

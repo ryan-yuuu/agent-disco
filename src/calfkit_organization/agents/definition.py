@@ -174,6 +174,21 @@ class AgentDefinition(BaseModel):
 
     The router's analogous knob is the ``CALFKIT_ROUTER_HISTORY_TURNS``
     env var (router is constructed in code, not from ``.md``)."""
+    memory: bool = False
+    """Opt in to a persistent per-agent notepad. When ``True``, the factory
+    registers a runtime instructions hook
+    (:func:`calfkit_organization.agents.memory.memory_instructions`) that
+    appends the memory-explanation block to this agent's instructions on every
+    invocation — the stored ``system_prompt`` is left unchanged. The block text
+    is read only by the bridge (from the editable ``memory_prompt.md``,
+    overridable via ``CALFCORD_MEMORY_PROMPT_PATH``) and shipped to the agent in
+    ``deps``; the hook localizes it to ``memory/<agent_id>/`` in the shared
+    workspace, where the agent keeps one-fact-per-file memories plus a
+    ``MEMORY.md`` index, managed with the ordinary filesystem tools.
+
+    Default ``False`` so existing agents are unchanged. A memory-enabled agent
+    must have the ``read_file`` and ``write_file`` tools — the factory enforces
+    this at build time. See :doc:`docs/authoring-agents`."""
     system_prompt: str
     source_path: Path | None = Field(default=None, exclude=True, repr=False)
     """Path to the ``.md`` file this definition was parsed from. Set by

@@ -119,12 +119,15 @@ def _ctx(
     caller: str = "alice",
     wire: WireMessage | None = None,
     phonebook: list[PhonebookEntry] | None = None,
+    extra_deps: dict[str, Any] | None = None,
 ) -> ToolContext:
     """Construct a ToolContext mirroring what calfkit's dispatch builds.
 
     The bridge ingress populates ``deps["phonebook"]`` on every invocation;
     tests do the same so the tool reads the same shape it would in
-    production.
+    production. ``extra_deps`` adds further ambient keys the bridge may seed
+    at the root (e.g. the memory-prompt template) to verify they project
+    forward across A2A.
     """
     if wire is None:
         wire = _wire()
@@ -136,6 +139,7 @@ def _ctx(
             provided_deps={
                 "discord": wire.model_dump(mode="json"),
                 "phonebook": phonebook_to_deps(phonebook),
+                **(extra_deps or {}),
             },
         ),
         agent_name=caller,
@@ -528,6 +532,29 @@ class TestNewThreadPath:
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         # Format pinned: <thread_id>NNN</thread_id>\n{response}.
         assert out == f"<thread_id>{_NEW_THREAD_ID}</thread_id>\nbob's reply"
+
+    async def test_projects_caller_deps_forward_to_target(self, deps: dict[str, Any]) -> None:
+        """Ambient deps the bridge seeds at the root (e.g. the memory-prompt
+        template) project forward to the A2A target, so a memory agent reached
+        via A2A still receives its memory instructions — while the A2A-specific
+        keys remain overrides, not the caller's forwarded values."""
+        deps["client"].execute_node.return_value = _result("ok")
+        ctx = _ctx(caller="alice", extra_deps={"memory_prompt": "TEMPLATE {{MEMORY_DIR}}"})
+        await pc.private_chat(ctx, "bob", "hello")
+        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]
+        assert forwarded["memory_prompt"] == "TEMPLATE {{MEMORY_DIR}}"
+        # A2A-owned keys are overridden after the spread (this hop's caller,
+        # the forwarded wire, the refreshed roster) — not the caller's copies.
+        assert forwarded["caller_agent_id"] == "alice"
+        assert "phonebook" in forwarded and "discord" in forwarded
+
+    async def test_forwarding_is_transparent_no_phantom_key(self, deps: dict[str, Any]) -> None:
+        """A caller without an ambient key doesn't get one fabricated downstream
+        — the spread forwards only what's present."""
+        deps["client"].execute_node.return_value = _result("ok")
+        await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
+        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]
+        assert "memory_prompt" not in forwarded
 
     async def test_first_send_to_unified_channel_without_thread_id(
         self, deps: dict[str, Any]
@@ -1643,6 +1670,43 @@ class TestA2ARetryWithFeedback:
         # output_type is still ``str`` so the response shape stays
         # uniform between original and retry.
         assert kwargs["output_type"] is str
+
+    async def test_retry_forwards_caller_ambient_deps(
+        self,
+        deps: dict[str, Any],
+    ) -> None:
+        """The retry path also projects the caller's ambient deps (e.g. the
+        bridge-seeded memory-prompt template) forward, so a memory agent that
+        hits a content-rejection retry still gets its memory instructions on the
+        retry turn. Guards the spread at the second (retry) execute_node site —
+        which the main-path projection test does not exercise."""
+        deps["client"].execute_node = AsyncMock(
+            side_effect=[_result("x" * 3000), _result("short")]
+        )
+        deps["persona_sender"].send = AsyncMock(
+            side_effect=[
+                _sent_message(_REQUEST_SENT_MESSAGE_ID),
+                _http_exc(discord.HTTPException, 400),
+                _sent_message(99998),
+            ]
+        )
+        phonebook = [
+            _entry("alice", tools=("private_chat",)),
+            _entry("bob", tools=("private_chat",)),
+        ]
+        await pc.private_chat(
+            _ctx(
+                caller="alice",
+                phonebook=phonebook,
+                extra_deps={"memory_prompt": "TEMPLATE {{MEMORY_DIR}}"},
+            ),
+            "bob",
+            "the original caller content",
+        )
+        retry_deps = deps["client"].execute_node.await_args_list[1].kwargs["deps"]
+        assert retry_deps["memory_prompt"] == "TEMPLATE {{MEMORY_DIR}}"
+        # A2A-owned keys still override the forwarded copies on the retry too.
+        assert retry_deps["caller_agent_id"] == "alice"
 
     async def test_retry_budget_exhausted_chunks_and_returns_full(
         self,
