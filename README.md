@@ -140,6 +140,8 @@ Three supported modes. All share the same `.env` and `agents/*.md` — switching
 
 ### 1. Quick start (Docker Compose)
 
+**First run:** create your Discord app first — see [`docs/discord-setup.md`](./docs/discord-setup.md) (~5 min). It produces the `DISCORD_*` values below.
+
 ```bash
 cp .env.example .env
 # Open .env and fill in (at minimum):
