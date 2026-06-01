@@ -1931,6 +1931,33 @@ class TestTypingIndicator:
         )
         notifier.fire.assert_called_once_with(thread_id)
 
+    async def test_fires_even_when_delta_renders_empty(
+        self,
+        persona_sender: AsyncMock,
+        pending_wires: PendingWires,
+        steps_state: StepsState,
+        broker: Any,
+    ) -> None:
+        """Typing reflects that work happened, independent of whether the delta
+        renders to anything visible: a whitespace-only model turn still fires
+        typing even though no progress message is posted."""
+        notifier = MagicMock()
+        consumer = build_steps_consumer(
+            persona_sender, _registry(), pending_wires, steps_state, typing_notifier=notifier
+        )
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="x")]),
+            ModelResponse(parts=[TextPart(content="   ")]),  # renders to nothing
+        ]
+        await consumer.handler(
+            envelope=_envelope(message_history=history),
+            correlation_id=_CORRELATION_ID,
+            headers=_headers(),
+            broker=broker,
+        )
+        notifier.fire.assert_called_once_with(_CHANNEL_ID)
+        persona_sender.send.assert_not_called()  # nothing renderable → no progress post
+
     async def test_empty_peer_mirror_does_not_fire(
         self,
         persona_sender: AsyncMock,

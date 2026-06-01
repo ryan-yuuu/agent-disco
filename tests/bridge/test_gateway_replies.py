@@ -250,6 +250,22 @@ class TestOnMessageTypingIndicator:
 
         notifier.fire.assert_called_once_with(6789)
 
+    async def test_fires_typing_into_thread_when_wire_in_thread(self) -> None:
+        """A message that originated inside a thread fires typing into the
+        thread (source_channel_id), not the flattened parent channel."""
+        notifier = MagicMock()
+        gateway = _gateway(typing_notifier=notifier)
+        wire = self._wire()
+        wire.source_channel_id = 4242  # thread id, distinct from channel_id
+        gateway._message_normalizer = MagicMock()
+        gateway._message_normalizer.normalize = MagicMock(return_value=wire)
+        gateway._bot_user_id = 0
+        gateway._ingress.handle = AsyncMock(return_value=None)
+
+        await gateway._on_message(self._message())
+
+        notifier.fire.assert_called_once_with(4242)
+
     async def test_does_not_fire_on_roster_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from calfkit_organization.bridge.ingress import AmbientRosterEmptyError
 

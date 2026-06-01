@@ -68,24 +68,38 @@ class TestFire:
 
 
 class TestSwallow:
-    async def test_forbidden_swallowed_and_warns_once(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_forbidden_swallowed_and_warns_once_per_channel(self, caplog: pytest.LogCaptureFixture) -> None:
         client = _client(send_typing=AsyncMock(side_effect=_http_exc(discord.Forbidden, 403)))
         notifier = TypingNotifier(client)
         with caplog.at_level(logging.WARNING, logger="calfkit_organization.discord.typing"):
             notifier.fire(_CHANNEL_ID)
-            notifier.fire(_CHANNEL_ID)
+            notifier.fire(_CHANNEL_ID)  # same channel → suppressed
+            notifier.fire(_CHANNEL_ID + 1)  # different channel → warns again
             await _drain(notifier)
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1  # only the first Forbidden warns
+        assert len(warnings) == 2  # once per channel, not once per call
         assert "Send Messages" in warnings[0].message
 
-    async def test_non_discord_error_swallowed(self) -> None:
-        """A non-Discord error (e.g. a session-closed during shutdown) must not
-        escape the detached task."""
+    async def test_transient_discord_error_swallowed_quietly(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A transient Discord error (5xx, rate-limit exhausted) is swallowed at
+        DEBUG — typing fires per hop, so it must not spam WARNING/ERROR."""
+        client = _client(send_typing=AsyncMock(side_effect=_http_exc(discord.HTTPException, 503)))
+        notifier = TypingNotifier(client)
+        with caplog.at_level(logging.DEBUG, logger="calfkit_organization.discord.typing"):
+            notifier.fire(_CHANNEL_ID)
+            await _drain(notifier)  # must not raise
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    async def test_unexpected_error_swallowed_but_logged_loudly(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A non-Discord error (mis-wired client, session closed at shutdown, a
+        real bug) must not escape the detached task, but must be visible — a
+        cosmetic feature should never silently bury a programming error."""
         client = _client(send_typing=AsyncMock(side_effect=RuntimeError("session closed")))
         notifier = TypingNotifier(client)
-        notifier.fire(_CHANNEL_ID)
-        await _drain(notifier)  # must not raise
+        with caplog.at_level(logging.ERROR, logger="calfkit_organization.discord.typing"):
+            notifier.fire(_CHANNEL_ID)
+            await _drain(notifier)  # must not raise
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
 
 
 class TestAclose:
@@ -104,3 +118,13 @@ class TestAclose:
         await notifier.aclose()
 
         assert task.cancelled()
+
+    async def test_aclose_with_no_tasks_is_noop(self) -> None:
+        notifier = TypingNotifier(_client())
+        await notifier.aclose()  # must not raise
+
+    async def test_aclose_is_idempotent(self) -> None:
+        notifier = TypingNotifier(_client())
+        notifier.fire(_CHANNEL_ID)
+        await notifier.aclose()
+        await notifier.aclose()  # second call must not raise

@@ -838,8 +838,10 @@ def build_steps_consumer(
         # Fire a typing indicator for genuine, non-terminal work. Skipped on
         # the terminal hop (the outbox posts the answer there) and on empty
         # peer mirrors (filtered by the guard above). Fire-and-forget, so it
-        # never blocks this serial consumer; targets the same channel/thread
-        # the progress message uses.
+        # never blocks this serial consumer. Targets the thread the wire
+        # originated in, else the parent channel — the surface the user is
+        # reading. (Typing addresses that id directly, unlike the webhook
+        # progress post, which addresses the parent and routes into the thread.)
         if typing_notifier is not None and new_messages and not is_terminal:
             typing_notifier.fire(entry.thread_id or entry.parent_channel_id)
 
