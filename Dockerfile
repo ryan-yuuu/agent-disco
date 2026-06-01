@@ -46,9 +46,11 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# Step 3: copy the live agent definitions. Compose mounts ``./agents``
-# read-only over this path at runtime, so the baked copy is the
-# fallback used only when the image is run without compose.
+# Step 3: copy the live agent definitions. Compose bind-mounts
+# ``./agents`` read-write over this path at runtime (the agent service
+# rewrites its own frontmatter via md_writer.update_thinking_effort),
+# so the baked copy is the fallback used only when the image is run
+# without compose.
 COPY agents ./agents
 
 
