@@ -1,15 +1,23 @@
 """Unit tests for :func:`build_router_definition`.
 
-The router definition is constructed in code with three configuration
-tiers (highest wins): ``router.yml`` field > env var > in-code default.
-These tests verify the env-tier defaults, the field invariants the
-registry depends on, the schema-level router constraints (no tools,
-publish_topic set), and the precedence chain.
+The router definition is constructed in code. Its tunable config
+(``provider`` / ``model`` / ``thinking_effort`` / ``history_turns``) and its
+system prompt come from the bundled ``router.md`` (see
+:func:`calfkit_organization.router.prompt.load_router_md`); a field omitted
+from the front matter falls through to the ``_DEFAULT_*`` in-code constant.
 
-Every test runs from a ``tmp_path`` CWD so the default ``./router.yml``
-lookup deterministically finds nothing unless the test plants a file
-itself — a developer with a stray router.yml in their actual working
-directory won't trip the env-tier suite.
+These tests cover three things:
+
+1. The field invariants the registry depends on (agent_id, display_name,
+   role, publish_topic, empty tools, source_path=None).
+2. The shipped bundled default (the front matter copied from the old
+   ``router.yml``).
+3. The config-resolution chain (front matter value > in-code default),
+   exercised via the ``CALFKIT_ROUTER_PROMPT_PATH`` override pointing at a
+   temp ``router.md``.
+
+Every test runs with the loader cache cleared and the override env var unset,
+so the bundled file is read unless a test plants its own override.
 """
 
 from __future__ import annotations
@@ -19,111 +27,33 @@ from pathlib import Path
 import pytest
 
 from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.router.config import (
-    CONFIG_PATH_ENV,
-    DEFAULT_CONFIG_PATH,
-)
+from calfkit_organization.router import prompt
 from calfkit_organization.router.definition import ROUTER_AGENT_ID, build_router_definition
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Pin every test's CWD to ``tmp_path`` and clear the path override.
+def _isolate_router_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the loader cache + override env var around every test.
 
-    The router config loader looks for ``./router.yml`` at CWD, so a
-    developer who has a stray ``router.yml`` in their real working
-    directory would otherwise see flaky pass/fail. Pinning each test's
-    CWD to a clean tmp dir makes the default-path behavior deterministic.
+    :func:`load_router_md` caches the parsed ``(config, prompt)`` on a module
+    global and is eagerly populated at import. Resetting before each test makes
+    the bundled-file read deterministic; resetting on teardown prevents a test
+    that planted an override from leaking its cache into later tests/files.
     """
-    monkeypatch.delenv(CONFIG_PATH_ENV, raising=False)
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(prompt._PROMPT_PATH_ENV, raising=False)
+    prompt._reset_cache_for_tests()
+    yield
+    prompt._reset_cache_for_tests()
 
 
-class TestDefaults:
-    """When no env vars are set, the router uses fast/cheap defaults."""
-
-    def test_provider_defaults_to_openai(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CALFKIT_ROUTER_PROVIDER", raising=False)
-        monkeypatch.delenv("CALFKIT_ROUTER_MODEL", raising=False)
-        monkeypatch.delenv("CALFKIT_ROUTER_THINKING_EFFORT", raising=False)
-        d = build_router_definition()
-        assert d.provider == "openai"
-
-    def test_model_defaults_to_gpt_5_nano(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CALFKIT_ROUTER_MODEL", raising=False)
-        d = build_router_definition()
-        assert d.model == "gpt-5-nano"
+def _write_router_md(path: Path, front_matter: str, body: str = "You are the router.") -> Path:
+    path.write_text(f"---\n{front_matter}---\n{body}\n")
+    return path
 
 
-class TestEnvOverrides:
-    """Env vars override the in-code defaults so operators can swap
-    LLMs without editing source."""
-
-    def test_provider_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALFKIT_ROUTER_PROVIDER", "anthropic")
-        d = build_router_definition()
-        assert d.provider == "anthropic"
-
-    def test_model_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALFKIT_ROUTER_MODEL", "claude-haiku-4-5")
-        d = build_router_definition()
-        assert d.model == "claude-haiku-4-5"
-
-    def test_thinking_effort_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALFKIT_ROUTER_THINKING_EFFORT", "high")
-        d = build_router_definition()
-        assert d.thinking_effort == "high"
-
-    def test_history_turns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CALFKIT_ROUTER_HISTORY_TURNS", raising=False)
-        d = build_router_definition()
-        assert d.history_turns == 10
-
-    def test_history_turns_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "25")
-        d = build_router_definition()
-        assert d.history_turns == 25
-
-    def test_history_turns_invalid_string_falls_back(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A non-integer value logs WARN and uses the default rather
-        than crashing the router build (which would brick deploys)."""
-        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "not-a-number")
-        d = build_router_definition()
-        assert d.history_turns == 10
-        assert any("not an integer" in r.message for r in caplog.records)
-
-    def test_history_turns_out_of_range_falls_back(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A value outside 0..100 logs WARN and uses the default."""
-        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "999")
-        d = build_router_definition()
-        assert d.history_turns == 10
-        assert any("outside the 0..100" in r.message for r in caplog.records)
-
-    def test_history_turns_zero_is_accepted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """0 is a valid value (disables router history)."""
-        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "0")
-        d = build_router_definition()
-        assert d.history_turns == 0
-
-    def test_history_turns_negative_falls_back(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "-1")
-        d = build_router_definition()
-        assert d.history_turns == 10
-        assert any("outside the 0..100" in r.message for r in caplog.records)
+def _use_override(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    monkeypatch.setenv(prompt._PROMPT_PATH_ENV, str(path))
+    prompt._reset_cache_for_tests()
 
 
 class TestFieldInvariants:
@@ -134,164 +64,134 @@ class TestFieldInvariants:
     it as a test failure rather than a silent edit.
     """
 
-    @pytest.fixture(autouse=True)
-    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in (
-            "CALFKIT_ROUTER_PROVIDER",
-            "CALFKIT_ROUTER_MODEL",
-            "CALFKIT_ROUTER_THINKING_EFFORT",
-        ):
-            monkeypatch.delenv(var, raising=False)
-
     def test_returns_agent_definition(self) -> None:
-        d = build_router_definition()
-        assert isinstance(d, AgentDefinition)
+        assert isinstance(build_router_definition(), AgentDefinition)
 
     def test_agent_id_is_router_constant(self) -> None:
-        d = build_router_definition()
-        assert d.agent_id == ROUTER_AGENT_ID == "_router"
+        assert build_router_definition().agent_id == ROUTER_AGENT_ID == "_router"
 
     def test_display_name_is_router(self) -> None:
-        d = build_router_definition()
-        assert d.display_name == "Router"
+        assert build_router_definition().display_name == "Router"
 
     def test_role_is_router(self) -> None:
-        d = build_router_definition()
-        assert d.role == "router"
+        assert build_router_definition().role == "router"
 
     def test_publish_topic_is_routing_decisions(self) -> None:
         """The fan-out consumer subscribes to this topic; the router's
-        ReturnCall publishes here via FastStream's @publisher
-        wrapping. Without the publish_topic set, the router has no
-        downstream consumer pathway and the routing decisions go
-        nowhere."""
-        d = build_router_definition()
-        assert d.publish_topic == "routing.decisions"
+        ReturnCall publishes here via FastStream's @publisher wrapping.
+        Without publish_topic set the routing decisions go nowhere."""
+        assert build_router_definition().publish_topic == "routing.decisions"
 
     def test_tools_is_empty(self) -> None:
-        """Routers use the ToolOutput pattern, not function tools.
-        The AgentDefinition validator also enforces this; this test
-        pins the definition's own value rather than the validator's
-        behavior."""
-        d = build_router_definition()
-        assert d.tools == ()
+        """Routers use the ToolOutput pattern, not function tools."""
+        assert build_router_definition().tools == ()
 
     def test_source_path_is_none(self) -> None:
-        """In-code definition — no on-disk .md file."""
-        d = build_router_definition()
-        assert d.source_path is None
+        """``router.md`` is bundled infrastructure, deliberately not exposed
+        to the ``/thinking-effort`` frontmatter rewriter."""
+        assert build_router_definition().source_path is None
 
     def test_avatar_url_is_none(self) -> None:
-        d = build_router_definition()
-        assert d.avatar_url is None
+        assert build_router_definition().avatar_url is None
 
     def test_system_prompt_is_non_empty(self) -> None:
         d = build_router_definition()
         assert d.system_prompt.strip() != ""
-        # Sanity: the hardcoded prompt mentions the dispatch tool
-        # (the tool name pydantic-ai's ToolOutput pattern uses).
+        # Sanity: the rendered prompt mentions the dispatch tool (the tool
+        # name pydantic-ai's ToolOutput pattern uses).
         assert "dispatch" in d.system_prompt
 
 
-class TestYamlConfigPrecedence:
-    """``router.yml`` field > env var > code default.
+class TestBundledDefault:
+    """The bundled ``router.md`` ships the values copied from the old
+    ``router.yml``. ``history_turns`` is omitted from the front matter, so it
+    falls through to the in-code default."""
 
-    Mirrors :func:`resolve_provider`'s file-beats-env chain. The YAML
-    file is the operator's authored source-of-truth; env vars stay as
-    a runtime override hook for ops staging a swap without editing the
-    file.
-    """
+    def test_provider(self) -> None:
+        assert build_router_definition().provider == "openai-codex"
 
-    @pytest.fixture(autouse=True)
-    def _clean_router_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in (
-            "CALFKIT_ROUTER_PROVIDER",
-            "CALFKIT_ROUTER_MODEL",
-            "CALFKIT_ROUTER_THINKING_EFFORT",
-            "CALFKIT_ROUTER_HISTORY_TURNS",
-        ):
-            monkeypatch.delenv(var, raising=False)
+    def test_model(self) -> None:
+        assert build_router_definition().model == "gpt-5.4-mini"
 
-    def test_file_supplies_all_fields(self, tmp_path: Path) -> None:
-        """With no env vars set, file values flow straight into the
-        AgentDefinition."""
-        (tmp_path / DEFAULT_CONFIG_PATH).write_text(
-            "provider: openai-codex\n"
-            "model: gpt-5.3-codex\n"
-            "thinking_effort: medium\n"
-            "history_turns: 25\n"
-        )
-        d = build_router_definition()
-        assert d.provider == "openai-codex"
-        assert d.model == "gpt-5.3-codex"
-        assert d.thinking_effort == "medium"
-        assert d.history_turns == 25
+    def test_thinking_effort(self) -> None:
+        assert build_router_definition().thinking_effort == "low"
 
-    def test_file_wins_over_env_var(
+    def test_history_turns_defaults(self) -> None:
+        assert build_router_definition().history_turns == 10
+
+
+class TestConfigResolution:
+    """Front-matter value > in-code default, exercised via an override file."""
+
+    def test_front_matter_supplies_all_fields(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The file is the authored source-of-truth; env is a runtime
-        override layer that should NOT shadow an explicit file value."""
-        monkeypatch.setenv("CALFKIT_ROUTER_PROVIDER", "anthropic")
-        monkeypatch.setenv("CALFKIT_ROUTER_MODEL", "claude-haiku-4-5")
-        (tmp_path / DEFAULT_CONFIG_PATH).write_text(
-            "provider: openai\nmodel: gpt-5-mini\n"
+        _use_override(
+            monkeypatch,
+            _write_router_md(
+                tmp_path / "router.md",
+                "provider: anthropic\n"
+                "model: claude-haiku-4-5\n"
+                "thinking_effort: high\n"
+                "history_turns: 7\n",
+            ),
         )
         d = build_router_definition()
-        assert d.provider == "openai"
-        assert d.model == "gpt-5-mini"
+        assert d.provider == "anthropic"
+        assert d.model == "claude-haiku-4-5"
+        assert d.thinking_effort == "high"
+        assert d.history_turns == 7
 
-    def test_env_fills_gaps_when_file_partial(
+    def test_omitted_fields_fall_to_code_default(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Fields the file omits fall through to env vars (then defaults).
-        The 3-tier chain is per-field, not all-or-nothing."""
-        monkeypatch.setenv("CALFKIT_ROUTER_MODEL", "claude-haiku-4-5")
-        monkeypatch.setenv("CALFKIT_ROUTER_THINKING_EFFORT", "high")
-        (tmp_path / DEFAULT_CONFIG_PATH).write_text("provider: anthropic\n")
+        """A partial front matter resolves per-field, not all-or-nothing."""
+        _use_override(
+            monkeypatch,
+            _write_router_md(tmp_path / "router.md", "provider: anthropic\n"),
+        )
         d = build_router_definition()
-        assert d.provider == "anthropic"  # from file
-        assert d.model == "claude-haiku-4-5"  # from env
-        assert d.thinking_effort == "high"  # from env
-
-    def test_defaults_fill_gaps_when_neither_file_nor_env_set(
-        self, tmp_path: Path
-    ) -> None:
-        """Fields absent from both file and env land on the in-code
-        defaults — same path the env-only suite already covers, here
-        verified with a partial file present."""
-        (tmp_path / DEFAULT_CONFIG_PATH).write_text("thinking_effort: low\n")
-        d = build_router_definition()
-        assert d.thinking_effort == "low"  # from file
-        assert d.provider == "openai"  # code default
+        assert d.provider == "anthropic"  # from front matter
         assert d.model == "gpt-5-nano"  # code default
+        assert d.thinking_effort == "none"  # code default
         assert d.history_turns == 10  # code default
 
-    def test_history_turns_file_value_wins_over_env(
+    def test_history_turns_zero_is_respected(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """history_turns has its own resolver because the env tier has
-        validate-and-warn semantics; the file tier should still win."""
-        monkeypatch.setenv("CALFKIT_ROUTER_HISTORY_TURNS", "5")
-        (tmp_path / DEFAULT_CONFIG_PATH).write_text("history_turns: 50\n")
-        d = build_router_definition()
-        assert d.history_turns == 50
+        """``history_turns: 0`` is a valid "disable history" signal; the
+        resolver must distinguish 0 from "not set" so a falsy-check bug
+        doesn't fall through to the default."""
+        _use_override(
+            monkeypatch,
+            _write_router_md(tmp_path / "router.md", "history_turns: 0\n"),
+        )
+        assert build_router_definition().history_turns == 0
 
-    def test_history_turns_file_zero_is_respected(self, tmp_path: Path) -> None:
-        """``history_turns: 0`` is a valid "disable history" signal;
-        the resolver must distinguish 0 from "not set" so a falsy-check
-        bug doesn't fall through to the default."""
-        (tmp_path / DEFAULT_CONFIG_PATH).write_text("history_turns: 0\n")
-        d = build_router_definition()
-        assert d.history_turns == 0
-
-    def test_explicit_path_missing_raises(
+    def test_body_becomes_system_prompt(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A typo'd ``CALFKIT_ROUTER_CONFIG_PATH`` propagates the
-        ``FileNotFoundError`` out of build_router_definition so the
-        runner converts it to a clean CLI exit rather than silently
-        booting with defaults."""
-        monkeypatch.setenv(CONFIG_PATH_ENV, str(tmp_path / "missing.yml"))
-        with pytest.raises(FileNotFoundError):
-            build_router_definition()
+        _use_override(
+            monkeypatch,
+            _write_router_md(
+                tmp_path / "router.md",
+                "provider: openai\n",
+                body="Custom router instructions.",
+            ),
+        )
+        assert build_router_definition().system_prompt == "Custom router instructions."
+
+    def test_no_front_matter_uses_all_defaults(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An override file with no front matter (empty config) resolves every
+        field to the in-code default; the whole file becomes the prompt."""
+        path = tmp_path / "router.md"
+        path.write_text("Just a prompt, no front matter.\n")
+        _use_override(monkeypatch, path)
+        d = build_router_definition()
+        assert d.provider == "openai"
+        assert d.model == "gpt-5-nano"
+        assert d.thinking_effort == "none"
+        assert d.history_turns == 10
+        assert d.system_prompt == "Just a prompt, no front matter."

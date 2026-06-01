@@ -24,7 +24,8 @@ directly to the targeted agent.
 The "exactly one" policy is enforced two ways: at the schema level
 (`RoutingDecision.agent_id` is a single `str | None`, so multi-agent
 fan-out is impossible at the type boundary) and at the prompt level
-(see `router/prompt.py`). The schema's `agent_id=None` case is
+(the prompt text lives in the bundled `router.md`, loaded by
+`router/prompt.py`). The schema's `agent_id=None` case is
 defense in depth — a misbehaving LLM that emits a tool call with
 no `agent_id` falls through to the fan-out consumer's no-op path
 rather than triggering pydantic-ai structured-output retry storms.
@@ -32,8 +33,9 @@ rather than triggering pydantic-ai structured-output retry storms.
 The router is **built-in infrastructure**, not a user-customizable
 agent. Its definition lives in code (`router/definition.py`) and is
 auto-appended to the bridge's `AgentRegistry`. Operators tune it via
-env vars; user-authored `agents/*.md` files cannot accidentally
-override it (the name `_router` is reserved by convention, and the
+the bundled `router.md` (config front matter + prompt body);
+user-authored `agents/*.md` files cannot accidentally override it (the
+name `_router` is reserved by convention, and the
 registry rejects multi-router lists at boot — see `Schema
 constraints` below; note that the constraint is enforced at registry
 construction in `bridge/registry.py`, not at the `AgentDefinition`
@@ -172,111 +174,105 @@ Bridge ingress branches on `wire.kind`:
 
 ## Configuration
 
-The router exposes four runtime knobs (`provider`, `model`,
-`thinking_effort`, `history_turns`). They can be set in either of two
-ways:
+The router's prompt and its four runtime knobs (`provider`, `model`,
+`thinking_effort`, `history_turns`) live together in a single bundled
+file, `src/calfkit_organization/router/router.md`: YAML front matter for
+the config, Markdown body for the prompt. This mirrors how user-defined
+agents are authored (`agents/*.md`), but the router file ships **inside
+the package** (like `agents/memory_prompt.md`) rather than being
+user-managed — the router is project infrastructure, and bundling it in
+the wheel/image means a deploy can never lose its router config.
 
-* `router.yml` at the project root (file-based, recommended for
-  long-lived deployments — versionable, easy to diff).
-* `CALFKIT_ROUTER_*` environment variables (runtime overrides — handy
-  for staging a swap without editing files).
-
-When both are set on the same field, the file wins. Missing fields
-fall through to env vars, then to the in-code defaults.
-
-### Required env vars
-
-Router-specific:
-
-```
-CALFKIT_ROUTER_PROVIDER=openai            # anthropic | openai | openai-codex
-CALFKIT_ROUTER_MODEL=gpt-5-nano           # fast/cheap recommended
-CALFKIT_ROUTER_THINKING_EFFORT=none       # none | minimal | low | medium | high | xhigh | max
-CALFKIT_ROUTER_HISTORY_TURNS=10           # 0..100; channel history window for routing decisions
-CALFKIT_ROUTER_CONFIG_PATH=router.yml     # override the YAML config path (default ./router.yml)
-```
-
-Defaults: `openai` / `gpt-5-nano` / `none` / `10`. The router runs once
-per ambient message — keep it fast and cheap. The router's history
-window is intentionally smaller than per-agent assistants (default 30)
-because the router only needs enough context to recognize follow-ups vs.
-fresh topics, not to carry the conversation. Invalid values (non-integer
-or outside 0..100) fall back to the default with a WARN log rather than
-crashing the router build.
-
-### Router config file (`router.yml`)
-
-Optional YAML file at the project root (or wherever
-`CALFKIT_ROUTER_CONFIG_PATH` points). When present, its fields take
-precedence over env vars on a per-field basis:
-
-```yaml
-# router.yml
+```markdown
+---
 provider: openai-codex
-model: gpt-5.3-codex
-thinking_effort: minimal
-history_turns: 10
+model: gpt-5.4-mini
+thinking_effort: low
+---
+You are the routing agent for a multi-agent Discord groupchat. ...
 ```
 
-A committable template lives at `router.yml.example` at the repo
-root — copy it and edit:
+Every front-matter field is optional — a field omitted from the front
+matter falls through to the in-code default in `router/definition.py`
+(`openai` / `gpt-5-nano` / `none` / `10`). The shipped `router.md`
+pins `provider: openai-codex` / `model: gpt-5.4-mini` /
+`thinking_effort: low` and omits `history_turns`, so it defaults to
+`10`. The router runs once per ambient message — keep it fast and cheap.
+Its history window is intentionally smaller than per-agent assistants
+(default 30) because the router only needs enough context to recognize
+follow-ups vs. fresh topics, not to carry the conversation.
 
-```bash
-cp router.yml.example router.yml
+The body references the structured-output tool name and the
+`RoutingDecision` field names via `{{ROUTER_OUTPUT_TOOL}}` /
+`{{AGENT_ID_FIELD}}` / `{{REASONING_FIELD}}` placeholders, which the
+loader substitutes from the code constants at load time. A typo'd
+placeholder that survives substitution is a boot error.
+
+### Overriding the bundled file
+
+To change the router's config or prompt without rebuilding the image,
+point `CALFKIT_ROUTER_PROMPT_PATH` at a mounted `router.md` (config +
+prompt in one file):
+
 ```
-
-All four fields are optional — omit any to fall through to the matching
-env var, then the in-code default.
+CALFKIT_ROUTER_PROMPT_PATH=/app/router.md   # override the bundled router.md
+```
 
 Loader behavior at boot:
 
-| Scenario                                          | Behavior                                                     |
-|---------------------------------------------------|--------------------------------------------------------------|
-| Default path `./router.yml`, file missing         | Silent fallback to env + defaults (backward compat).         |
-| `CALFKIT_ROUTER_CONFIG_PATH` set, file missing    | **Boot error** — operator pointed at a path explicitly.       |
-| File present, empty / whitespace-only             | Boot error — almost always a half-finished edit.             |
-| File present, malformed YAML                      | Boot error with file path and parse-error location.          |
-| File present, unknown key (e.g. typo `provder:`)  | Boot error from pydantic `extra="forbid"`.                   |
-| File present, reserved key (`role`, `name`, etc.) | Same — the router's identity is not operator-tunable.        |
+| Scenario                                            | Behavior                                                   |
+|-----------------------------------------------------|------------------------------------------------------------|
+| No override set                                     | Read the bundled `router.md` (always present in the image). |
+| `CALFKIT_ROUTER_PROMPT_PATH` set, file missing      | **Boot error** — operator pointed at a path explicitly.    |
+| Body empty / whitespace-only after substitution     | Boot error — the router would have no instructions.        |
+| Malformed YAML front matter                         | Boot error with file path and parse-error location.        |
+| Unknown front-matter key (e.g. typo `provder:`)     | Boot error from pydantic `extra="forbid"`.                 |
+| Reserved front-matter key (`role`, `system_prompt:`)| Same — the router's identity is not operator-tunable.      |
+| Unsubstituted `{{...}}` placeholder in the body     | Boot error — a typo'd placeholder.                         |
 
-**What's NOT in the schema** by design: `name`, `display_name`,
-`description`, `avatar_url`, `role`, `publish_topic`, `tools`, and
-`system_prompt`. These are router-singleton invariants (`agent_id =
-"_router"`, `role="router"`, etc.) — the registry depends on them
-being fixed. The Discord slash command is always `/<name>` (i.e.
-`/_router` for the router), so the slash is implicitly reserved with
-the agent_id. Operators who need to change the routing prompt should
-edit `src/calfkit_organization/router/prompt.py` and re-deploy.
+**What's NOT in the front-matter schema** by design: `name`,
+`display_name`, `description`, `avatar_url`, `role`, `publish_topic`,
+`tools`, and `system_prompt` (the prompt is the Markdown body, not a
+front-matter field). These are router-singleton invariants (`agent_id =
+"_router"`, `role="router"`, etc.) — the registry depends on them being
+fixed, and `extra="forbid"` rejects any of them appearing in the front
+matter. The Discord slash command is always `/<name>` (i.e. `/_router`
+for the router), so the slash is implicitly reserved with the agent_id.
 
-**Container deploys:** the docker-compose `router:` service does NOT
-bind-mount `router.yml` by default — Docker would silently create a
-directory at the host path if the file is absent, leaving a stray
-`router.yml/` at repo root for deploys that don't use the feature.
-To opt in, add this to your `docker-compose.override.yml`:
+**Container deploys:** the bundled `router.md` is baked into the image,
+so the docker-compose `router:` service needs no mount by default. To
+override the config or prompt, bind-mount your own file and point the
+env var at it in `docker-compose.override.yml`:
 
 ```yaml
 services:
   router:
+    environment:
+      CALFKIT_ROUTER_PROMPT_PATH: /app/router.md
     volumes:
-      - ./router.yml:/app/router.yml:ro
+      - ./router.md:/app/router.md:ro
 ```
 
 Shared with the assistant runner (also required by `calfkit-router`):
 
 ```
 CALF_HOST_URL=<broker-host[:port]>        # Kafka bootstrap; defaults to "localhost"
-OPENAI_API_KEY=...                        # required iff CALFKIT_ROUTER_PROVIDER=openai (default)
-ANTHROPIC_API_KEY=...                     # required iff CALFKIT_ROUTER_PROVIDER=anthropic
+OPENAI_API_KEY=...                        # required iff the router's provider (router.md) is openai
+ANTHROPIC_API_KEY=...                     # required iff the router's provider (router.md) is anthropic
 ```
 
-The LLM key is read by the provider SDK at first invocation, not at
+The provider is set in `router.md` (the shipped default is
+`openai-codex`, which uses ChatGPT-subscription OAuth — see
+`docs/codex-auth.md` — not an API key). The LLM key, when the provider
+needs one, is read by the provider SDK at first invocation, not at
 boot — a missing key surfaces as an exception on the first ambient
-message rather than at process start. Set it in the
-`calfkit-router` deployment's secret store, not just the bridge's.
+message rather than at process start. Set it in the `calfkit-router`
+deployment's secret store, not just the bridge's.
 
-The router definition is built in code; these env vars are the only
-operator-tunable surface. The router does NOT honor `agents/*.md`
-overrides or the `/thinking-effort` slash command. The slash UI
+The router definition is built in code, with its config + prompt in the
+bundled `router.md` (overridable via `CALFKIT_ROUTER_PROMPT_PATH`). The
+router does NOT honor `agents/*.md` overrides or the `/thinking-effort`
+slash command. The slash UI
 already excludes the router from its choice list
 (`bridge/slash.py`'s `_build_thinking_effort_command` filter), so
 an operator cannot select it from Discord. If something does reach
@@ -354,11 +350,12 @@ operator responsibilities the bridge cannot verify on its own.
    rate. Both should be zero in steady state.
 
 4. **Secrets in `calfkit-router`'s environment.** The router needs
-   `OPENAI_API_KEY` (default) or `ANTHROPIC_API_KEY` (if
-   `CALFKIT_ROUTER_PROVIDER=anthropic`), plus `CALF_HOST_URL` for
-   Kafka. Set them in the router deployment's secret store, NOT
-   just the bridge's — the router runs as an independent process
-   with no shared filesystem.
+   credentials for whatever `provider` is set in `router.md` — the
+   shipped default `openai-codex` needs the mounted Codex OAuth (see
+   `docs/codex-auth.md`); `openai`/`anthropic` need `OPENAI_API_KEY` /
+   `ANTHROPIC_API_KEY` — plus `CALF_HOST_URL` for Kafka. Set them in
+   the router deployment's secret store, NOT just the bridge's — the
+   router runs as an independent process with no shared filesystem.
 
 5. **calfkit version pin.** `pyproject.toml` pins
    `calfkit~=0.3.1`. `src/calfkit_organization/_compat/invoke.py`
@@ -391,7 +388,7 @@ prefixed into the user content as `<name>`).
 | Knob | Where | Default | Range |
 |---|---|---|---|
 | Per-assistant window | `history_turns:` in `agents/<name>.md` frontmatter | 30 | 0..100 (0 disables) |
-| Router window | `CALFKIT_ROUTER_HISTORY_TURNS` env on the router process | 10 | 0..100 (0 disables) |
+| Router window | `history_turns:` in the bundled `router.md` front matter | 10 | 0..100 (0 disables) |
 
 The upper bound of 100 matches Discord's per-call REST cap. History
 fetches are cached in-process for 2 seconds keyed on

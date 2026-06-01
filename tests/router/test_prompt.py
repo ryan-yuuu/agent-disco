@@ -1,19 +1,20 @@
 """Tests pinning the router system prompt to its schema and tool name.
 
-The router's :data:`SYSTEM_PROMPT` references the LLM-facing tool name
-(:data:`ROUTER_OUTPUT_TOOL_NAME`) and the
-:class:`RoutingDecision` schema field names. The prompt module already
-asserts the field names match at import time
-(:mod:`calfkit_organization.router.prompt`), which catches
-the most egregious mismatch — a typo in the prompt's hardcoded literal
-versus the schema's field name. These tests cover the symmetric
-direction (schema rename without prompt update) and pin the policy
-wording the LLM depends on.
+The router's :data:`SYSTEM_PROMPT` is loaded from ``router.md`` (the
+loader, :func:`calfkit_organization.router.prompt.load_router_md`,
+substitutes the ``{{ROUTER_OUTPUT_TOOL}}`` / ``{{AGENT_ID_FIELD}}`` /
+``{{REASONING_FIELD}}`` placeholders with the code constants). The prompt
+module also asserts the field-name constants match
+:class:`RoutingDecision` at import time
+(:mod:`calfkit_organization.router.prompt`), which catches a placeholder
+constant drifting from the schema. These tests cover the rendered prompt:
+the symmetric direction (schema rename without prompt update) and the
+policy wording the LLM depends on.
 
 A failure here means one of:
 
 * Someone renamed :data:`ROUTER_OUTPUT_TOOL_NAME` without updating the
-  prompt to interpolate the new value.
+  ``{{ROUTER_OUTPUT_TOOL}}`` placeholder / constant to match.
 * Someone renamed a :class:`RoutingDecision` field (e.g. ``agent_id`` →
   ``respondent``) without updating the prompt to instruct the LLM
   using the new name. The LLM would still emit a tool call but with
@@ -30,11 +31,17 @@ A failure here means one of:
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from calfkit_organization.agents.routing import (
     ROUTER_OUTPUT_TOOL_NAME,
     RoutingDecision,
 )
-from calfkit_organization.router.prompt import SYSTEM_PROMPT
+from calfkit_organization.router import prompt as prompt_module
+from calfkit_organization.router.config import RouterConfig
+from calfkit_organization.router.prompt import SYSTEM_PROMPT, load_router_md
 
 
 class TestSystemPromptCoupling:
@@ -44,14 +51,15 @@ class TestSystemPromptCoupling:
         reference) so a rename of :data:`ROUTER_OUTPUT_TOOL_NAME`
         without updating the prompt's instruction text is caught here.
 
-        The prompt module interpolates the constant via f-string at
-        module load, so a rename without a coordinated update would
-        propagate — this test serves as a contract anchor in case the
-        f-string is ever inlined as a literal."""
+        The loader substitutes the ``{{ROUTER_OUTPUT_TOOL}}`` placeholder
+        in ``router.md`` with this constant at load time, so a rename
+        without a coordinated update would propagate — this test serves as
+        a contract anchor in case the placeholder is ever inlined as a
+        literal in the Markdown."""
         assert ROUTER_OUTPUT_TOOL_NAME in SYSTEM_PROMPT, (
             f"prompt missing tool name {ROUTER_OUTPUT_TOOL_NAME!r}; "
-            f"if ROUTER_OUTPUT_TOOL_NAME was renamed, update "
-            f"router/prompt.py to interpolate the new value"
+            f"if ROUTER_OUTPUT_TOOL_NAME was renamed, update the "
+            f"{{{{ROUTER_OUTPUT_TOOL}}}} placeholder/constant in router/prompt.py"
         )
         # The current canonical value — kept in sync with
         # agents/routing.py. A change here forces a coordinated review
@@ -140,10 +148,9 @@ class TestSystemPromptCoupling:
         )
 
     def test_prompt_instructs_use_of_message_history(self) -> None:
-        """The router agent is configured with
-        ``history_turns=CALFKIT_ROUTER_HISTORY_TURNS`` (default 10) so
-        recent channel turns are projected into its ``message_history``
-        on every invocation — see
+        """The router agent is configured with ``history_turns`` from the
+        ``router.md`` front matter (default 10) so recent channel turns are
+        projected into its ``message_history`` on every invocation — see
         :func:`calfkit_organization.router.definition.build_router_definition`
         and the ``_DEFAULT_HISTORY_TURNS`` docstring ("only needs
         enough context to recognize follow-ups vs. fresh topics").
@@ -241,3 +248,118 @@ class TestSystemPromptCoupling:
             "wording 'the targeted agent will not exist and the "
             "message will go unanswered' was lost in a later edit"
         )
+
+
+class TestBundledRouterMd:
+    """The shipped ``router.md`` parses and renders cleanly."""
+
+    def test_front_matter_parses_to_router_config(self) -> None:
+        config, _ = load_router_md()
+        assert isinstance(config, RouterConfig)
+        # The bundled front matter copies the values from the old router.yml.
+        assert config.provider == "openai-codex"
+        assert config.model == "gpt-5.4-mini"
+        assert config.thinking_effort == "low"
+
+    def test_no_placeholder_leaks_into_rendered_prompt(self) -> None:
+        """Every ``{{...}}`` placeholder must be substituted at load time; a
+        surviving brace pair would reach the LLM verbatim."""
+        assert "{{" not in SYSTEM_PROMPT
+        assert "}}" not in SYSTEM_PROMPT
+
+    def test_rendered_prompt_substitutes_field_names(self) -> None:
+        for field_name in RoutingDecision.model_fields:
+            assert field_name in SYSTEM_PROMPT
+
+
+class TestRouterMdLoader:
+    """Error handling + the ``CALFKIT_ROUTER_PROMPT_PATH`` override.
+
+    The loader caches on a module global, so every test resets it before and
+    after (the override env var is cleared on teardown too).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(prompt_module._PROMPT_PATH_ENV, raising=False)
+        prompt_module._reset_cache_for_tests()
+        yield
+        prompt_module._reset_cache_for_tests()
+
+    def _override(self, monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+        monkeypatch.setenv(prompt_module._PROMPT_PATH_ENV, str(path))
+        prompt_module._reset_cache_for_tests()
+
+    def test_override_path_is_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "router.md"
+        path.write_text("---\nprovider: anthropic\n---\nOverride prompt body.\n")
+        self._override(monkeypatch, path)
+        config, body = load_router_md()
+        assert config.provider == "anthropic"
+        assert body == "Override prompt body."
+
+    def test_placeholders_substituted_in_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "router.md"
+        path.write_text(
+            "---\nprovider: openai\n---\n"
+            "Call {{ROUTER_OUTPUT_TOOL}} with {{AGENT_ID_FIELD}} and {{REASONING_FIELD}}.\n"
+        )
+        self._override(monkeypatch, path)
+        _, body = load_router_md()
+        assert body == f"Call {ROUTER_OUTPUT_TOOL_NAME} with agent_id and reasoning."
+
+    def test_missing_override_file_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._override(monkeypatch, tmp_path / "does-not-exist.md")
+        with pytest.raises(ValueError, match="cannot read router prompt"):
+            load_router_md()
+
+    def test_malformed_front_matter_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "router.md"
+        path.write_text("---\nprovider: openai\n  : : bad\n---\nBody.\n")
+        self._override(monkeypatch, path)
+        with pytest.raises(ValueError, match="malformed YAML frontmatter"):
+            load_router_md()
+
+    def test_invalid_front_matter_field_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "router.md"
+        path.write_text("---\nprovider: cohere\n---\nBody.\n")
+        self._override(monkeypatch, path)
+        with pytest.raises(ValueError, match="invalid router config"):
+            load_router_md()
+
+    def test_reserved_field_in_front_matter_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "router.md"
+        path.write_text("---\nsystem_prompt: sneaky\n---\nBody.\n")
+        self._override(monkeypatch, path)
+        with pytest.raises(ValueError, match="invalid router config"):
+            load_router_md()
+
+    def test_empty_body_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "router.md"
+        path.write_text("---\nprovider: openai\n---\n   \n")
+        self._override(monkeypatch, path)
+        with pytest.raises(ValueError, match="router prompt body is empty"):
+            load_router_md()
+
+    def test_unsubstituted_placeholder_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "router.md"
+        path.write_text("---\nprovider: openai\n---\nUse {{TYPOED_PLACEHOLDER}} here.\n")
+        self._override(monkeypatch, path)
+        with pytest.raises(ValueError, match="unsubstituted placeholder"):
+            load_router_md()

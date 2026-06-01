@@ -439,17 +439,16 @@ class AgentFactory:
               ``bridge/ingress.py``).
 
         Router builds need no per-channel state (single fixed ambient
-        topic) and no on-disk state store (router state is
-        env-driven). Callers should reach this method via
-        :meth:`build_node` with ``state=None``/``store=None`` rather
-        than building a never-used :class:`AgentStateStore`.
+        topic) and no on-disk state store. Callers should reach this
+        method via :meth:`build_node` with ``state=None``/``store=None``
+        rather than building a never-used :class:`AgentStateStore`.
 
-        Note on env-var precedence: the router definition's
+        Note on provider precedence: the router definition's
         ``provider``/``model`` are populated by
-        :func:`build_router_definition` from ``CALFKIT_ROUTER_*``
-        env vars (with defaults). Those values are always non-None,
-        so the assistant-targeted ``CALFKIT_AGENT_DEFAULT_*`` env
-        vars never apply on this path. A future refactor that lets
+        :func:`build_router_definition` from the bundled ``router.md``
+        front matter (with in-code defaults). Those values are always
+        non-None, so the assistant-targeted ``CALFKIT_AGENT_DEFAULT_*``
+        env vars never apply on this path. A future refactor that lets
         the router definition leave ``provider`` or ``model`` as
         ``None`` would silently start picking up the assistant
         defaults — keep them non-None.

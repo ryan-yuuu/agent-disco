@@ -172,8 +172,9 @@ class AgentDefinition(BaseModel):
         history_turns: 30
         ---
 
-    The router's analogous knob is the ``CALFKIT_ROUTER_HISTORY_TURNS``
-    env var (router is constructed in code, not from ``.md``)."""
+    The router's analogous knob is ``history_turns`` in the bundled
+    ``router.md`` front matter (see
+    :mod:`calfkit_organization.router.prompt`)."""
     memory: bool = False
     """Opt in to a persistent per-agent notepad. When ``True``, the factory
     registers a runtime instructions hook

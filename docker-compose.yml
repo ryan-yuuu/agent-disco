@@ -180,11 +180,11 @@ services:
     environment:
       CALF_HOST_URL: redpanda:9092
     volumes:
-      # Codex subscription auth — required when
-      # ``CALFKIT_ROUTER_PROVIDER=openai-codex``. Without these mounts
-      # the router boots and immediately fails with
-      # ``CodexNotLoggedInError``. Mirrors the agent service's Codex
-      # mounts; see that block for the rationale and the host-login
+      # Codex subscription auth — required when the router's ``provider``
+      # (set in the bundled ``router.md``) is ``openai-codex`` (the shipped
+      # default). Without these mounts the router boots and immediately
+      # fails with ``CodexNotLoggedInError``. Mirrors the agent service's
+      # Codex mounts; see that block for the rationale and the host-login
       # prerequisite (docs/codex-auth.md).
       - ${HOME}/.calfcord/auth:/home/calfcord/.calfcord/auth
       - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
