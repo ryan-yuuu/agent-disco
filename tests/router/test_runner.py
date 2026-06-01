@@ -25,15 +25,6 @@ class TestBuildRouterNodes:
     """``_build_router_nodes`` constructs the two nodes that boot on a
     single Worker: the router agent and the fan-out consumer."""
 
-    @pytest.fixture(autouse=True)
-    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in (
-            "CALFKIT_ROUTER_PROVIDER",
-            "CALFKIT_ROUTER_MODEL",
-            "CALFKIT_ROUTER_THINKING_EFFORT",
-        ):
-            monkeypatch.delenv(var, raising=False)
-
     def _factory(self) -> AgentFactory:
         def fake_model_factory(provider: str, model_name: str) -> PydanticModelClient:
             return MagicMock(spec=PydanticModelClient)

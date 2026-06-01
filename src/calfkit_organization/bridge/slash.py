@@ -143,9 +143,9 @@ class SlashCommandManager:
 
     def _build_thinking_effort_command(self) -> app_commands.Command:
         # The built-in router is excluded from the choice list — its
-        # config is env-driven (CALFKIT_ROUTER_*) and it is not a
-        # user-invocable agent, so exposing it in the Discord UI would
-        # only confuse operators.
+        # config lives in the bundled ``router.md`` (not an ``agents/*.md``
+        # file) and it is not a user-invocable agent, so exposing it in the
+        # Discord UI would only confuse operators.
         agent_choices = [
             app_commands.Choice(name=spec.agent_id, value=spec.agent_id)
             for spec in self._registry.all()

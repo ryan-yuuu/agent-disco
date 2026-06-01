@@ -37,15 +37,6 @@ def _write_agent(dir_: Path, name: str, **frontmatter_extra: str) -> None:
 class TestFromAgentsDirAppendsRouter:
     """``from_agents_dir`` always includes the built-in router."""
 
-    @pytest.fixture(autouse=True)
-    def _clean_router_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in (
-            "CALFKIT_ROUTER_PROVIDER",
-            "CALFKIT_ROUTER_MODEL",
-            "CALFKIT_ROUTER_THINKING_EFFORT",
-        ):
-            monkeypatch.delenv(var, raising=False)
-
     def test_empty_dir_yields_router_only(self, tmp_path: Path) -> None:
         registry = AgentRegistry.from_agents_dir(tmp_path)
         all_defs = registry.all()
@@ -69,15 +60,6 @@ class TestFromAgentsDirAppendsRouter:
 
 class TestRouterAccessor:
     """:meth:`AgentRegistry.router` returns the singleton router."""
-
-    @pytest.fixture(autouse=True)
-    def _clean_router_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in (
-            "CALFKIT_ROUTER_PROVIDER",
-            "CALFKIT_ROUTER_MODEL",
-            "CALFKIT_ROUTER_THINKING_EFFORT",
-        ):
-            monkeypatch.delenv(var, raising=False)
 
     def test_returns_router_from_disk_loaded_registry(self, tmp_path: Path) -> None:
         _write_agent(tmp_path, "scribe")
@@ -174,15 +156,6 @@ class TestPhonebookExcludesRouter:
     The router-side roster (built by
     :func:`calfkit_organization.router.roster.build_router_temp_instructions`)
     is the intentional place for the router-visible agent list."""
-
-    @pytest.fixture(autouse=True)
-    def _clean_router_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in (
-            "CALFKIT_ROUTER_PROVIDER",
-            "CALFKIT_ROUTER_MODEL",
-            "CALFKIT_ROUTER_THINKING_EFFORT",
-        ):
-            monkeypatch.delenv(var, raising=False)
 
     def test_router_not_in_phonebook(self, tmp_path: Path) -> None:
         _write_agent(tmp_path, "scribe")
