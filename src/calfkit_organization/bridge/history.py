@@ -54,6 +54,21 @@ thread group share one Kafka topic with the parent). For *history
 fetching* we want the actual channel the message landed in — the
 thread itself, not the parent. The wire's ``source_channel_id`` field
 preserves that.
+
+**Why the fetcher recovers a thread's starter message**: a Discord
+thread created from a message ("Start Thread from Message" — how
+``/task`` threads are made) keeps that starter message in the *parent*
+channel, not the thread, and its id equals the thread id. A
+thread-scoped :meth:`~discord.abc.Messageable.history` therefore never
+returns it, so an agent working a ``/task`` thread would lose the
+original task statement on every turn after the first (the task text
+reaches the agent only as the first turn's ``user_prompt``).
+:meth:`ChannelHistoryFetcher._thread_starter_message` recovers it
+(in-memory cache first, then one REST fetch from the parent) and
+:meth:`ChannelHistoryFetcher._do_fetch` prepends it as the oldest
+record — gated so it appears only on follow-up turns (never duplicating
+the first-turn trigger) and only when the thread's own history did not
+already include it (forum threads keep their starter in-thread).
 """
 
 from __future__ import annotations
@@ -452,6 +467,14 @@ class ChannelHistoryFetcher:
         Records are also truncated at the most recent ``/clear`` marker
         (see :func:`is_clear_marker` and the inline comment at the scan
         site for the rationale).
+
+        For a message-started thread, the starter message — which lives in
+        the parent channel and is therefore absent from
+        ``thread.history()`` — is recovered via
+        :meth:`_thread_starter_message` and prepended as the oldest record
+        when it falls within this fetch's exclusive ``before=`` window and
+        the thread's own history did not already include it. See the inline
+        comment at the prepend site.
         """
         channel = await self._resolve_channel(source_channel_id)
         if channel is None:
@@ -501,6 +524,35 @@ class ChannelHistoryFetcher:
         bot_user_id = bot_user.id if bot_user is not None else None
         try:
             ordered = list(reversed(messages))
+            # Recover a message-started thread's starter message and prepend
+            # it as the oldest entry. The starter lives in the PARENT channel
+            # (see :meth:`_thread_starter_message`), so ``thread.history()``
+            # never returns it — without this, agents in a ``/task`` thread
+            # lose the original task statement on every turn after the first.
+            #
+            # Two gates keep it exactly-once and in the right place:
+            #   * ``starter.id < before_message_id`` mirrors Discord's
+            #     exclusive ``before=`` rule applied to the anchor. On the
+            #     first ``/task`` turn the anchor IS the triggering message
+            #     (``before_message_id == thread.id == starter.id``) and is
+            #     supplied as the ``user_prompt``, so it stays excluded just
+            #     as a normal trigger would; on later turns it is included.
+            #   * the membership check skips the prepend when the fetched
+            #     history already contains the starter — forum-post threads
+            #     keep their starter in-thread (id == thread.id), so
+            #     ``thread.history()`` returns it and prepending would
+            #     duplicate it.
+            # Prepended BEFORE the ``/clear`` scan, so a ``/clear`` inside the
+            # thread truncates the task statement too ("clear means clear").
+            # Inside this defensive try so a malformed starter shape degrades
+            # to empty history rather than raising into the invocation path.
+            starter = await self._thread_starter_message(channel)
+            if (
+                starter is not None
+                and starter.id < before_message_id
+                and not any(m.id == starter.id for m in ordered)
+            ):
+                ordered.insert(0, starter)
             cut = -1
             for i in range(len(ordered) - 1, -1, -1):
                 if is_clear_marker(ordered[i], bot_user_id):
@@ -515,6 +567,82 @@ class ChannelHistoryFetcher:
                 source_channel_id,
             )
             return []
+
+    async def _thread_starter_message(self, channel: Any) -> discord.Message | None:
+        """Recover a message-started thread's starter message, or ``None``.
+
+        A thread created from a message (Discord's "Start Thread from
+        Message" — how ``/task`` threads and manually message-started
+        threads are made) keeps that starter message in the **parent
+        channel**, not the thread, so :meth:`discord.Thread.history` never
+        yields it. The starter's id equals the thread id (per discord.py's
+        :attr:`discord.Thread.starter_message`: "the thread starter message
+        ID is the same ID as the thread").
+
+        Recovery order:
+
+        1. ``channel.starter_message`` — a read of discord.py's in-memory
+           message cache (the ``max_messages`` deque, populated from
+           ``MESSAGE_CREATE`` gateway events). Opportunistic: usually a miss
+           on follow-up turns or after a bridge restart, in which case we
+           fall through to the REST path.
+        2. ``parent.fetch_message(channel.id)`` — one REST call, the
+           realistic common path (the starter id equals the thread id).
+
+        Duck-typed on ``parent_id`` (mirrors
+        :func:`~calfkit_organization.bridge.normalizer._resolve_channel_id`,
+        the codebase's thread-detection primitive) so a non-thread channel
+        returns ``None`` without a REST call and tests can use plain
+        ``SimpleNamespace`` fakes.
+
+        Total — every failure degrades to ``None`` (today's thread-only
+        history), logged like the sibling fetch failures in
+        :meth:`_do_fetch`:
+
+        * non-thread channel (no ``parent_id``) → ``None``, no REST;
+        * a cached starter → returned directly (no REST);
+        * a forum-channel parent (no ``fetch_message``) → ``None`` (forum
+          threads keep their starter in-thread, so no recovery is needed);
+        * thread with no fetchable starter — created standalone, or the
+          starter was deleted (``discord.NotFound``) → ``None``;
+        * uncached parent that cannot be resolved → ``None``;
+        * ``discord.Forbidden`` → ``None``, deduped once per parent id;
+        * ``discord.HTTPException`` → ``None``, WARN.
+        """
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id is None:
+            return None  # not a thread
+        # discord.py's in-memory message cache (the ``max_messages`` deque).
+        # Opportunistic — usually a miss on later turns / after a restart, in
+        # which case we fall to the REST fetch below.
+        starter = getattr(channel, "starter_message", None)
+        if starter is not None:
+            return starter  # in-memory cache hit — no REST
+        parent = getattr(channel, "parent", None)
+        if parent is None:
+            parent = await self._resolve_channel(parent_id)
+        # A forum-channel parent is not messageable and has no
+        # ``fetch_message`` — guard so we degrade to ``None`` instead of
+        # raising (forum threads keep their starter in-thread anyway).
+        if parent is None or not hasattr(parent, "fetch_message"):
+            return None
+        try:
+            return await parent.fetch_message(channel.id)
+        except discord.NotFound:
+            # Standalone thread (not created from a message) or the starter
+            # was deleted — not an error; there is simply no anchor to add.
+            return None
+        except discord.Forbidden:
+            self._log_forbidden_once(parent_id)
+            return None
+        except discord.HTTPException as e:
+            logger.warning(
+                "channel_id=%d: thread starter-message fetch failed status=%s: %s",
+                channel.id,
+                e.status,
+                e,
+            )
+            return None
 
     async def _resolve_channel(
         self, channel_id: int
