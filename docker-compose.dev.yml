@@ -1,0 +1,104 @@
+# Development overlay for hot-reload. Layered onto docker-compose.yml.
+# This file is NOT named docker-compose.override.yml, so Compose does
+# NOT auto-merge it — it must be selected explicitly with ``-f``. The
+# ``make dev`` target does that for you.
+#
+# Usage:
+#   make dev    # docker compose -f docker-compose.yml -f docker-compose.dev.yml watch
+#
+# What this does:
+#   * Configures ``develop.watch`` to sync source into the running
+#     containers and restart them. There is deliberately NO ./src bind
+#     mount: ``watch`` is the reload mechanism, not a supplement to a
+#     bind mount. Compose refuses to monitor a path that is also a
+#     bind-mount volume ("this path won't be monitored!"), which
+#     silently disables the rule — so bind-mounting ./src AND watching
+#     it cancels the watch. Watch alone syncs edits onto the image's
+#     baked /app/src (an editable install, so re-imports pick them up).
+#       - changes under ./src/  → sync changed files into /app/src and
+#         restart the service (sync+restart) so the long-running asyncio
+#         worker re-imports.
+#       - changes to pyproject.toml or uv.lock → full image rebuild,
+#         because dependencies live in the baked /app/.venv from the
+#         Dockerfile's ``uv sync`` step.
+#   * agents/*.md hot-reload (agent service only). ./agents stays a
+#     read-WRITE bind mount from the base file — the agent rewrites its
+#     own frontmatter via md_writer.update_thinking_effort, and that
+#     write only reaches the host through the bind mount. A bind-mounted
+#     path cannot use the sync / sync+restart actions (see above), but
+#     the ``restart`` action performs no sync and IS allowed on a bind
+#     mount, so we use it: editing an agents/*.md restarts the agent,
+#     which re-parses every definition at startup (load_agents_dir in
+#     agents/runner.py caches them for the process lifetime, so a restart
+#     is what makes an edit take effect).
+#
+# Caveats:
+#   * Compose ``watch`` requires v2.32+ for the ``sync+restart`` and
+#     ``restart`` actions. Check with: docker compose version
+#   * Mid-flight Kafka consumer-group reconnects happen on each restart
+#     (~1-2s); offsets persist to Redpanda so no message loss.
+#   * Bytecode cache: the image sets PYTHONDONTWRITEBYTECODE=1 already,
+#     so ``__pycache__`` ghosts don't survive across restarts.
+#
+# This file is committed as the shared dev config. A plain ``docker
+# compose up`` (no -f flags) uses ONLY docker-compose.yml, which is
+# production-shaped; this overlay applies solely when selected via
+# ``make dev``. For personal, machine-specific tweaks, drop a gitignored
+# docker-compose.override.yml next to this file — Compose auto-merges it
+# into bare ``docker compose`` commands, but NOT when ``-f`` is used, so
+# ``make dev`` ignores it (put tweaks you want during ``make dev`` here).
+
+services:
+  bridge:
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./src
+          target: /app/src
+        - action: rebuild
+          path: ./pyproject.toml
+        - action: rebuild
+          path: ./uv.lock
+
+  agent:
+    # Volumes (the read-write ./agents bind mount, ./state, and the codex
+    # auth/prompt-cache mounts) all come from the base file — see the
+    # agent service in docker-compose.yml. This overlay only adds watch.
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./src
+          target: /app/src
+        # agents/*.md edits → restart the agent so it re-reads its
+        # definitions on startup. ``restart`` (not sync/sync+restart)
+        # because ./agents is a read-write bind mount and the sync
+        # actions refuse to monitor a bind-mounted path. No ``target``:
+        # restart copies nothing, it just bounces the container.
+        - action: restart
+          path: ./agents
+        - action: rebuild
+          path: ./pyproject.toml
+        - action: rebuild
+          path: ./uv.lock
+
+  router:
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./src
+          target: /app/src
+        - action: rebuild
+          path: ./pyproject.toml
+        - action: rebuild
+          path: ./uv.lock
+
+  tools:
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./src
+          target: /app/src
+        - action: rebuild
+          path: ./pyproject.toml
+        - action: rebuild
+          path: ./uv.lock

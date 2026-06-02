@@ -234,8 +234,11 @@ state/
 !/workspace/.gitkeep
 
 # Operator-specific Docker Compose overrides (extra mounts, env tweaks,
-# alternate broker images). docker-compose.yml ships as the shared
-# default; this file is each operator's local-only delta.
+# alternate broker images): each operator's local-only delta, auto-merged
+# by Compose when present. The shared configs ARE committed —
+# docker-compose.yml (production-shaped base) and docker-compose.dev.yml
+# (hot-reload overlay, run via ``make dev``); only these personal
+# override files stay out of git.
 compose.override.yml
 compose.override.yaml
 docker-compose.override.yml
