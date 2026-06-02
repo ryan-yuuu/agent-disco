@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from calfkit.nodes.tool import ToolNodeDef
 
-from calfkit_organization.tools import TOOL_REGISTRY
+from calfcord.tools import TOOL_REGISTRY
 
 # The expected set of builtins. Edit this when adding a new tool —
 # the test will then flag any drift.

@@ -32,12 +32,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from calfkit_organization.bridge import gateway as gateway_mod
-from calfkit_organization.bridge.gateway import (
+from calfcord.bridge import gateway as gateway_mod
+from calfcord.bridge.gateway import (
     _open_transcript_store,
     _prune_on_startup,
 )
-from calfkit_organization.bridge.transcripts import (
+from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptStore,
 )
@@ -89,7 +89,7 @@ async def test_open_failure_yields_null_store_and_logs_error(
     # than propagate.
     monkeypatch.setattr(TranscriptStore, "connect", _boom)
 
-    with caplog.at_level(logging.ERROR, logger="calfkit_organization.bridge.gateway"):
+    with caplog.at_level(logging.ERROR, logger="calfcord.bridge.gateway"):
         async with _open_transcript_store(settings) as store:  # type: ignore[arg-type]
             # Degraded to the no-op store: disabled, and the no-op surface
             # is usable without raising.
@@ -143,7 +143,7 @@ async def test_prune_on_startup_prunes_and_logs(
     store = SimpleNamespace(prune_older_than=AsyncMock(return_value=3))
     settings = _retention_settings(days=30)
 
-    with caplog.at_level(logging.INFO, logger="calfkit_organization.bridge.gateway"):
+    with caplog.at_level(logging.INFO, logger="calfcord.bridge.gateway"):
         await _prune_on_startup(store, settings)  # type: ignore[arg-type]
 
     expected_cutoff = frozen_now - 30 * 86400
@@ -166,7 +166,7 @@ async def test_prune_on_startup_zero_pruned_logs_nothing(
     monkeypatch.setattr(gateway_mod.time, "time", lambda: 1_700_000_000)
     store = SimpleNamespace(prune_older_than=AsyncMock(return_value=0))
 
-    with caplog.at_level(logging.INFO, logger="calfkit_organization.bridge.gateway"):
+    with caplog.at_level(logging.INFO, logger="calfcord.bridge.gateway"):
         await _prune_on_startup(store, _retention_settings(days=7))  # type: ignore[arg-type]
 
     store.prune_older_than.assert_awaited_once()
@@ -181,7 +181,7 @@ async def test_prune_on_startup_swallows_prune_failure(
     The exception is logged and swallowed."""
     store = SimpleNamespace(prune_older_than=AsyncMock(side_effect=OSError("disk full")))
 
-    with caplog.at_level(logging.ERROR, logger="calfkit_organization.bridge.gateway"):
+    with caplog.at_level(logging.ERROR, logger="calfcord.bridge.gateway"):
         # Must not raise.
         await _prune_on_startup(store, _retention_settings(days=30))  # type: ignore[arg-type]
 

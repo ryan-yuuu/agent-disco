@@ -27,16 +27,16 @@ import discord
 import pytest
 from pydantic import SecretStr
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.gateway import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.gateway import (
     DiscordIngressGateway,
     _parse_task_command,
     _thread_name_from_text,
 )
-from calfkit_organization.bridge.ingress import AmbientRosterEmptyError, BridgeIngress
-from calfkit_organization.bridge.normalizer import MessageNormalizer
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.discord.settings import DiscordSettings
+from calfcord.bridge.ingress import AmbientRosterEmptyError, BridgeIngress
+from calfcord.bridge.normalizer import MessageNormalizer
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.discord.settings import DiscordSettings
 
 _GUILD_ID = 5678
 _PARENT_CHANNEL_ID = 6789

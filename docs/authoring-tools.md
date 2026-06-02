@@ -3,7 +3,7 @@
 How to add a new tool that any calfcord agent can invoke. This is the
 contributor reference for the file-drop workflow introduced in PR 2; for
 the architectural background on tools as a calfkit node type, see
-`src/calfkit_organization/tools/__init__.py` and the calfkit docs.
+`src/calfcord/tools/__init__.py` and the calfkit docs.
 
 ## 1. Overview
 
@@ -25,14 +25,14 @@ agent process (LLM sees the string return)
 
 A tool is, concretely, **an `async` function decorated with
 `@agent_tool` from `calfkit.nodes` that returns `str`**. Tools live in
-`src/calfkit_organization/tools/builtin/`. Drop a `.py` file there with
+`src/calfcord/tools/builtin/`. Drop a `.py` file there with
 a `ToolNodeDef` attribute at module scope and the next `calfkit-tools`
 boot picks it up — no edits to a central registry, no entry-point
 metadata, no second deploy. The discovery walk in
-`src/calfkit_organization/tools/discovery.py` does the work.
+`src/calfcord/tools/discovery.py` does the work.
 
 The canonical references are the modules under
-`src/calfkit_organization/tools/builtin/`. Read a couple before writing
+`src/calfcord/tools/builtin/`. Read a couple before writing
 a new one.
 
 ## 2. The 3-step workflow
@@ -45,7 +45,7 @@ every pattern this doc covers.
 ### Step 1 — Write the function
 
 ```python
-# src/calfkit_organization/tools/builtin/pypi.py
+# src/calfcord/tools/builtin/pypi.py
 """``pypi_info`` — look up a package's metadata on PyPI.
 
 Thin wrapper around the public ``https://pypi.org/pypi/<name>/json``
@@ -144,7 +144,7 @@ def` importable under its real name — tests should call it without
 going through calfkit's dispatch.
 
 ```python
-# At the bottom of src/calfkit_organization/tools/builtin/pypi.py
+# At the bottom of src/calfcord/tools/builtin/pypi.py
 
 # Call ``agent_tool`` as a function (not as the ``@agent_tool``
 # decorator form on the def) so ``pypi_info`` stays directly
@@ -161,15 +161,15 @@ for the LLM, not just for humans.
 
 ### Step 3 — Drop the file, restart, declare
 
-Save the file at `src/calfkit_organization/tools/builtin/pypi.py`. No
+Save the file at `src/calfcord/tools/builtin/pypi.py`. No
 edits to `tools/__init__.py`, no registry insertions, no entry points.
 
 Restart `calfkit-tools`. The discovery loader walks the package at
 import time and logs each registration:
 
 ```
-INFO calfkit_organization.tools.discovery: registered builtin
-     tool=pypi_info from=calfkit_organization.tools.builtin.pypi:pypi_info_tool
+INFO calfcord.tools.discovery: registered builtin
+     tool=pypi_info from=calfcord.tools.builtin.pypi:pypi_info_tool
 ```
 
 Add the tool to an agent by listing it in the agent's `.md` frontmatter
@@ -272,7 +272,7 @@ your tool wraps an openhands `Observation`, use the shared helper
 — it inspects `obs.is_error` and applies the prefix automatically:
 
 ```python
-from calfkit_organization.tools.builtin._observation import flatten_observation_text
+from calfcord.tools.builtin._observation import flatten_observation_text
 
 obs = _get_executor()(action)
 return flatten_observation_text(obs)
@@ -297,7 +297,7 @@ if api_key is None:
 logs caller / target / correlation_id at ERROR level and raises
 `RuntimeError` with the chained cause. Funneling every infra-bug path
 through a single helper keeps operator triage uniform — read
-`src/calfkit_organization/tools/builtin/private_chat.py` lines around
+`src/calfcord/tools/builtin/private_chat.py` lines around
 the `_raise_infra` definition and copy the shape.
 
 The boundary rule: if a competent human operator could fix the
@@ -309,7 +309,7 @@ return `"error: ..."`. When in doubt, prefer to raise — a noisy
 
 ## 5. Discovery rules
 
-The auto-loader at `src/calfkit_organization/tools/discovery.py`
+The auto-loader at `src/calfcord/tools/discovery.py`
 enforces these rules at import time:
 
 - **Drop a `.py` file in `tools/builtin/`.** No edits to
@@ -380,7 +380,7 @@ that model is the call-level disposition:
   the trusted-workspace contract for the `fs` tools, but if your tool
   only operates on a fixed subdirectory, reject paths that escape it
   via `..` or absolute prefixes. `_resolve_path` in
-  `src/calfkit_organization/tools/builtin/fs.py` shows the v1 baseline
+  `src/calfcord/tools/builtin/fs.py` shows the v1 baseline
   (no escape protection — by design); a more restrictive tool should
   do better.
 - **Validate SQL / shell / templated strings.** Anything that's
@@ -397,7 +397,7 @@ annotation says otherwise.
 ## 7. Testing pattern
 
 Tests live next to the source: a tool at
-`src/calfkit_organization/tools/builtin/pypi.py` gets tests at
+`src/calfcord/tools/builtin/pypi.py` gets tests at
 `tests/tools/builtin/test_pypi.py`. Two canonical references:
 
 - **`tests/tools/builtin/test_fs.py`** — exercises the real
@@ -436,7 +436,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from calfkit_organization.tools.builtin import pypi
+from calfcord.tools.builtin import pypi
 
 
 @pytest.fixture(autouse=True)
@@ -553,11 +553,11 @@ Copy the shape exactly.
 ## 9. Future — third-party plugins (deferred)
 
 Today, calfcord only auto-discovers tools that live inside the repo at
-`src/calfkit_organization/tools/builtin/`. There is no entry-point
+`src/calfcord/tools/builtin/`. There is no entry-point
 loading, no `[project.entry-points."calfcord.tools"]` discovery, no
 support for pip-installable third-party tool packages. If you want to
 ship a closed-source or otherwise externally-distributed tool without
 forking calfcord, file an issue describing the use case. The discovery
-loader is small (see `src/calfkit_organization/tools/discovery.py`)
+loader is small (see `src/calfcord/tools/discovery.py`)
 and entry-point loading is an additive change — we just haven't
 needed it yet.

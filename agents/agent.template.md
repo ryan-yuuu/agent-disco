@@ -4,7 +4,7 @@
 # ============================================================================
 #
 # This file is a TEMPLATE, not a live agent. The bridge's agent loader
-# (src/calfkit_organization/agents/loader.py) skips any file whose name ends
+# (src/calfcord/agents/loader.py) skips any file whose name ends
 # in ".template.md", so this file is ignored on boot even though it ends in
 # ".md". To create a real agent, copy this file to "agents/<your-name>.md"
 # and edit the fields below.
@@ -63,7 +63,7 @@ description: An example agent demonstrating the .md frontmatter schema.
 #   - "openai-codex"  OpenAI Codex models billed through a ChatGPT Plus/Pro
 #                     subscription instead of API credits. Requires a
 #                     one-time `uv run calfkit-auth codex login`; see
-#                     calfkit_organization.providers.codex.
+#                     calfcord.providers.codex.
 # Omit to fall back to CALFKIT_AGENT_DEFAULT_PROVIDER, then to the
 # project default ("anthropic"). See resolve_provider() in agents/factory.py.
 provider: anthropic
@@ -85,7 +85,7 @@ model: claude-sonnet-4-5
 # unknown names fail fast with a "known tools: ..." error.
 # ----------------------------------------------------------------------------
 
-# Available builtins (see src/calfkit_organization/tools/builtin/ for source):
+# Available builtins (see src/calfcord/tools/builtin/ for source):
 #   - private_chat   one-on-one A2A conversation with another agent
 #   - shell          run a shell command on the calfkit-tools host
 #   - read_file      view a file's contents (with line numbers)

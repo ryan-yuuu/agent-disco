@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
+from calfcord.agents.definition import AgentDefinition
+from calfcord.control_plane.definition_ref import AgentDefinitionRef
 
 
 def _make_definition(agent_id: str = "scribe", **overrides: object) -> AgentDefinition:

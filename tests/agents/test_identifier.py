@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.agents.identifier import (
+from calfcord.agents.identifier import (
     AGENT_ID_CHARSET,
     AGENT_ID_PATTERN,
 )

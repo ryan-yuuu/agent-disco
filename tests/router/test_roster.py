@@ -1,7 +1,7 @@
 """Unit tests for :func:`build_router_temp_instructions`.
 
 The router's roster is different from the peer roster
-(:mod:`calfkit_organization.agents.peer_roster`):
+(:mod:`calfcord.agents.peer_roster`):
 
 * No gating on ``private_chat`` — the router has no tools at all, so
   every agent is a candidate respondent regardless of which tools it
@@ -16,9 +16,9 @@ import logging
 
 import pytest
 
-from calfkit_organization.agents.phonebook import PhonebookEntry
-from calfkit_organization.router.definition import ROUTER_AGENT_ID
-from calfkit_organization.router.roster import build_router_temp_instructions
+from calfcord.agents.phonebook import PhonebookEntry
+from calfcord.router.definition import ROUTER_AGENT_ID
+from calfcord.router.roster import build_router_temp_instructions
 
 
 def _entry(
@@ -50,7 +50,7 @@ class TestBuildRouterTempInstructions:
         signal (no assistants registered); WARN connects cause to
         symptom (silent router)."""
         with caplog.at_level(
-            logging.WARNING, logger="calfkit_organization.router.roster"
+            logging.WARNING, logger="calfcord.router.roster"
         ):
             build_router_temp_instructions([])
         assert any(
@@ -70,7 +70,7 @@ class TestBuildRouterTempInstructions:
         empty roster — same WARN as the truly-empty case."""
         phonebook = [_entry(ROUTER_AGENT_ID, description="Internal routing agent")]
         with caplog.at_level(
-            logging.WARNING, logger="calfkit_organization.router.roster"
+            logging.WARNING, logger="calfcord.router.roster"
         ):
             build_router_temp_instructions(phonebook)
         assert any(

@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`calfkit_organization.bridge.history`.
+"""Unit tests for :mod:`calfcord.bridge.history`.
 
 Covers three units:
 
@@ -30,15 +30,15 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 from pydantic import ValidationError
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.history import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.history import (
     CLEAR_MARKER_TEXT,
     ChannelHistoryFetcher,
     HistoryRecord,
     is_clear_marker,
     project_history,
 )
-from calfkit_organization.bridge.registry import AgentRegistry
+from calfcord.bridge.registry import AgentRegistry
 
 
 def _record(
@@ -492,7 +492,7 @@ class TestChannelHistoryFetcher:
         def _mono() -> float:
             return fake_now["v"]
 
-        monkeypatch.setattr("calfkit_organization.bridge.history.monotonic", _mono)
+        monkeypatch.setattr("calfcord.bridge.history.monotonic", _mono)
 
         await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
         fake_now["v"] += 5.0  # past TTL

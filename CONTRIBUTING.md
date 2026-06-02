@@ -56,7 +56,7 @@ before adding a new agent.
 ## Adding a tool
 
 A tool is an `async` function decorated with `@agent_tool` and dropped
-into `src/calfkit_organization/tools/builtin/`. Discovery is automatic
+into `src/calfcord/tools/builtin/`. Discovery is automatic
 on the next `calfkit-tools` boot — no registry edits, no entry points.
 Agents opt in by listing the tool name in their `.md` frontmatter
 `tools:` array.

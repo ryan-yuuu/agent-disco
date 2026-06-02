@@ -16,10 +16,10 @@ import pytest
 from calfkit.nodes import Agent
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
-from calfkit_organization.agents.definition import AgentDefinition, Provider
-from calfkit_organization.agents.factory import AgentFactory, resolve_provider
-from calfkit_organization.agents.memory import MEMORY_PROMPT_DEPS_KEY
-from calfkit_organization.agents.state import AgentRuntimeState
+from calfcord.agents.definition import AgentDefinition, Provider
+from calfcord.agents.factory import AgentFactory, resolve_provider
+from calfcord.agents.memory import MEMORY_PROMPT_DEPS_KEY
+from calfcord.agents.state import AgentRuntimeState
 
 
 def _definition(
@@ -451,7 +451,7 @@ class TestRequireModelGuard:
 
     @pytest.mark.parametrize("provider", ["anthropic", "openai"])
     def test_none_model_raises_for_non_codex(self, provider: str) -> None:
-        from calfkit_organization.agents.factory import _default_model_client_factory
+        from calfcord.agents.factory import _default_model_client_factory
 
         with pytest.raises(ValueError, match="requires a model name"):
             _default_model_client_factory(provider, None)  # type: ignore[arg-type]
@@ -492,7 +492,7 @@ class TestThinkingEffortBaking:
         )
         agent_loop = worker._nodes[0]._agent_loop
         # Matches the operator → OpenAI mapping in
-        # :mod:`calfkit_organization.agents.thinking`: operator
+        # :mod:`calfcord.agents.thinking`: operator
         # ``medium`` → OpenAI ``"medium"`` after the ramp shift that
         # accompanied the ``minimal`` tier addition. Was ``"low"``
         # under the previous mapping.
@@ -818,7 +818,7 @@ class TestRouterRole:
         future rename of the constant would skip this site."""
         from calfkit._vendor.pydantic_ai import ToolOutput
 
-        from calfkit_organization.agents.routing import (
+        from calfcord.agents.routing import (
             ROUTER_OUTPUT_TOOL_NAME,
             RoutingDecision,
         )

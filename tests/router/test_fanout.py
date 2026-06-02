@@ -6,7 +6,7 @@ and the per-target ``invoke_node_with_metadata`` publish — all without
 Kafka, FastStream, or an LLM.
 
 The original :class:`WireMessage` rides on ``state.metadata`` (the
-mechanism :mod:`calfkit_organization._compat.invoke` provides);
+mechanism :mod:`calfcord._compat.invoke` provides);
 ``deps.provided_deps`` is intentionally NOT used here because
 @consumer's consume_fn never sees deps.
 """
@@ -30,11 +30,11 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 
-from calfkit_organization.agents.routing import RoutingDecision
-from calfkit_organization.bridge.history import HistoryRecord
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.router.definition import ROUTER_AGENT_ID
-from calfkit_organization.router.fanout import (
+from calfcord.agents.routing import RoutingDecision
+from calfcord.bridge.history import HistoryRecord
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.router.definition import ROUTER_AGENT_ID
+from calfcord.router.fanout import (
     SYNTHESIZED_INGRESS_TOPIC,
     build_fanout_consumer,
 )
@@ -422,7 +422,7 @@ class TestRouterSelfFilter:
         didn't reply" can distinguish a model error from a wiring
         bug that exposed the router's id to the roster."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(logging.WARNING, logger="calfkit_organization.router.fanout"):
+        with caplog.at_level(logging.WARNING, logger="calfcord.router.fanout"):
             await consumer.handler(
                 envelope=_envelope(
                     decision=RoutingDecision(
@@ -457,7 +457,7 @@ class TestErrorPaths:
         no-op rather than crash or publish a malformed wire. The
         schema deliberately allows ``None`` (no required=True) so this
         path stays reachable — see
-        :mod:`calfkit_organization.agents.routing` module docstring.
+        :mod:`calfcord.agents.routing` module docstring.
 
         The skip is WARN-logged (not INFO) because ``None`` is a
         prompt-disobedience signal — operators investigating "no agent
@@ -466,7 +466,7 @@ class TestErrorPaths:
         plus the LLM's reasoning so they can diagnose why the model
         declined to pick."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(logging.WARNING, logger="calfkit_organization.router.fanout"):
+        with caplog.at_level(logging.WARNING, logger="calfcord.router.fanout"):
             await consumer.handler(
                 envelope=_envelope(
                     decision=RoutingDecision(reasoning="small talk; no clear addressee"),
@@ -508,7 +508,7 @@ class TestErrorPaths:
 
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.router.fanout"
+            logging.ERROR, logger="calfcord.router.fanout"
         ):
             # The harness swallows the raise (matches the established
             # pattern in this file — e.g. test_missing_metadata_logs_
@@ -567,7 +567,7 @@ class TestErrorPaths:
         log surfaces the violation. Test the log + the no-publish
         guarantee."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(logging.ERROR, logger="calfkit_organization.router.fanout"):
+        with caplog.at_level(logging.ERROR, logger="calfcord.router.fanout"):
             await consumer.handler(
                 envelope=_envelope(metadata=None),
                 correlation_id=_CORRELATION_ID,
@@ -588,7 +588,7 @@ class TestErrorPaths:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(logging.ERROR, logger="calfkit_organization.router.fanout"):
+        with caplog.at_level(logging.ERROR, logger="calfcord.router.fanout"):
             await consumer.handler(
                 envelope=_envelope(metadata={"other": "stuff"}),
                 correlation_id=_CORRELATION_ID,
@@ -615,7 +615,7 @@ class TestErrorPaths:
         :meth:`MetadataEnvelope.extract`, so the error message
         identifies the failure at the envelope level."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
-        with caplog.at_level(logging.ERROR, logger="calfkit_organization.router.fanout"):
+        with caplog.at_level(logging.ERROR, logger="calfcord.router.fanout"):
             await consumer.handler(
                 envelope=_envelope(metadata={"wire": {"bogus": "data"}}),
                 correlation_id=_CORRELATION_ID,
@@ -638,7 +638,7 @@ class TestTypedEnvelopeError:
     refactor-resilient."""
 
     def test_raise_envelope_error_carries_attributes(self) -> None:
-        from calfkit_organization._compat.invoke import (
+        from calfcord._compat.invoke import (
             MetadataEnvelopeError,
             raise_envelope_error,
         )
@@ -660,7 +660,7 @@ class TestTypedEnvelopeError:
     def test_raise_envelope_error_chains_cause(self) -> None:
         """When a ``cause`` is provided, ``__cause__`` is set so the
         framework's exc_info trace surfaces the original error."""
-        from calfkit_organization._compat.invoke import (
+        from calfcord._compat.invoke import (
             MetadataEnvelopeError,
             raise_envelope_error,
         )
@@ -716,7 +716,7 @@ class TestPhonebookValidation:
         to a user-visible "no reply" symptom."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.router.fanout"
+            logging.ERROR, logger="calfcord.router.fanout"
         ):
             await consumer.handler(
                 envelope=_envelope(
@@ -751,7 +751,7 @@ class TestPhonebookValidation:
         router's LLM hallucinated anyway."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.router.fanout"
+            logging.ERROR, logger="calfcord.router.fanout"
         ):
             await consumer.handler(
                 envelope=_envelope(
@@ -788,7 +788,7 @@ class TestPhonebookValidation:
         # MetadataEnvelope parses as ``phonebook=None`` — the
         # fail-closed path.
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.router.fanout"
+            logging.ERROR, logger="calfcord.router.fanout"
         ):
             await consumer.handler(
                 envelope=_envelope(
@@ -850,7 +850,7 @@ class TestPhonebookValidation:
             {"not_agent_id": "bogus"},  # missing required fields
         ]
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.router.fanout"
+            logging.ERROR, logger="calfcord.router.fanout"
         ):
             await consumer.handler(
                 envelope=_envelope(
@@ -917,13 +917,13 @@ class TestReasoningIsolation:
 class TestTopicContract:
     """Sanity check that the producer (fan-out) and the consumer
     (bridge synthesized-in) read the same Kafka topic constant. Both
-    re-export :data:`calfkit_organization.topics.SYNTHESIZED_INGRESS_TOPIC`
+    re-export :data:`calfcord.topics.SYNTHESIZED_INGRESS_TOPIC`
     at module top, so divergence is impossible without a deliberate
     reassignment — but this asserts the contract explicitly rather
     than relying on the import path."""
 
     def test_synthesized_ingress_topic_matches_bridge(self) -> None:
-        from calfkit_organization.bridge.synthesized import (
+        from calfcord.bridge.synthesized import (
             SYNTHESIZED_INGRESS_TOPIC as BRIDGE_TOPIC,
         )
 
@@ -933,11 +933,11 @@ class TestTopicContract:
         """Same contract as above for the ambient topic — the bridge
         publishes ambient wires to this topic, and the router agent's
         factory subscribes to it. Both sites re-export
-        :data:`calfkit_organization.topics.AMBIENT_INGRESS_TOPIC`."""
-        from calfkit_organization.bridge.ingress import (
+        :data:`calfcord.topics.AMBIENT_INGRESS_TOPIC`."""
+        from calfcord.bridge.ingress import (
             _AMBIENT_INGRESS_TOPIC,
         )
-        from calfkit_organization.topics import (
+        from calfcord.topics import (
             AMBIENT_INGRESS_TOPIC,
         )
 
@@ -950,17 +950,17 @@ class TestMetadataKeyContract:
     (this fan-out / bridge synthesized-in) all agree on.
 
     The keys are defined centrally in
-    :mod:`calfkit_organization._compat.invoke` so all sites import from
+    :mod:`calfcord._compat.invoke` so all sites import from
     there. This test pins the contract at the symbol level — if the
     constants are ever renamed or split, the test surfaces the change.
     """
 
     def test_metadata_key_wire_is_canonical_string(self) -> None:
-        from calfkit_organization._compat.invoke import METADATA_KEY_WIRE
+        from calfcord._compat.invoke import METADATA_KEY_WIRE
 
         assert METADATA_KEY_WIRE == "wire"
 
     def test_metadata_key_phonebook_is_canonical_string(self) -> None:
-        from calfkit_organization._compat.invoke import METADATA_KEY_PHONEBOOK
+        from calfcord._compat.invoke import METADATA_KEY_PHONEBOOK
 
         assert METADATA_KEY_PHONEBOOK == "phonebook"

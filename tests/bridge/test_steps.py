@@ -63,14 +63,14 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 
-import calfkit_organization.bridge.steps as steps_mod
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.pending_wires import PendingWires, make_pending_entry
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.steps import build_steps_consumer
-from calfkit_organization.bridge.steps_state import StepsEntry, StepsState
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.discord.messages import SentMessage
+import calfcord.bridge.steps as steps_mod
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.pending_wires import PendingWires, make_pending_entry
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.steps import build_steps_consumer
+from calfcord.bridge.steps_state import StepsEntry, StepsState
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.discord.messages import SentMessage
 
 _CORRELATION_ID = "evt-1"
 _CHANNEL_ID = 6789

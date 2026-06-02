@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.packaging.dockerfile import (
+from calfcord.packaging.dockerfile import (
     os_deps_for_tools,
     render_agents_dockerfile,
     render_tools_dockerfile,

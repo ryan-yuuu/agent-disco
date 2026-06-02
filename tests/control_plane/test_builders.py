@@ -5,12 +5,12 @@ from __future__ import annotations
 from datetime import UTC
 from pathlib import Path
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.control_plane.builders import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.control_plane.builders import (
     build_state_event,
     state_event_to_definition,
 )
-from calfkit_organization.control_plane.schema import AgentStateEvent
+from calfcord.control_plane.schema import AgentStateEvent
 
 
 def _make_definition(**overrides: object) -> AgentDefinition:

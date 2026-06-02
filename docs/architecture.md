@@ -123,7 +123,7 @@ See [`a2a-threads.md`](./a2a-threads.md) for the full thread-projection design.
 ## Project layout
 
 ```
-src/calfkit_organization/
+src/calfcord/
 ├── agents/        # definition, factory, runner, state, gates, routing,
 │                  # peer_roster, phonebook, thinking, identifier,
 │                  # loader, md_writer

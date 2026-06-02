@@ -1,4 +1,4 @@
-"""Tests for :func:`calfkit_organization.tools.discovery.discover_tools`.
+"""Tests for :func:`calfcord.tools.discovery.discover_tools`.
 
 Each test builds a throwaway *real* package on disk under ``tmp_path``
 and prepends that directory to ``sys.path`` via ``monkeypatch``. We use
@@ -9,7 +9,7 @@ no on-disk presence are invisible to it.
 Each fake package is given a unique name (parameterised by the test
 function) so ``sys.modules`` caching from one test does not bleed into
 another. We deliberately do not import or touch
-:data:`calfkit_organization.tools.TOOL_REGISTRY` from these tests — every
+:data:`calfcord.tools.TOOL_REGISTRY` from these tests — every
 test passes a fresh ``{}`` to ``discover_tools`` so the real registry
 stays out of the picture.
 """
@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 from calfkit.nodes.tool import ToolNodeDef
 
-from calfkit_organization.tools.discovery import _resolve_alias_map, discover_tools
+from calfcord.tools.discovery import _resolve_alias_map, discover_tools
 
 
 def _write_package(root: Path, pkg_name: str, modules: dict[str, str]) -> Path:

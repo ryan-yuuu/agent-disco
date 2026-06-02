@@ -4,7 +4,7 @@ How to add a new LLM-backed agent to a calfcord deployment. This is the
 contributor reference for the file-drop workflow under `agents/`; for the
 companion reference on the tools an agent can wield, see
 `docs/authoring-tools.md`. For the calfkit node model that backs each
-agent, see `src/calfkit_organization/agents/factory.py`.
+agent, see `src/calfcord/agents/factory.py`.
 
 ## 1. Overview
 
@@ -16,9 +16,9 @@ parallels Claude Code's `.claude/agents/*.md` convention so the same
 mental model carries over.
 
 At boot, the bridge scans `agents/` via
-`calfkit_organization.agents.loader.load_agents_dir` and parses each
+`calfcord.agents.loader.load_agents_dir` and parses each
 `<name>.md` into an `AgentDefinition` (see
-`src/calfkit_organization/agents/definition.py`). The definitions feed
+`src/calfcord/agents/definition.py`). The definitions feed
 the agent registry that powers ingress routing, the phonebook
 propagated to A2A peers, and the slash-command tree the bridge
 registers with Discord. **A new `.md` file requires a `calfkit-bridge`
@@ -69,7 +69,7 @@ bridge from picking it up at boot).
 ## 3. Field reference
 
 Every field below is declared on `AgentDefinition` in
-`src/calfkit_organization/agents/definition.py`. The model is
+`src/calfcord/agents/definition.py`. The model is
 configured `extra="forbid"`, so frontmatter typos (`provder: openai`,
 `thiking_effort: high`) fail at parse time with a Pydantic error rather
 than silently falling back to defaults.
@@ -110,7 +110,7 @@ late-stage webhook 400.
 `provider` is one of `"anthropic"` or `"openai"`. The factory dispatches
 on this string to construct `AnthropicModelClient` or
 `OpenAIModelClient`; an unknown provider raises at boot. See
-`src/calfkit_organization/agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`,
+`src/calfcord/agents/factory.py` (`_PROVIDER_DEFAULT_MODELS`,
 `resolve_provider`) for the resolution path.
 
 `model` accepts any string the chosen provider's client accepts.
@@ -126,7 +126,7 @@ tools: [private_chat, shell, read_file]
 ```
 
 `tools` is a list of bare tool names. Each name is resolved against
-`calfkit_organization.tools.TOOL_REGISTRY` at agent build time. An
+`calfcord.tools.TOOL_REGISTRY` at agent build time. An
 unknown name fails fast:
 
 ```
@@ -138,7 +138,7 @@ tools: ['edit_file', 'glob', 'grep', 'private_chat', 'read_file',
 
 The registry is populated by `tools/discovery.py` at process import
 time. To add a new tool to the registry, drop a `.py` file under
-`src/calfkit_organization/tools/builtin/` — see
+`src/calfcord/tools/builtin/` — see
 `docs/authoring-tools.md` for the contract.
 
 Each agent only ever carries the `ToolNodeDef` for schema and
@@ -181,7 +181,7 @@ so per-agent directories are a convention for tidiness, not a sandbox.
 
 The explanation text is **not** bundled into agent deployments. The
 `calfkit-bridge` process is the single reader of the editable
-`src/calfkit_organization/agents/memory_prompt.md` (override via
+`src/calfcord/agents/memory_prompt.md` (override via
 `CALFCORD_MEMORY_PROMPT_PATH` on the bridge); it ships the template to agents
 in `deps`, and a per-agent instructions hook localizes it to that agent's
 `memory/<name>/` directory. So a memory-prompt change propagates from one
@@ -196,7 +196,7 @@ place (the bridge) without rebuilding agents.
 
 `role: router` is reserved for the singleton built-in routing agent
 constructed by `build_router_definition` in
-`calfkit_organization/router/definition.py`. A user agent with
+`calfcord/router/definition.py`. A user agent with
 `role: router` will boot but collide with the real router in the
 registry. Don't set this field.
 
@@ -250,7 +250,7 @@ agent's system prompt is where to add tool-selection guidance that
 spans multiple tools.
 
 The canonical "good docstring" reference is `private_chat` at
-`src/calfkit_organization/tools/builtin/private_chat.py` — it
+`src/calfcord/tools/builtin/private_chat.py` — it
 explicitly covers *when not to use*, *how to write the `content`
 argument*, and *what the return shape means*. Lean on that pattern for
 tools you write, and reference the tool by name in the agent's body
@@ -276,14 +276,14 @@ the system prompt — if you want the LLM to know its own
 An agent's identity (and the tool surface) lives in
 `agents/<name>.md`. The set of Discord channels the agent listens on
 lives in `state/agents/<name>.json` — see
-`src/calfkit_organization/agents/state.py`. Channel subscriptions are
+`src/calfcord/agents/state.py`. Channel subscriptions are
 **runtime state**, not identity, and so they're tracked separately and
 written atomically by the agent process.
 
 ### 5.1 First-boot seeding
 
 On first boot, an agent has no state file. The runner
-(`calfkit_organization/agents/runner.py`) seeds the channel list from
+(`calfcord/agents/runner.py`) seeds the channel list from
 two environment variables, in order:
 
 1. `CALFKIT_AGENT_<UPPER_NAME>_BOOTSTRAP_CHANNELS` — comma-separated
@@ -322,8 +322,8 @@ the workflow for adding an agent to a new channel is:
 `thinking_effort` is the one frontmatter field that is operator-tunable
 at runtime via the `/thinking-effort` Discord slash command (the
 command rewrites the file in place — see
-`calfkit_organization/agents/md_writer.py`). The seven tier names are
-defined in `src/calfkit_organization/agents/definition.py` as the
+`calfcord/agents/md_writer.py`). The seven tier names are
+defined in `src/calfcord/agents/definition.py` as the
 `ThinkingEffort` literal type.
 
 | Tier      | Anthropic `budget_tokens` | OpenAI `reasoning_effort` |
@@ -336,7 +336,7 @@ defined in `src/calfkit_organization/agents/definition.py` as the
 | `xhigh`   | 48000                     | `high` (saturated)        |
 | `max`     | 63999                     | `high` (saturated)        |
 
-Source: `src/calfkit_organization/agents/thinking.py`. The Anthropic
+Source: `src/calfcord/agents/thinking.py`. The Anthropic
 ramp anchors `low` / `medium` / `high` to the budgets Claude Code's
 `think` / `megathink` / `ultrathink` keywords trigger; `minimal` uses
 the API's documented floor of 1024 budget tokens; `xhigh` is a
@@ -355,7 +355,7 @@ rewrites the `.md` file's frontmatter via `md_writer.update_thinking_effort`.
 Slash-invocation and `@<agent_id>` mentions pick up the new value on
 the next message — the bridge resolves the override per-call via
 `BridgeIngress` (see
-`src/calfkit_organization/bridge/ingress.py`).
+`src/calfcord/bridge/ingress.py`).
 
 Ambient-channel messages do **not** pick up runtime changes without an
 agent restart. The tier is also baked into the calfkit `Agent`
@@ -411,7 +411,7 @@ override if you want this in production.
   known tools:
   `agent 'foo' declares unknown tool(s) ['my_tool']; known tools: [...]`.
   Either fix the name or add the tool under
-  `src/calfkit_organization/tools/builtin/` and restart `calfkit-tools`.
+  `src/calfcord/tools/builtin/` and restart `calfkit-tools`.
 - **`display_name == "Clyde"`.** Pydantic rejects this at parse time
   with a clear validator error — the agent never boots.
 - **Missing API key.** The provider's client construction succeeds (no
@@ -435,7 +435,7 @@ Quick smoke test that a `.md` parses:
 ```bash
 uv run python -c "
 from pathlib import Path
-from calfkit_organization.agents.definition import parse_agent_md
+from calfcord.agents.definition import parse_agent_md
 spec = parse_agent_md(Path('agents/example-bot.md'))
 print(spec.model_dump())
 "
@@ -470,7 +470,7 @@ agent that only ever needs `read_file`) don't need it.
 
 The bridge constructs the phonebook at boot from the agent registry and
 propagates it to A2A peers via `deps["phonebook"]`. Each
-`PhonebookEntry` (`calfkit_organization/agents/phonebook.py`) carries
+`PhonebookEntry` (`calfcord/agents/phonebook.py`) carries
 the peer's `agent_id`, `display_name`, `description`, and tool list.
 That's what every other agent sees when picking a peer to call.
 
@@ -487,7 +487,7 @@ Every A2A exchange is projected to a unified Discord audit channel
 caller's request and the target's reply each appear as the appropriate
 persona's webhook message, anchored in a per-conversation thread. See
 `docs/a2a-threads.md` and
-`src/calfkit_organization/bridge/egress.py` for the projection design.
+`src/calfcord/bridge/egress.py` for the projection design.
 
 Kafka is the system of record; Discord is the projection. The audit
 view is for humans observing the organization, not for state recovery.

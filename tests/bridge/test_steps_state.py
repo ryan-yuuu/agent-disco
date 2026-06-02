@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from calfkit_organization.bridge.steps_state import StepsEntry, StepsState
+from calfcord.bridge.steps_state import StepsEntry, StepsState
 
 
 def _entry(

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from calfkit_organization.agents.routing import (
+from calfcord.agents.routing import (
     ROUTER_OUTPUT_TOOL_NAME,
     RoutingDecision,
 )
@@ -24,7 +24,7 @@ class TestRoutingDecision:
         # no ``agent_id`` anyway, we want the fan-out consumer's no-op
         # path to handle it rather than trigger a pydantic-ai
         # structured-output retry storm. See
-        # :mod:`calfkit_organization.agents.routing` module docstring.
+        # :mod:`calfcord.agents.routing` module docstring.
         decision = RoutingDecision(reasoning="defensive empty handling")
         assert decision.agent_id is None
         assert decision.reasoning == "defensive empty handling"

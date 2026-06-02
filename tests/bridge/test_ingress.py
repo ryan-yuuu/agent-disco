@@ -16,13 +16,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.memory import MEMORY_PROMPT_DEPS_KEY
-from calfkit_organization.agents.memory import _reset_cache_for_tests as _reset_memory_cache
-from calfkit_organization.bridge.ingress import BridgeIngress
-from calfkit_organization.bridge.pending_wires import PendingWires
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
+from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.memory import MEMORY_PROMPT_DEPS_KEY
+from calfcord.agents.memory import _reset_cache_for_tests as _reset_memory_cache
+from calfcord.bridge.ingress import BridgeIngress
+from calfcord.bridge.pending_wires import PendingWires
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.wire import WireAuthor, WireMessage
 
 
 def _wire(
@@ -240,7 +240,7 @@ class TestModelSettings:
         ("effort", "expected_value"),
         [
             # Matches the operator → OpenAI mapping in
-            # :mod:`calfkit_organization.agents.thinking`. The ramp
+            # :mod:`calfcord.agents.thinking`. The ramp
             # was shifted up one notch when ``minimal`` was added —
             # the lookup-table comment in that module documents the
             # one-time behavior bump for existing OpenAI agents.
@@ -339,7 +339,7 @@ class TestModelSettings:
             raise ValueError("simulated provider misconfig")
 
         monkeypatch.setattr(
-            "calfkit_organization.bridge.ingress.resolve_provider",
+            "calfcord.bridge.ingress.resolve_provider",
             _raise_value_error,
         )
 
@@ -479,7 +479,7 @@ class TestBootValidation:
         would crash bridge boot in production while every previous
         test passed. Pin the contract: a router-included registry
         must construct cleanly."""
-        from calfkit_organization.router.definition import (
+        from calfcord.router.definition import (
             build_router_definition,
         )
 

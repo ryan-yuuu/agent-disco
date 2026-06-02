@@ -1,7 +1,7 @@
 """Unit tests for the shared addressable / addressed-to-me gate factories.
 
 The gates read ``ctx.deps.provided_deps["discord"]`` (a serialized
-:class:`~calfkit_organization.bridge.wire.WireMessage`) and return ``bool``.
+:class:`~calfcord.bridge.wire.WireMessage`) and return ``bool``.
 Tests fabricate a minimal :class:`SessionRunContext` directly — no Kafka,
 no real envelope flow — because gates are pure predicates over ``ctx``.
 """
@@ -14,7 +14,7 @@ import pytest
 from calfkit.models import State
 from calfkit.models.session_context import Deps, SessionRunContext
 
-from calfkit_organization.agents.gates import (
+from calfcord.agents.gates import (
     make_addressable_gate,
     make_addressed_to_me_gate,
 )

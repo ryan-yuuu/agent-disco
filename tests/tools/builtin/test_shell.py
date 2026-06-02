@@ -12,7 +12,7 @@ from calfkit.models import ToolContext
 from calfkit.models.session_context import Deps
 from openhands.tools.terminal.definition import TerminalObservation
 
-from calfkit_organization.tools.builtin import shell, workspace
+from calfcord.tools.builtin import shell, workspace
 
 
 def _ctx() -> ToolContext:

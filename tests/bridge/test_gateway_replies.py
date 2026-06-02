@@ -24,9 +24,9 @@ import discord
 import pytest
 from pydantic import SecretStr
 
-from calfkit_organization.bridge.gateway import DiscordIngressGateway
-from calfkit_organization.bridge.history import CLEAR_MARKER_TEXT, ChannelHistoryFetcher
-from calfkit_organization.discord.settings import DiscordSettings
+from calfcord.bridge.gateway import DiscordIngressGateway
+from calfcord.bridge.history import CLEAR_MARKER_TEXT, ChannelHistoryFetcher
+from calfcord.discord.settings import DiscordSettings
 
 
 def _settings() -> DiscordSettings:
@@ -94,7 +94,7 @@ class TestReplyEmptyRoster:
         correlatable to a user-reported "no reply"."""
         gateway = _gateway()
         message = _fake_message()
-        with caplog.at_level(logging.INFO, logger="calfkit_organization.bridge.gateway"):
+        with caplog.at_level(logging.INFO, logger="calfcord.bridge.gateway"):
             await gateway._reply_empty_roster(message)
         assert any(
             "rejected ambient publish" in r.message and "empty roster" in r.message and "12345" in r.message
@@ -118,7 +118,7 @@ class TestReplyEmptyRoster:
         fake_response.reason = "Too Many Requests"
         message.reply = AsyncMock(side_effect=discord.HTTPException(fake_response, "rate limited"))
 
-        with caplog.at_level(logging.ERROR, logger="calfkit_organization.bridge.gateway"):
+        with caplog.at_level(logging.ERROR, logger="calfcord.bridge.gateway"):
             # Must not raise — gateway swallows.
             await gateway._reply_empty_roster(message)
         assert any("failed to send empty-roster reply" in r.message for r in caplog.records)
@@ -139,7 +139,7 @@ class TestOnMessageEmptyRosterWiring:
         """End-to-end: ingress raises ``AmbientRosterEmptyError``;
         ``_on_message`` must drive ``_reply_empty_roster`` with the
         triggering message."""
-        from calfkit_organization.bridge.ingress import (
+        from calfcord.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 
@@ -341,7 +341,7 @@ class TestOnReadyInjectsFetcher:
             patch.object(type(gateway._client), "user", new=fake_user, create=True),
             patch.object(gateway._slash, "sync", new=AsyncMock(return_value=None)),
             patch(
-                "calfkit_organization.bridge.gateway.publish_discovery_ping",
+                "calfcord.bridge.gateway.publish_discovery_ping",
                 new=AsyncMock(return_value=None),
             ),
         ):
@@ -359,10 +359,10 @@ class TestOnReadyInjectsFetcher:
             patch.object(type(gateway._client), "user", new=fake_user, create=True),
             patch.object(gateway._slash, "sync", new=AsyncMock(return_value=None)),
             patch(
-                "calfkit_organization.bridge.gateway.publish_discovery_ping",
+                "calfcord.bridge.gateway.publish_discovery_ping",
                 new=AsyncMock(return_value=None),
             ),
-            caplog.at_level(logging.INFO, logger="calfkit_organization.bridge.gateway"),
+            caplog.at_level(logging.INFO, logger="calfcord.bridge.gateway"),
         ):
             await gateway._on_ready()
         assert any("history fetcher injected" in r.message for r in caplog.records)

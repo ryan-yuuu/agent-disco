@@ -15,7 +15,7 @@ import io
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from calfkit_organization.packaging import cli_agents
+from calfcord.packaging import cli_agents
 
 
 def _run(argv: list[str]) -> tuple[int, str, str]:

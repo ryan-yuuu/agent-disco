@@ -39,27 +39,27 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 
-from calfkit_organization._compat.invoke import METADATA_KEY_WIRE, MetadataEnvelope
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.routing import RoutingDecision
-from calfkit_organization.bridge.ingress import (
+from calfcord._compat.invoke import METADATA_KEY_WIRE, MetadataEnvelope
+from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.routing import RoutingDecision
+from calfcord.bridge.ingress import (
     _AMBIENT_INGRESS_TOPIC,
     BridgeIngress,
 )
-from calfkit_organization.bridge.outbox import build_outbox_consumer
-from calfkit_organization.bridge.pending_wires import PendingWires
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.synthesized import (
+from calfcord.bridge.outbox import build_outbox_consumer
+from calfcord.bridge.pending_wires import PendingWires
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.synthesized import (
     SYNTHESIZED_INGRESS_TOPIC,
     build_synthesized_consumer,
 )
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.discord.messages import SentMessage
-from calfkit_organization.router.definition import (
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.discord.messages import SentMessage
+from calfcord.router.definition import (
     ROUTER_AGENT_ID,
     build_router_definition,
 )
-from calfkit_organization.router.fanout import build_fanout_consumer
+from calfcord.router.fanout import build_fanout_consumer
 
 
 def _human_ambient_wire(*, event_id: str = "evt-original") -> WireMessage:

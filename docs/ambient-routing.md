@@ -176,7 +176,7 @@ Bridge ingress branches on `wire.kind`:
 
 The router's prompt and its four runtime knobs (`provider`, `model`,
 `thinking_effort`, `history_turns`) live together in a single bundled
-file, `src/calfkit_organization/router/router.md`: YAML front matter for
+file, `src/calfcord/router/router.md`: YAML front matter for
 the config, Markdown body for the prompt. This mirrors how user-defined
 agents are authored (`agents/*.md`), but the router file ships **inside
 the package** (like `agents/memory_prompt.md`) rather than being
@@ -359,7 +359,7 @@ operator responsibilities the bridge cannot verify on its own.
    router runs as an independent process with no shared filesystem.
 
 5. **calfkit version pin.** `pyproject.toml` pins
-   `calfkit~=0.3.1`. `src/calfkit_organization/_compat/invoke.py`
+   `calfkit~=0.3.1`. `src/calfcord/_compat/invoke.py`
    depends on calfkit private APIs (documented in the module's
    FIXME); a minor calfkit bump (`0.4.0`) could rename them and
    break the bridge at import time. Do NOT relax this constraint
@@ -724,7 +724,7 @@ loop, but it isn't the calfkit `State` we set.)
 The catch: `Client.invoke_node()` does not expose a `metadata`
 parameter. It constructs `State` internally with `metadata=None`. To
 set it without subclassing, we use a small helper at
-`src/calfkit_organization/_compat/invoke.py` that calls
+`src/calfcord/_compat/invoke.py` that calls
 `Client._invoke` (single-underscore, convention-private) directly with
 a pre-populated State.
 
@@ -807,7 +807,7 @@ the tool call, one to produce a final output after the tool result).
   in-memory expectations map could turn that into a real WARN signal.
 - **`_run_worker` extraction.** Three copies now exist
   (`agents/runner.py`, `tools/runner.py`, `router/runner.py`). Extract
-  to a shared `calfkit_organization/runtime.py` if the duplication
+  to a shared `calfcord/runtime.py` if the duplication
   becomes annoying.
 
 ### Bigger deferrals
@@ -837,7 +837,7 @@ the tool call, one to produce a final output after the tool result).
 ## Files
 
 ```
-src/calfkit_organization/
+src/calfcord/
 ├── agents/
 │   ├── definition.py          (modified — role, publish_topic, validator)
 │   ├── factory.py             (modified — role="router" build path)

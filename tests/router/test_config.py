@@ -1,7 +1,7 @@
 """Unit tests for :class:`RouterConfig` — the ``router.md`` front-matter schema.
 
 :class:`RouterConfig` validates the YAML front matter of ``router.md`` (the
-loader, :func:`calfkit_organization.router.prompt.load_router_md`, is tested in
+loader, :func:`calfcord.router.prompt.load_router_md`, is tested in
 ``test_prompt.py``). The schema is strict by design:
 
 1. ``extra="forbid"`` rejects unknown keys (typos like ``provder:``) and
@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from calfkit_organization.router.config import RouterConfig
+from calfcord.router.config import RouterConfig
 
 
 class TestRouterConfigSchema:

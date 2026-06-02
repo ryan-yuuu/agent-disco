@@ -1,5 +1,5 @@
 [project]
-name = "calfkit-organization"
+name = "calfcord"
 version = "0.1.0"
 description = "Multi-agent organization on Discord."
 readme = "README.md"
@@ -19,20 +19,20 @@ dependencies = [
 ]
 
 [project.scripts]
-calfkit-bridge = "calfkit_organization.bridge.gateway:main"
-calfkit-agent = "calfkit_organization.agents.runner:main"
-calfkit-tools = "calfkit_organization.tools.runner:main"
-calfkit-router = "calfkit_organization.router.runner:main"
-calfkit-auth = "calfkit_organization.providers.codex.cli:main"
-calfcord-package-tools = "calfkit_organization.packaging.cli_tools:main"
-calfcord-package-agents = "calfkit_organization.packaging.cli_agents:main"
+calfkit-bridge = "calfcord.bridge.gateway:main"
+calfkit-agent = "calfcord.agents.runner:main"
+calfkit-tools = "calfcord.tools.runner:main"
+calfkit-router = "calfcord.router.runner:main"
+calfkit-auth = "calfcord.providers.codex.cli:main"
+calfcord-package-tools = "calfcord.packaging.cli_tools:main"
+calfcord-package-agents = "calfcord.packaging.cli_agents:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/calfkit_organization"]
+packages = ["src/calfcord"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

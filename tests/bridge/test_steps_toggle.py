@@ -1,6 +1,6 @@
 """Unit tests for the on-demand step-transcript view button.
 
-Covers the three pieces of :mod:`calfkit_organization.bridge.steps_toggle`:
+Covers the three pieces of :mod:`calfcord.bridge.steps_toggle`:
 
 * :func:`render_steps` — round-trips a ``ModelMessagesTypeAdapter`` blob
   through ``_render_tree_blocks`` and returns the FULL untruncated text +
@@ -37,14 +37,14 @@ from calfkit._vendor.pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from calfkit_organization.bridge.steps_toggle import (
+from calfcord.bridge.steps_toggle import (
     _DISCORD_MESSAGE_LIMIT,
     _TOGGLE_CUSTOM_ID,
     StepsToggleView,
     build_toggle_button,
     render_steps,
 )
-from calfkit_organization.bridge.transcripts import (
+from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptRow,
     TranscriptStore,

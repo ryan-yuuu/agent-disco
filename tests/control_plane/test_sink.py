@@ -8,15 +8,15 @@ from typing import Any
 
 import frontmatter
 
-from calfkit_organization.agents.definition import parse_agent_md
-from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
-from calfkit_organization.control_plane.schema import (
+from calfcord.agents.definition import parse_agent_md
+from calfcord.control_plane.definition_ref import AgentDefinitionRef
+from calfcord.control_plane.schema import (
     AgentControlEnvelope,
     AgentStateEvent,
     DiscoveryPingOp,
     SetThinkingEffortOp,
 )
-from calfkit_organization.control_plane.sink import make_control_sink_handler
+from calfcord.control_plane.sink import make_control_sink_handler
 
 
 class _FakeConnection:

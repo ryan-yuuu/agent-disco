@@ -1,5 +1,5 @@
 def main():
-    print("Hello from calfkit-organization!")
+    print("Hello from calfcord!")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from calfkit_organization.providers.codex.jwt import extract_account_id
+from calfcord.providers.codex.jwt import extract_account_id
 
 
 def _make_jwt(payload: dict) -> str:

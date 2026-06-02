@@ -38,18 +38,18 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.outbox import build_outbox_consumer
-from calfkit_organization.bridge.pending_wires import PendingWires, make_pending_entry
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.steps_toggle import _TOGGLE_CUSTOM_ID
-from calfkit_organization.bridge.transcripts import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.outbox import build_outbox_consumer
+from calfcord.bridge.pending_wires import PendingWires, make_pending_entry
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.steps_toggle import _TOGGLE_CUSTOM_ID
+from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptRow,
     TranscriptStore,
 )
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.discord.messages import SentMessage
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.discord.messages import SentMessage
 
 
 def _http_exc(exc_cls: type[discord.HTTPException], status: int) -> discord.HTTPException:
@@ -383,8 +383,8 @@ class TestThreadRouting:
     ) -> None:
         """The last-resort chunked fallback also targets the thread: the
         failed reply send and every chunk send carry ``thread_id``."""
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
-        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+        monkeypatch.setattr("calfcord.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        from calfcord.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
 
         pw = PendingWires()
         pw.put(_CORRELATION_ID, make_pending_entry(_wire(source_channel_id=self._THREAD_ID)))
@@ -554,7 +554,7 @@ class TestDiscordErrorHandling:
     def _no_retry_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Skip the 2s retry delay in tests."""
         monkeypatch.setattr(
-            "calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS",
+            "calfcord.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS",
             0,
         )
 
@@ -833,10 +833,10 @@ class TestTranscriptAndToggle:
         """When agent retries are exhausted, the chunked fallback posts the
         content and writes the transcript against the FIRST chunk's id, with
         the toggle on that first chunk only."""
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        monkeypatch.setattr("calfcord.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
         # Drive straight to the chunk-split branch: exhaust the agent-retry
         # budget so an agent-fixable 400 falls back to chunking.
-        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+        from calfcord.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
 
         for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
             pending_wires.increment_retry(_CORRELATION_ID)
@@ -923,10 +923,10 @@ class TestTranscriptAndToggle:
         gate too: with a ``NullTranscriptStore`` the FIRST chunk carries no
         toggle (``extra_buttons is None``) and NO transcript write is
         attempted — even though the turn used tools."""
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        monkeypatch.setattr("calfcord.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
         # Exhaust the agent-retry budget so an agent-fixable 400 falls
         # straight through to the chunk-split fallback.
-        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+        from calfcord.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
 
         for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
             pending_wires.increment_retry(_CORRELATION_ID)
@@ -978,7 +978,7 @@ class TestTranscriptAndToggle:
         after a successful post. Otherwise the store would accumulate
         orphaned rows keyed to message ids that were never posted, and a
         later click would surface steps for a reply the user never saw."""
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        monkeypatch.setattr("calfcord.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
         persona_sender = AsyncMock()
         persona_sender.send = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
 
@@ -1014,8 +1014,8 @@ class TestTranscriptAndToggle:
         remaining chunks (independent partial delivery). Drives a real
         ``turn_delta`` so the transcript branch is live (the existing
         chunk-2-fails test runs with ``turn_delta=None``)."""
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
-        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+        monkeypatch.setattr("calfcord.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        from calfcord.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
 
         for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
             pending_wires.increment_retry(_CORRELATION_ID)
@@ -1147,7 +1147,7 @@ class TestTranscriptAndToggle:
         def _boom(_messages: object) -> list[str]:
             raise ValueError("malformed tool-call args")
 
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._render_tree_blocks", _boom)
+        monkeypatch.setattr("calfcord.bridge.outbox._render_tree_blocks", _boom)
 
         consumer = build_outbox_consumer(
             persona_sender, _registry(), pending_wires, calfkit_client, transcript_store=transcript_store
@@ -1179,7 +1179,7 @@ class TestNonDiscordSenderErrors:
 
     @pytest.fixture(autouse=True)
     def _no_retry_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("calfkit_organization.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        monkeypatch.setattr("calfcord.bridge.outbox._SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
 
     @pytest.mark.parametrize(
         ("exc", "type_name"),
@@ -1235,7 +1235,7 @@ class TestNonDiscordSenderErrors:
         broadened per-chunk catch records it and the remaining chunks still
         post (independent partial delivery). Regression guard for the
         ``(DiscordException, TypeError, RuntimeError)`` chunk catch."""
-        from calfkit_organization.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
+        from calfcord.discord.retry_feedback import MAX_REPLY_RETRY_ATTEMPTS
 
         for _ in range(MAX_REPLY_RETRY_ATTEMPTS):
             pending_wires.increment_retry(_CORRELATION_ID)

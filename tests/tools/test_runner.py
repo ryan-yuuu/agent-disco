@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from calfkit.worker import Worker
 
-from calfkit_organization.bridge.egress import A2AChannelResolver
-from calfkit_organization.tools import runner
-from calfkit_organization.tools.builtin import private_chat
+from calfcord.bridge.egress import A2AChannelResolver
+from calfcord.tools import runner
+from calfcord.tools.builtin import private_chat
 
 
 class TestResolveTimeout:
@@ -208,7 +208,7 @@ class TestInitWiringFromRunner:
         import discord
         from calfkit.client import Client as _Client
 
-        from calfkit_organization.discord.persona import (
+        from calfcord.discord.persona import (
             DiscordPersonaSender as _PersonaSender,
         )
 

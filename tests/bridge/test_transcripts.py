@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from calfkit_organization.bridge.transcripts import (
+from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptRow,
     TranscriptStore,

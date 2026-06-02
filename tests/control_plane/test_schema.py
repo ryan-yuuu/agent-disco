@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from calfkit_organization.control_plane.schema import (
+from calfcord.control_plane.schema import (
     CONTROL_PLANE_SCHEMA_VERSION,
     AgentControlEnvelope,
     AgentDepartureEvent,

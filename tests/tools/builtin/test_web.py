@@ -10,7 +10,7 @@ import pytest
 from calfkit.models import ToolContext
 from calfkit.models.session_context import Deps
 
-from calfkit_organization.tools.builtin import web
+from calfcord.tools.builtin import web
 
 
 def _ctx() -> ToolContext:

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from calfkit_organization.discord.typing import TypingNotifier
+from calfcord.discord.typing import TypingNotifier
 
 _CHANNEL_ID = 6789
 
@@ -71,7 +71,7 @@ class TestSwallow:
     async def test_forbidden_swallowed_and_warns_once_per_channel(self, caplog: pytest.LogCaptureFixture) -> None:
         client = _client(send_typing=AsyncMock(side_effect=_http_exc(discord.Forbidden, 403)))
         notifier = TypingNotifier(client)
-        with caplog.at_level(logging.WARNING, logger="calfkit_organization.discord.typing"):
+        with caplog.at_level(logging.WARNING, logger="calfcord.discord.typing"):
             notifier.fire(_CHANNEL_ID)
             notifier.fire(_CHANNEL_ID)  # same channel → suppressed
             notifier.fire(_CHANNEL_ID + 1)  # different channel → warns again
@@ -85,7 +85,7 @@ class TestSwallow:
         DEBUG — typing fires per hop, so it must not spam WARNING/ERROR."""
         client = _client(send_typing=AsyncMock(side_effect=_http_exc(discord.HTTPException, 503)))
         notifier = TypingNotifier(client)
-        with caplog.at_level(logging.DEBUG, logger="calfkit_organization.discord.typing"):
+        with caplog.at_level(logging.DEBUG, logger="calfcord.discord.typing"):
             notifier.fire(_CHANNEL_ID)
             await _drain(notifier)  # must not raise
         assert not any(r.levelno >= logging.WARNING for r in caplog.records)
@@ -96,7 +96,7 @@ class TestSwallow:
         cosmetic feature should never silently bury a programming error."""
         client = _client(send_typing=AsyncMock(side_effect=RuntimeError("session closed")))
         notifier = TypingNotifier(client)
-        with caplog.at_level(logging.ERROR, logger="calfkit_organization.discord.typing"):
+        with caplog.at_level(logging.ERROR, logger="calfcord.discord.typing"):
             notifier.fire(_CHANNEL_ID)
             await _drain(notifier)  # must not raise
         assert any(r.levelno == logging.ERROR for r in caplog.records)

@@ -7,7 +7,7 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from calfkit_organization.agents.md_writer import update_thinking_effort
+from calfcord.agents.md_writer import update_thinking_effort
 
 
 def _seed_md(
@@ -89,7 +89,7 @@ def test_missing_md_file_raises(tmp_path: Path) -> None:
 
 def test_round_trip_through_parse(tmp_path: Path) -> None:
     """A round-trip must produce a re-parsable .md (no corruption)."""
-    from calfkit_organization.agents.definition import parse_agent_md
+    from calfcord.agents.definition import parse_agent_md
 
     md_path = _seed_md(tmp_path)
     update_thinking_effort(md_path, "high")
@@ -147,7 +147,7 @@ def test_validation_failure_does_not_touch_disk(
     Forces a failure by monkeypatching ``AgentDefinition`` construction in the
     md_writer module to raise.
     """
-    from calfkit_organization.agents import md_writer
+    from calfcord.agents import md_writer
 
     md_path = _seed_md(tmp_path, thinking_effort="low")
     original = md_path.read_text(encoding="utf-8")

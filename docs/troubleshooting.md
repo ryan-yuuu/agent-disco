@@ -20,7 +20,7 @@ For one-time Codex setup, see [codex-auth.md](./codex-auth.md).
 through a reply when the agent service logs a traceback ending in:
 
 ```
-File ".../calfkit_organization/providers/codex/model_client.py", line 292, in _responses_create
+File ".../calfcord/providers/codex/model_client.py", line 292, in _responses_create
     stream_obj = await super()._responses_create(
 File ".../calfkit/_vendor/pydantic_ai/models/openai.py", line 1580, in _responses_create
     raise ModelHTTPError(status_code=status_code, model_name=self.model_name, body=e.body) from e

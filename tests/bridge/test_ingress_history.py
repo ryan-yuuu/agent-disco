@@ -27,16 +27,16 @@ from calfkit._vendor.pydantic_ai.messages import (
     ModelResponse,
 )
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.history import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.history import (
     ChannelHistoryFetcher,
     HistoryRecord,
 )
-from calfkit_organization.bridge.ingress import BridgeIngress
-from calfkit_organization.bridge.pending_wires import PendingWires
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.router.definition import build_router_definition
+from calfcord.bridge.ingress import BridgeIngress
+from calfcord.bridge.pending_wires import PendingWires
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.router.definition import build_router_definition
 
 
 def _slash_wire(

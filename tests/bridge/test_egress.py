@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from calfkit_organization.bridge.egress import A2AChannelResolver
-from calfkit_organization.discord.sender import DiscordSender
+from calfcord.bridge.egress import A2AChannelResolver
+from calfcord.discord.sender import DiscordSender
 
 
 def _category(*, name: str, channel_id: int) -> MagicMock:

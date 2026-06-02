@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.tools.builtin import workspace
+from calfcord.tools.builtin import workspace
 
 
 @pytest.fixture(autouse=True)

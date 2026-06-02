@@ -10,13 +10,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from calfkit_organization.control_plane.schema import (
+from calfcord.control_plane.schema import (
     AgentControlEnvelope,
     AgentDepartureEvent,
     AgentStateEvent,
     SetThinkingEffortOp,
 )
-from calfkit_organization.control_plane.state_consumer import (
+from calfcord.control_plane.state_consumer import (
     make_state_consumer_handler,
 )
 

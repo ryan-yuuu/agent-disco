@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from openhands.sdk.llm.auth import CredentialStore, OAuthCredentials
 
-from calfkit_organization.agents.definition import Provider
-from calfkit_organization.providers.codex import CodexNotLoggedInError, build_codex_subscription_client
+from calfcord.agents.definition import Provider
+from calfcord.providers.codex import CodexNotLoggedInError, build_codex_subscription_client
 
 
 def _seed_credentials(tmp_path: Path) -> None:
@@ -39,9 +39,9 @@ def _preloaded_default_resolver(monkeypatch, tmp_path):
     same. We bypass network entirely by hydrating the singleton's private
     state with a fixed catalog.
     """
-    from calfkit_organization.providers.codex import prompts as _prompts
-    from calfkit_organization.providers.codex.prompt_cache import PromptCache
-    from calfkit_organization.providers.codex.prompts import CodexModel, PromptResolver
+    from calfcord.providers.codex import prompts as _prompts
+    from calfcord.providers.codex.prompt_cache import PromptCache
+    from calfcord.providers.codex.prompts import CodexModel, PromptResolver
 
     resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "_prompts_cache"))
     resolver._catalog = {
@@ -96,7 +96,7 @@ class TestDefaultModelClientFactory:
         monkeypatch.setenv("CALFCORD_AUTH_DIR", str(tmp_path))
         _seed_credentials(tmp_path)
 
-        from calfkit_organization.agents.factory import _default_model_client_factory
+        from calfcord.agents.factory import _default_model_client_factory
 
         client = _default_model_client_factory("openai-codex", "gpt-5.2-codex")
         from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
@@ -108,7 +108,7 @@ class TestDefaultModelClientFactory:
     ) -> None:
         monkeypatch.setenv("CALFCORD_AUTH_DIR", str(tmp_path))
 
-        from calfkit_organization.agents.factory import _default_model_client_factory
+        from calfcord.agents.factory import _default_model_client_factory
 
         with pytest.raises(CodexNotLoggedInError):
             _default_model_client_factory("openai-codex", "gpt-5.2-codex")
@@ -116,7 +116,7 @@ class TestDefaultModelClientFactory:
     def test_default_model_for_openai_codex_is_none(self) -> None:
         """openai-codex has no static default: the Codex client resolves the
         highest-priority model from the live catalog at construction."""
-        from calfkit_organization.agents.factory import _PROVIDER_DEFAULT_MODELS
+        from calfcord.agents.factory import _PROVIDER_DEFAULT_MODELS
 
         assert _PROVIDER_DEFAULT_MODELS["openai-codex"] is None
 
@@ -128,7 +128,7 @@ class TestDefaultModelClientFactory:
         monkeypatch.setenv("CALFCORD_AUTH_DIR", str(tmp_path))
         _seed_credentials(tmp_path)
 
-        from calfkit_organization.agents.factory import _default_model_client_factory
+        from calfcord.agents.factory import _default_model_client_factory
 
         client = _default_model_client_factory("openai-codex", None)
         assert client.model_name == "gpt-5.2"

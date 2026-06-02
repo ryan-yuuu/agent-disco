@@ -14,12 +14,12 @@ from calfkit._vendor.pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from calfkit_organization.bridge.pending_wires import (
+from calfcord.bridge.pending_wires import (
     PendingEntry,
     PendingWires,
     make_pending_entry,
 )
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
+from calfcord.bridge.wire import WireAuthor, WireMessage
 
 
 def _wire(event_id: str = "evt-1") -> WireMessage:

@@ -84,7 +84,7 @@ A2A `private_chat` (in the tools process) is **unchanged** — stateless RPC.
 ### 5.1 New: `HistoryRecord`
 
 ```python
-# src/calfkit_organization/bridge/history.py
+# src/calfcord/bridge/history.py
 class HistoryRecord(BaseModel):
     """JSON-serializable snapshot of one Discord message for projection.
 
@@ -103,7 +103,7 @@ class HistoryRecord(BaseModel):
 
 ### 5.2 Extended: `MetadataEnvelope.history`
 
-In `src/calfkit_organization/_compat/invoke.py`:
+In `src/calfcord/_compat/invoke.py`:
 
 ```python
 class MetadataEnvelope(BaseModel):
@@ -116,7 +116,7 @@ class MetadataEnvelope(BaseModel):
 
 ### 5.3 Extended: `WireMessage.source_channel_id`
 
-In `src/calfkit_organization/bridge/wire.py`:
+In `src/calfcord/bridge/wire.py`:
 
 ```python
 class WireMessage(BaseModel):
@@ -132,7 +132,7 @@ Add-only field; no `schema_version` bump per the existing wire-schema policy in 
 
 ### 5.4 Extended: `AgentDefinition.history_turns`
 
-In `src/calfkit_organization/agents/definition.py`:
+In `src/calfcord/agents/definition.py`:
 
 ```python
 history_turns: int = Field(default=30, ge=0, le=100)
@@ -157,7 +157,7 @@ async def handle(
 
 Keyword-only, defaults `None` for backward compat. Used by the synthesized-in consumer to forward pre-fetched history without a refetch.
 
-## 6. New module: `src/calfkit_organization/bridge/history.py`
+## 6. New module: `src/calfcord/bridge/history.py`
 
 Single self-contained module. Public exports: `HistoryRecord`, `ChannelHistoryFetcher`, `project_history`.
 
@@ -346,15 +346,15 @@ That's the entire projector. ~25 lines.
 
 | File | Change |
 |---|---|
-| `src/calfkit_organization/bridge/history.py` | **NEW** — `HistoryRecord`, `ChannelHistoryFetcher`, `project_history` |
-| `src/calfkit_organization/bridge/wire.py` | Add `source_channel_id: int \| None = None` |
-| `src/calfkit_organization/bridge/normalizer.py` | Both `MessageNormalizer.normalize` and `SlashNormalizer.normalize` populate `source_channel_id` from `message.channel.id` / `interaction.channel.id` |
-| `src/calfkit_organization/_compat/invoke.py` | Add `history: tuple[HistoryRecord, ...] = ()` to `MetadataEnvelope`; update `model_rebuild` `_types_namespace` |
-| `src/calfkit_organization/agents/definition.py` | Add `history_turns: int = Field(default=30, ge=0, le=100)` |
-| `src/calfkit_organization/bridge/ingress.py` | Accept fetcher via constructor (Optional, set via `set_fetcher`); add `prefetched_history` kwarg to `handle()`; wire history into slash and ambient branches |
-| `src/calfkit_organization/bridge/synthesized.py` | Read `envelope.history`, pass to `ingress.handle(prefetched_history=...)` |
-| `src/calfkit_organization/bridge/gateway.py` | Construct `ChannelHistoryFetcher(self._client._client, registry)` in `_on_ready`; call `self._ingress.set_fetcher(fetcher)` to inject |
-| `src/calfkit_organization/router/definition.py` | Read `CALFKIT_ROUTER_HISTORY_TURNS` env (default 10); populate `history_turns` on the router definition |
+| `src/calfcord/bridge/history.py` | **NEW** — `HistoryRecord`, `ChannelHistoryFetcher`, `project_history` |
+| `src/calfcord/bridge/wire.py` | Add `source_channel_id: int \| None = None` |
+| `src/calfcord/bridge/normalizer.py` | Both `MessageNormalizer.normalize` and `SlashNormalizer.normalize` populate `source_channel_id` from `message.channel.id` / `interaction.channel.id` |
+| `src/calfcord/_compat/invoke.py` | Add `history: tuple[HistoryRecord, ...] = ()` to `MetadataEnvelope`; update `model_rebuild` `_types_namespace` |
+| `src/calfcord/agents/definition.py` | Add `history_turns: int = Field(default=30, ge=0, le=100)` |
+| `src/calfcord/bridge/ingress.py` | Accept fetcher via constructor (Optional, set via `set_fetcher`); add `prefetched_history` kwarg to `handle()`; wire history into slash and ambient branches |
+| `src/calfcord/bridge/synthesized.py` | Read `envelope.history`, pass to `ingress.handle(prefetched_history=...)` |
+| `src/calfcord/bridge/gateway.py` | Construct `ChannelHistoryFetcher(self._client._client, registry)` in `_on_ready`; call `self._ingress.set_fetcher(fetcher)` to inject |
+| `src/calfcord/router/definition.py` | Read `CALFKIT_ROUTER_HISTORY_TURNS` env (default 10); populate `history_turns` on the router definition |
 | `tests/bridge/test_history.py` | **NEW** — projector, fetcher (mocked discord), error paths, cache, thread `source_channel_id` |
 | `tests/bridge/test_ingress*.py` | Update existing tests to pass a no-op fake fetcher |
 | `docs/ambient-routing.md` | Add operator runbook note: requires "Read Message History" Discord permission |

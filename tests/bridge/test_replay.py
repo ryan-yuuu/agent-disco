@@ -43,18 +43,18 @@ from calfkit._vendor.pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.history import HistoryRecord, project_history
-from calfkit_organization.bridge.ingress import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.history import HistoryRecord, project_history
+from calfcord.bridge.ingress import (
     REPLAY_TOOL_RETURN_MAX_CHARS,
     BridgeIngress,
     _truncate_replay_tool_returns,
 )
-from calfkit_organization.bridge.pending_wires import PendingWires
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.transcripts import TranscriptRow, TranscriptStore
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.router.definition import build_router_definition
+from calfcord.bridge.pending_wires import PendingWires
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.transcripts import TranscriptRow, TranscriptStore
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.router.definition import build_router_definition
 
 # ---------------------------------------------------------------------------
 # Builders

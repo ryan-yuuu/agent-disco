@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.runner import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.runner import (
     BootstrapError,
     _build_node_or_bootstrap_error,
     _load_or_bootstrap_state,
@@ -25,8 +25,8 @@ from calfkit_organization.agents.runner import (
     _run_worker,
     bootstrap_env_var,
 )
-from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
-from calfkit_organization.control_plane.definition_ref import AgentDefinitionRef
+from calfcord.agents.state import AgentRuntimeState, AgentStateStore
+from calfcord.control_plane.definition_ref import AgentDefinitionRef
 
 
 def _write_agent_md(dir_: Path, name: str) -> None:
@@ -511,7 +511,7 @@ class TestPrewarmCodexIfNeeded:
             nonlocal called
             called = True
 
-        import calfkit_organization.providers.codex as codex_pkg
+        import calfcord.providers.codex as codex_pkg
 
         monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", _fake_prewarm)
         await _prewarm_codex_if_needed([self._spec("anthropic"), self._spec("openai")])
@@ -521,7 +521,7 @@ class TestPrewarmCodexIfNeeded:
     async def test_invokes_prewarm_when_any_agent_declares_openai_codex(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
         prewarm = AsyncMock()
-        import calfkit_organization.providers.codex as codex_pkg
+        import calfcord.providers.codex as codex_pkg
 
         monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
         await _prewarm_codex_if_needed([self._spec("anthropic"), self._spec("openai-codex")])
@@ -537,7 +537,7 @@ class TestPrewarmCodexIfNeeded:
         an opaque RuntimeError."""
         monkeypatch.setenv("CALFKIT_AGENT_DEFAULT_PROVIDER", "openai-codex")
         prewarm = AsyncMock()
-        import calfkit_organization.providers.codex as codex_pkg
+        import calfcord.providers.codex as codex_pkg
 
         monkeypatch.setattr(codex_pkg, "prewarm_codex_prompts", prewarm)
         # Agent's frontmatter omits provider; only the env var selects codex.
@@ -551,8 +551,8 @@ class TestPrewarmCodexIfNeeded:
         pointing the operator at the CLI — otherwise the worker process would
         crash with an unactionable traceback."""
         monkeypatch.delenv("CALFKIT_AGENT_DEFAULT_PROVIDER", raising=False)
-        import calfkit_organization.providers.codex as codex_pkg
-        from calfkit_organization.providers.codex import CodexPromptsUnavailableError
+        import calfcord.providers.codex as codex_pkg
+        from calfcord.providers.codex import CodexPromptsUnavailableError
 
         async def _failing_prewarm() -> None:
             raise CodexPromptsUnavailableError("simulated network failure")

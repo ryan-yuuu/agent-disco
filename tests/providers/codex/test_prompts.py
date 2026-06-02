@@ -10,9 +10,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from calfkit_organization.providers.codex import prompts as prompts_module
-from calfkit_organization.providers.codex.prompt_cache import PromptCache
-from calfkit_organization.providers.codex.prompts import (
+from calfcord.providers.codex import prompts as prompts_module
+from calfcord.providers.codex.prompt_cache import PromptCache
+from calfcord.providers.codex.prompts import (
     FALLBACK_PROMPT_URL,
     MODELS_JSON_URL,
     CodexModelError,

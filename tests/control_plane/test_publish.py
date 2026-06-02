@@ -11,13 +11,13 @@ from __future__ import annotations
 from datetime import UTC
 from typing import Any
 
-from calfkit_organization.control_plane.publish import (
+from calfcord.control_plane.publish import (
     publish_control_command,
     publish_departure,
     publish_discovery_ping,
     publish_state_event,
 )
-from calfkit_organization.control_plane.schema import (
+from calfcord.control_plane.schema import (
     AgentControlEnvelope,
     AgentDepartureEvent,
     AgentStateEvent,

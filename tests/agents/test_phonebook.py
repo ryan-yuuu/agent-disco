@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.phonebook import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.phonebook import (
     PhonebookEntry,
     phonebook_from_deps,
     phonebook_from_registry,
     phonebook_to_deps,
 )
-from calfkit_organization.bridge.registry import AgentRegistry
+from calfcord.bridge.registry import AgentRegistry
 
 
 def _agent(

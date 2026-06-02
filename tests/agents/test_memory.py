@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from calfkit_organization.agents import memory
+from calfcord.agents import memory
 
 
 @pytest.fixture(autouse=True)

@@ -29,13 +29,13 @@ from calfkit.client import Client
 from calfkit.models import ToolContext
 from calfkit.models.session_context import Deps
 
-from calfkit_organization.agents.phonebook import PhonebookEntry, phonebook_to_deps
-from calfkit_organization.bridge.egress import A2AChannelResolver
-from calfkit_organization.bridge.history import HistoryRecord
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.discord.messages import SentMessage
-from calfkit_organization.discord.persona import DiscordPersonaSender
-from calfkit_organization.tools.builtin import private_chat as pc
+from calfcord.agents.phonebook import PhonebookEntry, phonebook_to_deps
+from calfcord.bridge.egress import A2AChannelResolver
+from calfcord.bridge.history import HistoryRecord
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.discord.messages import SentMessage
+from calfcord.discord.persona import DiscordPersonaSender
+from calfcord.tools.builtin import private_chat as pc
 
 # Pattern for the success return surface: starts with a `<thread_id>NNN</thread_id>`
 # tag, then a newline, then any (possibly empty, possibly multi-line) response.
@@ -875,7 +875,7 @@ class TestNewThreadAnchorFailure:
             ]
         )
         with patch(
-            "calfkit_organization.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
+            "calfcord.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
         ), pytest.raises(RuntimeError, match="no anchor message available"):
             await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         deps["resolver"].create_anchored_thread.assert_not_called()
@@ -1033,7 +1033,7 @@ class TestRequestProjectionBestEffort:
             ]
         )
         with patch(
-            "calfkit_organization.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
+            "calfcord.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
         ):
             out = await pc.private_chat(
                 _ctx(caller="alice"), "bob", "x", thread_id=777
@@ -1057,7 +1057,7 @@ class TestRequestProjectionBestEffort:
             ]
         )
         with patch(
-            "calfkit_organization.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
+            "calfcord.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
         ), caplog.at_level(_logging.WARNING):
             await pc.private_chat(
                 _ctx(caller="alice"), "bob", "x", thread_id=777
@@ -1083,7 +1083,7 @@ class TestRequestProjectionBestEffort:
             ]
         )
         with patch(
-            "calfkit_organization.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
+            "calfcord.tools.builtin.private_chat.asyncio.sleep", new=AsyncMock()
         ):
             out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         # Three sends: request attempt 1 (fail), request attempt 2 (ok),
@@ -1108,7 +1108,7 @@ class TestRequestProjectionBestEffort:
             ]
         )
         with patch(
-            "calfkit_organization.tools.builtin.private_chat.asyncio.sleep",
+            "calfcord.tools.builtin.private_chat.asyncio.sleep",
             new=AsyncMock(),
         ) as sleep_mock:
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
@@ -1558,7 +1558,7 @@ class TestA2ARetryWithFeedback:
     A2A replies share the same UX contract.
 
     The orchestrator is
-    :func:`~calfkit_organization.tools.builtin.private_chat._post_response_with_feedback_retries`;
+    :func:`~calfcord.tools.builtin.private_chat._post_response_with_feedback_retries`;
     it directly invokes ``_persona_sender.send`` (NOT
     ``_post_projection``) so HTTPException can reach
     ``classify_error`` instead of being swallowed by
@@ -1973,8 +1973,8 @@ class TestRetryFeedbackSharedSymbols:
     drift over time. These identity assertions fail loud."""
 
     def test_bridge_imports_shared_symbols(self) -> None:
-        from calfkit_organization.bridge import outbox
-        from calfkit_organization.discord import retry_feedback
+        from calfcord.bridge import outbox
+        from calfcord.discord import retry_feedback
         assert outbox.classify_error is retry_feedback.classify_error
         assert outbox.build_retry_reminder is retry_feedback.build_retry_reminder
         assert outbox.build_retry_history is retry_feedback.build_retry_history
@@ -1983,8 +1983,8 @@ class TestRetryFeedbackSharedSymbols:
         assert outbox.NON_AGENT_FIXABLE_STATUSES is retry_feedback.NON_AGENT_FIXABLE_STATUSES
 
     def test_a2a_imports_shared_symbols(self) -> None:
-        from calfkit_organization.discord import retry_feedback
-        from calfkit_organization.tools.builtin import private_chat
+        from calfcord.discord import retry_feedback
+        from calfcord.tools.builtin import private_chat
         assert private_chat.classify_error is retry_feedback.classify_error
         assert private_chat.build_retry_reminder is retry_feedback.build_retry_reminder
         assert private_chat.build_retry_history is retry_feedback.build_retry_history

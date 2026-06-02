@@ -221,11 +221,11 @@ Today `_post_projection(persona, channel_id, content, *, caller, target, correla
 
 | File | Change | LOC delta (approx) |
 |---|---|---|
-| `src/calfkit_organization/bridge/egress.py` | Rewrite `A2AChannelResolver` to unified-channel + `create_anchored_thread` | -60, +50 (net ≈ -10) |
-| `src/calfkit_organization/bridge/history.py` | Add `bypass_cache` kwarg on `ChannelHistoryFetcher.fetch` | +10 |
-| `src/calfkit_organization/tools/private_chat.py` | Add `thread_id` param, branch on new/continue, inline-tag return, init signature gains `history_fetcher` | +120, -40 (net ≈ +80) |
-| `src/calfkit_organization/tools/runner.py` | New env var read, fetcher construction, init call signature | +25 |
-| `src/calfkit_organization/agents/peer_roster.py` | Docstring touch — explain the `<thread_id>` return tag in `build_temp_instructions` so peer-aware agents know to keep it | +10 |
+| `src/calfcord/bridge/egress.py` | Rewrite `A2AChannelResolver` to unified-channel + `create_anchored_thread` | -60, +50 (net ≈ -10) |
+| `src/calfcord/bridge/history.py` | Add `bypass_cache` kwarg on `ChannelHistoryFetcher.fetch` | +10 |
+| `src/calfcord/tools/private_chat.py` | Add `thread_id` param, branch on new/continue, inline-tag return, init signature gains `history_fetcher` | +120, -40 (net ≈ +80) |
+| `src/calfcord/tools/runner.py` | New env var read, fetcher construction, init call signature | +25 |
+| `src/calfcord/agents/peer_roster.py` | Docstring touch — explain the `<thread_id>` return tag in `build_temp_instructions` so peer-aware agents know to keep it | +10 |
 | `agents/*.md` (only ones declaring `tools: [private_chat]`) | Brief note in the agent's persona prompt: "private_chat returns `<thread_id>NNN</thread_id>\n…` — reuse the id if you want continuity, omit to start fresh." | +3/file |
 | `tests/bridge/test_egress.py` | Rewrite for unified resolver; add `create_anchored_thread` coverage | ≈ ±20 |
 | `tests/bridge/test_history.py` | Add `bypass_cache` cases | +30 |

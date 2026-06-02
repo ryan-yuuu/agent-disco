@@ -46,7 +46,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ModelRequest,
 )
 
-from calfkit_organization.bridge.history import HistoryRecord, project_history
+from calfcord.bridge.history import HistoryRecord, project_history
 
 pytestmark = pytest.mark.integration
 

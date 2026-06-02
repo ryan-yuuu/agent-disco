@@ -58,7 +58,7 @@ only approximate timing. So Discord is storage + change-notification; the app ow
 
 - Prefer no new runtime dependencies; any that are added go through `uv add`.
 - Fits the existing bridge: scheduled-task records and firing live alongside the
-  Discord-event normalization / outbox path under `src/calfkit_organization/bridge/`.
+  Discord-event normalization / outbox path under `src/calfcord/bridge/`.
 
 ## References
 

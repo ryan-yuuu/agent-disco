@@ -16,7 +16,7 @@ import httpx
 import pytest
 from openhands.sdk.llm.auth import CredentialStore, OAuthCredentials
 
-from calfkit_organization.providers.codex.model_client import (
+from calfcord.providers.codex.model_client import (
     CODEX_BASE_URL,
     OPENAI_BETA,
     ORIGINATOR,
@@ -70,7 +70,7 @@ def _loaded_resolver(
         "gpt-5.2": "GPT-5.2 OFFICIAL PROMPT",
         "gpt-5.3-codex": "GPT-5.3 OFFICIAL PROMPT",
     }
-    from calfkit_organization.providers.codex.prompts import CodexModel
+    from calfcord.providers.codex.prompts import CodexModel
 
     return _loaded_catalog_resolver(
         tmp_path,
@@ -85,8 +85,8 @@ def _loaded_catalog_resolver(
     fallback: str = "FALLBACK PROMPT",
 ):
     """Build a PromptResolver hydrated with explicit :class:`CodexModel` entries."""
-    from calfkit_organization.providers.codex.prompt_cache import PromptCache
-    from calfkit_organization.providers.codex.prompts import PromptResolver
+    from calfcord.providers.codex.prompt_cache import PromptCache
+    from calfcord.providers.codex.prompts import PromptResolver
 
     resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "prompts"))
     # Bypass network: hydrate the resolver's private state directly for tests.
@@ -207,8 +207,8 @@ class TestConstruction:
 
     def test_raises_when_resolver_not_loaded(self, tmp_path: Path) -> None:
         """If runner forgot to prewarm, construction should fail loudly."""
-        from calfkit_organization.providers.codex.prompt_cache import PromptCache
-        from calfkit_organization.providers.codex.prompts import PromptResolver
+        from calfcord.providers.codex.prompt_cache import PromptCache
+        from calfcord.providers.codex.prompts import PromptResolver
 
         store = _seed(tmp_path, account_id="x")
         unloaded_resolver = PromptResolver(cache=PromptCache(base_dir=tmp_path / "prompts"))
@@ -495,7 +495,7 @@ def _flatten_text(items: list) -> str:
 
 
 def _model(slug, instr="PROMPT", *, priority=0, visibility="list", upgrade_to=None):
-    from calfkit_organization.providers.codex.prompts import CodexModel
+    from calfcord.providers.codex.prompts import CodexModel
 
     return CodexModel(
         slug=slug,
@@ -560,7 +560,7 @@ class TestModelResolutionAndValidation:
     def test_deprecated_model_fails_fast(self, tmp_path: Path) -> None:
         """The reported bug: a configured, retired model must raise at
         construction (before any request) and name the replacement."""
-        from calfkit_organization.providers.codex.prompts import DeprecatedCodexModelError
+        from calfcord.providers.codex.prompts import DeprecatedCodexModelError
 
         store = _seed(tmp_path, account_id="x")
         resolver = _loaded_catalog_resolver(
@@ -576,7 +576,7 @@ class TestModelResolutionAndValidation:
             )
 
     def test_unknown_model_fails_fast(self, tmp_path: Path) -> None:
-        from calfkit_organization.providers.codex.prompts import UnknownCodexModelError
+        from calfcord.providers.codex.prompts import UnknownCodexModelError
 
         store = _seed(tmp_path, account_id="x")
         resolver = _loaded_catalog_resolver(tmp_path, [_model("gpt-5.4", priority=2)])
@@ -587,7 +587,7 @@ class TestModelResolutionAndValidation:
 
     def test_hidden_model_fails_fast(self, tmp_path: Path) -> None:
         """Fork B: an explicitly-configured internal model is not selectable."""
-        from calfkit_organization.providers.codex.prompts import UnknownCodexModelError
+        from calfcord.providers.codex.prompts import UnknownCodexModelError
 
         store = _seed(tmp_path, account_id="x")
         resolver = _loaded_catalog_resolver(
@@ -626,7 +626,7 @@ class TestChatGPTUnsupportedGuard:
         from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError
         from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
 
-        from calfkit_organization.providers.codex.model_client import (
+        from calfcord.providers.codex.model_client import (
             CodexModelNotSupportedError,
         )
 
@@ -695,7 +695,7 @@ class TestChatGPTUnsupportedGuard:
         error, not the raw 400."""
         from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
 
-        from calfkit_organization.providers.codex.model_client import (
+        from calfcord.providers.codex.model_client import (
             CodexModelNotSupportedError,
         )
 
@@ -717,7 +717,7 @@ class TestChatGPTUnsupportedGuard:
         """The translated error points the operator at the current default."""
         from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
 
-        from calfkit_organization.providers.codex.model_client import (
+        from calfcord.providers.codex.model_client import (
             CodexModelNotSupportedError,
         )
 
@@ -747,11 +747,11 @@ class TestChatGPTUnsupportedGuard:
         gracefully to a generic phrase rather than masking the 400."""
         from calfkit._vendor.pydantic_ai.models.openai import OpenAIResponsesModel
 
-        from calfkit_organization.providers.codex.model_client import (
+        from calfcord.providers.codex.model_client import (
             CodexModelNotSupportedError,
         )
-        from calfkit_organization.providers.codex.prompt_cache import PromptCache
-        from calfkit_organization.providers.codex.prompts import PromptResolver
+        from calfcord.providers.codex.prompt_cache import PromptCache
+        from calfcord.providers.codex.prompts import PromptResolver
 
         store = _seed(tmp_path, account_id="x")
         client = CodexSubscriptionModelClient(

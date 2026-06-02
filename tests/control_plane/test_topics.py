@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.control_plane.topics import (
+from calfcord.control_plane.topics import (
     AGENT_CONTROL_TOPIC_TEMPLATE,
     AGENT_STATE_TOPIC,
     BRIDGE_DISCOVERY_TOPIC,

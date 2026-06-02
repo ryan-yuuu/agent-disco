@@ -24,16 +24,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.ingress import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.ingress import (
     _AMBIENT_INGRESS_TOPIC,
     _AMBIENT_REPLY_DISCARD_TOPIC,
     BridgeIngress,
 )
-from calfkit_organization.bridge.pending_wires import PendingWires
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.router.definition import build_router_definition
+from calfcord.bridge.pending_wires import PendingWires
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.router.definition import build_router_definition
 
 
 def _wire(
@@ -348,14 +348,14 @@ class TestAmbientPublish:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-publish-log")
         with caplog.at_level(
-            logging.INFO, logger="calfkit_organization.bridge.ingress"
+            logging.INFO, logger="calfcord.bridge.ingress"
         ):
             await ingress.handle(wire)
         info_records = [
             r
             for r in caplog.records
             if r.levelno == logging.INFO
-            and r.name == "calfkit_organization.bridge.ingress"
+            and r.name == "calfcord.bridge.ingress"
         ]
         publish_records = [
             r for r in info_records if "ingress ambient publish" in r.message
@@ -440,7 +440,7 @@ class TestAmbientFailureHandling:
         wire = _wire(event_id="evt-fail-1")
         with (
             caplog.at_level(
-                logging.ERROR, logger="calfkit_organization.bridge.ingress"
+                logging.ERROR, logger="calfcord.bridge.ingress"
             ),
             pytest.raises(RuntimeError),
         ):
@@ -473,7 +473,7 @@ class TestAmbientEmptyRosterAbort:
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        from calfkit_organization.bridge.ingress import (
+        from calfcord.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 
@@ -495,7 +495,7 @@ class TestAmbientEmptyRosterAbort:
         """The whole point of the abort: zero LLM tokens burned on a
         router run with no roster, zero envelope on the ambient
         topic."""
-        from calfkit_organization.bridge.ingress import (
+        from calfcord.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 
@@ -514,14 +514,14 @@ class TestAmbientEmptyRosterAbort:
     ) -> None:
         """ERROR log identifies the affected ambient message — operator
         can correlate the registry-shape WARN to a user complaint."""
-        from calfkit_organization.bridge.ingress import (
+        from calfcord.bridge.ingress import (
             AmbientRosterEmptyError,
         )
 
         router_only_registry = AgentRegistry([build_router_definition()])
         ingress = BridgeIngress(client, router_only_registry, pending_wires)
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.bridge.ingress"
+            logging.ERROR, logger="calfcord.bridge.ingress"
         ), pytest.raises(AmbientRosterEmptyError):
             await ingress.handle(_wire(event_id="evt-abort-1"))
         assert any(

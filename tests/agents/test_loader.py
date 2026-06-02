@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.agents.loader import load_agents_dir
+from calfcord.agents.loader import load_agents_dir
 
 
 def _write_agent(dir_: Path, name: str, **frontmatter_extra) -> None:
@@ -95,7 +95,7 @@ class TestToolsDefaultExpansion:
     def test_omitted_tools_expands_to_all_registered(self, tmp_path: Path) -> None:
         _write_agent(tmp_path, "scheduler")  # no tools: line
         defs = load_agents_dir(tmp_path)
-        from calfkit_organization.tools import TOOL_REGISTRY
+        from calfcord.tools import TOOL_REGISTRY
 
         assert defs[0].tools is not None
         assert set(defs[0].tools) == set(TOOL_REGISTRY)

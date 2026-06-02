@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.agents.state import AgentRuntimeState, AgentStateStore
+from calfcord.agents.state import AgentRuntimeState, AgentStateStore
 
 
 class TestAgentRuntimeState:

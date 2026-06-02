@@ -109,7 +109,7 @@ The agent's gate reads `ctx.deps.provided_deps["discord"]` to make its decision.
 ## 5. Package layout
 
 ```
-src/calfkit_organization/bridge/
+src/calfcord/bridge/
 ├── __init__.py          # public API surface
 ├── registry.py          # AgentSpec, AgentRegistry; YAML loader
 ├── wire.py              # WireMessage, WireAuthor
@@ -120,11 +120,11 @@ src/calfkit_organization/bridge/
 └── egress.py            # A2AChannelResolver
 ```
 
-The existing `src/calfkit_organization/discord/` package (sender, persona sender, receiver, settings, messages) stays as-is. The bridge consumes `DiscordSettings` and uses `discord.py` directly for the gateway; it does not depend on `DiscordReceiver`.
+The existing `src/calfcord/discord/` package (sender, persona sender, receiver, settings, messages) stays as-is. The bridge consumes `DiscordSettings` and uses `discord.py` directly for the gateway; it does not depend on `DiscordReceiver`.
 
 ### 5.1 Public surface
 
-Exported from `calfkit_organization.bridge`:
+Exported from `calfcord.bridge`:
 
 ```python
 class AgentSpec(BaseModel):
@@ -239,7 +239,7 @@ Add a script entry point in `pyproject.toml`:
 
 ```toml
 [project.scripts]
-calfkit-bridge = "calfkit_organization.bridge.gateway:main"
+calfkit-bridge = "calfcord.bridge.gateway:main"
 ```
 
 `main()` is a small async wrapper: loads settings, registry, broker, constructs the gateway, calls `await gateway.start()`. Run via `uv run calfkit-bridge`.

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.bridge.normalizer import (
+from calfcord.bridge.normalizer import (
     MessageNormalizer,
     SlashNormalizer,
     UnknownAgentMentionError,
 )
-from calfkit_organization.bridge.registry import AgentRegistry
+from calfcord.bridge.registry import AgentRegistry
 
 _BOT_USER_ID = 99
 _OWNER_USER_ID = 1234
@@ -129,7 +129,7 @@ class TestMentionParsing:
         ``@_router foo`` surfaces as ``UnknownAgentMentionError`` so
         the gateway sends the standard fail-fast reply rather than
         silently routing to a topic with no consumer."""
-        from calfkit_organization.agents.definition import AgentDefinition
+        from calfcord.agents.definition import AgentDefinition
 
         registry = AgentRegistry(
             [

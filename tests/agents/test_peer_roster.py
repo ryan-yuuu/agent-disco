@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from calfkit_organization.agents.peer_roster import build_temp_instructions
-from calfkit_organization.agents.phonebook import PhonebookEntry
+from calfcord.agents.peer_roster import build_temp_instructions
+from calfcord.agents.phonebook import PhonebookEntry
 
 
 def _entry(
@@ -205,7 +205,7 @@ class TestBuildTempInstructionsChannel:
     def test_returns_none_when_target_is_filtered_out_of_phonebook(self) -> None:
         """Defense-in-depth for the router-exclusion invariant. The
         production phonebook (built via
-        :func:`~calfkit_organization.agents.phonebook.phonebook_from_registry`)
+        :func:`~calfcord.agents.phonebook.phonebook_from_registry`)
         filters out the router agent, and the bridge normalizer rejects
         ``@<router_id>`` as an unknown mention — so a router target
         should never reach this helper. But if a future regression

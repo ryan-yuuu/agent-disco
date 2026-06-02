@@ -3,7 +3,7 @@
 The transducer that turns a declarative `agents/<name>.md` definition into a
 runnable, LLM-backed calfkit agent process. Replaces the
 `NotImplementedError` stub at
-`src/calfkit_organization/agents/factory.py:53-58`. Builds on the existing
+`src/calfcord/agents/factory.py:53-58`. Builds on the existing
 Discord ↔ Kafka bridge (`discord-topic-bridge-plan.md`) and the calfkit
 0.3.0 emitter-header feature (`x-calf-emitter` / `x-calf-emitter-kind`).
 
@@ -171,18 +171,18 @@ inbound message has its own coroutine with its own `wire` binding.
 
 | File | Purpose | Approx. lines |
 |---|---|---|
-| `src/calfkit_organization/agents/gates.py` | `make_addressable_gate(agent_id)`, `make_addressed_to_me_gate(agent_id)` — extracted from `agents/echo.py`. | ~70 (incl. docstrings) |
+| `src/calfcord/agents/gates.py` | `make_addressable_gate(agent_id)`, `make_addressed_to_me_gate(agent_id)` — extracted from `agents/echo.py`. | ~70 (incl. docstrings) |
 | `tests/agents/test_gates.py` | Unit tests: addressable/not-addressable, slash-target match/mismatch, non-slash accept, missing-discord-dep reject, AND-stacking sanity. | ~120 |
 
 ### 5.2 Modified files
 
 | File | Change |
 |---|---|
-| `src/calfkit_organization/agents/factory.py` | Replace `NotImplementedError` stub with real `build()`. Add `default_model` constructor argument and `_resolve_model` helper. Add optional `model_client_factory` parameter for test injection. |
-| `src/calfkit_organization/agents/__init__.py` | Re-export the two gate helpers and a `make_persona(definition)` helper if extracted. |
-| `src/calfkit_organization/bridge/publisher.py` | **Delete** or repurpose. Replace `KafkaPublisher.publish(wire)` with an awaitable `invoke_and_get_reply(wire) -> NodeResult` (or fold straight into `DiscordIngressGateway._on_message`). The cleanup-future scaffolding goes away because we now consume replies. |
-| `src/calfkit_organization/bridge/gateway.py` | (a) Call `Client.connect(server_urls, reply_topic="discord.outbox", client_id="bridge.discord")` in `main`. (b) `_on_message` becomes `wire → execute_node → registry lookup → persona send` inline. (c) Remove the `KafkaPublisher`-specific wiring. |
-| `src/calfkit_organization/discord/persona.py` | Add `ReplyContext.from_wire(wire, style="button")` classmethod. Used in 3+ call sites. |
+| `src/calfcord/agents/factory.py` | Replace `NotImplementedError` stub with real `build()`. Add `default_model` constructor argument and `_resolve_model` helper. Add optional `model_client_factory` parameter for test injection. |
+| `src/calfcord/agents/__init__.py` | Re-export the two gate helpers and a `make_persona(definition)` helper if extracted. |
+| `src/calfcord/bridge/publisher.py` | **Delete** or repurpose. Replace `KafkaPublisher.publish(wire)` with an awaitable `invoke_and_get_reply(wire) -> NodeResult` (or fold straight into `DiscordIngressGateway._on_message`). The cleanup-future scaffolding goes away because we now consume replies. |
+| `src/calfcord/bridge/gateway.py` | (a) Call `Client.connect(server_urls, reply_topic="discord.outbox", client_id="bridge.discord")` in `main`. (b) `_on_message` becomes `wire → execute_node → registry lookup → persona send` inline. (c) Remove the `KafkaPublisher`-specific wiring. |
+| `src/calfcord/discord/persona.py` | Add `ReplyContext.from_wire(wire, style="button")` classmethod. Used in 3+ call sites. |
 | `agents/echo.py` | Migrate gate construction to import from `agents/gates.py`. Behavior unchanged. Echo continues to post directly via persona sender (it remains a hand-coded reference, outside the LLM factory flow). |
 | `tests/agents/test_factory.py` | Rewrite: the stub-pinning tests go away. New tests verify `build()` returns a `Worker` with one node whose `node_id`, `subscribe_topics`, gates (by name), and model-client wiring match the definition + state. Uses an injected `model_client_factory` to avoid real model construction. |
 | `tests/bridge/conftest.py` and `tests/bridge/test_*.py` | Update where they reference the old `KafkaPublisher` API. |
@@ -206,8 +206,8 @@ are ordered so each is unit-testable without the next.
 
 ### Phase 1 — Extract shared gates
 
-**Files**: `src/calfkit_organization/agents/gates.py` (new),
-`agents/echo.py` (update imports), `src/calfkit_organization/agents/__init__.py`
+**Files**: `src/calfcord/agents/gates.py` (new),
+`agents/echo.py` (update imports), `src/calfcord/agents/__init__.py`
 (re-exports), `tests/agents/test_gates.py` (new).
 
 **Scope**:
@@ -228,7 +228,7 @@ are ordered so each is unit-testable without the next.
 
 ### Phase 2 — `ReplyContext.from_wire` helper
 
-**File**: `src/calfkit_organization/discord/persona.py` (add classmethod).
+**File**: `src/calfcord/discord/persona.py` (add classmethod).
 
 **Scope**: One ~10-line classmethod that constructs a `ReplyContext` from a
 `WireMessage`. No behavior change anywhere else; this is a refactor that
@@ -243,7 +243,7 @@ bridge handler.
 
 ### Phase 3 — `AgentFactory.build`
 
-**Files**: `src/calfkit_organization/agents/factory.py` (real impl),
+**Files**: `src/calfcord/agents/factory.py` (real impl),
 `tests/agents/test_factory.py` (rewrite).
 
 **Scope sketch** (not the final code, but the shape):
@@ -321,9 +321,9 @@ client.
 
 ### Phase 4 — Replace `KafkaPublisher` with the awaitable round-trip
 
-**Files**: `src/calfkit_organization/bridge/publisher.py` (delete or
-simplify), `src/calfkit_organization/bridge/__init__.py` (drop the
-re-export), `src/calfkit_organization/bridge/gateway.py` (update internal
+**Files**: `src/calfcord/bridge/publisher.py` (delete or
+simplify), `src/calfcord/bridge/__init__.py` (drop the
+re-export), `src/calfcord/bridge/gateway.py` (update internal
 calls), `tests/bridge/test_publisher.py` (rewrite or delete).
 
 **Decision point during impl**: do we keep a thin `AgentInvoker` class for
@@ -399,7 +399,7 @@ class AgentInvoker:
 
 ### Phase 5 — Bridge gateway integration
 
-**File**: `src/calfkit_organization/bridge/gateway.py`.
+**File**: `src/calfcord/bridge/gateway.py`.
 
 **Scope**:
 
@@ -581,26 +581,26 @@ user if evidence demands otherwise.
 For the engineer doing the work, here's the bill of materials:
 
 **New files (4)**:
-- `src/calfkit_organization/agents/gates.py` (~70 lines)
+- `src/calfcord/agents/gates.py` (~70 lines)
 - `tests/agents/test_gates.py` (~120 lines)
-- `src/calfkit_organization/bridge/invoker.py` (`AgentInvoker`, ~80 lines)
+- `src/calfcord/bridge/invoker.py` (`AgentInvoker`, ~80 lines)
 - `tests/bridge/test_agent_invoker.py` (~150 lines)
 - `agents/scribe.md` (~15 lines)
 
 **Modified files (6)**:
-- `src/calfkit_organization/agents/factory.py` (rewrite: stub → ~60 lines)
-- `src/calfkit_organization/agents/__init__.py` (add 2 re-exports)
-- `src/calfkit_organization/bridge/gateway.py` (~30 lines of delta:
+- `src/calfcord/agents/factory.py` (rewrite: stub → ~60 lines)
+- `src/calfcord/agents/__init__.py` (add 2 re-exports)
+- `src/calfcord/bridge/gateway.py` (~30 lines of delta:
   inject `AgentInvoker`, swap publisher call, set `reply_topic`)
-- `src/calfkit_organization/bridge/__init__.py` (drop `KafkaPublisher`
+- `src/calfcord/bridge/__init__.py` (drop `KafkaPublisher`
   re-export, add `AgentInvoker`)
-- `src/calfkit_organization/discord/persona.py` (add
+- `src/calfcord/discord/persona.py` (add
   `ReplyContext.from_wire`, ~10 lines)
 - `agents/echo.py` (import gates from new module; ~5 lines of delta)
 - `tests/agents/test_factory.py` (rewrite: stub-pin tests → real tests)
 
 **Deleted files (2)**:
-- `src/calfkit_organization/bridge/publisher.py`
+- `src/calfcord/bridge/publisher.py`
 - `tests/bridge/test_publisher.py`
 
 Net: +~430 lines (mostly tests), -~150 lines (publisher + stub pins),

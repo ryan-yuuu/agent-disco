@@ -13,7 +13,7 @@ import pytest
 from calfkit.models import ToolContext
 from calfkit.models.session_context import Deps
 
-from calfkit_organization.tools.builtin import fs, workspace
+from calfcord.tools.builtin import fs, workspace
 
 
 def _ctx() -> ToolContext:

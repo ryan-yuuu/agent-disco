@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 import discord
 import pytest
 
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.discord.persona import (
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.discord.persona import (
     ReplyContext,
     _build_reply_button,
     _build_reply_embed,

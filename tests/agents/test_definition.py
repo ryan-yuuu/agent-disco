@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from calfkit_organization.agents.definition import AgentDefinition, parse_agent_md
+from calfcord.agents.definition import AgentDefinition, parse_agent_md
 
 
 def _make_definition(**overrides) -> AgentDefinition:

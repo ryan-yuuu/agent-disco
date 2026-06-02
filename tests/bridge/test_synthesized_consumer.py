@@ -29,13 +29,13 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 
-from calfkit_organization._compat.invoke import MetadataEnvelope
-from calfkit_organization.bridge.history import HistoryRecord
-from calfkit_organization.bridge.synthesized import (
+from calfcord._compat.invoke import MetadataEnvelope
+from calfcord.bridge.history import HistoryRecord
+from calfcord.bridge.synthesized import (
     SYNTHESIZED_INGRESS_TOPIC,
     build_synthesized_consumer,
 )
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
+from calfcord.bridge.wire import WireAuthor, WireMessage
 
 _CORRELATION_ID = "evt-synthesized"
 
@@ -161,7 +161,7 @@ class TestHappyPath:
         the router fanned out successfully. Pair with the bridge
         ingress's ambient-publish INFO log to detect a silent router."""
         consumer = build_synthesized_consumer(ingress)
-        with caplog.at_level(logging.INFO, logger="calfkit_organization.bridge.synthesized"):
+        with caplog.at_level(logging.INFO, logger="calfcord.bridge.synthesized"):
             await consumer.handler(
                 envelope=_envelope(),
                 correlation_id=_CORRELATION_ID,
@@ -183,7 +183,7 @@ class TestErrorPaths:
         operator-visible ERROR log surfaces the violation."""
         consumer = build_synthesized_consumer(ingress)
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.bridge.synthesized"
+            logging.ERROR, logger="calfcord.bridge.synthesized"
         ):
             await consumer.handler(
                 envelope=_envelope(metadata=None),
@@ -203,7 +203,7 @@ class TestErrorPaths:
     ) -> None:
         consumer = build_synthesized_consumer(ingress)
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.bridge.synthesized"
+            logging.ERROR, logger="calfcord.bridge.synthesized"
         ):
             await consumer.handler(
                 envelope=_envelope(metadata={"unrelated": "stuff"}),
@@ -300,7 +300,7 @@ class TestHistoryForwarding:
         older inner ``deserialize`` phrasing."""
         consumer = build_synthesized_consumer(ingress)
         with caplog.at_level(
-            logging.ERROR, logger="calfkit_organization.bridge.synthesized"
+            logging.ERROR, logger="calfcord.bridge.synthesized"
         ):
             await consumer.handler(
                 envelope=_envelope(metadata={"wire": {"missing_required_fields": True}}),
@@ -320,7 +320,7 @@ class TestHistoryForwarding:
         can assert on attributes rather than substring-matching log
         messages. Pins the contract that the synthesized-in site emits
         ``site="synthesized-in"`` on every envelope-extract failure."""
-        from calfkit_organization._compat.invoke import (
+        from calfcord._compat.invoke import (
             MetadataEnvelopeError,
             raise_envelope_error,
         )
@@ -350,7 +350,7 @@ class TestHistoryForwarding:
         ingress.handle = AsyncMock(side_effect=RuntimeError("broker hiccup"))
 
         consumer = build_synthesized_consumer(ingress)
-        with caplog.at_level(logging.ERROR, logger="calfkit_organization.bridge.synthesized"):
+        with caplog.at_level(logging.ERROR, logger="calfcord.bridge.synthesized"):
             # No raise — the consumer's catch-and-log path keeps it
             # alive for the next envelope.
             await consumer.handler(

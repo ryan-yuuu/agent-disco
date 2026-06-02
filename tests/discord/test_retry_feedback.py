@@ -1,8 +1,8 @@
 """Tests for the shared retry-with-feedback policy module.
 
 Covers the pure helpers consumed by both
-:mod:`calfkit_organization.bridge.outbox` (channel replies, async
-republish) and :mod:`calfkit_organization.tools.builtin.private_chat` (A2A
+:mod:`calfcord.bridge.outbox` (channel replies, async
+republish) and :mod:`calfcord.tools.builtin.private_chat` (A2A
 audit projections, sync re-invocation):
 
 * :func:`build_retry_reminder` — pure function shape, override map.
@@ -29,7 +29,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from calfkit_organization.discord.retry_feedback import (
+from calfcord.discord.retry_feedback import (
     _RETRY_REMINDER_OVERRIDES,
     CHUNK_SAFE_SIZE,
     build_retry_history,

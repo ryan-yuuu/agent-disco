@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.phonebook import phonebook_from_registry
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.router.definition import ROUTER_AGENT_ID, build_router_definition
+from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.phonebook import phonebook_from_registry
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.router.definition import ROUTER_AGENT_ID, build_router_definition
 
 
 def _write_agent(dir_: Path, name: str, **frontmatter_extra: str) -> None:
@@ -151,10 +151,10 @@ class TestPhonebookExcludesRouter:
     """The router is **filtered out** of :func:`phonebook_from_registry`
     output. It has no A2A inbox (``agent.{id}.in``), so listing it as
     a peer would mislead assistants' LLMs into calling
-    :func:`~calfkit_organization.tools.builtin.private_chat.private_chat`
+    :func:`~calfcord.tools.builtin.private_chat.private_chat`
     against a topic with no consumer — silent timeout, wasted tokens.
     The router-side roster (built by
-    :func:`calfkit_organization.router.roster.build_router_temp_instructions`)
+    :func:`calfcord.router.roster.build_router_temp_instructions`)
     is the intentional place for the router-visible agent list."""
 
     def test_router_not_in_phonebook(self, tmp_path: Path) -> None:

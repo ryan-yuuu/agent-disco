@@ -24,15 +24,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.factory import AgentFactory
-from calfkit_organization.agents.state import AgentRuntimeState
-from calfkit_organization.bridge.ingress import BridgeIngress
-from calfkit_organization.bridge.pending_wires import PendingWires
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.tools import TOOL_REGISTRY
-from calfkit_organization.tools.builtin.private_chat import private_chat_tool
+from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.factory import AgentFactory
+from calfcord.agents.state import AgentRuntimeState
+from calfcord.bridge.ingress import BridgeIngress
+from calfcord.bridge.pending_wires import PendingWires
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.tools import TOOL_REGISTRY
+from calfcord.tools.builtin.private_chat import private_chat_tool
 
 
 def _definition(tools: tuple[str, ...]) -> AgentDefinition:
@@ -125,8 +125,8 @@ class TestWireConventionRoundTrip:
     async def test_phonebook_serialized_by_bridge_validates_at_tool(
         self,
     ) -> None:
-        from calfkit_organization.agents.phonebook import phonebook_from_deps
-        from calfkit_organization.tools.builtin import private_chat as pc
+        from calfcord.agents.phonebook import phonebook_from_deps
+        from calfcord.tools.builtin import private_chat as pc
 
         # Stub calfkit Client to capture the deps the bridge writes —
         # no Kafka, no real publish. Reuses the same fixture pattern as

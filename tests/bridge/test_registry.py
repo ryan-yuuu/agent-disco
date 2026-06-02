@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.router.definition import build_router_definition
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.router.definition import build_router_definition
 
 
 def _make_definition(**overrides) -> AgentDefinition:

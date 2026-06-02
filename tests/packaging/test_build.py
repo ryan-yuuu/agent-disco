@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.packaging import _build
+from calfcord.packaging import _build
 
 
 def _fake_completed(returncode: int = 0):

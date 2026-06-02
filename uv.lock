@@ -532,32 +532,7 @@ wheels = [
 ]
 
 [[package]]
-name = "calfkit"
-version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anthropic" },
-    { name = "dishka" },
-    { name = "faststream", extra = ["kafka"] },
-    { name = "genai-prices" },
-    { name = "griffe" },
-    { name = "httpx" },
-    { name = "openai" },
-    { name = "opentelemetry-api" },
-    { name = "pydantic" },
-    { name = "pydantic-graph" },
-    { name = "python-dotenv" },
-    { name = "typing-extensions" },
-    { name = "typing-inspection" },
-    { name = "uuid-utils" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/78/d0/3d697e63d27c702773e749511fb99fecd2dd2d8020b8512131cb6545ef21/calfkit-0.3.1.tar.gz", hash = "sha256:7ae518996651cac6733803e39eec24ba7bec77c3c5cb984c3dc283e3fbd33383", size = 549332, upload-time = "2026-05-19T05:12:08.567Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/2b/b7b5e8f3cb9a9b20e58707fe5410c245234ba15507274ab1e6bcfde68220/calfkit-0.3.1-py3-none-any.whl", hash = "sha256:7da26001b6836fceb88bb7a5cda910381bac8ef8edd5ce58695b17af5c3698a2", size = 571427, upload-time = "2026-05-19T05:12:06.81Z" },
-]
-
-[[package]]
-name = "calfkit-organization"
+name = "calfcord"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -599,6 +574,31 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+]
+
+[[package]]
+name = "calfkit"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "dishka" },
+    { name = "faststream", extra = ["kafka"] },
+    { name = "genai-prices" },
+    { name = "griffe" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "pydantic-graph" },
+    { name = "python-dotenv" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+    { name = "uuid-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/d0/3d697e63d27c702773e749511fb99fecd2dd2d8020b8512131cb6545ef21/calfkit-0.3.1.tar.gz", hash = "sha256:7ae518996651cac6733803e39eec24ba7bec77c3c5cb984c3dc283e3fbd33383", size = 549332, upload-time = "2026-05-19T05:12:08.567Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7a/2b/b7b5e8f3cb9a9b20e58707fe5410c245234ba15507274ab1e6bcfde68220/calfkit-0.3.1-py3-none-any.whl", hash = "sha256:7da26001b6836fceb88bb7a5cda910381bac8ef8edd5ce58695b17af5c3698a2", size = 571427, upload-time = "2026-05-19T05:12:06.81Z" },
 ]
 
 [[package]]

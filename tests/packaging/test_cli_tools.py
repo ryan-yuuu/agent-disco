@@ -12,7 +12,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 
-from calfkit_organization.packaging import cli_tools
+from calfcord.packaging import cli_tools
 
 
 def _run(argv: list[str]) -> tuple[int, str, str]:
@@ -334,7 +334,7 @@ class TestRenameFlag:
 class TestEnvStripping:
     """The CLI strips ``CALFCORD_TOOLS_ALIAS`` and
     ``CALFCORD_TOOLS_INCLUDE`` from its own environment BEFORE
-    importing ``calfkit_organization.tools``. Otherwise the operator's
+    importing ``calfcord.tools``. Otherwise the operator's
     shell env would poison the registry the CLI validates against —
     e.g. ``--rename anything=foo`` would silently pass because the
     operator's env already cloned ``foo``, and the resulting image

@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.bridge.registry import AgentRegistry
+from calfcord.agents.definition import AgentDefinition
+from calfcord.bridge.registry import AgentRegistry
 
 
 @pytest.fixture

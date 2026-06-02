@@ -28,19 +28,19 @@ import discord
 import frontmatter
 import pytest
 
-from calfkit_organization.bridge.history import CLEAR_MARKER_TEXT
-from calfkit_organization.bridge.ingress import BridgeIngress
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.slash import (
+from calfcord.bridge.history import CLEAR_MARKER_TEXT
+from calfcord.bridge.ingress import BridgeIngress
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.slash import (
     _CLEAR_COMMAND_NAME,
     _THINKING_EFFORT_COMMAND_NAME,
     SlashCommandManager,
 )
-from calfkit_organization.control_plane.schema import (
+from calfcord.control_plane.schema import (
     AgentControlEnvelope,
     SetThinkingEffortOp,
 )
-from calfkit_organization.control_plane.topics import control_topic_for
+from calfcord.control_plane.topics import control_topic_for
 
 _OWNER_USER_ID = 9999
 

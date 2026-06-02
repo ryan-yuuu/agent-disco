@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
+from calfcord.bridge.wire import WireAuthor, WireMessage
 
 
 def _make_author(**overrides) -> WireAuthor:

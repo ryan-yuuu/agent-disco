@@ -3,7 +3,7 @@
 The router definition is constructed in code. Its tunable config
 (``provider`` / ``model`` / ``thinking_effort`` / ``history_turns``) and its
 system prompt come from the bundled ``router.md`` (see
-:func:`calfkit_organization.router.prompt.load_router_md`); a field omitted
+:func:`calfcord.router.prompt.load_router_md`); a field omitted
 from the front matter falls through to the ``_DEFAULT_*`` in-code constant.
 
 These tests cover three things:
@@ -26,9 +26,9 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.router import prompt
-from calfkit_organization.router.definition import ROUTER_AGENT_ID, build_router_definition
+from calfcord.agents.definition import AgentDefinition
+from calfcord.router import prompt
+from calfcord.router.definition import ROUTER_AGENT_ID, build_router_definition
 
 
 @pytest.fixture(autouse=True)

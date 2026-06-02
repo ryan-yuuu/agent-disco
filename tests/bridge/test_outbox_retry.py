@@ -1,7 +1,7 @@
 """Tests for the outbox's retry-with-feedback orchestration.
 
 Covers the bridge-specific transport that consumes the shared policy
-helpers from :mod:`calfkit_organization.discord.retry_feedback`:
+helpers from :mod:`calfcord.discord.retry_feedback`:
 
 * :func:`_handle_post_failure` — branch triage (non-retryable / budget
   exhausted / agent retry / Kafka publish failure).
@@ -45,30 +45,30 @@ from calfkit.models.session_context import (
     WorkflowState,
 )
 
-from calfkit_organization.agents.definition import AgentDefinition
-from calfkit_organization.agents.memory import (
+from calfcord.agents.definition import AgentDefinition
+from calfcord.agents.memory import (
     MEMORY_PROMPT_DEPS_KEY,
     _reset_cache_for_tests,
 )
-from calfkit_organization.bridge.outbox import (
+from calfcord.bridge.outbox import (
     _handle_post_failure,
     _post_chunked_fallback,
     _publish_retry,
     build_outbox_consumer,
 )
-from calfkit_organization.bridge.pending_wires import (
+from calfcord.bridge.pending_wires import (
     PendingEntry,
     PendingWires,
     make_pending_entry,
 )
-from calfkit_organization.bridge.registry import AgentRegistry
-from calfkit_organization.bridge.wire import WireAuthor, WireMessage
-from calfkit_organization.discord.messages import SentMessage
-from calfkit_organization.discord.persona import Persona
-from calfkit_organization.discord.retry_feedback import (
+from calfcord.bridge.registry import AgentRegistry
+from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.discord.messages import SentMessage
+from calfcord.discord.persona import Persona
+from calfcord.discord.retry_feedback import (
     MAX_REPLY_RETRY_ATTEMPTS,
 )
-from calfkit_organization.router.definition import build_router_definition
+from calfcord.router.definition import build_router_definition
 
 _CORRELATION_ID = "evt-1"
 

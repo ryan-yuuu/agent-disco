@@ -112,11 +112,11 @@ write access to the branch deployed to production.
 ### 2.3 Compromised or malicious tool
 
 A contributor who can add a `.py` file under
-`src/calfkit_organization/tools/builtin/` ships a tool with the same
+`src/calfcord/tools/builtin/` ships a tool with the same
 trusted-workspace access as the builtins. There is no signing, no
 manifest, no allowlist — the discovery loader picks up every
 `ToolNodeDef` it finds at boot (see
-`src/calfkit_organization/tools/discovery.py`). The mitigation is again
+`src/calfcord/tools/discovery.py`). The mitigation is again
 operational: review every PR that touches `tools/builtin/`, including
 the function bodies and their imports.
 
@@ -304,7 +304,7 @@ matters in practice.
 - **Use guild-scoped slash-command sync** for production deployments.
   Setting `DISCORD_GUILD_ID` in `.env` makes the bridge register slash
   commands against one guild instead of globally; see
-  `src/calfkit_organization/discord/settings.py`. Global slash sync
+  `src/calfcord/discord/settings.py`. Global slash sync
   has a longer propagation delay and exposes the commands in every
   guild the bot is in, including ones where you didn't intend to.
 - **Limit which channels each agent subscribes to.** An agent only

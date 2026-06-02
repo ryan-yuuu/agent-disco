@@ -66,7 +66,7 @@ Claude Code's two halves, mapped:
 # agents/memory.py
 import os
 from pathlib import Path
-from calfkit_organization.agents.definition import AgentDefinition
+from calfcord.agents.definition import AgentDefinition
 
 _ENV = "CALFCORD_MEMORY_PROMPT_PATH"
 _DEFAULT_PATH = Path(__file__).parent / "memory_prompt.md"
@@ -125,7 +125,7 @@ Notes:
 ### 3.2 The touch point (`factory.py:378-386`)
 
 ```python
-from calfkit_organization.agents.memory import compose_system_prompt
+from calfcord.agents.memory import compose_system_prompt
 
 agent = Agent(
     node_id=definition.agent_id,
@@ -227,7 +227,7 @@ time. Cost: a second mount + boot-snapshot staleness. Out of v1.
 | `agents/memory.py` | **NEW** — `load_memory_prompt()` (cached read, env override, non-empty validation) + `compose_system_prompt(definition)` (§3.1). |
 | `agents/definition.py` | Add `memory: bool = False` with a docstring (`extra="forbid"` requires it be declared). |
 | `agents/factory.py` | `build_node` calls `compose_system_prompt`; add the fs-tools guard (§3.3). Router path untouched. |
-| `pyproject.toml` (build backend) | **Likely no change.** Hatchling includes non-`.py` files under the wheel package (`packages = ["src/calfkit_organization"]`) by default, and the file is git-tracked, so `memory_prompt.md` ships automatically. One-time `uv build` + inspect to confirm; add an explicit `[tool.hatch.build] include`/`force-include` only if it's somehow missing. See §7.2. |
+| `pyproject.toml` (build backend) | **Likely no change.** Hatchling includes non-`.py` files under the wheel package (`packages = ["src/calfcord"]`) by default, and the file is git-tracked, so `memory_prompt.md` ships automatically. One-time `uv build` + inspect to confirm; add an explicit `[tool.hatch.build] include`/`force-include` only if it's somehow missing. See §7.2. |
 | `.env.example` | Document `CALFCORD_MEMORY_PROMPT_PATH` (commented; default bundled file works). |
 | `docker-compose.yml` | Remove the now-vestigial `./agent-memory:/app/agent-memory` mount from the **agent** service (it anticipated a different design; memory now lives under `./workspace`). Optional cleanup, not load-bearing. |
 | `.gitignore` | Drop the `agent-memory/` line alongside the mount removal; `workspace/` contents already ignored. |
@@ -259,8 +259,8 @@ already**. No agent process needs a workspace mount; no tools process needs the 
 
 ### 7.2 Packaging — the `.md` ships for free
 
-`memory_prompt.md` lives under `src/calfkit_organization/agents/`, inside the wheel
-package (`[tool.hatch.build.targets.wheel] packages = ["src/calfkit_organization"]`).
+`memory_prompt.md` lives under `src/calfcord/agents/`, inside the wheel
+package (`[tool.hatch.build.targets.wheel] packages = ["src/calfcord"]`).
 Hatchling includes non-`.py` files under the package dir by default and the file is
 git-tracked, so it ships in the wheel; in the Docker build it also arrives via
 `COPY src ./src`. Both editable and built-wheel installs resolve

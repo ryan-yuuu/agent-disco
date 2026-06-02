@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.providers.codex.prompt_cache import (
+from calfcord.providers.codex.prompt_cache import (
     CachedEntry,
     PromptCache,
 )
@@ -204,7 +204,7 @@ class TestBaseDirResolution:
         # Force Path.home() to recompute by patching the module-level helper.
         import importlib
 
-        from calfkit_organization.providers.codex import prompt_cache as module
+        from calfcord.providers.codex import prompt_cache as module
 
         importlib.reload(module)
         try:

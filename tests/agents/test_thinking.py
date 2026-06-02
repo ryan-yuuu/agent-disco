@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from calfkit_organization.agents.thinking import build_model_settings
+from calfcord.agents.thinking import build_model_settings
 
 
 class TestNoneAndUnset:
@@ -50,7 +50,7 @@ class TestOpenAIMapping:
             # top tier (``high``) since the API exposes no higher
             # value. This ramp was shifted up one notch when
             # operator ``minimal`` was added — see the lookup-table
-            # comment in :mod:`calfkit_organization.agents.thinking`
+            # comment in :mod:`calfcord.agents.thinking`
             # for the migration rationale.
             ("minimal", "minimal"),
             ("low", "low"),

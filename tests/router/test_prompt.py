@@ -1,12 +1,12 @@
 """Tests pinning the router system prompt to its schema and tool name.
 
 The router's :data:`SYSTEM_PROMPT` is loaded from ``router.md`` (the
-loader, :func:`calfkit_organization.router.prompt.load_router_md`,
+loader, :func:`calfcord.router.prompt.load_router_md`,
 substitutes the ``{{ROUTER_OUTPUT_TOOL}}`` / ``{{AGENT_ID_FIELD}}`` /
 ``{{REASONING_FIELD}}`` placeholders with the code constants). The prompt
 module also asserts the field-name constants match
 :class:`RoutingDecision` at import time
-(:mod:`calfkit_organization.router.prompt`), which catches a placeholder
+(:mod:`calfcord.router.prompt`), which catches a placeholder
 constant drifting from the schema. These tests cover the rendered prompt:
 the symmetric direction (schema rename without prompt update) and the
 policy wording the LLM depends on.
@@ -35,13 +35,13 @@ from pathlib import Path
 
 import pytest
 
-from calfkit_organization.agents.routing import (
+from calfcord.agents.routing import (
     ROUTER_OUTPUT_TOOL_NAME,
     RoutingDecision,
 )
-from calfkit_organization.router import prompt as prompt_module
-from calfkit_organization.router.config import RouterConfig
-from calfkit_organization.router.prompt import load_router_md
+from calfcord.router import prompt as prompt_module
+from calfcord.router.config import RouterConfig
+from calfcord.router.prompt import load_router_md
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +180,7 @@ class TestSystemPromptCoupling:
         """The router agent is configured with ``history_turns`` from the
         ``router.md`` front matter (default 10) so recent channel turns are
         projected into its ``message_history`` on every invocation — see
-        :func:`calfkit_organization.router.definition.build_router_definition`
+        :func:`calfcord.router.definition.build_router_definition`
         and the ``_DEFAULT_HISTORY_TURNS`` docstring ("only needs
         enough context to recognize follow-ups vs. fresh topics").
 

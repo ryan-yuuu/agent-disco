@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from openhands.sdk.llm.auth import OAuthCredentials
 
-from calfkit_organization.providers.codex.token_store import (
+from calfcord.providers.codex.token_store import (
     authlib_token_to_credentials,
     credentials_to_authlib_token,
     get_credentials_dir,

@@ -89,7 +89,7 @@ Three structural facts about this design:
 Extends what `PendingWires` stores. Carries the original wire AND the data the outbox needs to construct a retry envelope.
 
 ```python
-# src/calfkit_organization/bridge/pending_wires.py
+# src/calfcord/bridge/pending_wires.py
 
 @dataclass
 class PendingEntry:
@@ -463,10 +463,10 @@ Actually, reconsidering: the existing `_send_with_one_retry_on_outage` swallows 
 
 | File | Change |
 |---|---|
-| `src/calfkit_organization/bridge/pending_wires.py` | Introduce `PendingEntry` dataclass; `put`/`get`/`pop` take/return `PendingEntry`; new `increment_retry` method |
-| `src/calfkit_organization/bridge/outbox.py` | Add `NON_AGENT_FIXABLE_STATUSES`, `MAX_REPLY_RETRY_ATTEMPTS`, `CHUNK_SAFE_SIZE`, `_RETRY_REMINDER_OVERRIDES`; new functions `build_retry_reminder`, `_chunk_split`, `_publish_retry`, `_post_chunked_fallback`, `_handle_post_failure`; modify `build_outbox_consumer` to accept `calfkit_client`; modify `_post_reply` closure to route HTTPException to `_handle_post_failure` |
-| `src/calfkit_organization/bridge/ingress.py` | Slash branch: construct `PendingEntry(wire, message_history=tuple(message_history), temp_instructions=temp_instructions, retry_attempt=0)` and pass to `pending_wires.put`; same for the synthesized-slash path's underlying call |
-| `src/calfkit_organization/bridge/gateway.py` | Pass `calfkit_client` into `build_outbox_consumer(...)` |
+| `src/calfcord/bridge/pending_wires.py` | Introduce `PendingEntry` dataclass; `put`/`get`/`pop` take/return `PendingEntry`; new `increment_retry` method |
+| `src/calfcord/bridge/outbox.py` | Add `NON_AGENT_FIXABLE_STATUSES`, `MAX_REPLY_RETRY_ATTEMPTS`, `CHUNK_SAFE_SIZE`, `_RETRY_REMINDER_OVERRIDES`; new functions `build_retry_reminder`, `_chunk_split`, `_publish_retry`, `_post_chunked_fallback`, `_handle_post_failure`; modify `build_outbox_consumer` to accept `calfkit_client`; modify `_post_reply` closure to route HTTPException to `_handle_post_failure` |
+| `src/calfcord/bridge/ingress.py` | Slash branch: construct `PendingEntry(wire, message_history=tuple(message_history), temp_instructions=temp_instructions, retry_attempt=0)` and pass to `pending_wires.put`; same for the synthesized-slash path's underlying call |
+| `src/calfcord/bridge/gateway.py` | Pass `calfkit_client` into `build_outbox_consumer(...)` |
 | `tests/bridge/test_pending_wires.py` | Update fixtures to construct `PendingEntry`; new tests for `increment_retry` semantics + entry-evicted-during-retry edge case |
 | `tests/bridge/test_outbox.py` | New tests: 400-50035 triggers retry; 403 does not; retry envelope shape (history + ModelRequest + ModelResponse + reminder); retry counter increments; budget exhausted → chunk-split; chunk-split posts N messages with right content + only first uses reply_to |
 | `tests/bridge/test_ingress.py`, `test_ingress_history.py`, `test_ingress_router.py` | Update existing assertions on `pending_wires.get(...)` to expect `PendingEntry` and access `.wire` |

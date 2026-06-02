@@ -43,7 +43,7 @@ uv run calfcord-package-tools shell --tag my-shell:1.0
 
 That writes a slim Dockerfile that filters tool discovery via the
 `CALFCORD_TOOLS_INCLUDE=shell` env var (consumed by
-`src/calfkit_organization/tools/discovery.py`) and installs only the
+`src/calfcord/tools/discovery.py`) and installs only the
 OS deps that `shell` actually needs (`tmux` for persistent sessions,
 plus the always-on `ca-certificates`). The image is materially smaller
 than `calfcord:latest`:
@@ -56,7 +56,7 @@ Verify the resulting registry contains only the tools you asked for:
 
 ```bash
 docker run --rm --entrypoint /bin/sh my-shell:1.0 \
-  -c "python -c 'from calfkit_organization.tools import TOOL_REGISTRY; print(sorted(TOOL_REGISTRY))'"
+  -c "python -c 'from calfcord.tools import TOOL_REGISTRY; print(sorted(TOOL_REGISTRY))'"
 # ['shell']
 ```
 
@@ -226,7 +226,7 @@ docker run -d \
 
 The Discord env vars are required because `calfkit-tools` boots an
 `A2AChannelResolver` for the audit channel even when no A2A tool is
-hosted (see `src/calfkit_organization/tools/runner.py`).
+hosted (see `src/calfcord/tools/runner.py`).
 
 **Verify.** In Discord: `` @scribe please run `pwd && uname -a` via shell ``.
 The reply should contain builder's hostname and `/workspace` — proving

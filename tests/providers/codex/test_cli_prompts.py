@@ -7,8 +7,8 @@ from datetime import timedelta
 
 import pytest
 
-from calfkit_organization.providers.codex import cli
-from calfkit_organization.providers.codex.prompt_cache import PromptCache
+from calfcord.providers.codex import cli
+from calfcord.providers.codex.prompt_cache import PromptCache
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +16,7 @@ def _isolate_cache(monkeypatch, tmp_path):
     """Redirect the prompt cache to a tmp dir per test."""
     monkeypatch.setenv("CALFCORD_PROMPT_CACHE_DIR", str(tmp_path / "prompts"))
     # Reset the singleton resolver between tests
-    from calfkit_organization.providers.codex import prompts
+    from calfcord.providers.codex import prompts
 
     monkeypatch.setattr(prompts, "_default_resolver", None)
     yield
@@ -63,7 +63,7 @@ class TestRefreshPrompts:
     @pytest.mark.asyncio
     async def test_refresh_failure_returns_nonzero(self, capsys, monkeypatch):
         """When upstream unavailable AND cache empty, refresh hard-fails."""
-        from calfkit_organization.providers.codex import prompts as p
+        from calfcord.providers.codex import prompts as p
 
         class _FailingResolver:
             def reset(self) -> None:
