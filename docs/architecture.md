@@ -101,6 +101,18 @@ shared Kafka broker is the only wire-format contract between them. Native-side
 processes still need `CALF_HOST_URL=localhost:19092` in `.env`; containerized
 services pick up `redpanda:9092` from compose's per-service environment block.
 
+### Known calfkit lifecycle limitations
+
+Two of these processes — the bridge and `calfkit-agent` — don't use calfkit's
+managed `Worker.run()`. They hand-roll their own start/serve/drain loop because
+that path can't yet publish lifecycle events at precise points (agent presence /
+departure announcements), co-run a second foreground service (the bridge's
+Discord gateway), or cede OS-signal ownership to the application. The constraints,
+their evidence, and the upstream feature requests tracking them
+([calfkit-sdk #165–#168](https://github.com/calf-ai/calfkit-sdk/issues/165)) are
+documented in
+[`design/calfkit-worker-lifecycle-gaps.md`](./design/calfkit-worker-lifecycle-gaps.md).
+
 ## Agent-to-agent communication
 
 The `private_chat` tool lets one agent's LLM send a message to another agent and
