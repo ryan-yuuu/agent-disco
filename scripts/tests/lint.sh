@@ -14,9 +14,14 @@ lib="$tmp/lib.sh"
 sed '$d' "$ROOT/scripts/install.sh" > "$lib"   # strip `main "$@"`
 CALFCORD_HOME="$tmp" "$B" -c "source '$lib'; write_shims"
 
-shellcheck -s bash "$ROOT/scripts/install.sh"
-shellcheck -s bash "$tmp/shims/calfcord"
-shellcheck -s bash "$tmp/shims/calfcord-self"
-shellcheck -s bash "$ROOT/scripts/tests/test_installer.sh"
-shellcheck -s bash "$ROOT/scripts/tests/lint.sh"
+# Gate at warning+ so the result is stable across shellcheck versions: info /
+# style checks differ between releases (and CI's apt build lags the latest).
+# The sources are also info-clean under recent shellcheck locally; intentional
+# exceptions carry inline `# shellcheck disable=` directives.
+sc() { shellcheck --severity=warning --shell=bash "$@"; }
+sc "$ROOT/scripts/install.sh"
+sc "$tmp/shims/calfcord"
+sc "$tmp/shims/calfcord-self"
+sc "$ROOT/scripts/tests/test_installer.sh"
+sc "$ROOT/scripts/tests/lint.sh"
 echo "shellcheck: clean"
