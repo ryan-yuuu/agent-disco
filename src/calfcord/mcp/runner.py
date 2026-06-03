@@ -25,9 +25,9 @@ import argparse
 import asyncio
 import logging
 import os
-from typing import Any
 
 from calfkit.client import Client
+from calfkit.mcp import McpServer
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
@@ -51,14 +51,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _resolve_mcp_nodes(servers: dict[str, Any]) -> list[Any]:
-    """Validate the MCP server registry is non-empty and return its values.
+def _resolve_mcp_nodes(servers: dict[str, McpServer]) -> list[McpServer]:
+    """Validate the MCP server registry and return its values.
 
-    Extracted from ``_amain`` so the empty-registry guard can be tested
-    without standing up Kafka. The guard prevents the worker from starting
-    in an inert state where it subscribes to no topics — a failure mode
-    that is confusing in production logs, since the process appears healthy
-    while serving nothing.
+    Extracted from ``_amain`` so the registry guards can be tested without
+    standing up Kafka. Two failure modes are caught here:
+
+    * **Empty registry** — the worker would boot inert, subscribing to no
+      topics while appearing healthy in production logs, serving nothing.
+    * **Key/``name=`` mismatch** — calfkit derives a server's wire topics
+      (``mcp.<name>.<tool>.*``) from its :attr:`~calfkit.mcp.McpServer.name`
+      (the *normalized* name), but agents derive the *same* topics from the
+      ``<server>`` selector segment, which equals the schema-module name =
+      the registry key. If a registration's ``name=`` (or an inferred name)
+      does not equal its key, the bridge subscribes to one set of topics
+      while every agent publishes to another, so every call to that server
+      hangs forever with no error. We detect the mismatch at boot and fail
+      fast with the offending ``key != name`` pair(s).
 
     Args:
         servers: The ``server name -> McpServer`` registry (typically
@@ -69,13 +78,31 @@ def _resolve_mcp_nodes(servers: dict[str, Any]) -> list[Any]:
         passing to :class:`~calfkit.worker.Worker`.
 
     Raises:
-        SystemExit: When ``servers`` is empty — nothing to host.
+        SystemExit: When ``servers`` is empty (nothing to host), or when any
+            entry's :attr:`~calfkit.mcp.McpServer.name` differs from its
+            registry key (topics would not match the agents' nodes).
     """
     nodes = list(servers.values())
     if not nodes:
         raise SystemExit(
             "no MCP servers configured in calfcord.mcp.servers.MCP_SERVERS; "
             "nothing to host"
+        )
+    # Each server's wire topics derive from ``name=`` (calfkit normalizes it),
+    # but agents derive the same topics from the selector ``<server>`` segment,
+    # which equals the registry key. A key != name registration makes the
+    # bridge listen on different topics than the agents publish to, so every
+    # call to that server hangs silently. Surface it at boot.
+    mismatches = [(key, server.name) for key, server in servers.items() if server.name != key]
+    if mismatches:
+        detail = ", ".join(f"{key!r} (name={name!r})" for key, name in mismatches)
+        raise SystemExit(
+            f"MCP server registry key(s) do not match the server's name=: "
+            f"{detail}. The wire topics ``mcp.<name>.<tool>.*`` derive from "
+            f"name=, while agents derive them from the selector ``<server>`` "
+            f"segment (= the registry key), so a mismatch makes every call to "
+            f'that server hang. Pass name="<key>" explicitly so the topics '
+            f"match the agents' schema-only nodes."
         )
     return nodes
 

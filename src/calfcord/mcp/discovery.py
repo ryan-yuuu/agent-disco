@@ -78,6 +78,8 @@ from types import ModuleType
 
 from calfkit.mcp import McpToolDef
 
+from calfcord.mcp.selector import is_valid_server_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,6 +104,11 @@ def discover_mcp_catalog(package: ModuleType) -> dict[str, list[McpToolDef]]:
         exposed no defs are omitted (and warned about).
 
     Raises:
+        ValueError: When a (non-underscore) submodule's name is not a legal
+            ``[a-z0-9_]{1,64}`` server segment (e.g. an uppercase
+            ``Gmail.py``) — such a name would key the catalog under a server
+            no ``mcp/...`` selector could reach, so discovery fails loudly
+            instead of registering an unreachable server.
         ImportError: Propagated unchanged from
             :func:`importlib.import_module` when a generated submodule
             fails to import — treated as a hard config error.
@@ -115,6 +122,23 @@ def discover_mcp_catalog(package: ModuleType) -> dict[str, list[McpToolDef]]:
         # builtin-tool walk uses for shared helpers.
         if mod_info.name.startswith("_"):
             continue
+
+        # The module name becomes the catalog key, i.e. the MCP server name,
+        # and every ``mcp/<server>`` selector segment must match the
+        # ``[a-z0-9_]{1,64}`` server grammar. A module whose name violates
+        # that grammar (e.g. an uppercase ``Gmail.py``) would otherwise key
+        # the catalog under ``Gmail`` — a name no valid selector can ever
+        # reach, leaving its tools silently unreachable. Reject it loudly so
+        # the misnamed file surfaces at boot rather than as a baffling
+        # "unknown server" later.
+        if not is_valid_server_name(mod_info.name):
+            raise ValueError(
+                f"MCP schema module {package.__name__}.{mod_info.name!r} has an "
+                f"invalid server name {mod_info.name!r}; it must match the "
+                f"selector server grammar [a-z0-9_]{{1,64}}. Rename the schema "
+                f"module to lowercase [a-z0-9_]; the module name is the server "
+                f"name and every selector segment must match."
+            )
 
         server_name = mod_info.name
         full_name = f"{package.__name__}.{mod_info.name}"

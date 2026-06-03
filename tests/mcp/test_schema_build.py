@@ -31,6 +31,8 @@ class TestResolveBareServer:
         nodes = resolve_mcp_selectors(["mcp/demo"], _catalog())
         names = {n.tool_schema.name for n in nodes}
         assert names == {"demo_echo", "demo_get-x"}
+        # Exactly the server's two tools — no extras, no duplicates.
+        assert len(nodes) == 2
 
     def test_topics_use_original_tool_name(self) -> None:
         """LLM-facing name is flattened (``demo_echo``) but the wire topics
@@ -55,6 +57,23 @@ class TestResolveSingleTool:
         nodes = resolve_mcp_selectors(["mcp/demo", "mcp/demo/echo"], _catalog())
         names = sorted(n.tool_schema.name for n in nodes)
         assert names == ["demo_echo", "demo_get-x"]
+
+
+class TestCrossServerOrdering:
+    """The emitted node list is deterministic: servers are processed in
+    sorted order regardless of selector input order (and tools within a
+    server are sorted by ``_group_selected_tools``)."""
+
+    def test_servers_emitted_in_sorted_order_regardless_of_input(self) -> None:
+        catalog = {
+            "alpha": [McpToolDef(name="a")],
+            "zeta": [McpToolDef(name="z")],
+        }
+        # Selectors given in REVERSE-alpha order; nodes must still come out
+        # sorted by server name (alpha before zeta).
+        nodes = resolve_mcp_selectors(["mcp/zeta", "mcp/alpha"], catalog)
+        names = [n.tool_schema.name for n in nodes]
+        assert names == ["alpha_a", "zeta_z"]
 
 
 class TestUnknownReferences:

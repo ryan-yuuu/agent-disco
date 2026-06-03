@@ -32,6 +32,8 @@ from calfkit.mcp import McpServer
 
 from calfcord.mcp.catalog import MCP_CATALOG
 
+__all__ = ["MCP_CATALOG", "MCP_SERVERS"]
+
 MCP_SERVERS: dict[str, McpServer] = {
     # Empty until at least one credentialed MCP server is registered.
     #
@@ -51,10 +53,5 @@ MCP_SERVERS: dict[str, McpServer] = {
 
 Hosted by the ``calfkit-mcp`` bridge worker. Empty for now; see the
 commented example above and the module docstring for the import-boundary
-contract. ``MCP_CATALOG`` is imported so registrations can reuse a
-server's committed tool schemas as the ``tools=`` argument."""
-
-# Reference MCP_CATALOG at module scope so the import is not flagged as
-# unused while MCP_SERVERS is still empty; registrations above will use it
-# directly. (No runtime effect.)
-_ = MCP_CATALOG
+contract. ``MCP_CATALOG`` is re-exported (via ``__all__``) so registrations
+can reuse a server's committed tool schemas as the ``tools=`` argument."""

@@ -76,6 +76,35 @@ _SERVER_NAME_REGEX = re.compile(r"^[a-z0-9_]{1,64}$")
 _TOOL_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
+def is_valid_server_name(name: str) -> bool:
+    """Return whether ``name`` is a legal ``<server>`` selector segment.
+
+    Single source of truth for "is this a valid MCP server name?" — it
+    matches against the *same* module-level :data:`_SERVER_NAME_REGEX`
+    (``^[a-z0-9_]{1,64}$``) that :func:`parse_mcp_selector` enforces on the
+    server segment, so a name accepted here is exactly a name a ``mcp/...``
+    selector can reach. Reuses the compiled regex rather than re-spelling
+    the pattern, so the grammar cannot drift between the two call sites.
+
+    The intended consumer is :func:`calfcord.mcp.discovery.discover_mcp_catalog`,
+    which keys the catalog by *module name*: a schema module whose name is
+    not a legal server segment (e.g. an uppercase ``Gmail.py``) would land
+    in the catalog under a key no valid selector could ever name, leaving
+    its tools silently unreachable. Validating the module name with this
+    function lets discovery reject that case loudly instead.
+
+    Args:
+        name: A candidate server name (typically a ``schemas/`` module
+            name). Not a full ``mcp/...`` selector — just the bare server
+            segment.
+
+    Returns:
+        ``True`` if ``name`` matches the server-segment grammar, else
+        ``False``.
+    """
+    return bool(_SERVER_NAME_REGEX.match(name))
+
+
 def is_mcp_selector(entry: str) -> bool:
     """Return ``True`` if ``entry`` is an MCP selector (vs. a builtin name).
 

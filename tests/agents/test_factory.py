@@ -860,6 +860,57 @@ class TestMcpToolsWiring:
                 MagicMock(),
             )
 
+    def test_collision_between_two_mcp_servers_raises(self) -> None:
+        """Two DISTINCT servers can flatten to the same ``<server>_<tool>``
+        name: server ``demo_x`` with tool ``y`` → ``demo_x_y``, and server
+        ``demo`` with tool ``x_y`` → ``demo_x_y``. calfkit would silently
+        last-wins on the duplicate, so the factory must detect it and name
+        the colliding ``demo_x_y``."""
+        _, model_factory = _model_factory_spy()
+        catalog = {
+            "demo_x": [McpToolDef(name="y")],
+            "demo": [McpToolDef(name="x_y")],
+        }
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+            mcp_catalog=catalog,
+        )
+        with pytest.raises(ValueError, match="colliding tool name") as excinfo:
+            factory.build(
+                _definition(tools=("mcp/demo_x/y", "mcp/demo/x_y")),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+        assert "demo_x_y" in str(excinfo.value)
+
+    def test_bare_and_explicit_overlap_no_collision(
+        self, mcp_catalog: dict[str, list[McpToolDef]]
+    ) -> None:
+        """A bare server selector plus an explicit tool OF that same server
+        is a legitimate overlap, not a collision: the explicit ``echo`` is
+        already covered by the bare ``mcp/demo``, so the two resolve to
+        exactly the server's two distinct tools (``demo_echo``, ``demo_ask``)
+        with no duplicate and no collision error."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={},
+            mcp_catalog=mcp_catalog,
+        )
+        worker = factory.build(
+            _definition(tools=("mcp/demo", "mcp/demo/echo")),
+            AgentRuntimeState(channels=[100]),
+            MagicMock(),
+        )
+        names = sorted(t.tool_schema.name for t in worker._nodes[0].tools)
+        assert names == ["demo_ask", "demo_echo"]
+        assert len(worker._nodes[0].tools) == 2
+
     def test_mcp_nodes_carry_original_topics(
         self, mcp_catalog: dict[str, list[McpToolDef]]
     ) -> None:

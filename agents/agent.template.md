@@ -106,7 +106,9 @@ model: claude-sonnet-4-5
 #   - mcp/<server>/<tool>   ONE specific tool. `<tool>` is the raw MCP tool
 #                           name and MAY contain hyphens (e.g. mcp/gmail/list-labels).
 # Whichever form you use, the agent's LLM sees each selected tool under the
-# flattened name `<server>_<tool>` (e.g. `gmail_search`, `gmail_list_labels`).
+# flattened name `<server>_<tool>`, where `<tool>` is the raw MCP tool name
+# appended verbatim — a hyphen is KEPT, not converted (e.g. `gmail_search`,
+# and `mcp/gmail/list-labels` → `gmail_list-labels`).
 # Builtin names are unchanged. The agent process only advertises the MCP tool
 # SCHEMA and dispatches calls over Kafka — it never opens an MCP connection
 # and holds no MCP credentials; the separate calfkit-mcp bridge does that.

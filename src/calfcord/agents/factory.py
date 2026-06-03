@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable, Mapping
 
 from calfkit._vendor.pydantic_ai import ToolOutput
@@ -652,17 +653,12 @@ class AgentFactory:
         # ``mcp/gmail/search`` (also ``gmail_search``) would otherwise shadow
         # one of the two with no error. Detect and fail loud, naming all
         # colliding names so the operator can fix the ``.md`` in one pass.
-        seen: set[str] = set()
-        collisions: list[str] = []
-        for node in combined:
-            tool_name = node.tool_schema.name
-            if tool_name in seen and tool_name not in collisions:
-                collisions.append(tool_name)
-            seen.add(tool_name)
+        counts = Counter(node.tool_schema.name for node in combined)
+        collisions = sorted(name for name, n in counts.items() if n > 1)
         if collisions:
             raise ValueError(
                 f"agent {definition.agent_id!r} has colliding tool name(s) "
-                f"{sorted(collisions)!r}; each tool's LLM-facing name must be "
+                f"{collisions!r}; each tool's LLM-facing name must be "
                 f"unique (a builtin and an MCP selection resolved to the same "
                 f"name, or the same MCP tool was selected twice under "
                 f"different selectors)"

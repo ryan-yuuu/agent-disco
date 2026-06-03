@@ -22,12 +22,15 @@ Both deployments consume this catalog:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 from calfkit.mcp import McpToolDef
 
 from calfcord.mcp import discovery
 from calfcord.mcp import schemas as _schemas_pkg
 
-MCP_CATALOG: dict[str, list[McpToolDef]] = discovery.discover_mcp_catalog(_schemas_pkg)
+MCP_CATALOG: Mapping[str, list[McpToolDef]] = MappingProxyType(discovery.discover_mcp_catalog(_schemas_pkg))
 """Server name → list of that server's :class:`~calfkit.mcp.McpToolDef`.
 
 Populated at import time by
@@ -36,4 +39,9 @@ Populated at import time by
 (alphabetical by module name, then by attribute name within a module) so
 boot logs and resolved tool surfaces are reproducible. Empty until at
 least one ``calfkit mcp codegen`` output module is committed under
-``schemas/``."""
+``schemas/``.
+
+**Read-only.** Wrapped in :class:`types.MappingProxyType` so consumers
+cannot mutate the module global (a stray ``MCP_CATALOG["x"] = ...`` raises
+``TypeError``). Tests that need a different catalog inject their own dict
+into the factory; this only hardens the shared global."""

@@ -235,3 +235,24 @@ def test_empty_package_yields_empty_catalog(
     pkg = _import_fresh(pkg_name)
 
     assert discover_mcp_catalog(pkg) == {}
+
+
+def test_invalid_module_name_raises_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema module whose name is not a legal ``[a-z0-9_]{1,64}`` server
+    segment (here an uppercase ``Uppercase.py``) would key the catalog under
+    a server no ``mcp/...`` selector could reach, leaving its tools silently
+    unreachable. Discovery rejects it loudly instead, naming the offending
+    module and the required grammar."""
+    pkg_name = "fake_mcp_schemas_invalid_name"
+    _write_package(
+        tmp_path,
+        pkg_name,
+        {"Uppercase": _schema_source("echo")},
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    pkg = _import_fresh(pkg_name)
+
+    with pytest.raises(ValueError, match="invalid server name"):
+        discover_mcp_catalog(pkg)

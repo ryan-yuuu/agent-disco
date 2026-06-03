@@ -42,6 +42,11 @@ assert "calfcord.mcp.servers" not in sys.modules, (
     "agent path imported the bridge-only calfcord.mcp.servers module: "
     + repr([m for m in sys.modules if m.startswith("calfcord.mcp")])
 )
+
+# Sentinel printed only after every assertion above passed, so the test can
+# distinguish "ran to completion" from a vacuous exit-0 (e.g. if the script
+# were ever truncated or short-circuited before the assertions ran).
+print("ISOLATION_OK")
 """
 
 
@@ -54,4 +59,10 @@ def test_agent_path_does_not_import_mcp_servers() -> None:
     assert result.returncode == 0, (
         f"isolation subprocess failed (exit={result.returncode})\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    # Guard against a vacuous pass: the script must have run to completion
+    # (all assertions executed) and emitted the sentinel, not merely exited 0.
+    assert "ISOLATION_OK" in result.stdout, (
+        f"isolation subprocess exited 0 but did not run to completion "
+        f"(no ISOLATION_OK sentinel)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )

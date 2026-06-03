@@ -47,7 +47,7 @@ The `tools:` entry forms, resolved at agent boot:
 | Selector              | Meaning                                                      | LLM-facing name(s)        |
 | --------------------- | ------------------------------------------------------------ | ------------------------- |
 | `mcp/<server>`        | Every tool the `<server>` schema module advertises.          | `<server>_<tool>` for each |
-| `mcp/<server>/<tool>` | One specific tool. `<tool>` is the **raw** MCP tool name and may contain hyphens (`mcp/gmail/list-labels`). | `<server>_<tool>` (hyphens become underscores in the flattened name) |
+| `mcp/<server>/<tool>` | One specific tool. `<tool>` is the **raw** MCP tool name and may contain hyphens (`mcp/gmail/list-labels`). | `<server>_<tool>`, the raw tool name appended **verbatim** — a hyphen is kept, so `mcp/gmail/list-labels` → `gmail_list-labels` |
 
 A few rules worth internalizing:
 
@@ -202,9 +202,13 @@ uv run calfkit mcp codegen drive \
 
 Codegen requires the `mcp-codegen` extra, which is already declared in
 `pyproject.toml` (`calfkit[mcp-codegen]`) — a plain `uv sync` pulls it in,
-no extra install step. The positional argument (`gmail`, `drive`) is the
-server name; it must match the module name passed to `-o`, the `MCP_SERVERS`
-key (§5), and the `<server>` segment agents type in their selectors.
+no extra install step. The positional argument (`gmail`, `drive`) sets the
+**generated class name** inside the module — it does *not* drive
+resolution. The binding contract is the **`-o` filename**: discovery keys
+the catalog by the schema module's filename, so that filename must equal
+the `MCP_SERVERS` key (§5) and the `<server>` segment agents type in their
+selectors. Keep the positional matching the filename for consistency, but
+know that only the filename is load-bearing.
 
 **Commit the generated module.** It is the contract the agent deployment
 reads at boot. A schema change (the upstream server added or renamed a
@@ -280,9 +284,12 @@ Two things to note:
   topics no longer match the agent's schema-only nodes, and calls silently
   go unanswered.
 - **Secrets are `$VAR` references, not literals.** calfkit expands `$VAR`
-  (and `${VAR}`) against the bridge's environment at connect time, so the
-  declaration stays committable — no token ever lands in the repo. Set the
-  real values in the bridge's environment (§6).
+  (and `${VAR}`) against the bridge's environment at `McpServer`
+  **construction** time — i.e. when `servers.py` is imported at bridge
+  startup, not later when a connection is opened — so the declaration stays
+  committable (no token ever lands in the repo) but an unset variable fails
+  the import immediately (§6). Set the real values in the bridge's
+  environment.
 
 ## 6. Required environment (bridge only)
 
@@ -296,8 +303,11 @@ secret. Everything below is the **bridge's** (`calfkit-mcp`) requirement:
 - **Each server's declared `$VAR` secrets.** Whatever variables the
   `env=` / `token=` fields in `servers.py` reference must be present in the
   bridge's environment (its `.env`, the compose service's `environment:`
-  block, or the container's runtime env). A missing variable surfaces when
-  the bridge tries to connect that server.
+  block, or the container's runtime env). A missing variable makes
+  `servers.py` fail to import and **crashes the bridge at boot** with
+  `McpConfigError: environment variable 'X' is unset` (calfkit expands
+  `$VAR` at `McpServer` construction, §5) — it does **not** wait for a
+  connection attempt.
 
 Keep these on the bridge host and nowhere else — that placement *is* the
 isolation guarantee from §3.
@@ -328,20 +338,25 @@ committed, even before the bridge is up; tool *calls* simply hang
 Lead with the symptom, as elsewhere in [`troubleshooting.md`](./troubleshooting.md).
 
 - **Boot error: unknown MCP server.** An agent declares `mcp/<server>` for
-  a `<server>` with no committed schema module. The agent process fails
-  fast at boot with an error naming the bad server and listing the valid
-  ones. Fix: run codegen for that server (§4) and commit the module, or
-  correct the typo in the agent's `tools:`.
+  a `<server>` with no committed schema module. **Both** halves fail fast:
+  the bridge validates every agent's selectors against the catalog at
+  registry load (and usually starts first, per §7), and the agent process
+  re-validates as it builds its tool surface — whichever boots first raises
+  an error naming the bad server and listing the valid ones. Fix: run
+  codegen for that server (§4) and commit the module, or correct the typo
+  in the agent's `tools:`.
 - **Boot error: unknown MCP tool.** An agent declares `mcp/<server>/<tool>`
   where `<server>` exists but `<tool>` isn't in its schema module. Same
-  fast-fail, with the valid tool names for that server listed. Fix: use one
-  of the listed names (remember `<tool>` is the *raw* MCP name, hyphens and
-  all), or regenerate the schema if the upstream server actually renamed
-  the tool.
+  both-halves fast-fail (bridge at registry load, agent at build), with the
+  valid tool names for that server listed. Fix: use one of the listed names
+  (remember `<tool>` is the *raw* MCP name, hyphens and all), or regenerate
+  the schema if the upstream server actually renamed the tool.
 - **Boot error: malformed selector.** Something like `mcp/`, `mcp//search`,
   or `mcp/gmail/search/extra` — a selector that doesn't match
-  `mcp/<server>` or `mcp/<server>/<tool>`. The agent boot rejects it with
-  the expected forms. Fix: use exactly one or two segments after `mcp/`.
+  `mcp/<server>` or `mcp/<server>/<tool>`. The selector *shape* is checked
+  at frontmatter parse time, so **both** the bridge (which parses every
+  agent's `.md` at registry load) and the agent process reject it with the
+  expected forms. Fix: use exactly one or two segments after `mcp/`.
 - **An MCP tool call hangs and never returns.** The agent advertised the
   schema (so the call published to `mcp.<server>.<tool>.input`) but no
   bridge is serving that topic. Fix: deploy/restart `calfkit-mcp` (§6).
@@ -352,10 +367,19 @@ Lead with the symptom, as elsewhere in [`troubleshooting.md`](./troubleshooting.
   Node/`npx` (for `npx`-launched servers) or the command otherwise isn't on
   `$PATH`. Fix: install the runtime on the bridge host. The agent host
   never needs it.
+- **Bridge crashes at boot: `McpConfigError: environment variable 'X' is
+  unset`.** A `$VAR` secret referenced in `servers.py` is **unset** in the
+  bridge's environment. calfkit expands `$VAR` at `McpServer` construction
+  (§5), so an unset variable fails the `servers.py` import before any
+  connection is attempted — the bridge never starts. Fix: set the variable
+  on the bridge (only) and restart.
 - **Bridge connects but the server rejects auth.** A `$VAR` secret
-  referenced in `servers.py` is unset or wrong in the bridge's environment.
-  Fix: set the correct value on the bridge (only) and reconnect. The agent
-  deployment is uninvolved — it holds no MCP credentials by design.
+  referenced in `servers.py` is **set but wrong** in the bridge's
+  environment. The value expanded fine at construction, so the bridge boots
+  and connects, but the server rejects the (bad) credential at connect time.
+  Fix: set the correct value on the bridge (only) and reconnect. In both
+  cases the agent deployment is uninvolved — it holds no MCP credentials by
+  design.
 - **CI drift check is red.** The committed `schemas/<server>.py` no longer
   matches the live server (a tool was added, removed, or its schema
   changed). Fix: regenerate locally (§4), review the diff, and commit the
