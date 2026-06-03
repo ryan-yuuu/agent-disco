@@ -3,28 +3,23 @@
 [![CI](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml/badge.svg)](https://github.com/ryan-yuuu/calfcord/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
-**Spin up a team of AI agents that live in your Discord** — each with its own
-persona, each defined in a single Markdown file, all able to talk to you *and to
-each other*.
+**Collaborate with your team of AI agents on Discord** — each with its own responsibilities and memories, all able to talk to you *and to each other*.
 
-<!-- Demo image: capture a channel where `@scribe hello` gets a reply under the
-     agent's persona, save to docs/assets/demo.gif, then uncomment the line below. -->
+Distributed by design: agents and tools are independently deployable anywhere. Have agents deployed on your personal laptop, work laptop, and cloud VM all seamlessly collaborate with eachother.
+
+<!-- Demo image, save to docs/assets/demo.gif, then uncomment the line below. -->
 <!-- ![Calfcord demo](docs/assets/demo.gif) -->
-> _📸 Demo coming soon — a Discord channel where you `@mention` an agent and it
-> replies under its own persona._
+> _📸 Demo coming soon
 
 ## What you get
 
-- 🎭 **Agents as Discord personas.** Each agent replies under its own display
-  name and avatar via webhooks — not a single shared bot voice.
-- 📝 **One file per agent.** The file's header declares its identity; the body
-  is its system prompt. Drop it in `agents/`, and `/<name>` works in Discord.
-- 🤝 **Agents collaborate.** They can call each other with `private_chat`, and
-  every exchange is logged in a readable Discord thread.
-- 🧠 **Bring your own model.** Anthropic, OpenAI, or a ChatGPT Plus/Pro
-  subscription (via Codex) — set it per agent.
-- 🛠️ **Built-in tools.** Shell, files, web search/fetch, todos, and more.
-  Agents get them all by default; scope an agent down with a `tools:` list.
+- 💬 **Communicate with the team on Discord.** You and your agent team collaborate on work and provide updates through Discord.
+- 🎭 **Agents with distinct job responsibilities and tools.** Each agent is a first-class worker with personal responsibilities, tools, and memories.
+- 🌎 **Split agents and tools across hosts anywhere in the world.** Agents and tools within a team are microservices deployable anywhere, even across hosts.
+- ✏️ **Easily onboard new agents to the team.** A new agent can be configured in a Markdown file, independently deployed, and added to the team in <2 minutes.
+- 🤝 **Agents seamlessly collaborate.** Agents chat with each other through private chats, and every exchange is recorded in a Discord thread.
+- 🧠 **Bring your own model.** Anthropic, OpenAI, other OpenAI-compatible APIs, or use your ChatGPT Plus/Pro subscription (via Codex) — set it per agent.
+- 🛠️ **Built-in tools + MCP support.** Agents can get task-tracking, computer filesystem access, and web search tools by default. Plus, easily provide more tools to your team via MCP.
 
 ## Quick start
 
@@ -72,8 +67,7 @@ below shows how to add tools.
 docker compose up --build
 ```
 
-This starts the four Calfcord processes plus a Kafka broker (Redpanda) — five
-containers in total. The first build takes a minute or two.
+This starts the four processes plus a Calfkit broker — five containers in total.
 
 **5. Say hello.** In any channel the bot can see:
 
@@ -81,7 +75,7 @@ containers in total. The first build takes a minute or two.
 @scribe hello
 ```
 
-A reply appears **under the agent's own persona**. You're live. 🎉
+A reply appears from the agent. You're live. 🎉
 
 > Prefer running without Docker, or splitting processes across hosts? See
 > [running modes](./docs/architecture.md#running-modes).
@@ -115,14 +109,14 @@ Full field reference (providers, models, tool scoping, thinking effort) →
 
 ## How it works
 
-Calfcord is **four independent processes**, wired together over Kafka:
+Calfcord has **four independent process types**:
 
 - **`calfkit-bridge`** — the Discord gateway.
-- **`calfkit-agent`** — runs the agents.
-- **`calfkit-router`** — decides who answers un-mentioned messages.
-- **`calfkit-tools`** — runs the tools and the agent-to-agent channel.
+- **`calfkit-agent`** — runs the agent(s).
+- **`calfkit-router`** — decides who answers un-mentioned ambient messages.
+- **`calfkit-tools`** — runs the tool(s).
 
-Kafka is the only contract between them, so any process can run anywhere.
+Any process can run anywhere.
 
 ```mermaid
 flowchart LR
@@ -142,19 +136,6 @@ Full process model, the decoupled-deployment access matrix, and project layout �
 `.env.example` is fully commented — the [quick start](#quick-start) covers the
 four essentials, and [`docs/configuration.md`](./docs/configuration.md) is the
 complete environment-variable reference.
-
-## ⚠️ Security
-
-Agents run real code. By default an agent gets **every** built-in tool
-(including `shell`) unless you narrow its `tools:` list, and those tools execute
-in the `calfkit-tools` container against a shared, read-write `./workspace`
-directory. Widening that mount — or running the tools natively — gives agents
-broader access to the host.
-
-- **Don't expose Calfcord to untrusted users.**
-- **Scope each agent to only the tools it needs.**
-
-Details and hardening → [`docs/security.md`](./docs/security.md).
 
 ## Documentation
 
