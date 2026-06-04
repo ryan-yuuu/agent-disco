@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-from calfcord.cli import agent_tools, init
+from calfcord.cli import agent_tools, init, router_setup
 from calfcord.cli._prompts import make_prompter
 
 
@@ -34,6 +34,13 @@ def _build_parser() -> argparse.ArgumentParser:
     agent_sub = agent_p.add_subparsers(dest="agent_command", required=True)
     tools_p = agent_sub.add_parser("tools", help="Interactively edit an agent's tool list.")
     tools_p.add_argument("name", nargs="?", help="Agent name (omit to pick interactively).")
+
+    # ``router`` mirrors ``agent``: a verb group, not a leaf. ``required=True``
+    # makes a bare ``calfcord router`` print help + exit non-zero so the group
+    # can grow further commands later.
+    router_p = sub.add_parser("router", help="Manage the ambient-message router.")
+    router_sub = router_p.add_subparsers(dest="router_command", required=True)
+    router_sub.add_parser("setup", help="Configure the OPTIONAL ambient router (provider, model).")
     return parser
 
 
@@ -63,6 +70,12 @@ def main(argv: list[str] | None = None) -> int:
         # on where agents live (CALFKIT_AGENTS_DIR | $H/agents | ./agents).
         agents_dir = init.resolve_paths(_resolve_home())[1]
         return agent_tools.run(make_prompter(), agents_dir=agents_dir, name=args.name)
+
+    if args.command == "router" and args.router_command == "setup":
+        # Reuse init's path resolution so the router wizard writes the same
+        # config/.env the runners load (native: $H/config/.env; dev: ./.env).
+        env_path, _ = init.resolve_paths(_resolve_home())
+        return router_setup.run(make_prompter(), env_path=env_path)
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error exits

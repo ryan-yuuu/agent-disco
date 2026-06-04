@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from calfcord.cli import init
+from calfcord.cli import init, router_setup
 from calfcord.cli.main import main
 
 
@@ -34,6 +34,41 @@ def test_main_requires_subcommand() -> None:
     with pytest.raises(SystemExit) as exc:
         main([])
     assert exc.value.code == 2
+
+
+def test_main_router_setup_help_exits_zero() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["router", "setup", "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_router_requires_subcommand() -> None:
+    # ``router`` is a verb group: a bare ``calfcord router`` must error (exit 2),
+    # never silently no-op — the required sub-subparser enforces this.
+    with pytest.raises(SystemExit) as exc:
+        main(["router"])
+    assert exc.value.code != 0
+
+
+def test_main_router_setup_dispatches_with_resolved_env_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The shim exports CALFCORD_HOME; main must resolve the install's config/.env
+    # via init.resolve_paths and hand exactly that path to router_setup.run.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    captured: dict[str, object] = {}
+
+    def _sentinel(prompter: object, *, env_path: Path) -> int:
+        captured["env_path"] = env_path
+        return 0
+
+    monkeypatch.setattr(router_setup, "run", _sentinel)
+
+    assert main(["router", "setup"]) == 0
+    assert captured["env_path"] == home / "config" / ".env"
 
 
 def test_resolve_paths_native_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

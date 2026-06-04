@@ -253,6 +253,20 @@ def test_shim_dispatches_init_to_calfcord_cli(tmp_path: Path) -> None:
     assert _run_shim_argv(home, ["init"]) == "calfcord-cli init"
 
 
+def test_shim_dispatches_router_setup_to_calfcord_cli(tmp_path: Path) -> None:
+    """``calfcord router setup`` must exec ``calfcord-cli router setup`` unchanged."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["router", "setup"]) == "calfcord-cli router setup"
+
+
+def test_shim_dispatches_agent_to_calfcord_cli(tmp_path: Path) -> None:
+    """``calfcord agent tools`` must exec ``calfcord-cli agent tools`` unchanged."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["agent", "tools"]) == "calfcord-cli agent tools"
+
+
 def test_shim_passes_runner_commands_through_unchanged(tmp_path: Path) -> None:
     """A non-management command (e.g. a runner) is not rewritten by the dispatch."""
     home = tmp_path / "home"

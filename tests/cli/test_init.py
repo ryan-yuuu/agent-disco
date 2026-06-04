@@ -1,11 +1,14 @@
-"""Tests for the ``calfcord init`` flow, driven by a scripted fake Prompter.
+"""Tests for the ``calfcord init`` setup wizard, driven by a scripted fake Prompter.
 
 The flow is pure logic over an injected :class:`Prompter`, so these tests never
 touch a TTY or InquirerPy (they must run headless in CI). A :class:`FakePrompter`
 dequeues scripted answers per prompt kind; each test supplies only the answers
-its path consumes. We assert on the resulting ``.env`` (via ``read_env``) and on
-printed guidance (via ``capsys``), and we verify the keep-existing-on-empty
-behaviour that makes re-runs safe.
+its path consumes. The provider sub-flow is delegated to
+:func:`calfcord.cli._providers.configure_provider`, which reaches a real SDK /
+model catalog; every test monkeypatches it to a fixed ``(provider, model)`` so
+no network, key, or OAuth ever fires. We assert on the resulting ``.env`` (via
+``read_env``), the written ``agents/<name>.md`` (via ``parse_agent_md``), and
+printed guidance (via ``capsys``).
 """
 
 from __future__ import annotations
@@ -15,9 +18,12 @@ from pathlib import Path
 
 import pytest
 
+from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import init
 from calfcord.cli._envfile import read_env, upsert
 from calfcord.cli._prompts import Choice, Prompter
+
+_FIXED_PROVIDER = ("anthropic", "claude-haiku-4-5")
 
 
 class FakePrompter:
@@ -25,7 +31,9 @@ class FakePrompter:
 
     Answers are queued per prompt kind so a test only scripts the kinds its
     path actually hits, in call order. Running dry raises rather than hanging,
-    which surfaces a miscounted script as a clear test failure.
+    which surfaces a miscounted script as a clear test failure. ``checkbox``
+    records the choices it was offered (``last_checkbox_choices``) so tests can
+    assert the pre-checked default without coupling to the returned selection.
     """
 
     def __init__(
@@ -35,11 +43,14 @@ class FakePrompter:
         texts: list[str] | None = None,
         secrets: list[str] | None = None,
         confirms: list[bool] | None = None,
+        checkboxes: list[list[str]] | None = None,
     ) -> None:
         self._selects = deque(selects or [])
         self._texts = deque(texts or [])
         self._secrets = deque(secrets or [])
         self._confirms = deque(confirms or [])
+        self._checkboxes = deque(checkboxes or [])
+        self.last_checkbox_choices: list[Choice] = []
 
     def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
         if not self._selects:
@@ -62,10 +73,27 @@ class FakePrompter:
         return self._confirms.popleft()
 
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
-        # The init flow never multi-selects; this exists only so the fake stays
-        # structurally compatible with the (now checkbox-bearing) Prompter
-        # Protocol — see the agent-tools tests for the driven version.
-        return []
+        self.last_checkbox_choices = choices
+        if not self._checkboxes:
+            # An empty script means "keep every pre-checked row" — mirrors the
+            # InquirerPy default of returning the enabled set on enter.
+            return [c.value for c in choices if c.checked]
+        return self._checkboxes.popleft()
+
+
+@pytest.fixture(autouse=True)
+def _stub_configure_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the provider sub-flow with a fixed ``(provider, model)``.
+
+    ``configure_provider`` is imported into ``init``'s namespace, so the stub is
+    installed there. It consumes no prompts, so tests don't script provider
+    answers — keeping every wizard test free of any provider SDK / network.
+    """
+
+    def _fixed(prompter: object, **_: object) -> tuple[str, str]:
+        return _FIXED_PROVIDER
+
+    monkeypatch.setattr(init, "configure_provider", _fixed)
 
 
 def test_fake_prompter_satisfies_protocol() -> None:
@@ -73,92 +101,207 @@ def test_fake_prompter_satisfies_protocol() -> None:
     assert isinstance(FakePrompter(), Prompter)
 
 
-def _run(prompter: FakePrompter, tmp_path: Path) -> int:
-    """Drive ``init.run`` with the env file and agents dir both under ``tmp_path``."""
+def _run(
+    prompter: FakePrompter,
+    tmp_path: Path,
+    *,
+    agents_dir: Path | None = None,
+) -> int:
+    """Drive ``init.run`` with the env file under ``tmp_path`` and a chosen agents dir."""
     env = tmp_path / ".env"
-    return init.run(prompter, env_path=env, agents_dir=tmp_path)
+    return init.run(prompter, env_path=env, agents_dir=agents_dir or tmp_path)
 
 
-def test_anthropic_writes_provider_and_key(tmp_path: Path) -> None:
-    prompter = FakePrompter(
-        selects=["anthropic", "url"],
-        secrets=["sk-ant-123", ""],  # provider key, then empty discord token
-        texts=["", "", "", "broker:9092"],  # app_id, guild, channel, broker url
+def _fresh_run_prompter(
+    *,
+    name: str = "assistant",
+    description: str = "",
+    discord_token: str = "",
+    app_id: str = "",
+    guild: str = "",
+    channel: str = "",
+    broker: str = "url",
+    broker_url: str = "broker:9092",
+    checkboxes: list[list[str]] | None = None,
+) -> FakePrompter:
+    """Build a prompter scripting one full wizard pass (provider sub-flow stubbed).
+
+    Order of consumed prompts after the autouse stub removes the provider
+    sub-flow: text(name), text(description), checkbox(tools), secret(discord
+    token), text(app_id), text(guild), text(channel), select(broker)
+    [+ text(broker_url) on the ``url`` branch].
+    """
+    texts = [name, description, app_id, guild, channel]
+    if broker == "url":
+        texts.append(broker_url)
+    return FakePrompter(
+        selects=[broker],
+        texts=texts,
+        secrets=[discord_token],
+        checkboxes=checkboxes,
     )
-    assert _run(prompter, tmp_path) == 0
-
-    env = read_env(tmp_path / ".env")
-    assert env["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "anthropic"
-    assert env["ANTHROPIC_API_KEY"] == "sk-ant-123"
-    assert "OPENAI_API_KEY" not in env
 
 
-def test_openai_writes_openai_key(tmp_path: Path) -> None:
-    prompter = FakePrompter(
-        selects=["openai", "url"],
-        secrets=["sk-openai-xyz", ""],
-        texts=["", "", "", "broker:9092"],
+# --- agent file: fresh creation --------------------------------------------
+
+
+def test_fresh_run_creates_agent_md_and_writes_default_provider(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description="Takes notes")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+
+    md = agents_dir / "scribe.md"
+    assert md.is_file()
+    agent = parse_agent_md(md)
+    assert agent.agent_id == "scribe"
+    assert agent.display_name == "Scribe"
+    assert agent.description == "Takes notes"
+    assert agent.provider == "anthropic"
+    assert agent.model == "claude-haiku-4-5"
+
+    # The install default provider is persisted from the (stubbed) pick.
+    assert read_env(tmp_path / ".env")["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "anthropic"
+
+
+def test_blank_name_falls_back_to_assistant(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="   ", description="d")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    assert (agents_dir / "assistant.md").is_file()
+
+
+def test_typed_name_is_slugified(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="My Helper!", description="d")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    md = agents_dir / "my_helper.md"
+    assert md.is_file()
+    assert parse_agent_md(md).agent_id == "my_helper"
+
+
+def test_blank_description_uses_default(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description="")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    assert parse_agent_md(agents_dir / "scribe.md").description == init._DEFAULT_DESCRIPTION
+
+
+# --- tools checkbox ---------------------------------------------------------
+
+
+def test_tools_checkbox_offers_all_builtins_prechecked(tmp_path: Path) -> None:
+    from calfcord.tools import TOOL_REGISTRY
+
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description="d")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+
+    builtin_rows = {c.value: c.checked for c in prompter.last_checkbox_choices if not c.value.startswith("mcp/")}
+    # Every builtin is offered, and every builtin row is pre-checked.
+    assert set(builtin_rows) == set(TOOL_REGISTRY)
+    assert all(builtin_rows.values())
+
+
+def test_keeping_all_tools_writes_full_builtin_list(tmp_path: Path) -> None:
+    from calfcord.tools import TOOL_REGISTRY
+
+    agents_dir = tmp_path / "agents"
+    # No checkbox script → fake returns every pre-checked (all builtin) row.
+    prompter = _fresh_run_prompter(name="scribe", description="d", checkboxes=None)
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    assert set(parse_agent_md(agents_dir / "scribe.md").tools) == set(TOOL_REGISTRY)
+
+
+def test_selecting_a_subset_writes_that_subset(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(
+        name="scribe",
+        description="d",
+        checkboxes=[["read_file", "web_search"]],
     )
-    assert _run(prompter, tmp_path) == 0
-
-    env = read_env(tmp_path / ".env")
-    assert env["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "openai"
-    assert env["OPENAI_API_KEY"] == "sk-openai-xyz"
-    assert "ANTHROPIC_API_KEY" not in env
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    assert set(parse_agent_md(agents_dir / "scribe.md").tools) == {"read_file", "web_search"}
 
 
-def test_openai_codex_writes_no_key_and_prints_auth_hint(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    prompter = FakePrompter(
-        selects=["openai-codex", "url"],
-        secrets=[""],  # only the discord token secret; no provider key prompt for codex
-        texts=["", "", "", "broker:9092"],
+def test_empty_tool_selection_writes_explicit_empty_list(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description="d", checkboxes=[[]])
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    # ``tools: []`` parses to an empty tuple (explicit "no tools"), not None.
+    assert parse_agent_md(agents_dir / "scribe.md").tools == ()
+
+
+def test_security_caution_prints_when_shell_or_write_selected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(
+        name="scribe", description="d", checkboxes=[["shell", "write_file"]]
     )
-    assert _run(prompter, tmp_path) == 0
-
-    env = read_env(tmp_path / ".env")
-    assert env["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "openai-codex"
-    assert "ANTHROPIC_API_KEY" not in env
-    assert "OPENAI_API_KEY" not in env
-
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
     out = capsys.readouterr().out
-    assert "calfcord calfkit-auth login" in out
+    assert "shell + file write access" in out
+    assert "docs/security.md §3.4" in out
+
+
+def test_security_caution_silent_for_readonly_tools(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(
+        name="scribe", description="d", checkboxes=[["read_file", "web_search"]]
+    )
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    assert "file write access" not in capsys.readouterr().out
+
+
+# --- provider key / .env side effects (via the real provider sub-flow) ------
+
+
+def test_default_provider_persisted_from_configure_provider(tmp_path: Path) -> None:
+    """The provider returned by the sub-flow is persisted as the install default."""
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description="d")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+    assert read_env(tmp_path / ".env")["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "anthropic"
+
+
+# --- discord + broker .env writes ------------------------------------------
 
 
 def test_broker_docker_sets_local_url_and_prints_command(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    prompter = FakePrompter(
-        selects=["anthropic", "docker"],
-        secrets=["sk-ant", ""],
-        texts=["", "", ""],  # app_id, guild, channel — no broker-url prompt on docker path
-    )
-    assert _run(prompter, tmp_path) == 0
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(name="scribe", description="d", broker="docker")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
 
-    env = read_env(tmp_path / ".env")
-    assert env["CALF_HOST_URL"] == "localhost:19092"
-
+    assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "localhost:19092"
     out = capsys.readouterr().out
     assert "docker run -d --name calfcord-redpanda" in out
     assert "redpanda start --mode dev-container" in out
 
 
 def test_broker_url_sets_given_url(tmp_path: Path) -> None:
-    prompter = FakePrompter(
-        selects=["anthropic", "url"],
-        secrets=["sk-ant", ""],
-        texts=["", "", "", "my-broker.example.com:9092"],
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(
+        name="scribe", description="d", broker="url", broker_url="my-broker.example.com:9092"
     )
-    assert _run(prompter, tmp_path) == 0
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
     assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "my-broker.example.com:9092"
 
 
 def test_discord_fields_written_when_provided(tmp_path: Path) -> None:
-    prompter = FakePrompter(
-        selects=["anthropic", "url"],
-        secrets=["sk-ant", "bot-token-abc"],
-        texts=["12345", "67890", "11111", "broker:9092"],  # app_id, guild, channel, broker url
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(
+        name="scribe",
+        description="d",
+        discord_token="bot-token-abc",
+        app_id="12345",
+        guild="67890",
+        channel="11111",
     )
-    assert _run(prompter, tmp_path) == 0
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
 
     env = read_env(tmp_path / ".env")
     assert env["DISCORD_BOT_TOKEN"] == "bot-token-abc"
@@ -167,71 +310,54 @@ def test_discord_fields_written_when_provided(tmp_path: Path) -> None:
     assert env["DISCORD_DEFAULT_CHANNEL_ID"] == "11111"
 
 
-def test_empty_answers_keep_prior_values(tmp_path: Path) -> None:
-    """A re-run with empty secret/text answers must not clobber existing values."""
+def test_empty_answers_keep_prior_env_values(tmp_path: Path) -> None:
+    """A re-run with empty secret/text answers must not clobber existing .env values."""
     env_path = tmp_path / ".env"
-    # Pre-seed as if a prior init (and an operator-written comment) had run.
+    agents_dir = tmp_path / "agents"
     upsert(
         env_path,
         {
-            "ANTHROPIC_API_KEY": "sk-original",
             "DISCORD_BOT_TOKEN": "tok-original",
             "DISCORD_APPLICATION_ID": "app-original",
             "CALF_HOST_URL": "orig-broker:9092",
         },
     )
 
-    # Re-run: keep provider anthropic, supply NO new secrets/text (all empty),
-    # choose the "url" broker but leave the URL empty too.
-    prompter = FakePrompter(
-        selects=["anthropic", "url"],
-        secrets=["", ""],  # provider key empty, discord token empty
-        texts=["", "", "", ""],  # app_id, guild, channel, broker url all empty
+    prompter = _fresh_run_prompter(
+        name="scribe",
+        description="d",
+        discord_token="",  # keep token
+        app_id="",  # keep app id
+        guild="",
+        channel="",
+        broker="url",
+        broker_url="",  # keep broker url
     )
-    assert init.run(prompter, env_path=env_path, agents_dir=tmp_path) == 0
+    assert init.run(prompter, env_path=env_path, agents_dir=agents_dir) == 0
 
     env = read_env(env_path)
-    assert env["ANTHROPIC_API_KEY"] == "sk-original"
     assert env["DISCORD_BOT_TOKEN"] == "tok-original"
     assert env["DISCORD_APPLICATION_ID"] == "app-original"
     assert env["CALF_HOST_URL"] == "orig-broker:9092"
-    # Provider was (re)written — that one is always set from the select.
     assert env["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "anthropic"
 
 
-def test_agent_detection_reports_assistant(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+# --- next-steps guidance ----------------------------------------------------
+
+
+def test_next_steps_name_agent_and_mention_router_setup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     agents_dir = tmp_path / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "assistant.md").write_text("---\nname: assistant\n---\nhello\n")
-    # Skipped files must NOT be reported.
-    (agents_dir / "agent.template.md").write_text("---\nname: agent\n---\ntemplate\n")
-    (agents_dir / ".hidden.md").write_text("---\nname: hidden\n---\nx\n")
-
-    prompter = FakePrompter(
-        selects=["anthropic", "url"],
-        secrets=["sk-ant", ""],
-        texts=["", "", "", "broker:9092"],
-    )
-    env_path = tmp_path / ".env"
-    assert init.run(prompter, env_path=env_path, agents_dir=agents_dir) == 0
-
+    prompter = _fresh_run_prompter(name="scribe", description="d")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
     out = capsys.readouterr().out
-    assert "assistant" in out
-    assert "agent.template.md" not in out
-    assert "hidden" not in out
+    assert f"Set up agent 'scribe' in {agents_dir}." in out
+    assert "@scribe hello" in out
+    assert "calfcord router setup" in out
 
 
-def test_no_agents_explains_starter(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    empty_agents = tmp_path / "agents"
-    empty_agents.mkdir()
-    prompter = FakePrompter(
-        selects=["anthropic", "url"],
-        secrets=["sk-ant", ""],
-        texts=["", "", "", "broker:9092"],
-    )
-    assert init.run(prompter, env_path=tmp_path / ".env", agents_dir=empty_agents) == 0
-    out = capsys.readouterr().out
-    assert "assistant" in out  # the starter is named and explained
+# --- provider drift guard ---------------------------------------------------
 
 
 def test_providers_match_provider_literal() -> None:
@@ -239,13 +365,155 @@ def test_providers_match_provider_literal() -> None:
 
     ``Provider`` (a ``Literal``) is the single source of truth for supported
     providers; ``PROVIDERS`` re-lists those values for the picker. A test (not a
-    production assert) catches the two drifting apart — e.g. a new provider added
-    to the Literal but not offered in ``init`` — without coupling at import time.
+    production assert) catches the two drifting apart without coupling at import
+    time.
     """
     from typing import get_args
 
     from calfcord.agents.definition import Provider
 
     assert {c.value for c in init.PROVIDERS} == set(get_args(Provider))
-    # Every key-based provider must be a provider we actually offer.
     assert set(init.PROVIDER_KEY_VAR) <= {c.value for c in init.PROVIDERS}
+
+
+# --- _write_agent: branch-level unit tests ----------------------------------
+
+
+def _write(agents_dir: Path, *, name: str, tools: list[str] | None = None, description: str = "desc") -> Path:
+    """Invoke ``_write_agent`` with sensible fixed provider/model for brevity."""
+    return init._write_agent(
+        agents_dir,
+        name=name,
+        description=description,
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        tools=tools if tools is not None else ["read_file"],
+    )
+
+
+def test_write_agent_create_assistant_keeps_everything(tmp_path: Path) -> None:
+    """Creating ``assistant.md`` itself never prunes anything (no different agent)."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    path = _write(agents_dir, name="assistant")
+    assert path == agents_dir / "assistant.md"
+    assert path.is_file()
+    assert parse_agent_md(path).agent_id == "assistant"
+
+
+def test_write_agent_create_prunes_pristine_seed(tmp_path: Path) -> None:
+    """Naming a new agent deletes a *pristine* seeded assistant.md."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    seed = agents_dir / "assistant.md"
+    seed.write_text(
+        "---\n"
+        "name: assistant\n"
+        "display_name: Assistant\n"
+        f"description: {init._DEFAULT_DESCRIPTION}\n"
+        "tools: []\n"
+        "---\n\n"
+        "You are Assistant, a helpful general-purpose AI teammate. Answer clearly.\n"
+    )
+
+    _write(agents_dir, name="scribe")
+
+    assert (agents_dir / "scribe.md").is_file()
+    assert not seed.exists()  # pristine seed pruned
+
+
+def test_write_agent_create_keeps_customized_seed(tmp_path: Path) -> None:
+    """A *customized* assistant.md (changed description) is preserved."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    seed = agents_dir / "assistant.md"
+    seed.write_text(
+        "---\n"
+        "name: assistant\n"
+        "display_name: Assistant\n"
+        "description: My custom assistant for our team workflow.\n"
+        "tools: []\n"
+        "---\n\n"
+        "You are Assistant, customized. Answer clearly.\n"
+    )
+
+    _write(agents_dir, name="scribe")
+
+    assert (agents_dir / "scribe.md").is_file()
+    assert seed.exists()  # customized seed kept
+    assert parse_agent_md(seed).description == "My custom assistant for our team workflow."
+
+
+def test_write_agent_create_keeps_malformed_seed(tmp_path: Path) -> None:
+    """A malformed assistant.md is never deleted on a guess."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    seed = agents_dir / "assistant.md"
+    seed.write_text("not valid frontmatter at all\n")
+
+    _write(agents_dir, name="scribe")
+
+    assert (agents_dir / "scribe.md").is_file()
+    assert seed.exists()  # malformed → left untouched
+
+
+def test_write_agent_update_in_place_preserves_body_and_display_name(tmp_path: Path) -> None:
+    """Updating an existing agent rewrites fields but preserves body + display_name."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    target = agents_dir / "scribe.md"
+    body = "You are Scribe, the dedicated note-taker. Keep meticulous records."
+    target.write_text(
+        "---\n"
+        "name: scribe\n"
+        "display_name: Aksel (Scribe)\n"
+        "description: old description\n"
+        "provider: openai\n"
+        "model: gpt-5\n"
+        "tools: [read_file]\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+
+    _write(
+        agents_dir,
+        name="scribe",
+        description="new description",
+        tools=["read_file", "write_file"],
+    )
+
+    agent = parse_agent_md(target)
+    assert agent.description == "new description"
+    assert agent.provider == "anthropic"
+    assert agent.model == "claude-haiku-4-5"
+    assert set(agent.tools) == {"read_file", "write_file"}
+    # Body and display_name are preserved across the in-place update.
+    assert body in agent.system_prompt
+    assert agent.display_name == "Aksel (Scribe)"
+
+
+def test_run_updates_existing_agent_in_place(tmp_path: Path) -> None:
+    """A full wizard pass naming an existing agent updates it without pruning."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    target = agents_dir / "scribe.md"
+    body = "You are Scribe, the note-taker."
+    target.write_text(
+        "---\n"
+        "name: scribe\n"
+        "display_name: Scribe\n"
+        "description: old\n"
+        "provider: openai\n"
+        "model: gpt-5\n"
+        "tools: [read_file]\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+
+    prompter = _fresh_run_prompter(name="scribe", description="updated desc")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+
+    agent = parse_agent_md(target)
+    assert agent.description == "updated desc"
+    assert agent.provider == "anthropic"
+    assert body in agent.system_prompt
