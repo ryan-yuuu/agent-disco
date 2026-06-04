@@ -163,6 +163,60 @@ def test_set_unknown_field_errors(tmp_path: Path, capsys) -> None:
     assert "bogus" in capsys.readouterr().out
 
 
+def test_set_provider_without_model_warns_but_writes(tmp_path: Path, capsys) -> None:
+    """``--provider`` alone keeps the current model, which may not be valid for the
+    new provider — surface that to the operator while still applying the switch."""
+    agents_dir = tmp_path / "agents"
+    md_path = _seed_agent(agents_dir, "scribe")
+
+    rc = agent_lifecycle.run_set(agents_dir, "scribe", {"provider": "openai"})
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "warning: --provider was set without --model" in out
+    # The provider switch still lands despite the warning.
+    assert parse_agent_md(md_path).provider == "openai"
+
+
+def test_set_provider_with_model_does_not_warn(tmp_path: Path, capsys) -> None:
+    """Passing both ``--provider`` and ``--model`` carries a matched pair, so the
+    mismatch warning must stay silent."""
+    agents_dir = tmp_path / "agents"
+    md_path = _seed_agent(agents_dir, "scribe")
+
+    rc = agent_lifecycle.run_set(agents_dir, "scribe", {"provider": "openai", "model": "gpt-5-mini"})
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "warning: --provider was set without --model" not in out
+    reparsed = parse_agent_md(md_path)
+    assert reparsed.provider == "openai"
+    assert reparsed.model == "gpt-5-mini"
+
+
+def test_set_reports_partial_apply_before_mid_loop_failure(tmp_path: Path, capsys) -> None:
+    """A later field's validation failure leaves earlier successes written, and the
+    operator is told which fields already landed before the offending one."""
+    agents_dir = tmp_path / "agents"
+    md_path = _seed_agent(agents_dir, "scribe")
+    # Seed an in-range history_turns so the later (out-of-range) write is the only
+    # failure and the field's prior on-disk value is checkable.
+    agent_lifecycle.run_set(agents_dir, "scribe", {"history_turns": "5"})
+    assert parse_agent_md(md_path).history_turns == 5
+
+    # Dict order matters: description (applies), then the out-of-range int (fails).
+    rc = agent_lifecycle.run_set(
+        agents_dir, "scribe", {"description": "New desc", "history_turns": "999"}
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "note: already applied description before this error." in out
+    assert "error: history_turns:" in out
+
+    # The earlier field's write stuck; the failing field's value is untouched.
+    reparsed = parse_agent_md(md_path)
+    assert reparsed.description == "New desc"
+    assert reparsed.history_turns == 5
+
+
 # --- rename -----------------------------------------------------------------
 
 
@@ -251,6 +305,88 @@ def test_run_rename_existing_returns_1(tmp_path: Path, capsys) -> None:
     assert "error:" in capsys.readouterr().out
     # The source is still intact after a refused rename.
     assert (agents_dir / "scribe.md").is_file()
+
+
+def test_rename_onto_orphan_state_file_raises_and_clobbers_nothing(tmp_path: Path) -> None:
+    """An orphaned ``<new>.json`` (no matching ``.md``) blocks the rename: it holds
+    another agent's saved subscriptions and ``os.replace`` would silently destroy it.
+
+    Asserted at the ``rename_agent`` layer (it raises ``ValueError``) so the guard
+    is pinned independently of the ``run_*`` wrapper.
+    """
+    agents_dir = tmp_path / "agents"
+    state_dir = tmp_path / "state"
+    _seed_agent(agents_dir, "scribe")
+    scribe_state = _seed_state(state_dir, "scribe", channels=[7])
+    # An orphan state file for the rename target, with no penny.md beside it.
+    orphan_state = _seed_state(state_dir, "penny", channels=[999])
+    scribe_before = scribe_state.read_bytes()
+    orphan_before = orphan_state.read_bytes()
+
+    with pytest.raises(ValueError, match="already exists"):
+        agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "penny")
+
+    assert (agents_dir / "scribe.md").is_file()
+    assert not (agents_dir / "penny.md").exists()
+    # Neither state file moved or was overwritten — the orphan keeps its bytes.
+    assert scribe_state.read_bytes() == scribe_before
+    assert orphan_state.read_bytes() == orphan_before
+
+
+def test_run_rename_onto_orphan_state_file_returns_1(tmp_path: Path, capsys) -> None:
+    """The ``run_rename`` wrapper maps the orphan-state guard to ``error:`` + exit 1
+    and leaves both the agent and the orphan state file untouched."""
+    agents_dir = tmp_path / "agents"
+    state_dir = tmp_path / "state"
+    _seed_agent(agents_dir, "scribe")
+    scribe_state = _seed_state(state_dir, "scribe", channels=[7])
+    orphan_state = _seed_state(state_dir, "penny", channels=[999])
+    scribe_before = scribe_state.read_bytes()
+    orphan_before = orphan_state.read_bytes()
+
+    rc = agent_lifecycle.run_rename(agents_dir, state_dir, "scribe", "penny")
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "error:" in out
+    # The error names the offending state file so the operator can act on it.
+    assert "state file" in out
+
+    assert (agents_dir / "scribe.md").is_file()
+    assert not (agents_dir / "penny.md").exists()
+    assert scribe_state.read_bytes() == scribe_before
+    assert orphan_state.read_bytes() == orphan_before
+
+
+def test_rename_rolls_back_new_md_when_old_unlink_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If removing the OLD ``.md`` fails after the NEW one is written, the rename
+    must roll the new file back so two live agents aren't left on disk — and the
+    state file must not have moved (the move runs only after a clean unlink)."""
+    agents_dir = tmp_path / "agents"
+    state_dir = tmp_path / "state"
+    _seed_agent(agents_dir, "scribe")
+    _seed_state(state_dir, "scribe", channels=[1])
+
+    # Capture the real unlink before patching so the rollback unlink (penny.md)
+    # and the state move still work; only the old-.md removal is forced to fail.
+    real_unlink = Path.unlink
+
+    def fake(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == "scribe.md":
+            raise OSError("cannot remove old md")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fake)
+
+    with pytest.raises(OSError, match="cannot remove old md"):
+        agent_lifecycle.rename_agent(agents_dir, state_dir, "scribe", "penny")
+
+    # Original intact, new file rolled back, state never moved.
+    assert (agents_dir / "scribe.md").is_file()
+    assert not (agents_dir / "penny.md").exists()
+    assert (state_dir / "scribe.json").is_file()
+    assert not (state_dir / "penny.json").exists()
 
 
 # --- delete -----------------------------------------------------------------

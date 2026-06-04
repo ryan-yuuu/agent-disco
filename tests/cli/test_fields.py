@@ -23,6 +23,7 @@ from calfcord.cli._fields import (
     THINKING_EFFORTS,
     Field,
     render_value,
+    truncate,
     write_simple_field,
 )
 
@@ -78,6 +79,72 @@ def test_simple_kinds_carry_no_dedicated_editor_marker() -> None:
     """provider_model/tools/prompt are the compound kinds; the rest are simple."""
     compound = {f.kind for f in FIELDS if f.kind in ("provider_model", "tools", "prompt")}
     assert compound == {"provider_model", "tools", "prompt"}
+
+
+# --- Field.__post_init__ shape guards ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # A select field MUST carry choices.
+        {"key": "k", "label": "L", "kind": "select", "flag": "--k", "choices": None},
+        # A non-select field must NOT carry choices.
+        {"key": "k", "label": "L", "kind": "text", "flag": "--k", "choices": ("a",)},
+        # An int field MUST carry both bounds.
+        {"key": "k", "label": "L", "kind": "int", "flag": "--k"},
+        # A non-int field must NOT carry int bounds.
+        {"key": "k", "label": "L", "kind": "text", "flag": "--k", "int_min": 0},
+    ],
+)
+def test_field_post_init_rejects_malformed_entry(kwargs: dict[str, object]) -> None:
+    """A registry row whose shape doesn't match its kind fails loudly at construction."""
+    with pytest.raises(AssertionError):
+        Field(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # Well-formed select (choices present, no int bounds).
+        {"key": "k", "label": "L", "kind": "select", "flag": "--k", "choices": ("a", "b")},
+        # Well-formed int (both bounds, no choices).
+        {"key": "k", "label": "L", "kind": "int", "flag": "--k", "int_min": 0, "int_max": 10},
+        # Well-formed simple text (neither choices nor bounds).
+        {"key": "k", "label": "L", "kind": "text", "flag": "--k"},
+        # Well-formed compound kind (neither choices nor bounds).
+        {"key": "k", "label": "L", "kind": "bool", "flag": "--k"},
+    ],
+)
+def test_field_post_init_accepts_well_formed_entry(kwargs: dict[str, object]) -> None:
+    """A correctly-shaped row for each kind constructs without error."""
+    assert Field(**kwargs).kind == kwargs["kind"]
+
+
+# --- truncate ---------------------------------------------------------------
+
+
+def test_truncate_short_string_flattens_and_keeps_unclipped() -> None:
+    """A sub-limit value collapses internal whitespace/newlines to single spaces
+    and is returned whole (no ellipsis)."""
+    result = truncate("hi\n\n  there   world", 60)
+    assert result == "hi there world"
+    assert not result.endswith("…")
+
+
+def test_truncate_long_string_is_clipped_to_limit_with_ellipsis() -> None:
+    """An over-limit value (no boundary whitespace) clips to exactly ``limit`` chars,
+    the last being the ellipsis."""
+    result = truncate("abcdefghij" * 5, 10)  # 50 chars, no spaces
+    assert len(result) == 10
+    assert result.endswith("…")
+
+
+def test_truncate_exactly_at_limit_is_unclipped() -> None:
+    """A value whose flattened length equals ``limit`` is returned verbatim."""
+    result = truncate("a" * 10, 10)
+    assert result == "a" * 10
+    assert not result.endswith("…")
 
 
 # --- render_value -----------------------------------------------------------
@@ -136,7 +203,8 @@ def test_render_prompt_truncates_long_body() -> None:
 
 
 def test_render_bool_on_off() -> None:
-    on = _make_definition(memory=True, tools=("read_file", "write_file"))
+    # ``render_value`` keys off ``memory`` alone; no tools coupling is implied.
+    on = _make_definition(memory=True)
     off = _make_definition(memory=False)
     assert render_value(on, FIELDS_BY_KEY["memory"]) == "on"
     assert render_value(off, FIELDS_BY_KEY["memory"]) == "off"

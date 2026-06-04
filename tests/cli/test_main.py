@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, init, router_setup
+from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
 
 
@@ -218,6 +219,51 @@ def test_main_agent_delete_passes_flags(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr(agent_lifecycle, "run_delete", _run_delete)
     assert main(["agent", "delete", "scribe", "--yes", "--keep-state"]) == 0
     assert captured == {"name": "scribe", "yes": True, "keep_state": True}
+
+
+# --- main(): interrupt + raw-mode trapping ---------------------------------
+
+
+def test_main_traps_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ^C during the interactive dispatch exits 130 with ``aborted.``, not a traceback."""
+
+    def _interrupt(parser: object, args: object) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main_mod, "_dispatch", _interrupt)
+    assert main(["init"]) == 130
+    assert "aborted." in capsys.readouterr().out
+
+
+def test_main_maps_oserror_to_clean_exit_when_stdin_not_a_tty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """InquirerPy's raw-mode ``OSError`` (EINVAL) on a non-TTY stdin → exit 1 + a hint."""
+
+    def _raise(parser: object, args: object) -> int:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(main_mod, "_dispatch", _raise)
+    monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: False)
+
+    assert main(["init"]) == 1
+    assert "interactive terminal" in capsys.readouterr().out
+
+
+def test_main_reraises_oserror_on_a_real_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ``OSError`` with stdin a real TTY is a genuine bug — it must propagate,
+    not be masked behind the friendly non-TTY message."""
+
+    def _raise(parser: object, args: object) -> int:
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(main_mod, "_dispatch", _raise)
+    monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: True)
+
+    with pytest.raises(OSError):
+        main(["init"])
 
 
 def test_main_agent_create_and_edit_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

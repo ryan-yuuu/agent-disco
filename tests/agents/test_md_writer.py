@@ -336,3 +336,41 @@ def test_update_tools_malformed_mcp_selector_raises_and_leaves_file(tmp_path: Pa
 
     assert md_path.read_text(encoding="utf-8") == original
     assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_update_tools_non_string_token_raises_valueerror_and_leaves_file(tmp_path: Path) -> None:
+    """A non-string token surfaces as ``ValueError`` (the documented seam), not
+    an ``AttributeError`` from the selector check reaching for ``.startswith``.
+    The on-disk file is untouched."""
+    md_path = _seed_md(tmp_path, thinking_effort="low")
+    original = md_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid tool"):
+        update_tools(md_path, [123])  # type: ignore[list-item]
+
+    assert md_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+# --------------------------------------------------------------- mode preservation ---
+
+
+def test_update_fields_preserves_existing_file_mode(tmp_path: Path) -> None:
+    """A rewrite must keep the file's existing 0644 mode, not force 0600.
+
+    ``mkstemp`` creates the temp file 0600 and ``os.replace`` adopts the temp
+    file's mode, so without the capture-and-restore an operator's 0644 agent
+    ``.md`` would silently become 0600 on every edit. The writer restores the
+    original mode after the rename — assert that for both write paths.
+    """
+    import stat
+
+    md_path = _seed_md(tmp_path)
+    md_path.chmod(0o644)
+
+    _update_fields(md_path, {"thinking_effort": "high"})
+    assert stat.S_IMODE(md_path.stat().st_mode) == 0o644
+
+    # The body-rewrite path shares ``_atomic_write_text`` — preserve mode there too.
+    update_system_prompt(md_path, "Fresh body for the mode check.")
+    assert stat.S_IMODE(md_path.stat().st_mode) == 0o644

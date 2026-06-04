@@ -254,6 +254,60 @@ def test_create_agent_returns_name_and_provider(tmp_path: Path) -> None:
     assert provider == "anthropic"
 
 
+def test_create_agent_returns_created_agent_with_named_fields(tmp_path: Path) -> None:
+    """The result is a ``CreatedAgent`` exposing ``.name``/``.provider`` so callers
+    can't transpose the two same-typed strings (``init`` reads ``.provider``,
+    ``agent create`` reads ``.name``)."""
+    agents_dir = tmp_path / "agents"
+    prompter = _prompter(name="scribe")
+    created = agent_create.create_agent(
+        prompter,
+        agents_dir=agents_dir,
+        env_path=tmp_path / ".env",
+        prune_seed=False,
+        offer_prompt=False,
+    )
+    assert isinstance(created, agent_create.CreatedAgent)
+    assert created.name == "scribe"
+    assert created.provider == "anthropic"
+
+
+def test_create_agent_blank_name_with_one_non_assistant_edits_it_in_place(tmp_path: Path) -> None:
+    """With ``name_default=None`` and exactly one existing non-``assistant`` agent, a
+    blank typed name keeps the lone agent as the default — so the flow edits that
+    agent in place and returns its name (it does not fall back to ``assistant``)."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "scribe.md").write_text(
+        "---\n"
+        "name: scribe\n"
+        "display_name: Scribe\n"
+        "description: old\n"
+        "provider: openai\n"
+        "model: gpt-5\n"
+        "tools: [read_file]\n"
+        "---\n\n"
+        "You are Scribe, the note-taker.\n",
+        encoding="utf-8",
+    )
+
+    # Blank typed name → keeps the lone-agent default ("scribe").
+    prompter = FakePrompter(texts=["   ", "updated desc"], confirms=[False])
+    created = agent_create.create_agent(
+        prompter,
+        agents_dir=agents_dir,
+        env_path=tmp_path / ".env",
+        name_default=None,
+        prune_seed=False,
+        offer_prompt=False,
+    )
+
+    assert created.name == "scribe"
+    assert not (agents_dir / "assistant.md").exists()
+    assert {p.stem for p in agents_dir.glob("*.md")} == {"scribe"}
+    assert parse_agent_md(agents_dir / "scribe.md").description == "updated desc"
+
+
 def test_create_agent_prune_seed_false_keeps_pristine_assistant(tmp_path: Path) -> None:
     """With ``prune_seed=False`` (the ``agent create`` default) a pristine seed survives.
 

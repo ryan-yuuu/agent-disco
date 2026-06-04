@@ -165,6 +165,34 @@ def test_unchanged_text_value_writes_nothing(tmp_path: Path) -> None:
     assert md.read_text(encoding="utf-8") == original
 
 
+def test_unchanged_select_value_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Re-selecting the current ``thinking_effort`` is a no-op: no write, no hint."""
+    md = _seed_agent(tmp_path, thinking_effort="high")
+    original = md.read_text(encoding="utf-8")
+    # menu→thinking_effort, field-select returns the SAME value, menu→done.
+    prompter = FakePrompter(selects=["thinking_effort", "high", _DONE])
+    assert agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe") == 0
+
+    assert md.read_text(encoding="utf-8") == original
+    assert "Restart" not in capsys.readouterr().out
+
+
+def test_unchanged_bool_value_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Confirming the current ``memory`` value is a no-op: no write, no hint."""
+    md = _seed_agent(tmp_path, memory=False)
+    original = md.read_text(encoding="utf-8")
+    # menu→memory, confirm returns the SAME value (False), menu→done.
+    prompter = FakePrompter(selects=["memory", _DONE], confirms=[False])
+    assert agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe") == 0
+
+    assert md.read_text(encoding="utf-8") == original
+    assert "Restart" not in capsys.readouterr().out
+
+
 def test_restart_hint_printed_only_when_changed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The restart hint appears after a real change and is absent on a no-op session."""
     md = _seed_agent(tmp_path, description="Takes notes.")
@@ -300,6 +328,42 @@ def test_edit_system_prompt_missing_editor_hint(
     out = capsys.readouterr().out
     assert "error:" in out
     assert "$EDITOR" in out
+    assert parse_agent_md(md).system_prompt == before
+
+
+def test_edit_system_prompt_non_utf8_body_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An editor that saves a non-UTF-8 body must not raise out of the helper.
+
+    ``edit_system_prompt`` runs inside the menu loop AND ``agent create``'s prompt
+    step, so a ``UnicodeDecodeError`` reading the edited temp file back has to be
+    caught: it prints one ``error:`` line and leaves the on-disk body untouched.
+    The fake ``subprocess.run`` writes invalid UTF-8 bytes into the temp file the
+    helper hands it — mirroring an operator who saved a non-UTF-8 buffer.
+    """
+    md = _seed_agent(tmp_path)
+    original = md.read_text(encoding="utf-8")
+    before = parse_agent_md(md).system_prompt
+    monkeypatch.setenv("EDITOR", "fake-editor")
+
+    def _writes_bad_bytes(argv: list[str], *, check: bool = False):
+        Path(argv[-1]).write_bytes(b"\xff\xfe bad")
+
+        class _Completed:
+            returncode = 0
+
+        return _Completed()
+
+    monkeypatch.setattr(agent_edit.subprocess, "run", _writes_bad_bytes)
+
+    # Must not raise — the contract is "never escapes out of the menu".
+    agent_edit.edit_system_prompt(md)
+
+    out = capsys.readouterr().out
+    assert "error: could not read the edited prompt" in out
+    # The unreadable edit is discarded; the prompt body is unchanged on disk.
+    assert md.read_text(encoding="utf-8") == original
     assert parse_agent_md(md).system_prompt == before
 
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
+import pytest
+
 from calfcord.cli._envfile import read_env, upsert
 
 
@@ -99,6 +101,40 @@ def test_upsert_empty_updates_is_noop(tmp_path: Path) -> None:
     before = env.read_bytes()
     upsert(env, {})
     assert env.read_bytes() == before
+
+
+def test_upsert_rejects_newline_value_and_leaves_file_untouched(tmp_path: Path) -> None:
+    """A value with an embedded newline raises before any disk write.
+
+    A second line would silently corrupt the file (and re-append on the next
+    run), so the writer rejects it up front — and because the rejection happens
+    before the atomic write, a not-yet-existing file is never created.
+    """
+    env = tmp_path / ".env"
+    with pytest.raises(ValueError):
+        upsert(env, {"K": "a\nb"})
+    # Nothing was written: the file the upsert would have created is still absent.
+    assert not env.exists()
+
+
+def test_read_env_matches_loaders_on_hand_edited_lines(tmp_path: Path) -> None:
+    """``read_env`` decodes hand-edited lines the way the runtime dotenv loaders do.
+
+    The wizard's "current value" must agree with what the processes load, so a
+    leading ``export``, a trailing `` # inline comment`` (space + hash), and a
+    literal ``#`` with no preceding space are each parsed exactly as the loaders
+    parse them. (Quoted-value cases are covered separately.)
+    """
+    env = tmp_path / ".env"
+    env.write_text(
+        "export FOO=bar\n"  # shell/dotenv export prefix → key is FOO
+        "TOK=val # inline comment\n"  # space+hash starts an inline comment
+        "HASH=ab#cd\n"  # no space before # → the hash is literal
+    )
+    parsed = read_env(env)
+    assert parsed["FOO"] == "bar"
+    assert parsed["TOK"] == "val"
+    assert parsed["HASH"] == "ab#cd"
 
 
 def test_upsert_sets_mode_0600(tmp_path: Path) -> None:

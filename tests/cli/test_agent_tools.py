@@ -232,6 +232,33 @@ def test_unchecking_kept_mcp_token_removes_it(tmp_path: Path) -> None:
 # ------------------------------------------------------------- error handling ---
 
 
+def test_corrupt_mcp_schema_degrades_to_builtins_with_warning(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A generated MCP schema that raises a non-Import/Value error must not brick
+    the editor: ``_build_choices`` catches it broadly, warns, and degrades to
+    builtins-only (a ``SyntaxError``/``AttributeError`` from a malformed module
+    can escape ``discover_mcp_catalog`` just like ``ImportError``/``ValueError``).
+    """
+    import calfcord.mcp.discovery as discovery
+
+    def _boom(_package: object) -> dict[str, object]:
+        raise AttributeError("corrupt generated schema module")
+
+    # ``_build_choices`` imports ``discover_mcp_catalog`` from this module at call
+    # time, so patching the attribute here is what the lookup resolves to.
+    monkeypatch.setattr(discovery, "discover_mcp_catalog", _boom)
+
+    _seed_agent(tmp_path, "assistant", tools_line="[read_file]")
+    fake = FakePrompter(checkbox_result=[])
+    # The run must complete (no raised exception) despite the corrupt schema.
+    assert agent_tools.run(fake, agents_dir=tmp_path, name="assistant") == 0
+
+    out = capsys.readouterr().out
+    assert "warning: MCP catalog failed to load" in out
+    # Degraded to builtins-only: every builtin is still offered as a row.
+    assert fake.last_checkbox_choices is not None
+    assert _values(fake.last_checkbox_choices) >= BUILTIN_NAMES
+
+
 def test_malformed_md_returns_1_without_traceback(tmp_path: Path, capsys) -> None:
     """A malformed ``.md`` (invalid YAML frontmatter) reports an error, not a crash."""
     agents_dir = tmp_path

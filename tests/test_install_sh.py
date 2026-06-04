@@ -287,3 +287,306 @@ def test_install_sh_parses() -> None:
     """The outer script must stay syntactically valid (``bash -n``)."""
     result = subprocess.run(["bash", "-n", str(INSTALL_SH)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+# --------------------------------------------- version lifecycle (source+invoke) ---
+# These drive the activate/gc/version-marker machinery the same way the shim
+# tests drive seeding: source ``install.sh`` (main guarded off) and call the
+# individual functions against a throwaway ``$CALFCORD_HOME``. All offline.
+
+
+def _make_version(home: Path, sha: str) -> Path:
+    """Create a built ``versions/<sha>`` dir (the ``.calfcord-ok`` marker present)."""
+    vdir = home / "versions" / sha
+    vdir.mkdir(parents=True, exist_ok=True)
+    (vdir / ".calfcord-ok").write_text("")
+    return vdir
+
+
+def _version_field(home: Path, key: str) -> str:
+    """Read one ``KEY=value`` field out of the install's version marker (data, not source)."""
+    text = (home / "version").read_text()
+    for line in text.splitlines():
+        if line.startswith(f"{key}="):
+            return line[len(key) + 1 :]
+    raise AssertionError(f"{key} not found in version marker:\n{text}")
+
+
+# ------------------------------------------------------------ activate_version ---
+
+
+def test_activate_version_first_activation_has_empty_previous(tmp_path: Path) -> None:
+    """The very first activation points ``current`` at the dir and records no previous."""
+    home = tmp_path / "home"
+    aaa = _make_version(home, "aaa")
+    result = _source_and_run(f'activate_version "{aaa}"', home=home)
+    assert result.returncode == 0, result.stderr
+
+    assert (home / "current").resolve() == aaa.resolve()
+    assert _version_field(home, "CALFCORD_COMMIT") == "aaa"
+    # No outgoing version on a first install → previous is empty.
+    assert _version_field(home, "CALFCORD_PREVIOUS_COMMIT") == ""
+
+
+def test_activate_version_records_outgoing_as_previous(tmp_path: Path) -> None:
+    """A normal A→B update records prev=A and leaves A's dir in place."""
+    home = tmp_path / "home"
+    aaa = _make_version(home, "aaa")
+    bbb = _make_version(home, "bbb")
+
+    result = _source_and_run(
+        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert (home / "current").resolve() == bbb.resolve()
+    assert _version_field(home, "CALFCORD_COMMIT") == "bbb"
+    assert _version_field(home, "CALFCORD_PREVIOUS_COMMIT") == "aaa"
+    # The predecessor's dir survives so it can serve as a rollback target.
+    assert aaa.is_dir()
+
+
+def test_reactivating_current_sha_preserves_rollback_target(tmp_path: Path) -> None:
+    """Re-activating the already-current sha must NOT make it its own predecessor.
+
+    The headline Critical fix: a no-op re-install (or ``self update`` while
+    already current, which has no up-to-date short-circuit) re-runs
+    ``activate_version`` for the same sha. If it recorded prev == current, the
+    following ``gc_versions`` would delete the genuine rollback target. Instead
+    the existing previous must be preserved across the re-activation, and the
+    real predecessor's dir must survive GC.
+    """
+    home = tmp_path / "home"
+    aaa = _make_version(home, "aaa")
+    bbb = home / "versions" / "bbb"
+
+    # Mirror the real install ordering: each version dir is only built right
+    # before it's activated (the installer downloads B after A is current), so
+    # the GC after each activation can't prune a not-yet-built sibling. ``bbb``
+    # is materialised mid-script, just before its first activation.
+    script = "\n".join(
+        [
+            f'activate_version "{aaa}"',  # A first
+            'gc_versions aaa "$PREVIOUS_SHA"',
+            f'mkdir -p "{bbb}" && : > "{bbb}/.calfcord-ok"',
+            f'activate_version "{bbb}"',  # A → B; prev becomes aaa
+            'gc_versions bbb "$PREVIOUS_SHA"',
+            f'activate_version "{bbb}"',  # re-activate the current sha (the bug)
+            'gc_versions bbb "$PREVIOUS_SHA"',
+        ]
+    )
+    result = _source_and_run(script, home=home)
+    assert result.returncode == 0, result.stderr
+
+    # Previous still points at the genuine predecessor (aaa), NOT at bbb itself.
+    assert _version_field(home, "CALFCORD_PREVIOUS_COMMIT") == "aaa"
+    assert _version_field(home, "CALFCORD_COMMIT") == "bbb"
+    # The rollback target survived the re-activation + GC.
+    assert aaa.is_dir()
+    assert bbb.is_dir()
+
+
+# ----------------------------------------------------------------- gc_versions ---
+
+
+def test_gc_versions_keeps_current_and_previous_prunes_a_third(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    aaa = _make_version(home, "aaa")
+    bbb = _make_version(home, "bbb")
+    ccc = _make_version(home, "ccc")
+
+    result = _source_and_run('gc_versions ccc bbb', home=home)
+    assert result.returncode == 0, result.stderr
+
+    # Current + previous kept; the unrelated third is pruned.
+    assert ccc.is_dir()
+    assert bbb.is_dir()
+    assert not aaa.exists()
+
+
+def test_gc_versions_prunes_nothing_with_only_cur_and_prev(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    aaa = _make_version(home, "aaa")
+    bbb = _make_version(home, "bbb")
+
+    result = _source_and_run('gc_versions bbb aaa', home=home)
+    assert result.returncode == 0, result.stderr
+
+    assert aaa.is_dir()
+    assert bbb.is_dir()
+
+
+# -------------------------------------------------------- calfcord-self rollback ---
+
+
+def _run_self(home: Path, argv: list[str]) -> subprocess.CompletedProcess:
+    """Invoke the generated ``calfcord-self`` shim against ``$CALFCORD_HOME=home``."""
+    _install_shims(home)
+    env = {**os.environ, "CALFCORD_HOME": str(home)}
+    return subprocess.run(
+        [str(home / "shims" / "calfcord-self"), *argv],
+        env=env, capture_output=True, text=True, check=False,
+    )
+
+
+def test_self_rollback_flips_current_and_swaps_version_fields(tmp_path: Path) -> None:
+    """After A→B, ``rollback`` points current at A and swaps the version fields."""
+    home = tmp_path / "home"
+    aaa = _make_version(home, "aaa")
+    bbb = _make_version(home, "bbb")
+    # Reach the post-update state (current=B, prev=A) via the real activate path.
+    prep = _source_and_run(
+        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
+    )
+    assert prep.returncode == 0, prep.stderr
+
+    result = _run_self(home, ["rollback"])
+    assert result.returncode == 0, result.stderr
+
+    # current now points at A, and the marker swapped: commit=A, previous=B.
+    assert (home / "current").resolve() == aaa.resolve()
+    assert _version_field(home, "CALFCORD_COMMIT") == "aaa"
+    assert _version_field(home, "CALFCORD_PREVIOUS_COMMIT") == "bbb"
+
+
+def test_self_rollback_refuses_when_previous_lacks_ok_marker(tmp_path: Path) -> None:
+    """``rollback`` refuses (exit 1) when the previous version dir is not built."""
+    home = tmp_path / "home"
+    aaa = _make_version(home, "aaa")
+    bbb = _make_version(home, "bbb")
+    prep = _source_and_run(
+        f'activate_version "{aaa}"\nactivate_version "{bbb}"', home=home
+    )
+    assert prep.returncode == 0, prep.stderr
+    # Remove the predecessor's build marker so it's no longer a valid target.
+    (aaa / ".calfcord-ok").unlink()
+
+    result = _run_self(home, ["rollback"])
+    assert result.returncode == 1
+    assert "no valid previous version" in result.stderr
+    # current is untouched — still B.
+    assert (home / "current").resolve() == bbb.resolve()
+
+
+# ------------------------------------------------------ calfcord-self set-broker ---
+
+
+def _read_config_env(home: Path) -> str:
+    return (home / "config" / ".env").read_text()
+
+
+def test_self_set_broker_writes_value_at_mode_600(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    result = _run_self(home, ["set-broker", "broker.example.com:9092"])
+    assert result.returncode == 0, result.stderr
+
+    env_file = home / "config" / ".env"
+    assert "CALF_HOST_URL=broker.example.com:9092" in env_file.read_text()
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_self_set_broker_replaces_not_appends_and_keeps_other_keys(tmp_path: Path) -> None:
+    """A second set-broker REPLACES the line (single occurrence) and keeps unrelated keys."""
+    home = tmp_path / "home"
+    (home / "config").mkdir(parents=True)
+    (home / "config" / ".env").write_text("DISCORD_BOT_TOKEN=keepme\nCALF_HOST_URL=old:9092\n")
+
+    result = _run_self(home, ["set-broker", "new-broker:9092"])
+    assert result.returncode == 0, result.stderr
+
+    text = _read_config_env(home)
+    # Exactly one CALF_HOST_URL line, carrying the new value.
+    broker_lines = [ln for ln in text.splitlines() if ln.startswith("CALF_HOST_URL=")]
+    assert broker_lines == ["CALF_HOST_URL=new-broker:9092"]
+    # The unrelated key is preserved.
+    assert "DISCORD_BOT_TOKEN=keepme" in text
+
+
+# -------------------------------------------------------------- seed_config ---
+
+
+def test_seed_config_keeps_existing_env_untouched(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / "config").mkdir(parents=True)
+    existing = "OPERATOR=edits\n"
+    (home / "config" / ".env").write_text(existing)
+    dest = tmp_path / "src"
+    dest.mkdir()
+    (dest / ".env.example").write_text("EXAMPLE=value\n")
+
+    result = _source_and_run(f'seed_config "{dest}"', home=home)
+    assert result.returncode == 0, result.stderr
+    # An operator's existing config is never clobbered by the seed.
+    assert _read_config_env(home) == existing
+
+
+def test_seed_config_creates_new_env_at_mode_600(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    dest = tmp_path / "src"
+    dest.mkdir()
+    (dest / ".env.example").write_text("EXAMPLE=value\n")
+
+    result = _source_and_run(f'seed_config "{dest}"', home=home)
+    assert result.returncode == 0, result.stderr
+
+    env_file = home / "config" / ".env"
+    assert env_file.read_text() == "EXAMPLE=value\n"
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+
+# --------------------------------------------------------------- ensure_path ---
+
+
+def test_ensure_path_is_idempotent(tmp_path: Path) -> None:
+    """A second ``ensure_path`` must not re-append the export block to a profile.
+
+    ``ensure_path`` edits the real ``$HOME`` rc files, so we point HOME at a temp
+    dir holding a single seeded ``.zshrc`` and run the function twice; the block
+    that adds ``$SHIM_DIR`` must appear exactly once.
+    """
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+    zshrc.write_text("# existing profile\n")
+
+    extra = {"HOME": str(fake_home)}
+    first = _source_and_run("ensure_path", home=home, extra_env=extra)
+    assert first.returncode == 0, first.stderr
+    second = _source_and_run("ensure_path", home=home, extra_env=extra)
+    assert second.returncode == 0, second.stderr
+
+    text = zshrc.read_text()
+    shim_dir = str(home / "shims")
+    # The shim dir is wired into PATH exactly once, not appended on every run.
+    assert text.count(shim_dir) == 1
+    assert text.count("# calfcord") == 1
+
+
+# -------------------------------------------------- meta() parses, never sources ---
+
+
+def test_self_meta_parses_value_as_data_never_sources(tmp_path: Path) -> None:
+    """A version-marker value with shell metacharacters is data, never executed.
+
+    ``meta()`` reads the marker by line-parsing, so a value containing a command
+    substitution / backticks must NOT run. We plant such a value, run a
+    ``calfcord-self`` command that reads the marker (``version``), and assert no
+    side-effect file was created.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    pwned = home / "PWNED"
+    # A repo/ref value an attacker might try to smuggle into a sourced file.
+    (home / "version").write_text(
+        "CALFCORD_COMMIT=aaa\n"
+        f'CALFCORD_REPO=$(touch {pwned})`touch {pwned}`\n'
+        "CALFCORD_REF=main\n"
+    )
+
+    result = _run_self(home, ["version"])
+    assert result.returncode == 0, result.stderr
+    # The metacharacter value was treated as data — nothing executed it.
+    assert not pwned.exists()
+    # And the value still surfaced verbatim in the output (read, not run).
+    assert "$(touch" in result.stdout

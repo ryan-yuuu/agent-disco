@@ -292,6 +292,45 @@ def test_broker_url_sets_given_url(tmp_path: Path) -> None:
     assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "my-broker.example.com:9092"
 
 
+def test_broker_url_empty_on_fresh_install_warns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ``url`` branch with an empty URL and no prior ``CALF_HOST_URL`` warns.
+
+    A fresh install that ends with no broker won't start, so ``init`` flags it
+    now rather than letting it surface as a connection failure at first boot.
+    (On a re-run with a value already on disk the keep-existing contract means
+    there's nothing to warn about — exercised separately.)
+    """
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(
+        name="scribe", description="d", broker="url", broker_url=""
+    )
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+
+    out = capsys.readouterr().out
+    assert f"warning: no {init._BROKER_VAR} is set" in out
+    # And nothing was written for the broker key on the empty fresh path.
+    assert init._BROKER_VAR not in read_env(tmp_path / ".env")
+
+
+def test_non_numeric_application_id_warns_without_blocking(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-numeric DISCORD_APPLICATION_ID prints a numeric warning but still
+    completes (the field is accepted, the typo merely flagged)."""
+    agents_dir = tmp_path / "agents"
+    prompter = _fresh_run_prompter(
+        name="scribe", description="d", app_id="not-a-number"
+    )
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+
+    out = capsys.readouterr().out
+    assert "DISCORD_APPLICATION_ID should be numeric" in out
+    # Not blocked: the value the operator typed is still written.
+    assert read_env(tmp_path / ".env")["DISCORD_APPLICATION_ID"] == "not-a-number"
+
+
 def test_discord_fields_written_when_provided(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     prompter = _fresh_run_prompter(
@@ -585,4 +624,41 @@ def test_run_updates_existing_agent_in_place(tmp_path: Path) -> None:
     agent = parse_agent_md(target)
     assert agent.description == "updated desc"
     assert agent.provider == "anthropic"
+    assert body in agent.system_prompt
+
+
+def test_blank_name_with_one_non_assistant_agent_edits_it_in_place(tmp_path: Path) -> None:
+    """A blank name on an install carrying exactly one non-``assistant`` agent edits
+    that lone agent in place rather than spawning a new ``assistant.md``.
+
+    The create flow defaults the name to the sole existing agent (a re-run editing
+    it), and a blank answer keeps that default — so the operator who just presses
+    enter ends with the same single agent, updated, not a second starter.
+    """
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    target = agents_dir / "scribe.md"
+    body = "You are Scribe, the note-taker."
+    target.write_text(
+        "---\n"
+        "name: scribe\n"
+        "display_name: Scribe\n"
+        "description: old\n"
+        "provider: openai\n"
+        "model: gpt-5\n"
+        "tools: [read_file]\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+
+    # Blank name → keeps the lone-agent default ("scribe"); edits it in place.
+    prompter = _fresh_run_prompter(name="   ", description="updated desc")
+    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
+
+    # No new assistant.md; the one agent is still "scribe", now updated.
+    assert not (agents_dir / "assistant.md").exists()
+    assert {p.stem for p in agents_dir.glob("*.md")} == {"scribe"}
+    agent = parse_agent_md(target)
+    assert agent.agent_id == "scribe"
+    assert agent.description == "updated desc"
     assert body in agent.system_prompt

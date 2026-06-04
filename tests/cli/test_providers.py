@@ -378,6 +378,42 @@ def test_pick_model_falls_back_to_curated_list_on_error(
     assert chosen == fallback[-1]
 
 
+# --- pick_model: empty-but-successful live list -----------------------------
+
+
+class _NoEmptyPrompter(FakePrompter):
+    """A :class:`FakePrompter` that fails loudly if handed an empty choice list.
+
+    The bug this guards: an empty-on-success live fetch must be treated like a
+    failed fetch and replaced with the curated fallback *before* the prompter is
+    called — never passed through as ``[]`` (which crashes InquirerPy with
+    "choices cannot be empty" and aborts the wizard).
+    """
+
+    def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
+        assert choices, "prompter.select() must never receive an empty choices list"
+        return super().select(message, choices, default=default)
+
+
+@pytest.mark.parametrize("provider", ["openai-codex", "anthropic"])
+def test_pick_model_empty_live_list_falls_back_to_curated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], provider: str
+) -> None:
+    """A live fetch that SUCCEEDS but returns ``[]`` degrades to the curated list."""
+    monkeypatch.setattr(_providers, "list_models", lambda provider, *, api_key: [])
+
+    fallback = _providers.fallback_models()[provider]
+    prompter = _NoEmptyPrompter(selects=[fallback[0]])
+    chosen = _providers.pick_model(prompter, provider, api_key=None)
+
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert f"no models returned for {provider}" in out
+    # The curated fallback list is exactly what the (non-empty) prompter saw.
+    assert [c.value for c in prompter.last_select_choices] == fallback
+    assert chosen == fallback[0]
+
+
 # --- pick_model: default selection -----------------------------------------
 
 
@@ -542,7 +578,9 @@ def test_codex_login_failure_warns_and_does_not_raise(
 
     out = capsys.readouterr().out
     assert "warning: Codex login did not complete" in out
-    assert "calfcord calfkit-auth login" in out
+    # The resume hint must name the real command — the calfkit-auth CLI requires
+    # the `codex` subcommand (`calfkit-auth codex login`), not a bare `login`.
+    assert "calfcord calfkit-auth codex login" in out
 
 
 # --- shared seam: PROVIDERS / ensure_credentials return / configure_provider ---
@@ -589,6 +627,38 @@ def test_configure_provider_selects_provider_creds_and_model(
     assert read_env(env)["ANTHROPIC_API_KEY"] == "sk-key"
     # cheap=True biased the model default to the haiku tier.
     assert prompter.last_select_default == "claude-haiku-4-5"
+
+
+def test_configure_provider_returns_provider_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The return is a named ``ProviderModel`` (``.provider`` / ``.model``), still unpackable.
+
+    Monkeypatch the two seams ``configure_provider`` drives — ``ensure_credentials``
+    (no real key/OAuth) and ``list_models`` (no SDK/network) — so the test asserts
+    only the return shape: a positional swap would be silent on a bare tuple, so the
+    named pair is the contract callers (``create_agent`` / ``init``) rely on.
+    """
+    env = tmp_path / ".env"
+    env.write_text("")
+    monkeypatch.setattr(
+        _providers, "ensure_credentials", lambda *a, **k: "sk-key"
+    )
+    monkeypatch.setattr(
+        _providers,
+        "list_models",
+        lambda provider, *, api_key: [Choice("claude-sonnet-4-5", "x")],
+    )
+    prompter = FakePrompter(selects=["anthropic", "claude-sonnet-4-5"])
+
+    result = _providers.configure_provider(prompter, env_path=env, current={})
+
+    assert isinstance(result, _providers.ProviderModel)
+    assert result.provider == "anthropic"
+    assert result.model == "claude-sonnet-4-5"
+    # Tuple-unpacking still works for callers that don't read the attributes.
+    provider, model = result
+    assert (provider, model) == ("anthropic", "claude-sonnet-4-5")
 
 
 def test_configure_provider_warns_when_no_key_set(

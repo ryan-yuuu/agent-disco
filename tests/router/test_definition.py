@@ -237,3 +237,19 @@ class TestEnvOverrides:
         monkeypatch.setenv(_PROVIDER_ENV, "nonsense")
         with pytest.raises(ValueError):
             build_router_definition()
+
+    def test_model_env_alone_resolves_independently_of_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting ONLY the model env var must not drag the provider with it.
+
+        Provider and model resolve as two independent ``env > front matter >
+        default`` chains, not a coupled pair: with only ``CALFKIT_ROUTER_MODEL``
+        set, the model comes from the env while the provider still comes from the
+        bundled ``router.md`` front matter (``openai-codex``). A coupled-pair bug
+        would either ignore the lone model override or reset the provider.
+        """
+        monkeypatch.setenv(_MODEL_ENV, "claude-haiku-4-5")
+        d = build_router_definition()
+        assert d.model == "claude-haiku-4-5"  # from the env override
+        assert d.provider == "openai-codex"  # untouched: still the bundled front matter
