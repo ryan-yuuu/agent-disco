@@ -132,11 +132,14 @@ prompt. The filename must match `name`, and the slash command is always
 `/<name>`. Drop the file in, restart `calfcord calfkit-bridge` and
 `calfcord calfkit-agent`, and it's live.
 
-To add or remove an agent's tools interactively, run
-`calfcord agent tools [<name>]` and restart `calfcord calfkit-agent` (tools are
-loaded at agent boot).
+Prefer not to hand-write the file? The full lifecycle is on the CLI:
+`calfcord agent create | list | show | edit | set | rename | delete` (plus
+`calfcord agent tools` for just the tool list). `create` is a guided wizard,
+`edit` an interactive field menu, and `set` its scriptable equivalent; restart
+`calfcord calfkit-agent` after any change to apply it.
 
-Full field reference (providers, models, tool scoping, thinking effort) →
+Full field reference (providers, models, tool scoping, thinking effort) and the
+`calfcord agent` CLI →
 [`docs/authoring-agents.md`](./docs/authoring-agents.md).
 
 ## How it works
