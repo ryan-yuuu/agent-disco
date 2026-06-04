@@ -34,6 +34,8 @@ SHIM_DIR="$CALFCORD_HOME/shims"       # calfcord + calfcord-self (placed on PATH
 VERSIONS_DIR="$CALFCORD_HOME/versions"
 CONFIG_DIR="$CALFCORD_HOME/config"
 CONFIG_ENV="$CONFIG_DIR/.env"
+AGENTS_DIR="$CALFCORD_HOME/agents"    # operator's agent .md files (stable across updates)
+STATE_DIR="$CALFCORD_HOME/state"      # per-agent runtime state (channel subscriptions)
 CURRENT_LINK="$CALFCORD_HOME/current"
 VERSION_FILE="$CALFCORD_HOME/version"
 
@@ -167,6 +169,26 @@ seed_config() {
   log "seeded config at $CONFIG_ENV (fill in DISCORD_*, CALF_HOST_URL, API keys)"
 }
 
+# Give the native install a stable home for agent definitions and per-agent
+# state, and drop in the bundled starter agent on first install. ``calfkit-agent``
+# resolves these dirs from CALFKIT_AGENTS_DIR / CALFKIT_STATE_DIR (the shim points
+# both under $CALFCORD_HOME), so they must live outside the GC'd ``versions/<sha>``
+# tree to survive ``calfcord self update``. Seeding only happens when the agents
+# dir is empty, so an operator who removed the starter (or added their own
+# agents) is never clobbered on re-install.
+seed_agents() {
+  local dest="$1"
+  mkdir -p "$AGENTS_DIR" "$STATE_DIR"
+  if [ -n "$(ls -A "$AGENTS_DIR" 2>/dev/null)" ]; then
+    log "keeping existing agents in $AGENTS_DIR"
+    return 0
+  fi
+  if [ -f "$dest/agents/assistant.md" ]; then
+    cp "$dest/agents/assistant.md" "$AGENTS_DIR/assistant.md"
+    log "seeded starter agent at $AGENTS_DIR/assistant.md"
+  fi
+}
+
 # Flip the current symlink atomically and record the version marker.
 activate_version() {
   local dest="$1" sha now
@@ -240,6 +262,23 @@ fi
 [ -e "$H/current" ] || { echo "calfcord: no active install at $H/current; re-run the installer" >&2; exit 1; }
 
 ENVF="$H/config/.env"
+
+# Default calfcord's runtime dirs into the install layout unless the operator
+# already chose them (shell env OR config .env wins — checked here so we don't
+# depend on `uv run --env-file` precedence). Agents and per-agent state live
+# under the install home so they survive `self update` and are found from any
+# directory; the tools workspace defaults to the *launch* directory so agents
+# act where you ran the command (like Claude Code). Override any of these in
+# config/.env.
+_default_env() {  # name default
+  [ -n "${!1:-}" ] && return 0
+  [ -f "$ENVF" ] && grep -q "^$1=" "$ENVF" && return 0
+  export "$1=$2"
+}
+_default_env CALFKIT_AGENTS_DIR     "$H/agents"
+_default_env CALFKIT_STATE_DIR      "$H/state/agents"
+_default_env CALFCORD_WORKSPACE_DIR "$PWD"
+
 if [ -f "$ENVF" ]; then
   exec "$UV" run --frozen --no-sync --project "$H/current" --env-file "$ENVF" -- "$@"
 else
@@ -431,6 +470,7 @@ main() {
   log "resolved $REF -> ${sha:0:12}"
   install_version "$sha"
   seed_config "$INSTALLED_DEST"
+  seed_agents "$INSTALLED_DEST"
   activate_version "$INSTALLED_DEST"
   gc_versions "$sha" "$PREVIOUS_SHA"
   write_shims
@@ -438,7 +478,15 @@ main() {
   log "done."
   log "  version:  calfcord self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: calfcord self set-broker <url>)"
+  log "  agents:   $AGENTS_DIR  (starter: assistant.md)"
   log "  deploy:   calfcord calfkit-bridge | calfkit-agent | calfkit-router | calfkit-tools"
 }
 
-main "$@"
+# Run main only when executed (``bash install.sh``) or piped (``curl | bash``),
+# never when sourced — so tests can source this file to exercise individual
+# functions. Piped execution leaves ``BASH_SOURCE[0]`` empty; a file execution
+# makes it equal to ``$0``; sourcing makes it a non-empty path that differs from
+# ``$0``. The ``:-`` guards keep this safe under ``set -u``.
+if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
+  main "$@"
+fi
