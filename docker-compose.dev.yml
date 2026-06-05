@@ -36,7 +36,7 @@
 #   * Compose ``watch`` requires v2.32+ for the ``sync+restart`` and
 #     ``restart`` actions. Check with: docker compose version
 #   * Mid-flight Kafka consumer-group reconnects happen on each restart
-#     (~1-2s); offsets persist to Redpanda so no message loss.
+#     (~1-2s); offsets persist in the still-running broker so no message loss.
 #   * Bytecode cache: the image sets PYTHONDONTWRITEBYTECODE=1 already,
 #     so ``__pycache__`` ghosts don't survive across restarts.
 #

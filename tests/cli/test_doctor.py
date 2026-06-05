@@ -18,7 +18,7 @@ TOKEN = "SENTINEL_TOKEN_do_not_leak_42"
 @pytest.mark.parametrize(
     "url,expected",
     [
-        ("localhost:19092", ("localhost", 19092)),
+        ("localhost:9094", ("localhost", 9094)),  # explicit non-default port is honored
         ("localhost", ("localhost", 9092)),  # bare host defaults to 9092
         ("b1:9092,b2:9093", ("b1", 9092)),  # first endpoint of a comma list
         ("kafka://h:9092", ("h", 9092)),  # scheme stripped

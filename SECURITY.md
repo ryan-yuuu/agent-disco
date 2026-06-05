@@ -76,7 +76,7 @@ The deployment plumbing around those processes is also in scope:
 
 ## What's NOT in scope
 
-- **Bugs in upstream `openhands-tools`, `smolagents`, Redpanda /
+- **Bugs in upstream `openhands-tools`, `smolagents`, Tansu /
   Apache Kafka, or `calfkit` itself.** Report those to their respective
   trackers; we'll happily coordinate but the fix has to land upstream.
 - **Operator misconfigurations.** A `.env` checked into a public repo

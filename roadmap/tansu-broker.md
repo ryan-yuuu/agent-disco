@@ -1,8 +1,11 @@
 # Tansu Broker — Native Kafka-Compatible Broker & S3-Backed Distributed Agents
 
-**Status:** Blocked — gated on upstream [`calf-ai/calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174)
-(broker topic auto-creation). The single-box switch is fully designed and validated; the
-distributed S3 phase is exploratory. No code has landed.
+**Status:** Stage 1 **shipped** (landed on `main`). The upstream blocker
+[`calf-ai/calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174) (broker topic
+auto-creation) is **resolved in calfkit 0.5.1** via opt-in topic provisioning — calfcord now
+re-creates the topics it needs on startup — so the native broker switch is complete: Redpanda is
+gone from the installer, init, compose, and docs, and the local broker is native Tansu. The
+distributed S3 phase (Stage 2) remains future / exploratory.
 
 ## Goal
 
@@ -37,54 +40,57 @@ shared object store tomorrow — never a topology that requires one process to k
 
 ---
 
-## Stage 1 — Switch the local broker to Tansu (near term)
+## Stage 1 — Switch the local broker to Tansu (near term) — SHIPPED
 
 ### Decisions (agreed)
 
 - **Delivery:** native binary is the primary path; a Docker option is kept for Docker users.
 - **Default storage:** `memory` (ephemeral). Topics/messages reset on broker restart — a deliberate
-  change from Redpanda's persistent volume. SQLite is documented as a one-line persistent upgrade.
+  change from a persistent broker volume; calfcord re-creates the topics it needs on startup. A
+  libsql/SQLite (or postgres) store is documented as a one-line persistent upgrade.
 - **Cutover:** full removal of Redpanda from the installer, init, compose, and docs.
 - **Scope:** single-box only now; the distributed S3 path is deferred to Stage 2 (this doc).
 
-### The blocker (why this is parked)
+### The blocker (resolved)
 
-calfcord/calfkit rely on **broker-side topic auto-creation**: nothing in the
-`calfcord → calfkit → FastStream → aiokafka` stack ever creates a topic. Tansu has **no**
-auto-creation — confirmed three ways:
+calfcord/calfkit relied on **broker-side topic auto-creation**: nothing in the
+`calfcord → calfkit → FastStream → aiokafka` stack ever created a topic, and Tansu has **no**
+auto-creation. This was confirmed three ways during the spike:
 
-- **Empirically:** producing to / subscribing to a non-existent topic fails with
+- **Empirically:** producing to / subscribing to a non-existent topic failed with
   `UnknownTopicOrPartitionError`.
-- **Control:** the *same* test auto-creates cleanly on Redpanda (`--mode dev-container`), proving the
-  dependency is on broker auto-create, not a client bug.
-- **FastStream version-independent:** reproduced on FastStream `0.6.7` and the latest `0.7.1` —
-  upgrading FastStream does not help.
+- **Control:** the *same* test auto-created cleanly on a `--mode dev-container` broker, proving the
+  dependency was on broker auto-create, not a client bug.
+- **FastStream version-independent:** reproduced on FastStream `0.6.7` and `0.7.1` — upgrading
+  FastStream did not help.
 - **Source:** Tansu's broker ignores the Kafka `allow_auto_topic_creation` flag and exposes no
-  auto-create knob (docs + source); calfkit contains no topic-creation/admin calls.
+  auto-create knob (docs + source); calfkit contained no topic-creation/admin calls.
 
 Tansu *does* fully implement the explicit `CreateTopics` API, and once topics exist, produce/consume
-and **consumer groups** work end-to-end through FastStream. So the gap is specifically topic creation.
+and **consumer groups** work end-to-end through FastStream. So the gap was specifically topic creation.
 
-The correct fix lives in **calfkit** (the layer that owns produce/subscribe I/O *and* its internal
-reply/return topics), not in calfcord — handling a Kafka wire error in the application layer would be a
-leaky abstraction and would force each process to know topics it doesn't own, breaking the decoupling
-invariant. This is filed as [`calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174);
-the design is intentionally left to the calfkit maintainers. **Stage 1 resumes once #174 lands.**
+The fix landed in **calfkit** (the layer that owns produce/subscribe I/O *and* its internal
+reply/return topics), not in calfcord — handling a Kafka wire error in the application layer would have
+been a leaky abstraction and would have forced each process to know topics it doesn't own, breaking the
+decoupling invariant. It was filed as
+[`calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174) and is **resolved in calfkit
+0.5.1** via opt-in topic provisioning: calfcord now declares the topics it needs and they are created
+on startup. **Stage 1 is complete and has shipped on `main`.**
 
-### Migration plan (ready to execute once unblocked)
+### Migration plan (executed)
 
-1. **Native bootstrap + `calfcord broker`.** Add an `ensure_tansu` step to `scripts/install.sh`
+1. **Native bootstrap + `calfcord broker`.** Added an `ensure_tansu` step to `scripts/install.sh`
    mirroring the existing `ensure_uv` (OS/arch detect, download the release binary to
-   `~/.calfcord/bin/tansu`, strip the macOS quarantine attribute, verify). Add a `broker` verb to the
+   `~/.calfcord/bin/tansu`, strip the macOS quarantine attribute, verify). Added a `broker` verb to the
    `calfcord` shim that starts Tansu with calfcord defaults.
 2. **init + config.** `calfcord init` offers "start a local Tansu broker"; default
-   `CALF_HOST_URL=localhost:9092`; rewrite the `.env.example` Kafka block (Tansu, memory = ephemeral,
-   SQLite upgrade, Docker option).
-3. **Docker option.** Replace the `redpanda` compose service with a `tansu` service (memory storage,
+   `CALF_HOST_URL=localhost:9092`; the `.env.example` Kafka block was rewritten (Tansu, memory =
+   ephemeral, libsql/SQLite persistence upgrade, Docker option).
+3. **Docker option.** Replaced the old Redpanda compose service with a `tansu` service (memory storage,
    port 9092, no data volume).
-4. **Docs sweep.** Remove Redpanda across README, `CLAUDE.md`, and `docs/`; update the broker default.
+4. **Docs sweep.** Removed Redpanda across README, `CLAUDE.md`, and `docs/`; updated the broker default.
 5. **Verification.** Native + Docker end-to-end (`@agent` reply + A2A thread), test suite, and a
-   `grep -ri redpanda` completeness check.
+   broker-name completeness grep.
 
 ### Validated facts (captured during the spike, for whoever executes this)
 
@@ -136,19 +142,20 @@ with the independently-deployable invariant.
 - **Shared dependency shifts, not disappears.** There is no single broker SPOF, but the S3 bucket
   becomes the central source of truth and consistency point; cross-region object-store latency applies.
 - **Maturity.** Tansu is new (debuted 2026); the multi-broker S3 mode is its most advanced path.
-- **Same auto-create gap.** Stage 2 inherits the `#174` topic-creation prerequisite.
+- **Topic provisioning across brokers.** Stage 1's opt-in topic provisioning (calfkit 0.5.1) must hold
+  when topics are created against one broker and consumed via another sharing the bucket.
 
 ### Dependencies
 
-1. Stage 1 (the local switch) landed.
-2. [`calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174) resolved.
+1. ✅ Stage 1 (the local switch) landed.
+2. ✅ [`calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174) — resolved in calfkit 0.5.1.
 3. A multi-broker / shared-S3 validation spike (consumer groups + latency) passing.
 
 ---
 
 ## References
 
-- Upstream blocker: [`calf-ai/calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174)
+- Upstream prerequisite (resolved in calfkit 0.5.1): [`calf-ai/calfkit-sdk#174`](https://github.com/calf-ai/calfkit-sdk/issues/174)
 - Tansu: [repo](https://github.com/tansu-io/tansu) · [docs](https://docs.tansu.io/)
 - Related calfcord docs: [`docs/distributed-deployment.md`](../docs/distributed-deployment.md),
   [`docs/architecture.md`](../docs/architecture.md), [`docs/configuration.md`](../docs/configuration.md)

@@ -50,7 +50,9 @@ onboarding default.
 2. **No runtime status.** `calfcord doctor` answers "is it *configured* right?" but there's still no
    "is it *running / connected*?" — and `calfcord self status` (an update check) muddies the word.
 3. **Edit → restart loop.** Nearly every agent change ends with "restart `calfcord run agent`"; no reload.
-4. **Broker is copy-paste.** A 5-line `docker run` with no lifecycle command.
+4. **No single-command broker lifecycle.** The native `calfcord broker` verb starts a Tansu broker in
+   the foreground (no Docker), but there's still no supervised `up`/`down` that brings the broker and
+   the four processes up together.
 5. **`init` configures but launches nothing** — the wizard ends and the user still faces the manual
    broker + four-process steps.
 
@@ -85,8 +87,9 @@ Design constraints to carry in:
 - **Runtime `status`.** Add `calfcord status` (is it running / connected) — distinct from `doctor`
   (config preflight). Consider renaming the update check (`calfcord self status` →
   e.g. `self check-update`) so "status" unambiguously means runtime health.
-- **Broker lifecycle as commands.** `calfcord broker up|down` (and the native start from the Tansu
-  roadmap) instead of a copy-pasted `docker run`. *(Depends on the Tansu native broker.)*
+- **Broker lifecycle as commands.** The native `calfcord broker` start **shipped** with the Tansu
+  migration. What remains is supervised lifecycle — `calfcord broker up|down` (background/daemonized)
+  so the broker is ensured-up rather than tied to a foreground terminal.
 
 ### 3. Onboarding / quickstart sequencing
 
@@ -100,8 +103,8 @@ Design constraints to carry in:
 
 ## Relationship to other work
 
-- **Builds on [Tansu native broker](tansu-broker.md).** A native broker binary is what makes
-  daemonizing the broker clean for the no-Docker audience.
+- **Builds on the [Tansu native broker](tansu-broker.md)** — now **shipped**. The native broker binary
+  (`calfcord broker`) is what makes daemonizing the broker clean for the no-Docker audience.
 - **Bounded by the calfkit Worker lifecycle gap** (`docs/design/calfkit-worker-lifecycle-gaps.md`) —
   the supervisor/daemon must respect hand-rolled start/serve/drain and OS-signal ownership.
 - **Backward compatibility.** Keep `calfcord calfkit-*` passthrough as hidden aliases so existing docs

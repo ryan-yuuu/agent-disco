@@ -70,12 +70,38 @@ printf '%s' "$out" | grep -Fq \
   "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfkit-agent --foo bar" \
   && pass "passthrough args" || fail "passthrough: $out"
 
+# `calfcord broker` execs the bundled native tansu binary directly (NOT via uv),
+# supplying ephemeral-storage + localhost:9092 defaults via env and passing
+# extra args through. Stub the binary so this stays network-free.
+printf '#!/usr/bin/env bash\necho "TANSU $*"\necho "SE=$STORAGE_ENGINE"\necho "AL=$ADVERTISED_LISTENER_URL"\n' > "$TD/bin/tansu"; chmod +x "$TD/bin/tansu"
+out="$("$B" "$C" broker --cluster-id demo 2>&1)"
+{ printf '%s' "$out" | grep -Fq "TANSU broker --cluster-id demo" \
+  && printf '%s' "$out" | grep -Fq "SE=memory://tansu/" \
+  && printf '%s' "$out" | grep -Fq "AL=tcp://localhost:9092"; } \
+  && pass "broker verb: env defaults + passthrough" || fail "broker verb: $out"
+# operator env overrides the advertised-listener default
+out="$(ADVERTISED_LISTENER_URL=tcp://0.0.0.0:9092 "$B" "$C" broker 2>&1)"
+printf '%s' "$out" | grep -Fq "AL=tcp://0.0.0.0:9092" \
+  && pass "broker verb: env override wins" || fail "broker override: $out"
+# missing binary -> branded error + non-zero exit
+rm -f "$TD/bin/tansu"
+out="$("$B" "$C" broker 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "native tansu broker not installed"; } \
+  && pass "broker verb: missing binary error" || fail "broker missing (rc=$rc): $out"
+
+# ensure_tansu degrades (no die, TANSU_OK stays 0) on an unsupported platform.
+printf '#!/usr/bin/env bash\n[ "$1" = -s ] && echo Plan9 || echo sparc\n' > "$SB/uname"; chmod +x "$SB/uname"
+out="$(PATH="$SB:$PATH" CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; ensure_tansu; echo TANSU_OK=\$TANSU_OK" 2>&1)"; rc=$?
+rm -f "$SB/uname"
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "TANSU_OK=0"; } \
+  && pass "ensure_tansu: unsupported platform degrades" || fail "ensure_tansu degrade (rc=$rc): $out"
+
 # set-broker: single replaced line, other keys preserved, mode 600
-"$B" "$CS" set-broker kafka-b:19092 >/dev/null 2>&1
+"$B" "$CS" set-broker kafka-b:9092 >/dev/null 2>&1
 n="$(grep -c '^CALF_HOST_URL=' "$TD/config/.env")"
 v="$(grep '^CALF_HOST_URL=' "$TD/config/.env")"
 k="$(grep -c '^DISCORD_BOT_TOKEN=keep-me$' "$TD/config/.env")"
-{ [ "$n" -eq 1 ] && [ "$v" = "CALF_HOST_URL=kafka-b:19092" ] && [ "$k" -eq 1 ]; } \
+{ [ "$n" -eq 1 ] && [ "$v" = "CALF_HOST_URL=kafka-b:9092" ] && [ "$k" -eq 1 ]; } \
   && pass "set-broker replace + preserve" || fail "set-broker (n=$n v=$v k=$k)"
 # GNU stat (-c) first; on macOS it errors cleanly (no stdout) and we fall back
 # to BSD stat (-f). The reverse order pollutes the value on Linux.

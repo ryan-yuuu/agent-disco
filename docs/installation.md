@@ -75,17 +75,19 @@ alongside the other processes. Skip the wizard and `@mentions` still work. See
 calfcord's processes talk to each other through a **Kafka broker**, so you need
 one running and must point calfcord at it.
 
-**Easy path — a local Redpanda container** (Docker required only for this).
-`calfcord init` selects `CALF_HOST_URL=localhost:19092` and prints this command
-to run:
+**Easy path — the native Tansu broker** (no Docker). The installer bootstraps a
+single Tansu binary to `~/.calfcord/bin/tansu`; `calfcord init` selects
+`CALF_HOST_URL=localhost:9092`. Start it in its own terminal:
 
 ```bash
-docker run -d --name calfcord-redpanda -p 19092:19092 \
-  docker.redpanda.com/redpandadata/redpanda:latest \
-  redpanda start --mode dev-container --smp 1 \
-  --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
-  --advertise-kafka-addr internal://localhost:9092,external://localhost:19092
+calfcord broker
 ```
+
+Tansu's default storage is **ephemeral memory** — topics and messages reset when
+the broker restarts, and calfcord re-creates the topics it needs on startup. For
+persistence across restarts, start the broker with a libsql/SQLite or postgres
+store via the `STORAGE_ENGINE` env var (or `--storage-engine` flag); see
+[Tansu's docs](https://docs.tansu.io/).
 
 **Bring your own / a shared broker.** Choose "I have a broker URL" in
 `calfcord init`, or set it later:

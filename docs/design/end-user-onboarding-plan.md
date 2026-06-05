@@ -44,8 +44,9 @@ validators, or provider plumbing are introduced.
 ## Decisions
 
 - Guided **`calfcord init`** for onboarding (not a hand-edited `.env`).
-- **Docker-Redpanda** as the recommended local broker now; broker auth (SASL/TLS)
-  for hosted/serverless Kafka is a **deferred fast-follow**.
+- A **native Tansu broker** (`calfcord broker`) as the recommended local broker
+  now; broker auth (SASL/TLS) for hosted/serverless Kafka is a **deferred
+  fast-follow**.
 - Provider-agnostic starter named **`assistant`** (general-purpose), `tools: []`.
 - Agents + state **pinned** under `~/.calfcord/`; the tools **workspace follows
   the launch directory** (Claude Code model).
@@ -100,8 +101,8 @@ and reports* the agent, so there is no duplicated starter content.
              anthropic/openai → masked key → upsert ANTHROPIC_API_KEY / OPENAI_API_KEY
              openai-codex     → "run `calfcord calfkit-auth login`"
 2 Discord  → DISCORD_BOT_TOKEN (masked), DISCORD_APPLICATION_ID; optional GUILD / CHANNEL
-3 Broker   → [Local Redpanda (Docker) | I have a broker URL]
-             docker → CALF_HOST_URL=localhost:19092 + print one-liner (offer to run if docker present)
+3 Broker   → [Start a local Tansu broker (`calfcord broker`) | I have a broker URL]
+             native → CALF_HOST_URL=localhost:9092 + remind to run `calfcord broker`
              url    → CALF_HOST_URL=<prompt>
 4 Detect   → list agents in CALFKIT_AGENTS_DIR; report or explain how to add one
 5 Next     → start broker · run the 4 processes · @assistant hello
@@ -178,7 +179,7 @@ regression). Sequence: **1 → 2 → 4 → 3** (PR 1 is independent).
   `None`/`[]`/explicit; selector grammar; agent picker.
 - **PR 3 — `docs:` installer-first README** (lands last, captures everything).
   README quick start rewrite (Docker demoted to a dev pointer);
-  `installation.md` (agents-dir + `init` + Redpanda one-liner + shared-broker
+  `installation.md` (agents-dir + `init` + native Tansu broker + shared-broker
   link); `architecture.md` running-modes; `security.md` native workspace note;
   `authoring-agents.md` / `authoring-tools.md` mention `calfcord agent tools`;
   `distributed-deployment.md` SASL-deferred note.

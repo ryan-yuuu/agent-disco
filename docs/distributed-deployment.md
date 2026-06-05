@@ -194,19 +194,21 @@ directory.
 **Network prereq.** Builder needs to reach the broker. For trusted
 hosts, run **Tailscale** or **WireGuard** between them — broker stays
 unauthenticated, the overlay is the perimeter. For public-internet
-exposure, use SASL/SCRAM + TLS (see § 6). This walkthrough assumes
+exposure, require client auth + TLS (see § 6). This walkthrough assumes
 Tailscale with hostnames `laptop` and `builder`.
 
 **Laptop side.** Bring up the broker plus everything EXCEPT the
 all-in-one tools (the remote box owns `shell`; see § 10 for excluding
-it from the local tools process if you keep one):
+it from the local tools process if you keep one). Advertise the broker
+on its tailnet hostname so builder can reach it:
 
 ```bash
-docker compose up -d redpanda bridge router agent
+TANSU_ADVERTISE=laptop docker compose up -d tansu bridge router agent
 ```
 
-Redpanda's external listener is already published on `:19092`. Verify
-from builder: `rpk cluster info --brokers=laptop:19092`.
+Tansu's listener is published on `:9092`. The `TANSU_ADVERTISE=laptop`
+override makes the broker advertise `laptop:9092` instead of the default
+`tansu:9092`, so off-box clients resolve a reachable address.
 
 **Remote host.** On builder, with the project directory at
 `/home/me/my-project`:
@@ -215,7 +217,7 @@ from builder: `rpk cluster info --brokers=laptop:19092`.
 docker run -d \
   --name calfcord-shell \
   --restart unless-stopped \
-  -e CALF_HOST_URL=laptop:19092 \
+  -e CALF_HOST_URL=laptop:9092 \
   -e DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN \
   -e DISCORD_APPLICATION_ID=$DISCORD_APPLICATION_ID \
   -e DISCORD_GUILD_ID=$DISCORD_GUILD_ID \
@@ -235,25 +237,29 @@ have a duplicate `shell` consumer; see § 10.
 
 ## 6. Broker authentication
 
-The default Redpanda runs with `--mode=dev-container` (see
-`docker-compose.yml`) — **no authentication, no TLS**. Fine on
-localhost or a trusted overlay. NOT fine on the public internet.
+The default Tansu broker runs with **memory storage, no authentication,
+no TLS** (see `docker-compose.yml`). Fine on localhost or a trusted
+overlay. NOT fine on the public internet.
 
 **Trusted overlay (recommended for small teams).** Tailscale or
 WireGuard between every host. The broker stays unauthenticated; the
-overlay is the perimeter. No SASL config, no certs to rotate. Configure
-the broker to advertise its tailnet address rather than `localhost`:
+overlay is the perimeter. No auth config, no certs to rotate. Configure
+the broker to advertise its tailnet address rather than the in-network
+default via the `TANSU_ADVERTISE` env the compose `tansu` service reads:
 
-```yaml
-# in docker-compose.yml's redpanda command, swap external advertise:
-- --advertise-kafka-addr=internal://redpanda:9092,external://laptop:19092
+```bash
+# advertise the broker on its tailnet hostname instead of `tansu`:
+TANSU_ADVERTISE=laptop docker compose up -d tansu
 ```
 
-**SASL/SCRAM + TLS.** Broker exposed on the public internet, gated by
-auth. Redpanda configures this via `rpk cluster config set` plus
-`rpk acl user create` — see the
-[Redpanda security docs](https://docs.redpanda.com/current/manage/security/authentication/)
-for the canonical setup. Two calfcord-specific notes:
+**Client auth + TLS.** Broker exposed on the public internet, gated by
+auth. Tansu offers `--authentication` (require client auth), TLS via
+`--cert` / `--key`, and `tansu user create` for users. Production-grade
+SASL/ACL hardening with Tansu is still maturing (it is a newer broker),
+so follow [Tansu's docs](https://docs.tansu.io/) and the
+[upstream repo](https://github.com/tansu-io/tansu) for the current,
+canonical setup rather than a fixed command set here. Two
+calfcord-specific notes:
 
 - **The Kafka client is `aiokafka`** (via calfkit). The standard env
   vars (`KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`,

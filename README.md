@@ -23,8 +23,10 @@ Distributed by design: agents and tools are independently deployable anywhere. H
 
 ## Quick start
 
-You'll need a Discord server you own. [Docker](https://docs.docker.com/get-docker/)
-is optional — only for running a Kafka broker locally (step 5).
+You'll need a Discord server you own. No Docker required — the installer
+bootstraps a native Tansu broker (a single Kafka-compatible binary).
+[Docker](https://docs.docker.com/get-docker/) is only needed if you'd rather run
+the whole stack via `docker compose`.
 
 **1. Set up the Discord app** (~5 min, one time) — follow
 [`docs/discord-setup.md`](./docs/discord-setup.md). It gives you the bot token
@@ -45,7 +47,7 @@ description, a model provider (Anthropic / OpenAI / Codex subscription) and its
 API key, a model **picked from a live list fetched from the provider** (you
 select one — you can't mistype an invalid slug), and its tools (every built-in,
 **all selected by default** — deselect any you don't want). Then it asks for
-your Discord bot token and application ID, and finally a Kafka broker. It writes
+your Discord bot token and application ID, and finally a broker. It writes
 `~/.calfcord/config/.env` plus `~/.calfcord/agents/<name>.md`. Pick **Codex** and
 it logs you in inline via a device code — a URL + one-time code you open on any
 device, so it works the same locally or over SSH:
@@ -55,16 +57,18 @@ calfcord init
 ```
 
 **4. Start a broker.** Calfcord's processes talk over Kafka. The easy local
-option is one Redpanda container (`calfcord init` selects
-`CALF_HOST_URL=localhost:19092` and prints this command):
+option is the native **Tansu** broker the installer bootstrapped — no Docker
+(`calfcord init` selects `CALF_HOST_URL=localhost:9092`). Start it in its own
+terminal:
 
 ```bash
-docker run -d --name calfcord-redpanda -p 19092:19092 \
-  docker.redpanda.com/redpandadata/redpanda:latest \
-  redpanda start --mode dev-container --smp 1 \
-  --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
-  --advertise-kafka-addr internal://localhost:9092,external://localhost:19092
+calfcord broker
 ```
+
+Storage is ephemeral memory by default (topics/messages reset on restart;
+calfcord re-creates the topics it needs on startup). For persistence, point the
+broker at a libsql/SQLite or postgres store via `STORAGE_ENGINE` — see
+[Tansu's docs](https://docs.tansu.io/).
 
 Already have a broker? Pick "I have a broker URL" in `calfcord init`, or run
 `calfcord self set-broker <host:port>`.

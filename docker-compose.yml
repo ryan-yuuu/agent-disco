@@ -5,25 +5,26 @@
 #   1. Full stack (recommended for first run):
 #        cp .env.example .env       # fill in Discord + LLM creds
 #        docker compose up --build
-#      Brings up Redpanda plus the four calfcord services (bridge,
-#      agent, router, tools). The ``--build`` flag rebuilds the image
-#      after any Dockerfile change; omit it for plain restarts.
+#      Brings up Tansu (the broker) plus the four calfcord services
+#      (bridge, agent, router, tools). The ``--build`` flag rebuilds the
+#      image after any Dockerfile change; omit it for plain restarts.
 #
-#   2. Broker only (for native development):
-#        docker compose up redpanda
-#      Then in three or four terminals (or under a process supervisor):
-#        CALF_HOST_URL=localhost:19092 uv run calfkit-bridge
-#        CALF_HOST_URL=localhost:19092 uv run calfkit-agent
-#        CALF_HOST_URL=localhost:19092 uv run calfkit-router
-#        CALF_HOST_URL=localhost:19092 uv run calfkit-tools
+#   2. Native development (no Docker for the app):
+#        Run the broker natively with ``calfcord broker`` (or point
+#        ``CALF_HOST_URL`` at your own Kafka), then in separate terminals:
+#        CALF_HOST_URL=localhost:9092 uv run calfkit-bridge   (agent / router / tools)
+#      To run only the broker in Docker but the processes natively, advertise
+#      the host address so host clients can reach it:
+#        TANSU_ADVERTISE=localhost docker compose up tansu
 #
 #   3. Fully native:
 #        Don't use this file at all. Point ``CALF_HOST_URL`` at your
-#        own Kafka broker and run the uv commands above.
+#        own Kafka broker (or the native ``calfcord broker``) and run the uv
+#        commands above.
 #
 # All modes share the same ``.env``. Per-service ``environment:`` blocks
 # below override ``.env`` defaults for Docker-network-specific values
-# (e.g. ``CALF_HOST_URL`` → ``redpanda:9092``).
+# (e.g. ``CALF_HOST_URL`` → ``tansu:9092``).
 #
 # Linux hosts with UID != 1000:
 #   docker compose build \
@@ -50,48 +51,38 @@ x-calfcord-base: &calfcord-base
   env_file: .env
   restart: unless-stopped
   depends_on:
-    redpanda:
+    tansu:
       condition: service_healthy
 
 services:
-  # Single-binary Kafka-compatible broker. Dev-container mode is a
-  # single broker with one partition by default; production deploys
-  # would tune mode + smp + replication.
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:latest
-    container_name: calfcord-redpanda
+  # Native Kafka-compatible broker — a single Rust binary. Memory storage is
+  # ephemeral (no volume): topics/messages reset on restart, and calfcord
+  # re-creates the topics it needs on startup (opt-in topic provisioning). For
+  # persistence, switch --storage-engine to a libsql/SQLite or postgres URL.
+  tansu:
+    image: ghcr.io/tansu-io/tansu:latest
+    container_name: calfcord-tansu
     command:
-      - redpanda
-      - start
-      # Two listeners: ``internal://`` for in-network calfcord services
-      # at redpanda:9092, ``external://`` published to the host at
-      # localhost:19092 so native processes can reach the same broker
-      # without re-routing.
-      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
-      - --rpc-addr=0.0.0.0:33145
-      - --advertise-rpc-addr=redpanda:33145
-      - --mode=dev-container
-      - --smp=1
-      - --default-log-level=warn
+      - broker
+      - --storage-engine=memory://tansu/
+      - --listener-url=tcp://0.0.0.0:9092
+      # Tansu advertises ONE address (no internal/external split like Redpanda).
+      # In-network services dial ``tansu:9092`` (the default). To run only the
+      # broker in Docker but the calfcord processes natively on the host,
+      # advertise the host name: TANSU_ADVERTISE=localhost docker compose up tansu
+      - --advertised-listener-url=tcp://${TANSU_ADVERTISE:-tansu}:9092
     ports:
-      # Only the external listener is published. Internal communication
-      # between containerized services uses the Docker network and
-      # needs no host port.
-      - "19092:19092"
-    volumes:
-      - redpanda-data:/var/lib/redpanda/data
+      # Published so a host-native process (or TANSU_ADVERTISE=localhost) can
+      # reach the broker; in-network services use the Docker network regardless.
+      - "9092:9092"
     healthcheck:
-      # Forces an actual Kafka handshake against the internal listener.
-      # Previously used ``rpk cluster health`` which queries the admin
-      # API on port 9644 — that can flip "healthy" a few ms before the
-      # Kafka listener at 9092 finishes binding, leading to calfcord
-      # services starting and failing with "no broker available" errors.
-      test: ["CMD-SHELL", "rpk cluster info --brokers=redpanda:9092"]
+      # A real Kafka handshake (lists topics). The image is distroless (no
+      # shell, no rpk), so this is exec-form using the tansu binary at /tansu.
+      test: ["CMD", "/tansu", "topic", "list"]
       interval: 5s
       timeout: 5s
       retries: 12
-      start_period: 30s
+      start_period: 10s
     restart: unless-stopped
 
   # The Discord gateway: normalizes inbound Discord events and posts
@@ -109,7 +100,7 @@ services:
     environment:
       # Override .env so this service always dials the in-network
       # broker regardless of what the host-side .env says.
-      CALF_HOST_URL: redpanda:9092
+      CALF_HOST_URL: tansu:9092
     volumes:
       # Bridge-local SQLite transcript store (DISCORD_TRANSCRIPT_DB_PATH,
       # default state/transcripts.sqlite3): step transcripts + tool-call
@@ -139,7 +130,7 @@ services:
     <<: *calfcord-base
     command: calfkit-agent
     environment:
-      CALF_HOST_URL: redpanda:9092
+      CALF_HOST_URL: tansu:9092
     volumes:
       # Read-write: the agent's control-plane sink rewrites its own
       # frontmatter via md_writer.update_thinking_effort when the
@@ -178,7 +169,7 @@ services:
     container_name: calfcord-router
     command: calfkit-router
     environment:
-      CALF_HOST_URL: redpanda:9092
+      CALF_HOST_URL: tansu:9092
     volumes:
       # Codex subscription auth — required when the router's ``provider``
       # (set in the bundled ``router.md``) is ``openai-codex`` (the shipped
@@ -197,7 +188,7 @@ services:
     container_name: calfcord-tools
     command: calfkit-tools
     environment:
-      CALF_HOST_URL: redpanda:9092
+      CALF_HOST_URL: tansu:9092
       CALFCORD_WORKSPACE_DIR: /workspace
       CALFKIT_A2A_CHANNEL_NAME: private-a2a
     volumes:
@@ -215,9 +206,8 @@ services:
       # with a ``volumes:`` override.
       - ./workspace:/workspace
 
-# Named volume for Redpanda data so it survives ``docker compose down``.
-# ``docker compose down -v`` wipes it; that DESTROYS all Kafka topic
-# history including in-flight A2A audit data — flag this in any deploy
-# runbook.
-volumes:
-  redpanda-data:
+# No named broker volume: Tansu uses ephemeral memory storage, so there is no
+# Kafka data to persist. calfcord re-creates its topics on startup (opt-in
+# provisioning), so a fresh broker after ``docker compose down`` just works.
+# For durable broker storage, switch the tansu service's --storage-engine to a
+# libsql/SQLite or postgres URL and add a volume for it.

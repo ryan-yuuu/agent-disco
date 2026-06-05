@@ -56,7 +56,7 @@ ensures the provider's credentials, and writes these two vars for you.
 
 | Variable | Required | Description |
 |---|---|---|
-| `CALF_HOST_URL` | depends on run mode | Kafka bootstrap URL(s). Native: leave unset → `localhost`. Native + docker broker: `localhost:19092`. Full Docker Compose: leave unset; compose sets `redpanda:9092` per-service. |
+| `CALF_HOST_URL` | depends on run mode | Kafka bootstrap URL(s). Native broker (`calfcord broker`): `localhost:9092`. Bring-your-own Kafka: leave unset → `localhost`, or point it at your broker. Full Docker Compose: leave unset; compose sets `tansu:9092` per-service. (Broker-in-Docker, processes-native: `TANSU_ADVERTISE=localhost docker compose up tansu`, then `localhost:9092`.) |
 
 ## Agents, tools & A2A
 

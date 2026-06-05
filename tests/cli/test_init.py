@@ -270,17 +270,18 @@ def test_default_provider_persisted_from_configure_provider(tmp_path: Path) -> N
 # --- discord + broker .env writes ------------------------------------------
 
 
-def test_broker_docker_sets_local_url_and_prints_command(
+def test_broker_native_sets_local_url_and_prints_command(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(name="scribe", description="d", broker="docker")
+    prompter = _fresh_run_prompter(name="scribe", description="d", broker="native")
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
 
-    assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "localhost:19092"
+    assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "localhost:9092"
     out = capsys.readouterr().out
-    assert "docker run -d --name calfcord-redpanda" in out
-    assert "redpanda start --mode dev-container" in out
+    assert "calfcord broker" in out
+    # The Docker alternative is surfaced too, but the native binary is the default.
+    assert "docker compose up -d tansu" in out
 
 
 def test_broker_url_sets_given_url(tmp_path: Path) -> None:

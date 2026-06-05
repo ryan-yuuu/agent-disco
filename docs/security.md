@@ -134,7 +134,7 @@ the function bodies and their imports.
 - **Discord platform vulnerabilities.** Bot tokens, webhook URL
   exposure, etc., are Discord's surface. We expect operators to keep
   `.env` and bot tokens secret.
-- **DoS against the broker.** Redpanda/Kafka tuning, partition limits,
+- **DoS against the broker.** Tansu/Kafka tuning, partition limits,
   and consumer-lag handling are an ops concern, not a security one for
   calfcord's purposes.
 
@@ -211,7 +211,7 @@ uv run calfkit-tools
 Keep the rest of the stack in compose:
 
 ```bash
-docker compose up -d redpanda bridge agent router
+docker compose up -d tansu bridge agent router
 ```
 
 Now the tools process runs as your shell user with the full filesystem
@@ -355,9 +355,14 @@ matters in practice.
   determine where each agent listens. Loss of these files re-runs the
   bootstrap-env path on next boot — possibly with stale or no
   channels. Back them up.
-- **The Redpanda volume** (`redpanda-data` in the default compose) holds
-  the Kafka audit trail. `docker compose down -v` wipes it. Flag this
-  in any deploy runbook.
+- **No broker volume to back up by default.** The shipped `tansu` broker
+  uses ephemeral memory storage, so there is no persisted Kafka data —
+  topics/messages reset on broker restart, and calfcord re-creates the
+  topics it needs on startup. `docker compose down` (with or without
+  `-v`) loses no broker state because none is persisted. If you switch
+  the broker to a durable store (libsql/SQLite or postgres via
+  `STORAGE_ENGINE`), back that store up and flag it in your deploy
+  runbook.
 
 ## 6. Reporting a vulnerability
 
@@ -375,9 +380,9 @@ The threat model above assumes a single-host deployment where the
 broker only listens on localhost. Once you split calfcord across hosts
 — see `docs/distributed-deployment.md` for the operational walkthrough
 — the broker becomes the network perimeter, and the default
-`--mode=dev-container` Redpanda setup is no longer adequate.
+unauthenticated Tansu setup is no longer adequate.
 
-The shipped `docker-compose.yml` starts Redpanda **unauthenticated and
+The shipped `docker-compose.yml` starts Tansu **unauthenticated and
 without TLS**. That is fine when the broker only listens on `localhost`
 or only on a trusted overlay's interface. It is NOT fine when the
 broker is reachable over any network the operator does not control.
@@ -388,11 +393,14 @@ broker is reachable over any network the operator does not control.
 equivalent overlay between every host. Bind the broker only to the
 overlay's interface so it is unreachable from anywhere else. The
 broker stays unauthenticated; the overlay is the perimeter. Win: no
-SASL config, no cert rotation, no extra moving parts.
+auth config, no cert rotation, no extra moving parts.
 
-**SASL/SCRAM + TLS.** Broker exposed publicly, gated by auth.
-Configure via `rpk cluster config set` + `rpk acl user create` per
-the [Redpanda security docs](https://docs.redpanda.com/current/manage/security/authentication/).
+**Client auth + TLS.** Broker exposed publicly, gated by auth. Tansu
+offers `--authentication` (require client auth), TLS via `--cert` /
+`--key`, and `tansu user create` for users. Production-grade SASL/ACL
+hardening with Tansu is still maturing, so follow
+[Tansu's docs](https://docs.tansu.io/) and the
+[upstream repo](https://github.com/tansu-io/tansu) for the current setup.
 Note that calfcord's `runner.py` currently only forwards
 `CALF_HOST_URL`; the standard aiokafka SASL/SSL env vars
 (`KAFKA_SASL_MECHANISM`, etc.) need to be plumbed through at the

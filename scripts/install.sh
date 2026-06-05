@@ -37,6 +37,9 @@ CONFIG_ENV="$CONFIG_DIR/.env"
 AGENTS_DIR="$CALFCORD_HOME/agents"            # operator's agent .md files (stable across updates)
 STATE_DIR="$CALFCORD_HOME/state/agents"       # per-agent runtime state; matches the shim's CALFKIT_STATE_DIR
 CURRENT_LINK="$CALFCORD_HOME/current"
+
+# Native broker: pinned tansu-io/tansu release, downloaded into BIN_DIR/tansu.
+TANSU_VERSION="${CALFCORD_TANSU_VERSION:-v0.6.0}"
 VERSION_FILE="$CALFCORD_HOME/version"
 
 API_BASE="https://api.github.com/repos/$REPO"
@@ -46,6 +49,7 @@ UV=""            # resolved by ensure_uv
 INSTALLED_DEST=""   # set by install_version
 PREVIOUS_SHA=""     # set by activate_version (for GC)
 SEEDED_STARTER=0    # set by seed_agents when it drops in the starter agent
+TANSU_OK=0          # set by ensure_tansu when the native broker binary is in place
 
 # ---------------------------------------------------------------------- ui ---
 if [ -t 2 ]; then
@@ -133,6 +137,64 @@ ensure_uv() {
     UV="$BIN_DIR/uv"
   fi
   [ -x "$UV" ] || die "uv unavailable after bootstrap"
+}
+
+# Download the pinned native Tansu broker binary into $BIN_DIR/tansu. Best
+# effort: an unsupported platform or a failed download WARNS and leaves
+# TANSU_OK=0 rather than aborting the install — calfcord can still run against a
+# Docker or remote broker. Net-new vs ensure_uv (which delegates to uv's own
+# installer): Tansu ships raw per-target tarballs, so we detect the target
+# triple, fetch, extract bin/tansu, and clear the macOS quarantine xattr that
+# would otherwise block first launch.
+ensure_tansu() {
+  if [ -x "$BIN_DIR/tansu" ]; then
+    TANSU_OK=1
+    log "using existing tansu broker at $BIN_DIR/tansu"
+    return 0
+  fi
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os="apple-darwin" ;;
+    Linux) os="unknown-linux-gnu" ;;
+    *) warn "no native tansu broker for $(uname -s); use the Docker broker (docker compose up tansu) or a remote CALF_HOST_URL"; return 0 ;;
+  esac
+  case "$(uname -m)" in
+    arm64 | aarch64) arch="aarch64" ;;
+    x86_64 | amd64) arch="x86_64" ;;
+    *) warn "no native tansu broker for CPU $(uname -m); use the Docker broker or a remote CALF_HOST_URL"; return 0 ;;
+  esac
+  local target="tansu-$arch-$os"
+  local url="https://github.com/tansu-io/tansu/releases/download/$TANSU_VERSION/$target.tar.gz"
+  log "installing tansu broker $TANSU_VERSION ($target) ..."
+  mkdir -p "$BIN_DIR"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/calfcord-tansu.XXXXXX")"
+  # Extract the whole tarball to a temp dir then move just the binary — most
+  # portable across GNU/BSD tar (avoids strip-components + leading-./ quirks).
+  if ! fetch "$url" | tar -xz -C "$tmp"; then
+    rm -rf "$tmp"
+    warn "failed to download tansu from $url; native broker unavailable (use Docker or a remote broker)"
+    return 0
+  fi
+  if [ ! -f "$tmp/bin/tansu" ]; then
+    rm -rf "$tmp"
+    warn "tansu tarball did not contain bin/tansu (release layout changed?); native broker unavailable"
+    return 0
+  fi
+  mv "$tmp/bin/tansu" "$BIN_DIR/tansu"
+  chmod +x "$BIN_DIR/tansu"
+  rm -rf "$tmp"
+  # macOS quarantines downloaded binaries; clear it so first launch isn't blocked.
+  if [ "$os" = "apple-darwin" ] && have xattr; then
+    xattr -d com.apple.quarantine "$BIN_DIR/tansu" 2>/dev/null || true
+  fi
+  if [ -x "$BIN_DIR/tansu" ]; then
+    TANSU_OK=1
+    log "tansu broker installed at $BIN_DIR/tansu"
+  else
+    warn "tansu binary not executable after install; native broker unavailable"
+  fi
+  return 0
 }
 
 # Build versions/<sha> in place (idempotent). Sets INSTALLED_DEST.
@@ -268,11 +330,27 @@ if [ "${1:-}" = "self" ]; then
   exec "$H/shims/calfcord-self" "$@"
 fi
 
+# `calfcord broker` runs the bundled native Tansu broker (a standalone Rust
+# binary, NOT a uv console script, so it short-circuits before the uv passthrough
+# below). Defaults are supplied via env so an operator's env or passthrough CLI
+# args still override them: ephemeral memory storage, advertised on
+# localhost:9092. Run it, then point the runners at CALF_HOST_URL=localhost:9092.
+if [ "${1:-}" = "broker" ]; then
+  shift
+  TANSU="$H/bin/tansu"
+  [ -x "$TANSU" ] || { echo "calfcord: native tansu broker not installed at $TANSU; re-run the installer, or use the Docker broker (docker compose up tansu)" >&2; exit 1; }
+  exec env \
+    STORAGE_ENGINE="${STORAGE_ENGINE:-memory://tansu/}" \
+    ADVERTISED_LISTENER_URL="${ADVERTISED_LISTENER_URL:-tcp://localhost:9092}" \
+    "$TANSU" broker "$@"
+fi
+
 usage() {
   cat <<'USAGE'
 usage:
   calfcord init                  guided first-run config (provider, Discord, broker)
   calfcord doctor                check config, broker, Discord token/app id, and agents
+  calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
   calfcord run <bridge|agent|router|tools|mcp>
                                  run a calfcord process in the pinned env
   calfcord agent <create|list|show|edit|set|rename|delete|tools> [<name>]
@@ -531,6 +609,7 @@ main() {
   log "installing calfcord from $REPO @ $REF"
   mkdir -p "$CALFCORD_HOME" "$VERSIONS_DIR"
   ensure_uv
+  ensure_tansu
   local sha
   sha="$(resolve_sha "$REF")"
   log "resolved $REF -> ${sha:0:12}"
@@ -544,6 +623,11 @@ main() {
   log "done."
   log "  version:  calfcord self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: calfcord self set-broker <url>)"
+  if [ "$TANSU_OK" -eq 1 ]; then
+    log "  broker:   calfcord broker   (native Tansu, ephemeral, localhost:9092)"
+  else
+    log "  broker:   native broker unavailable — use Docker (docker compose up tansu) or a remote CALF_HOST_URL"
+  fi
   if [ "$SEEDED_STARTER" -eq 1 ]; then
     log "  agents:   $AGENTS_DIR  (starter: assistant.md)"
   else

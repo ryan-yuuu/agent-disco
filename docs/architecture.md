@@ -33,7 +33,7 @@ unified A2A channel — named `private-a2a-chats` by default, overridable via
 flowchart LR
     Discord(("Discord"))
     Discord <--> Bridge[calfkit-bridge]
-    Bridge <--> Kafka{{Kafka / Redpanda}}
+    Bridge <--> Kafka{{Kafka / Tansu}}
     Kafka <--> Agents[calfkit-agent]
     Kafka <--> Router[calfkit-router]
     Kafka <--> Tools[calfkit-tools]
@@ -89,10 +89,10 @@ defaults (`agents/`, `state/agents/`, `state/workspace/`):
 
 ```bash
 uv sync                                              # install dependencies
-docker compose up -d redpanda                        # or bring your own Kafka
+calfcord broker                                      # native Tansu broker — or bring your own Kafka
 
 # Add to .env so every uv-run terminal picks it up automatically:
-echo 'CALF_HOST_URL=localhost:19092' >> .env
+echo 'CALF_HOST_URL=localhost:9092' >> .env
 
 # Each in its own terminal (or process supervisor):
 uv run calfkit-bridge
@@ -103,19 +103,23 @@ uv run calfkit-router
 uv run calfkit-tools
 ```
 
-`localhost:19092` is Redpanda's external listener (the published port in
-`docker-compose.yml`). Skip the `docker compose up -d redpanda` line if you have
-Kafka elsewhere — just point `CALF_HOST_URL` at it. Writing the value to `.env`
-rather than `export`ing it means every `uv run` terminal picks it up via
-`python-dotenv` without a per-shell re-export.
+`localhost:9092` is the default Kafka port the native Tansu broker listens on.
+Skip `calfcord broker` if you have Kafka elsewhere — just point `CALF_HOST_URL`
+at it. Tansu's default storage is ephemeral memory, so topics/messages reset on
+broker restart and calfcord re-creates the topics it needs on startup. Writing
+the value to `.env` rather than `export`ing it means every `uv run` terminal
+picks it up via `python-dotenv` without a per-shell re-export.
 
 ### Mixing modes
 
 Anything in between works too: run the bridge in compose while you iterate on the
 agent locally, or the reverse. Each process reads `.env` independently, and a
 shared Kafka broker is the only wire-format contract between them. Native-side
-processes still need `CALF_HOST_URL=localhost:19092` in `.env`; containerized
-services pick up `redpanda:9092` from compose's per-service environment block.
+processes still need `CALF_HOST_URL=localhost:9092` in `.env`; containerized
+services pick up `tansu:9092` from compose's per-service environment block. (To
+run only the broker in Docker but the calfcord processes natively on the host,
+advertise the host address: `TANSU_ADVERTISE=localhost docker compose up tansu`,
+then point the native processes at `localhost:9092`.)
 
 ### Known calfkit lifecycle limitations
 

@@ -40,21 +40,16 @@ from calfcord.cli import _envfile
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli.agent_create import create_agent
 
-# The one-liner that starts a throwaway local Redpanda matching
-# ``CALF_HOST_URL=localhost:19092``. Printed (never executed) so the operator
-# stays in control of what runs on their box — the README shows it as a
-# separate, explicit step.
-REDPANDA_DOCKER_CMD = (
-    "docker run -d --name calfcord-redpanda -p 19092:19092 \\\n"
-    "  docker.redpanda.com/redpandadata/redpanda:latest \\\n"
-    "  redpanda start --mode dev-container --smp 1 \\\n"
-    "  --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \\\n"
-    "  --advertise-kafka-addr internal://localhost:9092,external://localhost:19092"
-)
+# Commands that start a local Tansu broker matching ``CALF_HOST_URL=localhost:9092``.
+# Printed (never executed) so the operator stays in control of what runs on their
+# box. The native ``calfcord broker`` (a single Rust binary the installer
+# bootstraps — no Docker) is the default; a Docker option is kept for container users.
+TANSU_BROKER_CMD = "calfcord broker"
+TANSU_DOCKER_CMD = "docker compose up -d tansu"
 
 _DEFAULT_PROVIDER_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 _BROKER_VAR = "CALF_HOST_URL"
-_LOCAL_BROKER_URL = "localhost:19092"
+_LOCAL_BROKER_URL = "localhost:9092"
 
 
 def resolve_paths(home: Path | None) -> tuple[Path, Path]:
@@ -171,16 +166,18 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     broker_choice = prompter.select(
         "Kafka broker?",
         [
-            Choice("docker", "Start a local Redpanda in Docker (recommended)"),
+            Choice("native", "Start a local Tansu broker with `calfcord broker` (recommended)"),
             Choice("url", "I have a broker URL"),
         ],
-        default="docker",
+        default="native",
     )
-    if broker_choice == "docker":
+    if broker_choice == "native":
         _envfile.upsert(env_path, {_BROKER_VAR: _LOCAL_BROKER_URL})
-        print(f"  Set {_BROKER_VAR}={_LOCAL_BROKER_URL}. Start the broker with:")
+        print(f"  Set {_BROKER_VAR}={_LOCAL_BROKER_URL}. Start the broker in its own terminal with:")
         print()
-        print(REDPANDA_DOCKER_CMD)
+        print(f"      {TANSU_BROKER_CMD}")
+        print()
+        print(f"  (Docker users can instead run: {TANSU_DOCKER_CMD})")
     else:
         url = prompter.text(
             f"{_BROKER_VAR} (e.g. broker.example.com:9092):",
@@ -205,7 +202,7 @@ def run(prompter: Prompter, *, env_path: Path, agents_dir: Path) -> int:
     print(f"Set up agent '{name}' in {agents_dir}.")
     print()
     print("Next steps:")
-    if broker_choice == "docker":
+    if broker_choice == "native":
         print("  1. Start the broker (command above).")
         step = 2
     else:
