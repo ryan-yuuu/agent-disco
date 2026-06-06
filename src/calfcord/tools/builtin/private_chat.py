@@ -143,16 +143,23 @@ permission overwrite. Overridable via :data:`_CHANNEL_NAME_ENV`."""
 
 
 def _resolve_timeout() -> float:
-    """Read ``CALFKIT_TOOLS_TIMEOUT_SECONDS`` or fall back to the default."""
+    """Read ``CALFKIT_TOOLS_TIMEOUT_SECONDS`` or fall back to the default.
+
+    Raises ``RuntimeError`` on a malformed value: this runs inside the
+    :func:`_a2a_resource` bracket at worker startup, so a misconfiguration is an
+    infra bug (matching the bracket's ``DISCORD_GUILD_ID`` check) — not the
+    process-boot ``SystemExit`` it was when the tools runner called it directly.
+    A setup error here propagates out of the resource bracket and fails boot.
+    """
     raw = os.getenv(_TIMEOUT_ENV)
     if raw is None:
         return DEFAULT_TIMEOUT_SECONDS
     try:
         value = float(raw)
     except ValueError as e:
-        raise SystemExit(f"{_TIMEOUT_ENV} must be a number, got {raw!r}") from e
+        raise RuntimeError(f"{_TIMEOUT_ENV} must be a number, got {raw!r}") from e
     if value <= 0:
-        raise SystemExit(f"{_TIMEOUT_ENV} must be positive, got {value}")
+        raise RuntimeError(f"{_TIMEOUT_ENV} must be positive, got {value}")
     return value
 
 
@@ -244,10 +251,19 @@ def _resources_from_ctx(ctx: ToolContext, correlation_id: str) -> _A2A:
     """
     client = ctx.resources.get(_RES_CLIENT)
     discord_res = ctx.resources.get(_RES_DISCORD)
-    if client is None or not isinstance(discord_res, _A2ADiscord):
+    # Type-check BOTH halves, not just presence: a wrong-typed value (e.g. the
+    # runner keyed the wrong object under a2a_client) must fail here with the
+    # real cause, not 200 lines later as an opaque AttributeError. Name which
+    # half is missing so the operator fixes the right deployment side.
+    if not isinstance(client, Client) or not isinstance(discord_res, _A2ADiscord):
+        missing: list[str] = []
+        if not isinstance(client, Client):
+            missing.append(f"{_RES_CLIENT!r} (worker-scoped Client; tools runner must expose it)")
+        if not isinstance(discord_res, _A2ADiscord):
+            missing.append(f"{_RES_DISCORD!r} (node-scoped Discord bundle; private_chat must be hosted)")
         _raise_infra(
-            "a2a resources unavailable; the worker must host the private_chat "
-            f"node with its resource bracket (have keys: {sorted(ctx.resources)})",
+            "a2a resources unavailable; the worker did not supply "
+            f"{' and '.join(missing)} (have keys: {sorted(ctx.resources)})",
             correlation_id=correlation_id,
         )
     return _A2A(
@@ -1354,7 +1370,7 @@ async def _post_projection(
 private_chat_tool: ToolNodeDef = agent_tool(private_chat)
 
 
-@private_chat_tool.resource("a2a")
+@private_chat_tool.resource(_RES_DISCORD)
 async def _a2a_resource(ctx: ResourceSetupContext[ToolNodeDef]) -> AsyncIterator[_A2ADiscord]:
     """Open the Discord connection ``private_chat`` needs, scoped to this node.
 
@@ -1387,6 +1403,9 @@ async def _a2a_resource(ctx: ResourceSetupContext[ToolNodeDef]) -> AsyncIterator
         yield _A2ADiscord(
             persona_sender=persona_sender,
             resolver=resolver,
+            # ``persona_sender.client`` raises if start() hasn't been awaited;
+            # the ``async with`` above already awaited it, so a future lazy-init
+            # refactor fails fast here at boot rather than at first invocation.
             discord_client=persona_sender.client,
             timeout_seconds=_resolve_timeout(),
         )

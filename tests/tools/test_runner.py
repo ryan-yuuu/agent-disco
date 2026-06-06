@@ -26,6 +26,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 
 from calfcord.tools import runner
+from calfcord.tools.builtin import private_chat
 
 
 class TestResolveToolNodes:
@@ -83,20 +84,28 @@ class TestAmainExposesClientResource:
     constructs none here.
     """
 
+    def test_resource_key_matches_private_chat(self) -> None:
+        """Producer (runner) and consumer (private_chat) must agree on the
+        worker-resource key. The runner imports the constant from private_chat,
+        so they're the same object — pin that single-source-of-truth so a future
+        edit that re-hardcodes the literal here is caught (mirrors the
+        cross-module symbol-parity guards elsewhere)."""
+        assert runner._A2A_CLIENT_RESOURCE is private_chat._RES_CLIENT
+
     async def test_connected_client_is_registered_as_worker_resource(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = MagicMock(spec=Client)
+        captured: dict[str, object] = {}
 
         @asynccontextmanager
         async def _fake_connect(*args, **kwargs):
+            captured["connect_kwargs"] = kwargs
             yield client
 
         fake_client_cls = MagicMock()
         fake_client_cls.connect = _fake_connect
         monkeypatch.setattr(runner, "Client", fake_client_cls)
-
-        captured: dict[str, Worker] = {}
 
         def _make_worker(c, nodes):
             worker = MagicMock(spec=Worker)
@@ -111,6 +120,9 @@ class TestAmainExposesClientResource:
         await runner._amain()
 
         assert captured["worker"].resources["a2a_client"] is client
+        # The reply topic must be the tools-private one (NOT the bridge's
+        # discord.outbox) or target-agent ReturnCalls get double-projected.
+        assert captured["connect_kwargs"]["reply_topic"] == runner._REPLY_TOPIC
 
 
 class TestRunWorkerShutdownContract:

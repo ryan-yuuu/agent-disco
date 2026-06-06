@@ -1,11 +1,13 @@
 """Unit tests for the ``private_chat`` A2A tool.
 
 Tests call the bare async function directly with a constructed
-:class:`ToolContext`, bypassing calfkit's tool dispatch. The module-level
-singletons are populated via ``monkeypatch.setattr`` per-test (so leak is
-impossible across tests), and the phonebook arrives via ``ctx.deps`` —
-mirroring the bridge ingress, which is the tool's only source of agent
-identity.
+:class:`ToolContext`, bypassing calfkit's tool dispatch. The live A2A
+dependencies (calfkit ``Client`` + the node-scoped ``_A2ADiscord`` bundle)
+reach the body through ``ctx.resources``: the ``deps`` fixture builds the mocks
+and points the module-level ``_ACTIVE_RESOURCES`` holder (which ``_ctx`` reads)
+at them, ``monkeypatch``-restored per test so leak is impossible across tests.
+The phonebook arrives via ``ctx.deps`` — mirroring the bridge ingress, which is
+the tool's only source of agent identity.
 
 The architecture under test is the **unified-channel + per-conversation
 thread** model: every A2A invocation lives inside a Discord thread
@@ -951,6 +953,33 @@ class TestInfraErrors:
         with pytest.raises(RuntimeError, match="a2a resources unavailable"):
             await pc.private_chat(
                 _ctx(resources={"a2a_client": MagicMock(spec=Client)}), "bob", "x"
+            )
+
+    async def test_wrong_typed_a2a_bundle_raises(self) -> None:
+        """A present-but-wrong-typed Discord bundle (not an ``_A2ADiscord``) is a
+        deployment bug; the type guard must catch it rather than let an attribute
+        access fail opaquely deep in the body."""
+        with pytest.raises(RuntimeError, match="a2a resources unavailable"):
+            await pc.private_chat(
+                _ctx(resources={"a2a_client": MagicMock(spec=Client), "a2a": object()}),
+                "bob",
+                "x",
+            )
+
+    async def test_wrong_typed_client_raises(self) -> None:
+        """Symmetric to the bundle check: a present-but-wrong-typed
+        ``a2a_client`` (e.g. the runner keyed the wrong object) must fail here
+        with the real cause, not later as an opaque AttributeError on
+        ``client.execute_node``."""
+        bundle = pc._A2ADiscord(
+            persona_sender=MagicMock(spec=DiscordPersonaSender),
+            resolver=MagicMock(spec=A2AChannelResolver),
+            discord_client=MagicMock(spec=discord.Client),
+            timeout_seconds=30.0,
+        )
+        with pytest.raises(RuntimeError, match="a2a resources unavailable"):
+            await pc.private_chat(
+                _ctx(resources={"a2a_client": object(), "a2a": bundle}), "bob", "x"
             )
 
     async def test_missing_emitter_node_id_raises(self, deps: dict[str, Any]) -> None:
@@ -2033,10 +2062,10 @@ class TestA2AResource:
         persona_sender.client = rest_client
         resolver = MagicMock(spec=A2AChannelResolver)
 
-        monkeypatch.setattr(pc, "DiscordSender", MagicMock(return_value=self._acm(sender)))
-        monkeypatch.setattr(
-            pc, "DiscordPersonaSender", MagicMock(return_value=self._acm(persona_sender))
-        )
+        sender_cm = self._acm(sender)
+        persona_cm = self._acm(persona_sender)
+        monkeypatch.setattr(pc, "DiscordSender", MagicMock(return_value=sender_cm))
+        monkeypatch.setattr(pc, "DiscordPersonaSender", MagicMock(return_value=persona_cm))
         monkeypatch.setattr(pc, "A2AChannelResolver", MagicMock(return_value=resolver))
 
         agen = self._resource_genfn()(
@@ -2052,6 +2081,33 @@ class TestA2AResource:
         assert bundle.resolver is resolver
         assert bundle.discord_client is rest_client
         assert bundle.timeout_seconds == pc.DEFAULT_TIMEOUT_SECONDS
+        # Teardown is the whole point of a node-scoped bracket: at drain calfkit
+        # re-enters the generator, exiting the ``async with`` and closing both
+        # Discord connections. A regression that leaked them would skip these.
+        sender_cm.__aexit__.assert_awaited_once()
+        persona_cm.__aexit__.assert_awaited_once()
+
+    async def test_settings_validation_error_fails_fast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If ``DiscordSettings()`` itself raises (e.g. missing bot token / app
+        id — distinct from a missing guild id), the bracket must surface it at
+        startup before constructing any Discord connection, not midway."""
+        from calfkit.worker.lifecycle import ResourceSetupContext
+
+        def _boom() -> object:
+            raise RuntimeError("missing DISCORD_BOT_TOKEN")
+
+        monkeypatch.setattr(pc, "DiscordSettings", _boom)
+        sender_factory = MagicMock()
+        monkeypatch.setattr(pc, "DiscordSender", sender_factory)
+
+        agen = self._resource_genfn()(
+            ResourceSetupContext(owner=pc.private_chat_tool, resources={})
+        )
+        with pytest.raises(RuntimeError, match="DISCORD_BOT_TOKEN"):
+            await agen.__anext__()
+        sender_factory.assert_not_called()
 
 
 class TestConfigResolvers:
@@ -2068,15 +2124,18 @@ class TestConfigResolvers:
         assert pc._resolve_timeout() == 15.5
 
     def test_timeout_non_numeric_fails_fast(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Now resolved inside the @resource bracket at worker startup, so a bad
+        value raises RuntimeError (the infra-bug convention) rather than the
+        SystemExit that suited the old at-boot runner call."""
         monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "abc")
-        with pytest.raises(SystemExit, match="must be a number"):
+        with pytest.raises(RuntimeError, match="must be a number"):
             pc._resolve_timeout()
 
     def test_timeout_zero_or_negative_fails_fast(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("CALFKIT_TOOLS_TIMEOUT_SECONDS", "0")
-        with pytest.raises(SystemExit, match="must be positive"):
+        with pytest.raises(RuntimeError, match="must be positive"):
             pc._resolve_timeout()
 
     def test_category_unset_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:

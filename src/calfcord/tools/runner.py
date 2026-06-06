@@ -40,6 +40,7 @@ from dotenv import load_dotenv
 from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.tools import TOOL_REGISTRY
+from calfcord.tools.builtin.private_chat import _RES_CLIENT as _A2A_CLIENT_RESOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +49,12 @@ _REPLY_TOPIC = "calfkit.tools.reply"
 ``discord.outbox`` so target-agent ReturnCalls route here, not to the
 bridge's outbox consumer (which would project them to Discord twice)."""
 
-_A2A_CLIENT_RESOURCE = "a2a_client"
-"""Worker-resource key under which the process-wide ``Client`` is exposed to
-A2A tool bodies. Must match :data:`calfcord.tools.builtin.private_chat._RES_CLIENT`."""
+# The worker-resource key under which the process-wide ``Client`` is exposed to
+# A2A tool bodies is imported from its owner/consumer (private_chat) so producer
+# and consumer cannot drift — the same single-source-of-truth posture as the
+# cross-process topic literals in ``calfcord.topics``. The runner already
+# imports private_chat transitively via TOOL_REGISTRY discovery, so this adds no
+# new coupling across the (same-process) tools deployment.
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

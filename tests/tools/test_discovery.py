@@ -647,6 +647,49 @@ class TestCloneCarriesLifecycle:
         assert "extra" not in dict(node._resource_cms())
 
 
+def test_aliased_resource_tool_keeps_bracket_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end guard tying the ``_clone_with_name`` fix to the real path
+    that motivates it: a ``@resource``-bearing tool aliased via
+    ``CALFCORD_TOOLS_ALIAS`` through ``discover_tools`` must keep its bracket on
+    the clone. The unit tests above and the alias-expansion tests below never
+    meet — none of the alias fixtures register a ``@resource`` — so without this
+    test a regression that dropped the carry-over in the discovery path (or a
+    calfkit rename of the lifecycle ``__dict__`` keys) would pass both suites
+    while silently breaking an aliased ``private_chat``.
+    """
+    source = """\
+from calfkit.nodes import agent_tool, ToolNodeDef
+
+
+async def alpha(ctx, payload: str) -> str:
+    \"\"\"Trivial tool for tests.\"\"\"
+    return payload
+
+
+alpha_tool: ToolNodeDef = agent_tool(alpha)
+
+
+@alpha_tool.resource("conn")
+async def _alpha_conn(ctx):
+    yield object()
+"""
+    monkeypatch.setenv("CALFCORD_TOOLS_ALIAS", "alpha=alpha_eu")
+    pkg_name = "fake_pkg_alias_resource"
+    _write_package(tmp_path, pkg_name, {"alpha": source})
+    monkeypatch.syspath_prepend(str(tmp_path))
+    pkg = _import_fresh(pkg_name)
+
+    registry: dict[str, ToolNodeDef] = {}
+    discover_tools(pkg, registry)
+
+    assert "alpha_eu" in registry
+    assert "conn" in dict(registry["alpha_eu"]._resource_cms())
+    # And the original still carries it (alias is additive without an include filter).
+    assert "conn" in dict(registry["alpha"]._resource_cms())
+
+
 class TestResolveAliasMap:
     """Direct unit tests for ``_resolve_alias_map``.
 
