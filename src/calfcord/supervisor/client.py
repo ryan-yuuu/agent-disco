@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -76,13 +77,20 @@ class ProcessComposeClient:
         return {_TOKEN_HEADER: self._token} if self._token else None
 
     async def _request(
-        self, *, caller: str, method: str, route: str, content: str | None = None
+        self,
+        *,
+        caller: str,
+        method: str,
+        route: str,
+        json: Any | None = None,
     ) -> httpx.Response:
         """Issue one request and raise a context-rich ``RuntimeError`` on non-2xx.
 
         Each call opens its own client via the factory (the resolver pattern) so
         the wrapper holds no long-lived connection — the supervisor is local and
         calls are sparse, so a per-call client keeps lifetime management trivial.
+        ``json`` (the project-update path) is serialized with ``Content-Type:
+        application/json``, which the v1.110.0 server requires for ``POST /project``.
         """
         async with self._client_factory() as client:
             try:
@@ -90,7 +98,7 @@ class ProcessComposeClient:
                     method,
                     f"{self._base_url}{route}",
                     headers=self._headers(),
-                    content=content,
+                    json=json,
                 )
             except httpx.RequestError as exc:
                 # Transport failure (server not up yet / wedged / wrong port) — an
@@ -181,12 +189,25 @@ class ProcessComposeClient:
     async def update_project(self, yaml_text: str) -> Any:
         """Apply an updated project to the running supervisor (``POST /project``).
 
-        Powers the dynamic-add path (an agent authored after ``start``). The
-        body is the rendered project YAML; the supervisor reconciles it without
-        bouncing unchanged processes in steady state (the once-only first-update
-        bounce, upstream #494, is handled by the caller's priming reconcile).
+        Powers the dynamic-add path (an agent authored after ``start``) and the
+        priming reconcile. Callers pass the *rendered project YAML* (the one body
+        type the renderer produces); the v1.110.0 server's ``POST /project``
+        decodes **JSON**, not YAML — a raw-YAML body is rejected with HTTP 400 —
+        so we parse here and ship JSON, exactly as the ``process-compose project
+        update -f <yaml>`` CLI does. Confining that YAML→JSON detail to this seam
+        keeps the wire contract in one place (design §12.4, Risk #2).
+
+        A no-op reconcile answers **207 Multi-Status** with a per-process result
+        map (e.g. ``{"broker": "error"}`` for an unchanged, still-running
+        process); 207 is a 2xx, so it is returned, not raised — the supervisor
+        reconciles without bouncing unchanged processes in steady state (the
+        once-only first-update bounce, upstream #494, is absorbed by the caller's
+        priming reconcile).
         """
         response = await self._request(
-            caller="update_project", method="POST", route="/project", content=yaml_text
+            caller="update_project",
+            method="POST",
+            route="/project",
+            json=yaml.safe_load(yaml_text),
         )
         return response.json()

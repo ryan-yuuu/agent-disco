@@ -103,12 +103,29 @@ async def test_get_logs_is_get_with_offset_and_limit_in_path() -> None:
     assert seen[0].url.path == "/process/logs/assistant/100/50"
 
 
-async def test_update_project_is_post_project_with_body() -> None:
+async def test_update_project_is_post_project_with_json_body() -> None:
+    # The real v1.110.0 server rejects a raw-YAML body with HTTP 400
+    # ("invalid character 'v' ...") — POST /project decodes JSON, exactly like the
+    # `process-compose project update -f <yaml>` CLI does. So the client takes the
+    # rendered YAML (the lifecycle's one body type) and ships it as a JSON object.
+    import json
+
     seen, client = _json_client({})
-    await client.update_project("version: '0.5'\n")
+    await client.update_project("version: '0.5'\nprocesses: {}\n")
     assert seen[0].method == "POST"
     assert seen[0].url.path == "/project"
-    assert seen[0].content == b"version: '0.5'\n"
+    assert seen[0].headers["content-type"] == "application/json"
+    assert json.loads(seen[0].content) == {"version": "0.5", "processes": {}}
+
+
+async def test_update_project_accepts_207_multi_status() -> None:
+    # The real server answers a no-op reconcile with 207 Multi-Status + a
+    # per-process map (e.g. {"broker": "error"} for an unchanged process). 207 is
+    # a 2xx, so it must NOT raise — the priming reconcile depends on this.
+    _, client = _record(httpx.Response(207, json={"broker": "error"}))
+    assert await client.update_project("version: '0.5'\nprocesses: {}\n") == {
+        "broker": "error"
+    }
 
 
 # --- response parsing -------------------------------------------------------

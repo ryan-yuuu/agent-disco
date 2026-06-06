@@ -28,9 +28,11 @@ from calfcord.cli import (
     init,
     router_setup,
 )
+from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._prompts import make_prompter
 from calfcord.health.check import default_broker_probe, healthcheck
+from calfcord.supervisor import lifecycle
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -92,6 +94,16 @@ def _build_parser() -> argparse.ArgumentParser:
     router_p = sub.add_parser("router", help="Manage the ambient-message router.")
     router_sub = router_p.add_subparsers(dest="router_command", required=True)
     router_sub.add_parser("setup", help="Configure the OPTIONAL ambient router (provider, model).")
+
+    # Substrate lifecycle (design §2 / §13): bring the always-on office (broker +
+    # bridge) up detached, close it, and glance at the org board. These are thin
+    # veneers over :mod:`calfcord.supervisor.lifecycle`; the heavy contract (the
+    # detached launch flags, the #494 priming reconcile, the readiness gate) lives
+    # there. They take no flags today — the lifecycle entry points are nullary
+    # beyond the resolved install paths.
+    sub.add_parser("start", help="Open the workspace: broker + bridge, detached, health-gated.")
+    sub.add_parser("stop", help="Close the workspace (stops the supervised substrate).")
+    sub.add_parser("status", help="Show the org board: substrate + roster health.")
 
     # Hidden internal subcommand: the Process Compose readiness exec probe runs
     # ``calfcord _healthcheck <component>`` on the agent/tools hosts. No ``help=``
@@ -228,8 +240,55 @@ def _run_healthcheck(component: str) -> int:
     )
 
 
+def _run_lifecycle(command: str) -> int:
+    """Dispatch a substrate-lifecycle verb (``start`` / ``stop`` / ``status``).
+
+    The Process Compose supervisor is *install-scoped*: its lock, derived REST
+    port, generated project, and logs all live under ``$CALFCORD_HOME/state``,
+    and ``start`` supervises processes by execing the install's shim. A dev run
+    (no ``CALFCORD_HOME``) has neither a shim nor a stable home, so these verbs
+    refuse to run there with an actionable message rather than launching a
+    half-built supervisor against the project-local dev tree.
+
+    ``server_urls`` comes from ``CALF_HOST_URL`` (defaulting to ``localhost``,
+    the same default the runners and the broker healthcheck use); the roster is
+    the install's defined agents (:func:`detect_agents`, the seam ``agent list``
+    consumes) so the generated project declares one disabled slot per ``.md``.
+    The lifecycle coroutine's POSIX exit code is propagated unchanged.
+    """
+    home = _resolve_home()
+    if home is None:
+        print(
+            f"error: `calfcord {command}` needs a native install — set CALFCORD_HOME "
+            "(or run the installer) so the supervisor has a stable home and shim."
+        )
+        return 1
+
+    if command == "stop":
+        return asyncio.run(lifecycle.stop(home))
+    if command == "status":
+        return asyncio.run(lifecycle.status(home))
+
+    # ``start`` additionally needs the shim launcher every supervised process
+    # execs under, the broker URL, and the roster to declare.
+    _, agents_dir = init.resolve_paths(home)
+    launcher = str(home / "shims" / "calfcord")
+    server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+    return asyncio.run(
+        lifecycle.start(
+            home,
+            server_urls=server_urls,
+            launcher=launcher,
+            agent_ids=detect_agents(agents_dir),
+        )
+    )
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Route a parsed command to its handler (the interactive, prompt-driven part)."""
+    if args.command in ("start", "stop", "status"):
+        return _run_lifecycle(args.command)
+
     if args.command == "init":
         env_path, agents_dir = init.resolve_paths(_resolve_home())
         return init.run(make_prompter(), env_path=env_path, agents_dir=agents_dir)

@@ -16,6 +16,7 @@ import pytest
 from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, doctor, init, router_setup
 from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
+from calfcord.supervisor import lifecycle
 
 
 def test_main_help_exits_zero() -> None:
@@ -399,3 +400,181 @@ def test_main_agent_create_and_edit_dispatch(monkeypatch: pytest.MonkeyPatch, tm
     assert main(["agent", "create", "scribe"]) == 0
     assert main(["agent", "edit"]) == 0
     assert seen == [("create", "scribe"), ("edit", None)]
+
+
+# --- substrate lifecycle: start / stop / status ----------------------------
+
+
+@pytest.mark.parametrize("verb", ["start", "stop", "status"])
+def test_main_lifecycle_help_exits_zero(verb: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([verb, "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_start_dispatches_with_resolved_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ``start`` must resolve home from CALFCORD_HOME, build the launcher as the
+    # install's shim, read server_urls from CALF_HOST_URL, and enumerate the
+    # agents dir for the roster — then asyncio.run lifecycle.start and propagate
+    # its exit code.
+    home = tmp_path / "home"
+    agents = home / "agents"
+    agents.mkdir(parents=True)
+    (agents / "assistant.md").write_text(
+        "---\nname: assistant\nmodel: gpt-5-nano\n---\nYou are assistant.\n"
+    )
+    (agents / "scribe.md").write_text(
+        "---\nname: scribe\nmodel: gpt-5-nano\n---\nYou are scribe.\n"
+    )
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, server_urls, launcher, agent_ids, **kwargs):
+        captured.update(
+            home=home_arg,
+            server_urls=server_urls,
+            launcher=launcher,
+            agent_ids=list(agent_ids),
+        )
+        return 0
+
+    monkeypatch.setattr(lifecycle, "start", _start)
+    assert main(["start"]) == 0
+    assert captured["home"] == home
+    assert captured["server_urls"] == "broker.example:9092"
+    assert captured["launcher"] == str(home / "shims" / "calfcord")
+    # Roster is the sorted .md stems (the same seam `agent list` uses).
+    assert captured["agent_ids"] == ["assistant", "scribe"]
+
+
+def test_main_start_propagates_nonzero_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    (home / "agents").mkdir(parents=True)
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _start(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr(lifecycle, "start", _start)
+    assert main(["start"]) == 1
+
+
+def test_main_start_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Dev runs (no CALFCORD_HOME) have no shim to launch under, so ``start`` must
+    # fail with a clear native-install message rather than asyncio.run a half-built
+    # invocation.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("lifecycle.start must not run without a home")
+
+    monkeypatch.setattr(lifecycle, "start", _boom)
+    assert main(["start"]) == 1
+    out = capsys.readouterr().out
+    assert "native install" in out
+
+
+def test_main_start_defaults_host_url_to_localhost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    (home / "agents").mkdir(parents=True)
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALF_HOST_URL", raising=False)
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, server_urls, **kwargs):
+        captured["server_urls"] = server_urls
+        return 0
+
+    monkeypatch.setattr(lifecycle, "start", _start)
+    assert main(["start"]) == 0
+    assert captured["server_urls"] == "localhost"
+
+
+def test_main_stop_dispatches_with_resolved_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    captured: dict[str, object] = {}
+
+    async def _stop(home_arg, **kwargs):
+        captured["home"] = home_arg
+        return 0
+
+    monkeypatch.setattr(lifecycle, "stop", _stop)
+    assert main(["stop"]) == 0
+    assert captured["home"] == home
+
+
+def test_main_stop_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    async def _stop(*args, **kwargs):
+        return 3
+
+    monkeypatch.setattr(lifecycle, "stop", _stop)
+    assert main(["stop"]) == 3
+
+
+def test_main_status_dispatches_with_resolved_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    captured: dict[str, object] = {}
+
+    async def _status(home_arg, **kwargs):
+        captured["home"] = home_arg
+        return 0
+
+    monkeypatch.setattr(lifecycle, "status", _status)
+    assert main(["status"]) == 0
+    assert captured["home"] == home
+
+
+def test_main_stop_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("lifecycle.stop must not run without a home")
+
+    monkeypatch.setattr(lifecycle, "stop", _boom)
+    assert main(["stop"]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+def test_main_status_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("lifecycle.status must not run without a home")
+
+    monkeypatch.setattr(lifecycle, "status", _boom)
+    assert main(["status"]) == 1
+    assert "native install" in capsys.readouterr().out

@@ -639,12 +639,22 @@ These decisions are the contract for Phase 1+ and supersede earlier hedging.
 ### 13.1 Gate result
 - Starting a pre-declared **`disabled: true`** roster slot via `POST /process/start/{name}` does **NOT** bounce
   the substrate (proven: substrate PID unchanged). This is the onboarding path and the common case.
-- `project update -f` (for an agent authored *after* `start`) is additive + PID-preserving in steady state —
-  EXCEPT **upstream bug #494**: the *first* `project update` after `up` misclassifies unchanged processes as
-  "updated" and bounces the substrate once (reproduced 3×).
-- **Mandatory mitigation:** right after the detached `up`, issue ONE no-op `project update -f` with the
-  byte-identical YAML (a "priming reconcile") so the buggy first-update lands on a no-op. Onboarding calls
-  zero project-updates (disabled-slot start only), so TTFV is unaffected regardless.
+- **Corrected by Phase 2d real-binary testing:** an `update_project` (`POST /project`) that *changes the
+  process set* classifies **every** existing process as "updated" and **bounces the whole substrate** on
+  v1.110.0 — and this is NOT first-update-only; it persists after priming reconciles. So `project update -f`
+  is **NOT a PID-preserving way to add a late agent** (the earlier "additive in steady state" claim was wrong).
+  Two operations *are* PID-stable (both verified against the real binary): the byte-identical **priming
+  reconcile** (a no-op `update_project`, answered 207 Multi-Status), and starting a pre-declared
+  **`disabled: true` slot via `POST /process/start/{name}`** (the onboarding path).
+- **Priming reconcile is still worth it** as the once-after-`up` no-op (byte-identical → PID-stable, and it
+  consumes the buggy first-update #494). **Onboarding issues zero process-set updates** (disabled-slot start
+  only), so TTFV is unaffected.
+- **Phase-3 implication (open):** adding a *brand-new* agent authored *after* `start` cannot use
+  `update_project` without bouncing broker+bridge. Phase-3 options: accept + clearly warn of a brief substrate
+  bounce for that one action; pre-declare a generous slot set; or defer to calfkit 0.5.3 hot-reload (§10).
+  Does not affect onboarding.
+- **Wire detail learned:** `POST /project` takes a **JSON** body (YAML parsed to an object), not raw YAML (the
+  real server 400s on raw YAML); confined to `supervisor/client.py`.
 
 ### 13.2 Pinned facts
 - **Version/asset:** pin `CALFCORD_PROCESS_COMPOSE_VERSION` default `v1.110.0`; asset
