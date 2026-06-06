@@ -802,41 +802,50 @@ async def _run(settings: DiscordSettings, registry: AgentRegistry, server_urls: 
                 # redundant-by-construction here; see _provisioning.)
                 await provision_infra(calfkit_client, extra_topics=bridge_infra_topics())
 
-                async with worker:
-                    # The bridge embeds a foreground (the Discord gateway), so
-                    # it owns its own signal handling + the gateway/stop race —
-                    # start()/stop() install no signals by design.
-                    stop = asyncio.Event()
-                    loop = asyncio.get_running_loop()
-                    for sig in (signal.SIGINT, signal.SIGTERM):
-                        loop.add_signal_handler(sig, stop.set)
+                # The outer ``try/finally`` guarantees the typing notifier is
+                # closed on EVERY exit — normal SIGTERM, a gateway crash, or
+                # cancellation — while still running AFTER the broker drains
+                # (the drain completes at the ``async with worker`` __aexit__,
+                # before this finally body).
+                try:
+                    async with worker:
+                        # The bridge embeds a foreground (the Discord gateway),
+                        # so it owns its own signal handling + the gateway/stop
+                        # race — start()/stop() install no signals by design.
+                        stop = asyncio.Event()
+                        loop = asyncio.get_running_loop()
+                        for sig in (signal.SIGINT, signal.SIGTERM):
+                            loop.add_signal_handler(sig, stop.set)
 
-                    gateway_task = asyncio.create_task(gateway.start())
-                    stop_task = asyncio.create_task(stop.wait())
-                    try:
-                        await asyncio.wait(
-                            {gateway_task, stop_task},
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                    finally:
-                        # Stop the DISCORD ingress first so no new events arrive
-                        # while the broker drains. The synthesized consumer is a
-                        # second ingress; it drains with the broker (safe — the
-                        # transcript store closes last, outermost). The broker
-                        # itself drains at the ``async with worker`` exit below.
-                        for t in (gateway_task, stop_task):
-                            if not t.done():
-                                t.cancel()
-                        await gateway.close()
-                # worker.stop() drained the broker HERE — the steps/outbox
-                # consumers finished their in-flight hops, still using
-                # persona_sender + typing_notifier (both still open). Only NOW
-                # is it safe to cancel typing tasks: TypingNotifier.aclose()
-                # cancels in-flight tasks, so closing it before the drain (as
-                # the pre-0.5.4 code did) could fire a draining steps hop into a
-                # cancelled notifier. Closing after the drain eliminates that
-                # race; persona/client/store still close after this (outermost).
-                await typing_notifier.aclose()
+                        gateway_task = asyncio.create_task(gateway.start())
+                        stop_task = asyncio.create_task(stop.wait())
+                        try:
+                            await asyncio.wait(
+                                {gateway_task, stop_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            # Stop the DISCORD ingress first so no new events
+                            # arrive while the broker drains. The synthesized
+                            # consumer is a second ingress; it drains with the
+                            # broker (safe — the transcript store closes last,
+                            # outermost). The broker itself drains at the
+                            # ``async with worker`` exit below.
+                            for t in (gateway_task, stop_task):
+                                if not t.done():
+                                    t.cancel()
+                            await gateway.close()
+                finally:
+                    # worker.stop() drained the broker at the ``async with
+                    # worker`` exit above (which runs even on the exceptional
+                    # path). Closing the typing notifier HERE is both
+                    # ordering-correct — TypingNotifier.aclose() cancels in-flight
+                    # tasks, so closing it before the drain could fire a draining
+                    # steps hop into a cancelled notifier — AND unconditional: the
+                    # pre-0.5.4 code closed it in a finally, and the 0.5.4 rewrite
+                    # must not lose that guarantee. persona/client/store still
+                    # close after this (outermost).
+                    await typing_notifier.aclose()
 
 
 def main() -> None:

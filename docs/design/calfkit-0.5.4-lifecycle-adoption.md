@@ -106,7 +106,8 @@ async def provision_infra(client: Client, *, extra_topics: Iterable[str] = ()) -
     Two blind spots: the client's reply topic (calf-ai/calfkit-sdk#180 — still open in
     0.5.4) and calfcord's raw-subscriber / boot-publish / no-subscriber topics. Call once
     before worker.run()/start(); the worker provisions its own node topics during startup.
-    A no-op on an auto-creating broker (no admin client constructed when nothing is missing).
+    Idempotent (already-existing topics are reported, not recreated) — but always does one
+    admin create_topics round-trip, since the reply topic is always in the list.
     """
     await provision_extra_topics(client, [client.reply_topic, *extra_topics])
 ```

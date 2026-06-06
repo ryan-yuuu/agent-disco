@@ -1037,6 +1037,39 @@ class TestAmainPresenceHooks:
         with pytest.raises(RuntimeError, match="kafka producer down"):
             await worker.after_startup_hook(MagicMock())
 
+    async def test_after_startup_partial_announce_raises_after_earlier_agents_published(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Multi-agent boot edge (design §10 risk 4): if the announce fails at
+        agent *k* of *n*, agents ``1..k-1`` have already published "startup" and
+        the RuntimeError still propagates — no matching departures fire (the
+        failing hook's serving CM never fully enters), the boot exits non-zero,
+        and the supervisor restart re-announces. Pins the documented
+        partial-announce window so a future all-or-nothing change is a conscious,
+        test-visible decision rather than a silent behavior shift."""
+        from calfcord.agents import runner as agents_runner
+        from calfcord.control_plane import publish as cp_publish
+        from calfcord.control_plane import sink as cp_sink
+
+        client = MagicMock()
+        worker = self._patch_boot(monkeypatch, client=client, agent_ids=["echo", "scribe"])
+
+        monkeypatch.setattr(cp_sink, "register_control_sink", lambda *_a, **_k: None)
+        # echo announces successfully; scribe's publish then fails mid-loop.
+        publish = AsyncMock(side_effect=[None, RuntimeError("kafka producer down")])
+        monkeypatch.setattr(cp_publish, "publish_state_event", publish)
+        monkeypatch.setattr(agents_runner, "provision_infra", AsyncMock())
+
+        await agents_runner._amain(_parse_args([]))
+
+        with pytest.raises(RuntimeError, match="kafka producer down"):
+            await worker.after_startup_hook(MagicMock())
+
+        # echo's "startup" went out before scribe's failure aborted the hook —
+        # the partial-announce window §10 risk 4 documents as acceptable.
+        assert publish.await_count == 2
+        assert publish.await_args_list[0].args[1].agent_id == "echo"
+
     async def test_on_shutdown_publishes_departures_best_effort(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

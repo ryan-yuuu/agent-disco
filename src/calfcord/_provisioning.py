@@ -135,8 +135,11 @@ async def provision_infra(client: Client, *, extra_topics: Iterable[str] = ()) -
     * **calfcord's blind-spot topics** (``extra_topics``) — raw control-plane
       subscribers and no-subscriber callback targets (see the module docstring).
 
-    Call once BEFORE ``worker.run()`` / ``worker.start()``. A no-op on an
-    auto-creating broker (no admin client is constructed when nothing is missing).
+    Call once BEFORE ``worker.run()`` / ``worker.start()``. Idempotent, but not a
+    no-op: because the reply topic is always in the list, it always performs one
+    admin connect + ``create_topics`` round-trip — already-existing topics are
+    reported as existing, not recreated, so it is safe to call on a broker that
+    already has them (incl. an auto-creating one).
     """
     # TODO(calfkit#180): drop ``client.reply_topic`` from this list — and, when it
     # is the only entry, this whole call — once calf-ai/calfkit-sdk#180 lands and

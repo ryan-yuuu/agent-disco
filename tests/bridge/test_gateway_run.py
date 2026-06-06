@@ -262,9 +262,20 @@ class TestRunSignalRace:
 
         gateway.start = _never_returns
 
+        # Record the typing-notifier close so we can prove it runs even on the
+        # exceptional (cancelled) teardown path — it was relocated into an outer
+        # finally precisely so a crash/cancellation can't skip it.
+        notifier = MagicMock()
+        notifier.aclose = AsyncMock(side_effect=lambda: order.append("notifier.aclose"))
+
         worker = _RecordingWorker(order)
         _patch_boot(
-            monkeypatch, order=order, client=MagicMock(), worker=worker, gateway=gateway
+            monkeypatch,
+            order=order,
+            client=MagicMock(),
+            worker=worker,
+            gateway=gateway,
+            typing_notifier=notifier,
         )
 
         run_task = asyncio.create_task(
@@ -280,9 +291,12 @@ class TestRunSignalRace:
             await run_task
 
         # Even on a cancellation the inner finally + async-with-worker teardown
-        # must have stopped the ingress and drained the broker.
+        # must have stopped the ingress and drained the broker, AND the outer
+        # finally must still have closed the typing notifier — after the drain.
         assert "gateway.close" in order
         assert "drain" in order
+        assert "notifier.aclose" in order
+        assert order.index("drain") < order.index("notifier.aclose")
 
 
 class TestMainDelegatesToRun:
