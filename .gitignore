@@ -223,6 +223,7 @@ __marimo__/
 .claude/worktrees/
 .claude/settings.local.json
 CLAUDE.local.md
+.claude/*.js
 
 # Calfkit per-agent runtime state (channel subscriptions, etc.)
 state/
