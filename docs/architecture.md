@@ -121,16 +121,42 @@ run only the broker in Docker but the calfcord processes natively on the host,
 advertise the host address: `TANSU_ADVERTISE=localhost docker compose up tansu`,
 then point the native processes at `localhost:9092`.)
 
-### Known calfkit lifecycle limitations
+### Worker lifecycle (calfkit-managed)
 
-Two of these processes — the bridge and `calfkit-agent` — don't use calfkit's
-managed `Worker.run()`. They hand-roll their own start/serve/drain loop because
-that path can't yet publish lifecycle events at precise points (agent presence /
-departure announcements), co-run a second foreground service (the bridge's
-Discord gateway), or cede OS-signal ownership to the application. The constraints,
-their evidence, and the upstream feature requests tracking them
-([calfkit-sdk #165–#168](https://github.com/calf-ai/calfkit-sdk/issues/165)) are
-documented in
+All five worker-bearing processes (the four above plus the in-tools `calfkit-mcp`
+bridge) now run on calfkit's managed `Worker` lifecycle. Until calfkit 0.5.2 the
+managed `Worker.run()` path couldn't publish lifecycle events at precise points
+(agent presence / departure announcements), co-run a second foreground service
+(the bridge's Discord gateway), or cede OS-signal ownership to the application —
+so the bridge and `calfkit-agent` hand-rolled their own start/serve/drain loops.
+calfkit 0.5.2/0.5.4 closed those gaps
+([calfkit-sdk #175](https://github.com/calf-ai/calfkit-sdk/pull/175)) and
+calfcord adopted the managed path:
+
+- **The four standalone runners** (`calfkit-agent`, `calfkit-router`,
+  `calfkit-tools`, `calfkit-mcp`) call `await worker.run()`. The Worker owns the
+  whole loop: register handlers → provision node topics → `broker.start()` (block
+  until consumer groups join) → serve → drain → stop, with SIGINT/SIGTERM handled
+  for them. A clean return happens *only* on a signal; a startup failure
+  propagates as a non-zero exit for the supervisor to restart.
+- **`calfkit-agent`** publishes presence declaratively via `@worker.after_startup`
+  (announce, after the producer is live) and `@worker.on_shutdown` (depart, before
+  the drain) hooks, replacing the old imperative loop.
+- **The bridge** embeds the Discord gateway as its real foreground, so it composes
+  the worker with `async with worker:` (which installs no signal handlers — the
+  bridge keeps owning shutdown ordering) and runs the gateway alongside it under
+  its own `asyncio.wait` race.
+
+calfcord's only remaining deviation from vanilla calfkit lifecycle is
+`_provisioning.provision_infra`, called once before `run()` / `async with worker`:
+it creates the topics calfkit's node-walking provisioner can't see — the
+single-partition `agent.steps` topic, the raw control-plane topics, the
+no-subscriber ambient-discard topic, and the client reply topic (the latter
+working around the still-open
+[calfkit-sdk #180](https://github.com/calf-ai/calfkit-sdk/issues/180) on
+no-auto-create brokers). The full adoption rationale is in
+[`design/calfkit-0.5.4-lifecycle-adoption.md`](./design/calfkit-0.5.4-lifecycle-adoption.md);
+the now-closed upstream gaps it built on are in
 [`design/calfkit-worker-lifecycle-gaps.md`](./design/calfkit-worker-lifecycle-gaps.md).
 
 ## Agent-to-agent communication

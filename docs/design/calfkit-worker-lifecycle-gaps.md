@@ -1,14 +1,25 @@
 # calfkit `Worker` lifecycle gaps for embedded deployments
 
-> **Status:** filed against calfkit-sdk — Gap 1 → [#165], Gap 2 → [#166],
-> Gap 3 → [#167], Gap 4 → [#168] (companion to existing [#159]).
-> **Against:** calfkit `0.3.6`.
+> **Status: CLOSED.** All four gaps were filed against calfkit-sdk — Gap 1 →
+> [#165], Gap 2 → [#166], Gap 3 → [#167], Gap 4 → [#168] (companion to existing
+> [#159]) — and **shipped in calfkit 0.5.2/0.5.4 ([#175])**. 0.5.4 surfaced the
+> capabilities through a cleaner API than the kwargs/`serving()` proposed below:
+> Worker decorators `@worker.after_startup` / `@worker.on_shutdown` (Gap 1),
+> `await worker.start()` / `await worker.stop()` and `async with worker:` (Gaps
+> 2+3 — `start()`/`stop()`/`async with` install no signal handlers; only `run()`
+> does), and a documented contract in calfkit's `docs/worker-lifecycle.md` (Gap
+> 4). **calfcord has adopted all four** — see
+> [`calfkit-0.5.4-lifecycle-adoption.md`](./calfkit-0.5.4-lifecycle-adoption.md)
+> for the adoption plan. The proposals below are retained as the original
+> upstream feature request and as the rationale for why each gap mattered.
+> **Filed against:** calfkit `0.3.6`. **Closed in:** calfkit `0.5.4` ([#175]).
 
 [#165]: https://github.com/calf-ai/calfkit-sdk/issues/165
 [#166]: https://github.com/calf-ai/calfkit-sdk/issues/166
 [#167]: https://github.com/calf-ai/calfkit-sdk/issues/167
 [#168]: https://github.com/calf-ai/calfkit-sdk/issues/168
 [#159]: https://github.com/calf-ai/calfkit-sdk/issues/159
+[#175]: https://github.com/calf-ai/calfkit-sdk/pull/175
 > **Evidence repo:** calfcord @ `8bf1a58` (file:symbol references below).
 > **Audience:** calfkit maintainers. This doc is self-contained; no calfcord
 > knowledge is required to act on it.
@@ -56,19 +67,29 @@ There is no supported way to take (1)+(2)+(3) while keeping (4) for yourself, an
 no seam to run caller code *between* "broker started" and "begin serving", or
 *before* "broker stops".
 
-## Evidence: three run loops for five processes
+## Evidence: three run loops for five processes (resolved)
 
-calfcord runs five worker-bearing processes. Only two can use `Worker.run()`:
+> **Resolved in calfkit 0.5.4.** This section captures the pre-0.5.4 state that
+> motivated the request. With the gaps closed, all five processes now run on the
+> managed `Worker` lifecycle: the shared `run_worker_until_signal()` helper and
+> the two hand-rolled loops are gone (the four standalone runners call
+> `worker.run()`; the bridge composes `async with worker:`), so the
+> fragmentation below no longer exists. See
+> [`calfkit-0.5.4-lifecycle-adoption.md`](./calfkit-0.5.4-lifecycle-adoption.md).
 
-| Process | Run loop | Uses `Worker.run()`? | Reason it deviates |
+At the time of filing, calfcord ran five worker-bearing processes and only two
+could use `Worker.run()`:
+
+| Process | Run loop (then) | Used `Worker.run()`? | Reason it deviated |
 |---|---|---|---|
-| tools / mcp / router | shared `run_worker_until_signal()` (spawns `worker.run()` as a task) | ✅ | fits the managed path |
-| agents | bespoke loop in `agents/runner.py:_run_worker` | ❌ | must publish presence events at precise lifecycle points |
-| bridge | inline `asyncio.wait` race in `bridge/gateway.py:main` | ❌ | co-runs a second foreground service (Discord) + owns signals + composes shutdown across subsystems |
+| tools / mcp / router | shared `run_worker_until_signal()` (spawns `worker.run()` as a task) | ✅ | fit the managed path |
+| agents | bespoke loop in `agents/runner.py:_run_worker` | ❌ | had to publish presence events at precise lifecycle points |
+| bridge | inline `asyncio.wait` race in `bridge/gateway.py:main` | ❌ | co-ran a second foreground service (Discord) + owned signals + composed shutdown across subsystems |
 
 Two independent teams-of-one arrived at two different hand-rolled loops, and the
-shared helper itself only exists because `run()` doesn't surface a
-"clean-exit-without-signal is a crash" contract. The fragmentation is the symptom.
+shared helper itself only existed because `run()` didn't surface a
+"clean-exit-without-signal is a crash" contract. The fragmentation was the
+symptom — now removed by the 0.5.4 managed-lifecycle adoption.
 
 ---
 

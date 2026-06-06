@@ -835,10 +835,13 @@ the tool call, one to produce a final output after the tool result).
 - **Per-reply ambient WARN tracking.** v1 only INFO-logs at publish
   and synthesized-arrival; operators correlate by grep. A small
   in-memory expectations map could turn that into a real WARN signal.
-- **`_run_worker` extraction.** Three copies now exist
-  (`agents/runner.py`, `tools/runner.py`, `router/runner.py`). Extract
-  to a shared `calfcord/runtime.py` if the duplication
-  becomes annoying.
+- ~~**`_run_worker` extraction.** Three copies once existed
+  (`agents/runner.py`, `tools/runner.py`, `router/runner.py`).~~
+  **Resolved (calfkit 0.5.4).** The hand-rolled run loops are gone: the
+  standalone runners call `await worker.run()` and the bridge composes
+  `async with worker:`, so there is no duplicated `_run_worker` left to
+  extract (the shared `_worker_runtime.py` helper was deleted). See
+  [`design/calfkit-0.5.4-lifecycle-adoption.md`](./design/calfkit-0.5.4-lifecycle-adoption.md).
 
 ### Bigger deferrals
 
