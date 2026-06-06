@@ -28,8 +28,11 @@ from calfcord.cli import (
     agent_inspect,
     agent_lifecycle,
     agent_tools,
+    deploy,
     doctor,
+    explain,
     init,
+    logs,
     router_config,
 )
 from calfcord.cli._agents import detect_agents
@@ -157,6 +160,21 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("start", help="Open the workspace: broker + bridge, detached, health-gated.")
     sub.add_parser("stop", help="Close the workspace (stops the supervised substrate).")
     sub.add_parser("status", help="Show the org board: substrate + roster health.")
+
+    # Graduation-tier surfaces (design §2 / §11). ``explain`` is a verb group (like
+    # ``router``) so its teaching catalogue can grow; ``topology`` is the only topic
+    # today. ``logs`` and ``deploy`` are leaves with their own args.
+    explain_p = sub.add_parser("explain", help="Explain calfcord's runtime topology and why it splits.")
+    explain_sub = explain_p.add_subparsers(dest="explain_command", required=True)
+    explain_sub.add_parser("topology", help="One screen: how the pieces split, and why.")
+
+    logs_p = sub.add_parser("logs", help="Tail unified or per-component supervisor logs.")
+    logs_p.add_argument("component", nargs="?", help="Component to tail (omit for all).")
+    logs_p.add_argument("-f", "--follow", action="store_true", help="Follow log output.")
+
+    deploy_p = sub.add_parser("deploy", help="Generate systemd / k8s / Docker manifests (advanced).")
+    deploy_p.add_argument("target", choices=("systemd", "k8s", "docker"), help="Manifest format to render.")
+    deploy_p.add_argument("-o", "--output", help="Write the manifest to PATH instead of stdout.")
 
     # Hidden internal subcommand: the Process Compose readiness exec probe runs
     # ``calfcord _healthcheck <component>`` on the agent/tools hosts. No ``help=``
@@ -476,6 +494,60 @@ def _run_component(name: str, verb: str) -> int:
     return asyncio.run(component.component_stop(home, name=name))
 
 
+def _run_logs(component: str | None, *, follow: bool) -> int:
+    """Dispatch ``calfcord logs [component] [-f]`` to the log-tail module.
+
+    The supervisor writes each process's stdout/stderr under
+    ``$CALFCORD_HOME/state/logs/`` (the §13.2 ``log_location`` contract), so this
+    is install-scoped: a dev run (no ``CALFCORD_HOME``) has no such dir, and refuses
+    with the same actionable native-install message every supervisor-scoped verb
+    uses rather than tailing a nonexistent project-local log dir. The agents dir is
+    resolved from the same seam ``start``/``agent list`` use so the tail's known-name
+    set equals the roster the supervisor declares. Synchronous (no broker, no REST):
+    :func:`logs.tail` reads files straight off disk, and its ``-f`` follow loop exits
+    cleanly on Ctrl-C (``main`` maps the interrupt to 130).
+    """
+    home = _resolve_home()
+    if home is None:
+        print(
+            "error: `calfcord logs` needs a native install — set CALFCORD_HOME "
+            "(or run the installer) so the supervisor has a stable home and logs dir."
+        )
+        return 1
+    _, agents_dir = init.resolve_paths(home)
+    return logs.tail(home, agents_dir=agents_dir, component=component, follow=follow)
+
+
+def _run_deploy(target: str, *, output: str | None) -> int:
+    """Dispatch ``calfcord deploy <target> [--output PATH]`` to the manifest module.
+
+    The rendered manifests reference the install's shim launcher
+    (``<home>/shims/calfcord``), home paths, and ``config/.env``, so this is
+    install-scoped: a dev run (no ``CALFCORD_HOME``) has no shim to emit, and refuses
+    with the same actionable native-install message rather than rendering a manifest
+    that points at nothing. The roster + ``.env`` come off disk via the seams
+    ``deploy.run`` consumes (:func:`detect_agents` / :func:`read_env`), and
+    ``server_urls`` defaults to ``localhost`` — the same default the runners and
+    ``start`` use. Synchronous (pure text rendering, no broker, no REST).
+    """
+    home = _resolve_home()
+    if home is None:
+        print(
+            "error: `calfcord deploy` needs a native install — set CALFCORD_HOME "
+            "(or run the installer) so the manifest can reference a stable home and shim."
+        )
+        return 1
+    env_path, agents_dir = init.resolve_paths(home)
+    return deploy.run(
+        target,
+        home=home,
+        env_path=env_path,
+        agents_dir=agents_dir,
+        server_urls=os.getenv("CALF_HOST_URL") or "localhost",
+        out_path=Path(output) if output is not None else None,
+    )
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Route a parsed command to its handler (the interactive, prompt-driven part)."""
     if args.command in ("start", "stop", "status"):
@@ -519,6 +591,15 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     # (``tools_command`` / ``mcp_command``) carries the start/stop verb.
     if args.command in ("tools", "mcp"):
         return _run_component(args.command, getattr(args, f"{args.command}_command"))
+
+    if args.command == "explain":
+        return explain.run(args.explain_command)
+
+    if args.command == "logs":
+        return _run_logs(args.component, follow=args.follow)
+
+    if args.command == "deploy":
+        return _run_deploy(args.target, output=args.output)
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error exits

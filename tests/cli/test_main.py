@@ -18,8 +18,11 @@ from calfcord.cli import (
     agent_edit,
     agent_inspect,
     agent_lifecycle,
+    deploy,
     doctor,
+    explain,
     init,
+    logs,
     router_config,
 )
 from calfcord.cli import main as main_mod
@@ -1285,4 +1288,303 @@ def test_main_component_lifecycle_without_home_errors_native_install(
     monkeypatch.setattr(component, "component_start", _boom)
     monkeypatch.setattr(component, "component_stop", _boom)
     assert main([group, verb]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+# --- explain: read-only teaching screens (no native-install guard) ----------
+#
+# `explain` is a verb group whose only topic today is `topology`. It is a PURE
+# teaching screen — no supervisor, no broker, no install home — so it dispatches
+# without the native-install guard every supervisor-scoped verb carries, and runs
+# identically in dev and on a native install.
+
+
+def test_main_explain_requires_subcommand() -> None:
+    # `explain` is a verb group: a bare `calfcord explain` must error (exit 2),
+    # never silently no-op — the required sub-subparser enforces this so the group
+    # can grow further topics later.
+    with pytest.raises(SystemExit) as exc:
+        main(["explain"])
+    assert exc.value.code == 2
+
+
+def test_main_explain_topology_help_exits_zero() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["explain", "topology", "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_explain_topology_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `explain topology` dispatches to explain.run with the topology topic and
+    # propagates its exit code. The topic registry (explain.run) is the single
+    # source of truth for what can be taught.
+    captured: dict[str, object] = {}
+
+    def _run(topic: str) -> int:
+        captured["topic"] = topic
+        return 0
+
+    monkeypatch.setattr(explain, "run", _run)
+    assert main(["explain", "topology"]) == 0
+    assert captured["topic"] == "topology"
+
+
+def test_main_explain_propagates_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(explain, "run", lambda topic: 1)
+    assert main(["explain", "topology"]) == 1
+
+
+def test_main_explain_needs_no_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A pure teaching screen must run in a dev tree (no CALFCORD_HOME) WITHOUT the
+    # native-install guard the supervisor-scoped verbs carry.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    captured: dict[str, object] = {}
+
+    def _run(topic: str) -> int:
+        captured["topic"] = topic
+        return 0
+
+    monkeypatch.setattr(explain, "run", _run)
+    assert main(["explain", "topology"]) == 0
+    assert captured["topic"] == "topology"
+    assert "native install" not in capsys.readouterr().out
+
+
+# --- logs: tail unified or per-component supervisor logs ---------------------
+#
+# `logs [component] [-f]` reads the install's `state/logs/<name>.log` files, so it
+# carries the native-install guard (a dev run has no $CALFCORD_HOME state dir).
+# main resolves home + agents_dir once and forwards the optional component + the
+# follow flag; the file-reading logic lives in the cohesive logs module.
+
+
+def test_main_logs_help_exits_zero() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["logs", "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_logs_no_component_dispatches_with_resolved_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A bare `calfcord logs` tails ALL component logs: main resolves the install
+    # home from CALFCORD_HOME and the agents dir via init.resolve_paths, then hands
+    # logs.tail home + agents_dir with component=None and follow=False.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _tail(home_arg: Path, *, agents_dir: Path, component: str | None, follow: bool) -> int:
+        captured.update(home=home_arg, agents_dir=agents_dir, component=component, follow=follow)
+        return 0
+
+    monkeypatch.setattr(logs, "tail", _tail)
+    assert main(["logs"]) == 0
+    assert captured["home"] == home
+    assert captured["agents_dir"] == home / "agents"
+    assert captured["component"] is None
+    assert captured["follow"] is False
+
+
+def test_main_logs_named_component_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _tail(home_arg: Path, *, agents_dir: Path, component: str | None, follow: bool) -> int:
+        captured.update(component=component, follow=follow)
+        return 0
+
+    monkeypatch.setattr(logs, "tail", _tail)
+    assert main(["logs", "broker"]) == 0
+    assert captured["component"] == "broker"
+    assert captured["follow"] is False
+
+
+def test_main_logs_follow_flag_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Both `-f` and the long `--follow` form set follow=True.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _tail(home_arg: Path, *, agents_dir: Path, component: str | None, follow: bool) -> int:
+        captured.update(component=component, follow=follow)
+        return 0
+
+    monkeypatch.setattr(logs, "tail", _tail)
+    assert main(["logs", "bridge", "-f"]) == 0
+    assert captured == {"component": "bridge", "follow": True}
+    assert main(["logs", "--follow"]) == 0
+    assert captured == {"component": None, "follow": True}
+
+
+def test_main_logs_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    monkeypatch.setattr(logs, "tail", lambda *a, **k: 1)
+    assert main(["logs", "nope"]) == 1
+
+
+def test_main_logs_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `logs` reads $CALFCORD_HOME/state/logs/*, so a dev run with no home must
+    # refuse with the same actionable native-install message every supervisor-
+    # scoped verb uses — rather than reading a nonexistent dev log dir.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("logs.tail must not run without a home")
+
+    monkeypatch.setattr(logs, "tail", _boom)
+    assert main(["logs"]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+# --- deploy: generate graduation manifests ----------------------------------
+#
+# `deploy <systemd|k8s|docker> [--output PATH]` renders heavier-tier manifests
+# from the install's roster + paths. It emits the install shim path (systemd), so
+# it carries the native-install guard. main resolves home, env_path, agents_dir
+# and server_urls, then forwards target + out_path to the cohesive deploy module.
+
+
+def test_main_deploy_help_exits_zero() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["deploy", "--help"])
+    assert exc.value.code == 0
+
+
+def test_main_deploy_requires_target() -> None:
+    # `deploy` needs a positional target: a bare `calfcord deploy` must error
+    # (exit 2), never silently act on nothing.
+    with pytest.raises(SystemExit) as exc:
+        main(["deploy"])
+    assert exc.value.code == 2
+
+
+def test_main_deploy_rejects_unknown_target() -> None:
+    # The target is constrained by argparse `choices=`, so a bad target errors at
+    # parse time (exit 2) before any handler runs.
+    with pytest.raises(SystemExit) as exc:
+        main(["deploy", "nope"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("target", ["systemd", "k8s", "docker"])
+def test_main_deploy_dispatches_with_resolved_args(
+    target: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Each target resolves home from CALFCORD_HOME, env_path + agents_dir via
+    # init.resolve_paths, server_urls from CALF_HOST_URL, and forwards them (with
+    # out_path defaulting to None for stdout) to deploy.run, propagating its code.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _run(
+        target_arg: str,
+        *,
+        home: Path,
+        env_path: Path,
+        agents_dir: Path,
+        server_urls: str,
+        out_path: Path | None = None,
+    ) -> int:
+        captured.update(
+            target=target_arg,
+            home=home,
+            env_path=env_path,
+            agents_dir=agents_dir,
+            server_urls=server_urls,
+            out_path=out_path,
+        )
+        return 0
+
+    monkeypatch.setattr(deploy, "run", _run)
+    assert main(["deploy", target]) == 0
+    assert captured["target"] == target
+    assert captured["home"] == home
+    assert captured["env_path"] == home / "config" / ".env"
+    assert captured["agents_dir"] == home / "agents"
+    assert captured["server_urls"] == "broker.example:9092"
+    assert captured["out_path"] is None
+
+
+def test_main_deploy_output_flag_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `--output PATH` (and the `-o` short form) writes the manifest to a file
+    # instead of stdout: main forwards the resolved Path as out_path.
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _run(target_arg: str, *, out_path: Path | None = None, **kwargs: object) -> int:
+        captured["out_path"] = out_path
+        return 0
+
+    monkeypatch.setattr(deploy, "run", _run)
+    out_file = tmp_path / "calfcord.service"
+    assert main(["deploy", "systemd", "--output", str(out_file)]) == 0
+    assert captured["out_path"] == out_file
+    assert main(["deploy", "systemd", "-o", str(out_file)]) == 0
+    assert captured["out_path"] == out_file
+
+
+def test_main_deploy_defaults_host_url_to_localhost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # CALF_HOST_URL unset → "localhost" (the same default the runners + start use).
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALF_HOST_URL", raising=False)
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    captured: dict[str, object] = {}
+
+    def _run(target_arg: str, *, server_urls: str, **kwargs: object) -> int:
+        captured["server_urls"] = server_urls
+        return 0
+
+    monkeypatch.setattr(deploy, "run", _run)
+    assert main(["deploy", "k8s"]) == 0
+    assert captured["server_urls"] == "localhost"
+
+
+def test_main_deploy_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+    monkeypatch.setattr(deploy, "run", lambda *a, **k: 2)
+    assert main(["deploy", "systemd"]) == 2
+
+
+def test_main_deploy_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # deploy emits the install shim path (`<home>/shims/calfcord`), which has no
+    # meaning on a dev run, so a missing CALFCORD_HOME refuses with the actionable
+    # native-install message rather than rendering a manifest pointing at nothing.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("deploy.run must not run without a home")
+
+    monkeypatch.setattr(deploy, "run", _boom)
+    assert main(["deploy", "systemd"]) == 1
     assert "native install" in capsys.readouterr().out

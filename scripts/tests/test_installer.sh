@@ -70,17 +70,42 @@ printf '%s' "$out" | grep -Fq \
   "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfkit-agent --foo bar" \
   && pass "passthrough args" || fail "passthrough: $out"
 
+# Regression: `run <bridge|agent|...>` still translates to the matching calfkit-*
+# console script — adding the graduation verbs above must not perturb the `run`
+# group's verb translation.
+out="$("$B" "$C" run bridge 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfkit-bridge" \
+  && pass "dispatch run bridge -> calfkit-bridge (regression)" || fail "dispatch run bridge: $out"
+
 # Lifecycle/process-supervisor verbs route to the calfcord-cli argparse entry
 # point (same family as init|agent|router|doctor), NOT the bare `uv run`
 # passthrough — otherwise `calfcord start` would try to exec a nonexistent
 # `start` console script. `_healthcheck` is the process-compose readiness probe
 # command. Each must land as `... -- calfcord-cli <verb> ...`.
-for verb in start stop status _healthcheck; do
+for verb in start stop status _healthcheck logs explain deploy; do
   out="$("$B" "$C" "$verb" 2>&1)"
   printf '%s' "$out" | grep -Fq \
     "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli $verb" \
     && pass "dispatch $verb -> calfcord-cli" || fail "dispatch $verb: $out"
 done
+
+# The graduation-tier verbs forward their sub-args verbatim ("$@" is passed
+# through), exactly like the lifecycle verbs above: `explain topology`,
+# `logs <component> -f`, `deploy <target>` must all land as
+# `... -- calfcord-cli <verb> <args...>` so the argparse entry point sees them.
+out="$("$B" "$C" explain topology 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli explain topology" \
+  && pass "dispatch explain topology -> calfcord-cli" || fail "dispatch explain topology: $out"
+out="$("$B" "$C" logs broker -f 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli logs broker -f" \
+  && pass "dispatch logs broker -f -> calfcord-cli" || fail "dispatch logs args: $out"
+out="$("$B" "$C" deploy systemd 2>&1)"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli deploy systemd" \
+  && pass "dispatch deploy systemd -> calfcord-cli" || fail "dispatch deploy args: $out"
 
 # `tools` is a calfcord-cli verb group (the singleton tools-host lifecycle:
 # `tools start|stop`), so the whole group routes to the argparse entry point and
@@ -122,7 +147,8 @@ printf '%s' "$out" | grep -Fq \
 # Day-to-day lifecycle verbs are advertised in the shim's help text so returning
 # users discover them (help -> stdout, exit 0).
 help="$("$B" "$C" --help 2>&1)"
-for tok in "calfcord start" "calfcord stop" "calfcord status"; do
+for tok in "calfcord start" "calfcord stop" "calfcord status" \
+           "calfcord logs" "calfcord explain" "calfcord deploy"; do
   printf '%s' "$help" | grep -Fq "$tok" \
     && pass "usage lists '$tok'" || fail "usage missing '$tok': $help"
 done

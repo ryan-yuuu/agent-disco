@@ -432,6 +432,10 @@ usage:
   calfcord start                 bring up the local org (broker + bridge + roster)
   calfcord stop                  stop the local org
   calfcord status                show what's running locally
+  calfcord logs [component] [-f] tail unified or per-component logs
+  calfcord explain topology      explain how the pieces split, and why
+  calfcord deploy <systemd|k8s|docker> [-o PATH]
+                                 generate deployment manifests (advanced)
   calfcord broker                run a local Tansu broker (ephemeral, localhost:9092)
   calfcord run <bridge|agent|router|tools|mcp>
                                  run a calfcord process in the pinned env
@@ -496,9 +500,10 @@ case "${1:-}" in
   # a nonexistent `start`/`stop`/… console script). `tools` is a calfcord-cli
   # verb group (the singleton tools-host lifecycle: `tools start|stop`); `mcp` is
   # SPLIT below (lifecycle -> calfcord-cli, add/codegen -> their own scripts), so
-  # it is NOT matched here. Verbs whose calfcord-cli subcommands don't exist yet
-  # (logs) are intentionally omitted until those phases land.
-  init|agent|router|tools|doctor|_healthcheck|start|stop|status) set -- calfcord-cli "$@" ;;
+  # it is NOT matched here. The graduation-tier verbs (`explain` / `logs` /
+  # `deploy`) are calfcord-cli subcommands too — listed here so their sub-args
+  # forward verbatim to the argparse entry point instead of the `uv run` passthrough.
+  init|agent|router|tools|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in
