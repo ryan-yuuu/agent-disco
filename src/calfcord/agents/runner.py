@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from calfkit.client import Client
+from calfkit.provisioning import topics_for_nodes
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
@@ -573,20 +574,29 @@ async def _amain(args: argparse.Namespace) -> None:
         worker = Worker(calfkit_client, nodes)
         worker.register_handlers()
 
-        # Provision the agents' node topics (Worker.run()'s _on_startup hook is
-        # bypassed on this hand-rolled path), the client reply topic, and the
-        # control-plane infra topics, then start the broker — all BEFORE
-        # publish_state_event below, which raises ``IncorrectState`` unless the
-        # producer is connected, and before the broker subscribes the reply
-        # dispatcher / control sinks (which on a no-auto-create broker must
-        # already exist). See provision_and_start_broker. Decomposing Worker.run
-        # this way (rather than calling worker.run() from _run_worker) also
-        # avoids a second FastStream signal-handler set overlapping the one
+        # Provision the agents' node topics + the control-plane infra topics,
+        # then start the broker — all BEFORE publish_state_event below, which
+        # raises ``IncorrectState`` unless the producer is connected, and before
+        # the broker subscribes the reply dispatcher / control sinks (which on a
+        # no-auto-create broker must already exist).
+        #
+        # This is the HAND-ROLLED path: register_handlers() + a bare
+        # broker.start() bypass Worker.run()'s _on_startup hook, so calfkit does
+        # NOT auto-provision the node topics — we compute them ourselves with
+        # topics_for_nodes() over the same node list we built (the calfkit 0.6.0
+        # replacement for the removed Worker.provision_topics()). The client
+        # reply topic is excluded: calfkit's connect-hook auto-provisions it on
+        # the broker.start() inside provision_and_start_broker. Decomposing
+        # Worker.run this way (rather than calling worker.run() from _run_worker)
+        # also avoids a second FastStream signal-handler set overlapping the one
         # _run_worker installs.
         await provision_and_start_broker(
             calfkit_client,
-            extra_topics=agent_infra_topics(ref.current.agent_id for ref in definition_refs),
-            worker=worker,
+            server_urls,
+            [
+                *topics_for_nodes(nodes),
+                *agent_infra_topics(ref.current.agent_id for ref in definition_refs),
+            ],
         )
 
         logger.info(

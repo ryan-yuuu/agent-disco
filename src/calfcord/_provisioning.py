@@ -1,30 +1,38 @@
 """Opt-in Kafka topic-provisioning policy and blind-spot helpers for the runners.
 
-calfkit 0.5.x can create the topics a Worker's nodes reference (opt-in via
+calfkit 0.6.0 auto-provisions topics on broker start (opt-in via
 ``ProvisioningConfig`` on ``Client.connect``), letting calfcord run on brokers
-that do not auto-create topics — notably Tansu. Its provisioner walks each
-node's ``subscribe_topics``/``publish_topic`` only, which leaves gaps that
-calfcord fills explicitly:
+that do not auto-create topics — notably Tansu — but only for what its startup
+ensurer can declare:
 
-* The bridge and agents runners deliberately hand-roll ``register_handlers()`` +
-  ``broker.start()`` instead of ``Worker.run()`` (see
-  ``docs/design/calfkit-worker-lifecycle-gaps.md``), so calfkit's startup hook
-  never fires — they must call ``worker.provision_topics()`` themselves.
-* Some cross-process topics are raw FastStream broker subscribers, boot-time
-  publish targets, or no-subscriber callback topics rather than node
-  subscribe/publish topics, so ``topics_for_nodes()`` cannot see them.
-  :func:`provision_extra_topics` creates those; the per-runner sets below name
-  exactly which.
-* The client's reply topic is a framework inbox calfkit subscribes at ``connect``
-  but only provisions lazily on first invoke — never before a direct
-  ``broker.start()``. :func:`provision_and_start_broker` provisions it (plus the
-  extras and, optionally, the worker's node topics) before starting the broker,
-  so all four direct-start runners share one definition of that contract.
+* The **client reply topic** is auto-provisioned on EVERY ``broker.start()``
+  path (a connect-time pre-start hook; calf-ai/calfkit-sdk#180). calfcord no
+  longer provisions it anywhere.
+* A **Worker's node topics** are auto-provisioned only on the *managed* run
+  surfaces (``Worker.run()`` / ``start()`` / ``async with``), whose
+  ``_on_startup`` hook declares :func:`~calfkit.provisioning.topics_for_nodes`
+  into the same ensurer. The tools/mcp/router runners use ``Worker.run()`` and
+  so get their node topics for free.
+
+Two gaps remain that calfcord fills explicitly via :func:`provision_extra_topics`
+(and, before a bare start, :func:`provision_and_start_broker`):
+
+* **Hand-rolled node topics.** The bridge and agents runners deliberately
+  hand-roll ``register_handlers()`` + a bare ``broker.start()`` instead of
+  ``Worker.run()`` (see ``docs/design/calfkit-worker-lifecycle-gaps.md``), so the
+  managed ``_on_startup`` ensurer never fires — they must provision their node
+  topics themselves via :func:`~calfkit.provisioning.topics_for_nodes` over the
+  node list they built.
+* **Blind-spot topics** that ``topics_for_nodes()`` cannot see at all: raw
+  FastStream broker subscribers, boot-time publish targets, and no-subscriber
+  callback topics. The per-runner ``*_infra_topics`` sets below name exactly
+  which, and apply on the managed runners too (router) where the gap is a
+  publish-only target rather than a node topic.
 
 Why these particular extras (and not the rest of the cross-process contracts in
 ``calfcord.topics`` / ``calfcord.control_plane.topics``): every other shared
 topic is also a node ``subscribe_topics``/``publish_topic`` on the process that
-needs it created early, so the Worker already provisions it. Only the raw
+needs it created early, so the ensurer already covers it. Only the raw
 control-plane subscribers, the boot-time publishes (which cannot wait for the
 peer process to create the topic), and the no-subscriber discard topic fall
 through — those are listed here.
@@ -47,7 +55,6 @@ from calfcord.topics import AMBIENT_REPLY_DISCARD_TOPIC
 
 if TYPE_CHECKING:
     from calfkit.client import Client
-    from calfkit.worker import Worker
 
 PROVISIONING = ProvisioningConfig(enabled=True, num_partitions=1, replication_factor=1)
 """Shared opt-in provisioning policy passed to every calfcord ``Client.connect``.
@@ -98,61 +105,60 @@ def router_infra_topics() -> list[str]:
     return [AMBIENT_REPLY_DISCARD_TOPIC]
 
 
-async def provision_extra_topics(client: Client, topics: Iterable[str]) -> None:
-    """Create ``topics`` that calfkit's node-walking provisioner cannot discover.
+async def provision_extra_topics(server_urls: str | Iterable[str], topics: Iterable[str]) -> None:
+    """Create ``topics`` that calfkit's startup ensurer cannot declare.
 
     A no-op when ``topics`` is empty (no admin client is constructed). Otherwise
     de-duplicates (first-seen order) and creates them with :data:`PROVISIONING`
-    via calfkit's :class:`~calfkit.provisioning.TopicProvisioner`, reusing the
-    connected ``client``'s bootstrap URL(s) and security kwargs so creation hits
-    the same broker with the same credentials as the Worker's own provisioning
-    pass (idempotent; already-existing topics are reported, not recreated). These
-    are plain data topics, so ``framework_topics`` is empty.
+    via calfkit's :class:`~calfkit.provisioning.TopicProvisioner`, against
+    ``server_urls`` — the same bootstrap the caller passes to ``Client.connect``
+    (calfkit 0.6.0 removed ``Client.server_urls``, so the URL(s) must be threaded
+    through explicitly). calfcord configures no broker security, so no
+    ``security_kwargs`` are forwarded; the standalone provisioner connects with a
+    plaintext admin client like the rest of calfcord. Idempotent — already-existing
+    topics are reported, not recreated. These are plain data topics, so
+    ``framework_topics`` is empty.
     """
     topic_list = list(dict.fromkeys(topics))
     if not topic_list:
         return
     provisioner = TopicProvisioner.from_connection(
-        server_urls=client.server_urls,
+        server_urls=server_urls,
         config=PROVISIONING,
-        security_kwargs=client.security_kwargs,
     )
     await provisioner.provision(topic_list, framework_topics=set())
 
 
 async def provision_and_start_broker(
     client: Client,
-    *,
-    extra_topics: Iterable[str] = (),
-    worker: Worker | None = None,
+    server_urls: str | Iterable[str],
+    topics: Iterable[str],
 ) -> None:
-    """Provision everything ``client``'s subscribers consume, then start its broker.
+    """Provision ``topics`` the ensurer can't see, then bring the broker up.
 
-    The router/tools/mcp/agents runners bring their reply dispatcher up with a
-    DIRECT ``broker.start()``; on a broker that does not auto-create topics that
-    start blocks forever unless every subscribed topic already exists. Two
-    categories are invisible to calfkit's node-walking provisioner and are
-    created here first, BEFORE ``broker.start()``:
+    For the **hand-rolled** runners only (agents, bridge, probe): they wire
+    subscribers with ``register_handlers()`` / raw ``broker.subscriber(...)`` and
+    then a bare ``broker.start()``, bypassing the managed ``Worker.run()``
+    lifecycle — so calfkit's ``_on_startup`` ensurer never fires and does NOT
+    provision their node topics. On a broker that does not auto-create topics that
+    bare start blocks forever unless every subscribed topic already exists, so the
+    caller passes the full blind-spot set here — its node topics (via
+    :func:`~calfkit.provisioning.topics_for_nodes` over the node list it built)
+    plus its ``*_infra_topics`` — and they are created BEFORE the bare start.
 
-    * **the client's reply topic** — calfkit registers a reply-dispatcher
-      subscriber on ``client.reply_topic`` at ``connect`` but only provisions it
-      lazily on the first invoke/emit, which a direct ``broker.start()`` never
-      triggers (these processes may never invoke at all). This works around an
-      upstream gap: calf-ai/calfkit-sdk#180 — if calfkit provisions the reply
-      topic before a direct start, this step (and the helper) can be dropped; and
-    * **calfcord's blind-spot topics** (``extra_topics``) — raw control-plane
-      subscribers and no-subscriber callback targets (see the module docstring).
+    The client reply topic is intentionally NOT included: calfkit 0.6.0's
+    connect-hook auto-provisions it on every start path (calf-ai/calfkit-sdk#180),
+    so the broker.start() below creates it for free.
 
-    When ``worker`` is given (the hand-rolled path that bypasses ``Worker.run()``
-    and so never fires calfkit's ``_on_startup`` provisioning), the worker's own
-    node topics are provisioned too. A pure no-op on an auto-creating broker.
+    Idempotent on an auto-creating broker (every create reports "existing"). The
+    ``broker.running`` guard avoids a non-idempotent second ``start()`` if the
+    broker was already brought up (e.g. by an earlier lazy first publish).
 
-    The bridge does NOT use this helper: its reply topic ``discord.outbox`` is
-    also its outbox node's inbox (so ``worker.provision_topics()`` already covers
-    it), and it interleaves state-consumer registration before its own start.
+    The tools/mcp/router runners do NOT use this helper: they run via
+    ``Worker.run()``, whose managed lifecycle auto-provisions reply + node topics;
+    the router provisions only its publish-only blind spot separately and lets
+    ``Worker.run()`` own the broker start.
     """
-    if worker is not None:
-        await worker.provision_topics()
-    await provision_extra_topics(client, [client.reply_topic, *extra_topics])
+    await provision_extra_topics(server_urls, topics)
     if not client.broker.running:
         await client.broker.start()

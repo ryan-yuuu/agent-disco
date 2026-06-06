@@ -59,7 +59,10 @@ async def _announce_repeatedly(agent_ids: list[str], *, rounds: int, every_s: fl
     subscriber becomes live, a fresh announcement lands within its window.
     """
     async with Client.connect(BOOTSTRAP, provisioning=PROVISIONING) as pub:
-        await provision_and_start_broker(pub, extra_topics=[AGENT_STATE_TOPIC])
+        # Hand-rolled publisher: only publishes to agent.state (a blind spot for
+        # the ensurer, which sees no Worker nodes here). The reply topic
+        # auto-provisions on the bare start inside the helper.
+        await provision_and_start_broker(pub, BOOTSTRAP, [AGENT_STATE_TOPIC])
         for _ in range(rounds):
             for agent_id in agent_ids:
                 await publish_state_event(pub, _state_event(agent_id))

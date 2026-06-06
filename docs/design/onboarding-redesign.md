@@ -4,9 +4,11 @@
 **Scope:** Replace the current `init` → `doctor` → run-five-`calfkit-*`-processes onboarding with a
 guided, resumable setup that lands an agent replying in Discord, backed by a real process supervisor so
 the substrate runs detached and teammates join a live organization on demand.
-**SDK baseline:** built on the currently pinned **calfkit `0.5.1`** — no SDK version upgrade is in scope
-for this change (calfkit `0.5.3`'s node-running/hot-reload CLI was evaluated and deliberately deferred to
-keep this change self-contained; see §10).
+**SDK baseline:** **calfkit `0.6.0`** (bumped from 0.5.1 mid-implementation). 0.6.0 fixes the #180 Tansu
+provisioning hang (connect-time pre-start hook auto-provisions the reply topic) and closes the
+Worker-lifecycle gaps; the reply-topic workaround was removed and the runners simplified accordingly (see §10
+and `tests/integration/test_broker_startup_provisioning.py`). No embedded/in-memory broker — Tansu stays an
+external binary, so the §13 substrate design is unchanged.
 
 ---
 
@@ -368,10 +370,14 @@ Docs land *here*, last, so they never advertise commands that aren't shipped yet
 - `doctor` gains runtime/daemon-health checks.
 - `init` is **one continuous, resumable** session that ends **live** with a first reply; block-and-poll
   bridges the Discord detour; targeted sub-flows remain for experts.
-- **calfkit stays at 0.5.1** — no SDK upgrade in scope. The 0.5.3 node-running/hot-reload CLI is a promising
-  future simplification (could fold `agent restart` into hot reload, shrink calfcord's runners onto the
-  managed path, and dissolve the dynamic-add risk), but it requires a version bump + integration spike and
-  would complicate this change; tracked separately, not here.
+- **calfkit bumped 0.5.1 → 0.6.0** (mid-implementation): fixes the #180 provisioning hang (reply topic
+  auto-provisions via a connect-time pre-start hook) and closes the Worker-lifecycle gaps. The reply-topic
+  workaround was deleted; the runners simplified (tools/mcp/router rely on the managed `worker.run()`
+  auto-provisioning; the hand-rolled agents/bridge/probe paths provision node topics via `topics_for_nodes`
+  + their blind-spot topics through a slimmed `provision_and_start_broker`). No embedded broker — Tansu stays
+  external; §13 substrate unchanged. **Tier 3** (fold agents + bridge onto the managed Worker lifecycle to
+  collapse the hand-rolled run loops, per `docs/design/calfkit-worker-lifecycle-gaps.md`) is the follow-on
+  cleanup, done as its own workflow.
 
 **Locked after design review (detail in §12):**
 - **Restart:** bridge + agents = `restart: always` (they exit 0 on clean return; `on_failure` won't fire).

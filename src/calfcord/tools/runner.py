@@ -39,7 +39,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING, provision_and_start_broker
+from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.discord.persona import DiscordPersonaSender
@@ -169,12 +169,12 @@ async def _amain() -> None:
         DiscordPersonaSender(settings) as persona_sender,
         Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client,
     ):
-        # Provision the reply topic, then eagerly start the broker so the reply
-        # dispatcher is live before any tool tries to ``execute_node``. The
-        # worker's tool-node topics are provisioned later by Worker.run()'s
-        # startup hook (via _run_worker below).
-        await provision_and_start_broker(client)
-
+        # No manual provisioning: this runner uses the managed Worker.run()
+        # (via _run_worker below), whose _on_startup hook + the connect-time
+        # pre-start hook auto-provision the worker's tool-node topics AND the
+        # client reply topic at broker start. Tools only ``execute_node`` while
+        # consuming a message — which can only happen after Worker.run() has
+        # started the broker — so no eager start is needed for the dispatcher.
         resolver = A2AChannelResolver(
             sender,
             settings.guild_id,

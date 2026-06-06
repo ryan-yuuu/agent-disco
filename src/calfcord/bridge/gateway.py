@@ -44,9 +44,10 @@ from pathlib import Path
 
 import discord
 from calfkit.client import Client
+from calfkit.provisioning import topics_for_nodes
 from calfkit.worker import Worker
 
-from calfcord._provisioning import PROVISIONING, bridge_infra_topics, provision_extra_topics
+from calfcord._provisioning import PROVISIONING, bridge_infra_topics, provision_and_start_broker
 from calfcord.bridge.history import ChannelHistoryFetcher
 from calfcord.bridge.ingress import (
     AmbientRosterEmptyError,
@@ -891,7 +892,8 @@ def main() -> None:
                     # FastStream serve loop whose signal handling overlaps with
                     # the loop we install below. broker.start() activates every
                     # registered subscriber on its own, which is what we need.
-                    worker = Worker(calfkit_client, [consumer_node, synthesized_node, steps_node])
+                    bridge_nodes = [consumer_node, synthesized_node, steps_node]
+                    worker = Worker(calfkit_client, bridge_nodes)
                     worker.register_handlers()
 
                     # Register the state-event projection subscriber on the
@@ -917,26 +919,30 @@ def main() -> None:
                         on_departed=gateway._slash.schedule_resync,
                     )
 
-                    # Worker.run() would provision the registered nodes' topics in
-                    # its _on_startup hook, but the bridge hand-rolls
-                    # register_handlers + broker.start, so call it explicitly —
-                    # after every subscriber is registered and BEFORE broker.start
-                    # so the topics exist before consumption. Then create the
-                    # control-plane topics that node-walking can't see: agent.state
-                    # (a raw subscriber) and bridge.discovery (the discovery ping is
-                    # published at boot, before any agent may be up). No-ops on an
+                    # The bridge hand-rolls register_handlers + a bare
+                    # broker.start (it interleaves the raw state-consumer
+                    # subscriber registration above and runs its own gateway loop,
+                    # so it cannot delegate to Worker.run()). That bypasses
+                    # Worker.run()'s _on_startup hook, so calfkit does NOT
+                    # auto-provision the registered nodes' topics — compute them
+                    # ourselves with topics_for_nodes() over the same node list we
+                    # built (the calfkit 0.6.0 replacement for the removed
+                    # Worker.provision_topics()). Add the control-plane topics
+                    # node-walking can't see: agent.state (a raw subscriber) and
+                    # bridge.discovery (the discovery ping is published at boot,
+                    # before any agent may be up). The client reply topic
+                    # (discord.outbox) is the outbox node's inbox, so
+                    # topics_for_nodes already covers it. All created BEFORE the
+                    # bare broker.start() inside provision_and_start_broker (which
+                    # also auto-creates the reply topic via calfkit's connect-hook,
+                    # and guards on broker.running so faststream's non-idempotent
+                    # KafkaSubscriber.start is never called twice). No-ops on an
                     # auto-creating broker; required on Tansu.
-                    await worker.provision_topics()
-                    await provision_extra_topics(calfkit_client, bridge_infra_topics())
-
-                    # ``broker.running`` is the public-ish state flag faststream
-                    # sets True at the end of start() and False in stop(). Guarding
-                    # on it (rather than calling start() unconditionally) matters
-                    # because faststream's ``KafkaSubscriber.start`` is *not*
-                    # idempotent — a second call would build a fresh aiokafka
-                    # consumer, drop the previous reference, and re-subscribe.
-                    if not calfkit_client.broker.running:
-                        await calfkit_client.broker.start()
+                    await provision_and_start_broker(
+                        calfkit_client,
+                        server_urls,
+                        [*topics_for_nodes(bridge_nodes), *bridge_infra_topics()],
+                    )
 
                     stop = asyncio.Event()
                     loop = asyncio.get_running_loop()

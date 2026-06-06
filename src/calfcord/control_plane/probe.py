@@ -90,10 +90,14 @@ async def probe_live_roster(
             group_id=f"calfcord-probe-{uuid.uuid4().hex}",
             auto_offset_reset="latest",
         )(_collect)
-        # Provision the reply topic (calf-ai/calfkit-sdk#180) plus the two control
-        # topics this probe touches, so the direct start does not hang on Tansu.
+        # Provision the two control topics this probe touches as blind spots —
+        # agent.state (a raw subscriber registered above) and bridge.discovery
+        # (the discovery ping published below). Neither is a Worker node here, so
+        # calfkit's ensurer cannot see them; create them before the bare start so
+        # it does not hang on Tansu. The client reply topic auto-provisions via
+        # calfkit's connect-hook on the broker.start() inside this helper.
         await provision_and_start_broker(
-            client, extra_topics=[AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TOPIC]
+            client, server_urls, [AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TOPIC]
         )
         await publish_discovery_ping(client)
         await asyncio.sleep(timeout_s)

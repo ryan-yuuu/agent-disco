@@ -1,10 +1,14 @@
 """Tests for calfcord's opt-in topic-provisioning policy + blind-spot helpers.
 
-calfkit 0.5.x creates the topics a Worker's nodes reference, but it walks node
-``subscribe_topics``/``publish_topic`` only. calfcord has cross-process topics
-that are raw FastStream broker subscribers, boot-time publish targets, or
-no-subscriber callback topics — invisible to that walk. These tests pin the
-exact extra-topic sets each runner must provision, plus the shared policy.
+calfkit 0.6.0 auto-provisions the client reply topic on EVERY broker-start path
+(a connect-time pre-start hook) and the worker's node topics on the managed
+``Worker.run()``/``start()``/``async with`` paths. What it still cannot see are
+calfcord's cross-process topics that are raw FastStream broker subscribers,
+boot-time publish targets, or no-subscriber callback topics — and, on the
+hand-rolled ``register_handlers()`` + bare ``broker.start()`` paths (agents,
+bridge), the node topics too (no managed lifecycle fires the ensurer). These
+tests pin the exact extra-topic sets each runner must provision, plus the shared
+policy and the provision-before-bare-start ordering.
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ from calfcord.control_plane.topics import (
     control_topic_for,
 )
 from calfcord.topics import AMBIENT_REPLY_DISCARD_TOPIC
+
+_SERVERS = "h:9092"
 
 
 def test_provisioning_policy_enabled_single_partition() -> None:
@@ -58,14 +64,6 @@ def test_router_infra_topics_is_the_no_subscriber_discard_topic() -> None:
     assert router_infra_topics() == [AMBIENT_REPLY_DISCARD_TOPIC]
 
 
-def _fake_client(*, server_urls: str = "h:9092", security_kwargs: dict | None = None) -> MagicMock:
-    """A stand-in calfkit Client exposing only what the provisioning helpers read."""
-    client = MagicMock()
-    client.server_urls = server_urls
-    client.security_kwargs = security_kwargs if security_kwargs is not None else {}
-    return client
-
-
 async def test_provision_extra_topics_noop_on_empty_never_touches_kafka(monkeypatch) -> None:
     import calfcord._provisioning as mod
 
@@ -73,10 +71,13 @@ async def test_provision_extra_topics_noop_on_empty_never_touches_kafka(monkeypa
         raise AssertionError("must not construct a provisioner for an empty topic set")
 
     monkeypatch.setattr(mod.TopicProvisioner, "from_connection", classmethod(lambda cls, **k: boom()))
-    await provision_extra_topics(_fake_client(), [])
+    await provision_extra_topics(_SERVERS, [])
 
 
-async def test_provision_extra_topics_dedups_and_forwards_client_creds(monkeypatch) -> None:
+async def test_provision_extra_topics_dedups_and_forwards_explicit_server_urls(monkeypatch) -> None:
+    """The bootstrap URL(s) are now passed in explicitly (calfkit 0.6.0 removed
+    ``Client.server_urls``). calfcord uses no security, so no ``security_kwargs``
+    are forwarded — the provisioner reuses the broker's plaintext connection."""
     from calfkit.provisioning import ProvisionReport
 
     import calfcord._provisioning as mod
@@ -85,10 +86,9 @@ async def test_provision_extra_topics_dedups_and_forwards_client_creds(monkeypat
 
     class FakeProvisioner:
         @classmethod
-        def from_connection(cls, *, server_urls, config, security_kwargs):
+        def from_connection(cls, *, server_urls, config):
             captured["server_urls"] = server_urls
             captured["config"] = config
-            captured["security_kwargs"] = security_kwargs
             return cls()
 
         async def provision(self, topics, *, framework_topics):
@@ -97,21 +97,17 @@ async def test_provision_extra_topics_dedups_and_forwards_client_creds(monkeypat
             return ProvisionReport()
 
     monkeypatch.setattr(mod, "TopicProvisioner", FakeProvisioner)
-    # Bootstrap + security kwargs are sourced from the connected client, so the
-    # extras hit the same broker with the same credentials as the Worker's pass.
-    client = _fake_client(server_urls="h:9092", security_kwargs={"security_protocol": "SASL_SSL"})
-    await provision_extra_topics(client, ["a", "b", "a"])
+    await provision_extra_topics(_SERVERS, ["a", "b", "a"])
 
-    assert captured["server_urls"] == "h:9092"
+    assert captured["server_urls"] == _SERVERS
     assert captured["config"] is PROVISIONING
-    assert captured["security_kwargs"] == {"security_protocol": "SASL_SSL"}
     assert captured["topics"] == ["a", "b"]  # de-duplicated, first-seen order
+    assert captured["framework_topics"] == set()  # plain data topics
 
 
 def test_runner_reply_topics_are_pairwise_distinct() -> None:
-    """Each runner's reply dispatcher needs its OWN topic provisioned before its
-    broker.start() (router/tools/mcp pass these explicitly; the bridge reuses
-    discord.outbox, its outbox-consumer node topic). A collision would cross-wire
+    """Each runner's reply dispatcher needs its OWN topic. calfkit 0.6.0
+    auto-provisions each at broker start, but a collision would still cross-wire
     reply delivery between processes — pin distinctness so a copy-paste can't.
     """
     from calfcord.mcp.runner import _REPLY_TOPIC as MCP
@@ -125,14 +121,13 @@ def test_runner_reply_topics_are_pairwise_distinct() -> None:
 async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch) -> None:
     """A provisioning failure must abort startup LOUDLY (calfcord's
     infra-failure-raises rule), never be swallowed — a runner that cannot create
-    its reply/inbox topics must not come up and then silently stall on the wire
-    (the exact failure mode this migration prevents).
+    its blind-spot topics must not come up and then silently stall on the wire.
     """
     import calfcord._provisioning as mod
 
     class FailingProvisioner:
         @classmethod
-        def from_connection(cls, *, server_urls, config, security_kwargs):
+        def from_connection(cls, *, server_urls, config):
             return cls()
 
         async def provision(self, topics, *, framework_topics):
@@ -140,19 +135,20 @@ async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch
 
     monkeypatch.setattr(mod, "TopicProvisioner", FailingProvisioner)
     with pytest.raises(RuntimeError, match="broker unreachable"):
-        await provision_extra_topics(_fake_client(), ["some.topic"])
+        await provision_extra_topics(_SERVERS, ["some.topic"])
 
 
-# --- provision_and_start_broker: the provision-BEFORE-broker.start() invariant ---
-# This is the regression fence for the bug that hung router/tools/mcp/agents on a
-# no-auto-create broker. Centralizing the contract in one helper makes the
-# ordering unit-testable without a real Kafka broker (the gated integration test
-# in tests/integration/ proves the same end-to-end against live Tansu).
+# --- provision_and_start_broker: the provision-BEFORE-bare-broker.start() invariant ---
+# Regression fence for the hand-rolled (agents/bridge/probe) paths: on those, the
+# managed Worker lifecycle never fires, so calfcord must provision the node +
+# blind-spot topics itself BEFORE the bare broker.start(). (The reply topic now
+# auto-provisions via the connect-hook, so it is no longer this helper's job.)
+# Centralizing the ordering here makes it unit-testable without a real broker;
+# the gated integration test proves the same end-to-end against live Tansu.
 
 
 def _client_with_recording_broker(order: list[str], *, running: bool = False) -> MagicMock:
-    client = _fake_client()
-    client.reply_topic = "calf.reply"
+    client = MagicMock()
     client.broker.running = running
 
     async def _start() -> None:
@@ -162,47 +158,31 @@ def _client_with_recording_broker(order: list[str], *, running: bool = False) ->
     return client
 
 
-async def test_provision_and_start_broker_orders_reply_extras_then_start(monkeypatch) -> None:
+async def test_provision_and_start_broker_orders_topics_then_start(monkeypatch) -> None:
     import calfcord._provisioning as mod
 
     order: list[str] = []
 
-    async def _record_provision(client, topics) -> None:
-        order.append(f"provision:{list(topics)}")
+    async def _record_provision(server_urls, topics) -> None:
+        order.append(f"provision:{server_urls}:{list(topics)}")
 
     monkeypatch.setattr(mod, "provision_extra_topics", _record_provision)
     client = _client_with_recording_broker(order)
 
-    await mod.provision_and_start_broker(client, extra_topics=["x.topic"])
+    await mod.provision_and_start_broker(client, _SERVERS, ["node.in", "x.topic"])
 
-    # reply topic + extras provisioned first, THEN broker.start().
-    assert order == ["provision:['calf.reply', 'x.topic']", "start"]
-
-
-async def test_provision_and_start_broker_provisions_worker_node_topics_first(monkeypatch) -> None:
-    import calfcord._provisioning as mod
-
-    order: list[str] = []
-    monkeypatch.setattr(mod, "provision_extra_topics", AsyncMock(side_effect=lambda *a, **k: order.append("extras")))
-    worker = MagicMock()
-    worker.provision_topics = AsyncMock(side_effect=lambda: order.append("worker"))
-    client = _client_with_recording_broker(order)
-
-    await mod.provision_and_start_broker(client, worker=worker)
-
-    # hand-rolled path: worker node topics, then extras (reply), then start.
-    assert order == ["worker", "extras", "start"]
+    # blind-spot/node topics provisioned first, THEN bare broker.start().
+    assert order == [f"provision:{_SERVERS}:['node.in', 'x.topic']", "start"]
 
 
 async def test_provision_and_start_broker_skips_start_when_already_running(monkeypatch) -> None:
     import calfcord._provisioning as mod
 
     monkeypatch.setattr(mod, "provision_extra_topics", AsyncMock())
-    client = _fake_client()
-    client.reply_topic = "calf.reply"
+    client = MagicMock()
     client.broker.running = True
     client.broker.start = AsyncMock()
 
-    await mod.provision_and_start_broker(client)
+    await mod.provision_and_start_broker(client, _SERVERS, ["node.in"])
 
     client.broker.start.assert_not_awaited()
