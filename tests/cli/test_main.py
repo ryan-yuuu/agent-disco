@@ -293,6 +293,95 @@ def test_main_doctor_dispatches_with_resolved_paths(monkeypatch: pytest.MonkeyPa
     assert captured["offline"] is True
 
 
+# --- _healthcheck: hidden readiness-probe subcommand -----------------------
+
+
+def test_main_healthcheck_broker_exits_with_probe_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The hidden _healthcheck broker probe returns 0 when the injected production
+    # probe reports the broker reachable. main resolves home + builds the probe
+    # from CALF_HOST_URL; we patch the probe builder so no live Kafka is needed.
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CALF_HOST_URL", "localhost:9092")
+    captured: dict[str, object] = {}
+
+    async def _reachable() -> bool:
+        return True
+
+    def _builder(server_urls: str) -> object:
+        captured["server_urls"] = server_urls
+        return _reachable
+
+    monkeypatch.setattr(main_mod, "default_broker_probe", _builder)
+    assert main(["_healthcheck", "broker"]) == 0
+    # The probe is built from CALF_HOST_URL, exactly as the runners read it.
+    assert captured["server_urls"] == "localhost:9092"
+
+
+def test_main_healthcheck_broker_unreachable_exits_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CALF_HOST_URL", "localhost:9092")
+
+    async def _unreachable() -> bool:
+        return False
+
+    monkeypatch.setattr(main_mod, "default_broker_probe", lambda server_urls: _unreachable)
+    assert main(["_healthcheck", "broker"]) == 1
+
+
+def test_main_healthcheck_defaults_host_url_to_localhost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # CALF_HOST_URL unset → "localhost" (same default the runners use), so the
+    # probe is still buildable on a bare dev box.
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CALF_HOST_URL", raising=False)
+    captured: dict[str, object] = {}
+
+    async def _reachable() -> bool:
+        return True
+
+    def _builder(server_urls: str) -> object:
+        captured["server_urls"] = server_urls
+        return _reachable
+
+    monkeypatch.setattr(main_mod, "default_broker_probe", _builder)
+    assert main(["_healthcheck", "broker"]) == 0
+    assert captured["server_urls"] == "localhost"
+
+
+def test_main_healthcheck_bridge_reads_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A non-broker component is judged by heartbeat freshness under the resolved
+    # home's state/health/ — no broker probe is consulted at all. A fresh beat → 0.
+    from datetime import UTC, datetime
+
+    from calfcord.health.heartbeat import write_beat
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    write_beat(home, "bridge", status="healthy", now=datetime.now(UTC))
+
+    # Building a broker probe for a non-broker check would be a bug; make the
+    # builder explode so the test fails loudly if the broker path is taken.
+    def _explode(server_urls: str) -> object:
+        raise AssertionError("broker probe must not be built for a heartbeat check")
+
+    monkeypatch.setattr(main_mod, "default_broker_probe", _explode)
+    assert main(["_healthcheck", "bridge"]) == 0
+
+
+def test_main_healthcheck_bridge_missing_beat_exits_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "home"))
+    assert main(["_healthcheck", "bridge"]) == 1
+
+
 def test_main_agent_create_and_edit_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_dirs(monkeypatch, tmp_path)
     seen: list[tuple[str, str | None]] = []

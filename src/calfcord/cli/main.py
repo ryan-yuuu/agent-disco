@@ -12,8 +12,10 @@ register additional subparsers; the shim only needs to know the top-level verb
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from calfcord.cli import (
@@ -28,6 +30,7 @@ from calfcord.cli import (
 )
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._prompts import make_prompter
+from calfcord.health.check import default_broker_probe, healthcheck
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -89,6 +92,12 @@ def _build_parser() -> argparse.ArgumentParser:
     router_p = sub.add_parser("router", help="Manage the ambient-message router.")
     router_sub = router_p.add_subparsers(dest="router_command", required=True)
     router_sub.add_parser("setup", help="Configure the OPTIONAL ambient router (provider, model).")
+
+    # Hidden internal subcommand: the Process Compose readiness exec probe runs
+    # ``calfcord _healthcheck <component>`` on the agent/tools hosts. No ``help=``
+    # so it stays out of the user-facing command listing (design §4.2 / §13.2).
+    health_p = sub.add_parser("_healthcheck")
+    health_p.add_argument("component", help="The component to probe (broker, bridge, an agent id, ...).")
     return parser
 
 
@@ -193,6 +202,32 @@ def _run_agent(args: argparse.Namespace) -> int:
     return agent_tools.run(make_prompter(), agents_dir=agents_dir, name=args.name)
 
 
+def _run_healthcheck(component: str) -> int:
+    """Run the readiness probe for ``component`` and return its exit code.
+
+    The Process Compose exec probe shells out to ``calfcord _healthcheck
+    <component>`` on the agent/tools hosts (design §4.2 / §13.2). The broker probe
+    is metadata reachability built from ``CALF_HOST_URL`` (same default the runners
+    use); every other component is judged by heartbeat freshness under the resolved
+    home's ``state/health/``. ``now`` is the real clock — freshness is wall-time
+    here, injectable only in the unit-tested :func:`~calfcord.health.check.healthcheck`.
+    """
+    home = _resolve_home() or Path()
+    # Only the broker path needs (and awaits) a broker probe; a heartbeat check
+    # must not pay the admin-client cost, so the probe is built lazily and the
+    # heartbeat path gets a stub that is never awaited.
+    if component == "broker":
+        server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+        broker_probe = default_broker_probe(server_urls)
+    else:
+        async def broker_probe() -> bool:
+            raise AssertionError("broker probe awaited for a non-broker component")
+
+    return asyncio.run(
+        healthcheck(home, component, now=datetime.now(UTC), broker_probe=broker_probe)
+    )
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Route a parsed command to its handler (the interactive, prompt-driven part)."""
     if args.command == "init":
@@ -206,6 +241,9 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     if args.command == "agent":
         return _run_agent(args)
+
+    if args.command == "_healthcheck":
+        return _run_healthcheck(args.component)
 
     if args.command == "router" and args.router_command == "setup":
         # Reuse init's path resolution so the router wizard writes the same
