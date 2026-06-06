@@ -34,8 +34,7 @@ from calfkit.mcp.exceptions import McpConfigError
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING, provision_and_start_broker
-from calfcord._worker_runtime import run_worker_until_signal
+from calfcord._provisioning import PROVISIONING, provision_infra
 from calfcord.mcp.config import load_mcp_servers, resolve_config_path
 
 logger = logging.getLogger(__name__)
@@ -100,11 +99,10 @@ async def _amain() -> None:
     mcp_nodes = _resolve_mcp_nodes(servers, config_path)
 
     async with Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client:
-        # Provision the reply topic, then eagerly start the broker so the reply
-        # dispatcher is live before any node awaits a reply. The worker's
-        # MCP-bridge node topics are provisioned later by Worker.run()'s startup
-        # hook (via run_worker_until_signal below).
-        await provision_and_start_broker(client)
+        # Provision the client reply topic (the calfkit#180 blind spot) before
+        # handing the lifecycle to Worker.run(), which owns broker.start() and
+        # provisions this worker's MCP-bridge node topics itself during startup.
+        await provision_infra(client)
 
         worker = Worker(client, mcp_nodes)
         logger.info(
@@ -114,7 +112,7 @@ async def _amain() -> None:
             _REPLY_TOPIC,
             config_path,
         )
-        await run_worker_until_signal(worker, drain_label="mcp bridge worker")
+        await worker.run()
 
 
 def main() -> None:

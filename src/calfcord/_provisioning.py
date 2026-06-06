@@ -120,6 +120,30 @@ async def provision_extra_topics(client: Client, topics: Iterable[str]) -> None:
     await provisioner.provision(topic_list, framework_topics=set())
 
 
+async def provision_infra(client: Client, *, extra_topics: Iterable[str] = ()) -> None:
+    """Create the topics calfkit's node-walking provisioner can't discover, before broker start.
+
+    The provision-only seam for the 0.5.4 managed-worker lifecycle: under
+    ``Worker.run()`` / ``Worker.start()`` the worker owns ``broker.start()`` and
+    provisions its own node topics during startup, so this helper fills only the two
+    blind spots calfkit cannot see:
+
+    * **the client's reply topic** — calfkit registers a reply-dispatcher subscriber
+      on ``client.reply_topic`` at ``connect`` but provisions it only lazily on the
+      first invoke, never before the direct ``broker.start()`` the worker performs.
+      On a no-auto-create broker that start hangs forever unless the topic exists
+      first (TODO(calfkit#180): drop this line — and this whole reply-topic dance —
+      once calf-ai/calfkit-sdk#180 lands and calfkit provisions the reply topic
+      before a direct start); and
+    * **calfcord's blind-spot topics** (``extra_topics``) — raw control-plane
+      subscribers and no-subscriber callback targets (see the module docstring).
+
+    Call once BEFORE ``worker.run()`` / ``worker.start()``. A no-op on an
+    auto-creating broker (no admin client is constructed when nothing is missing).
+    """
+    await provision_extra_topics(client, [client.reply_topic, *extra_topics])
+
+
 async def provision_and_start_broker(
     client: Client,
     *,

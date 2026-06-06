@@ -18,6 +18,7 @@ from calfcord._provisioning import (
     agent_infra_topics,
     bridge_infra_topics,
     provision_extra_topics,
+    provision_infra,
     router_infra_topics,
 )
 from calfcord.control_plane.topics import (
@@ -141,6 +142,65 @@ async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch
     monkeypatch.setattr(mod, "TopicProvisioner", FailingProvisioner)
     with pytest.raises(RuntimeError, match="broker unreachable"):
         await provision_extra_topics(_fake_client(), ["some.topic"])
+
+
+# --- provision_infra: provision-only seam for the 0.5.4 worker.run() path ---
+# Under the managed worker.run()/start() lifecycle the Worker owns broker.start(),
+# so provision_infra ONLY fills the calfkit blind spots (the client reply topic for
+# calf-ai/calfkit-sdk#180, plus calfcord's raw-subscriber/boot-publish extras). It
+# must never touch the broker — that is the worker's job now.
+
+
+async def test_provision_infra_provisions_reply_topic_only_by_default(monkeypatch) -> None:
+    import calfcord._provisioning as mod
+
+    captured: dict = {}
+
+    async def _record_provision(client, topics) -> None:
+        captured["topics"] = list(topics)
+
+    monkeypatch.setattr(mod, "provision_extra_topics", _record_provision)
+    client = _fake_client()
+    client.reply_topic = "calf.reply"
+
+    await provision_infra(client)
+
+    # Default: just the client reply topic (the #180 blind spot).
+    assert captured["topics"] == ["calf.reply"]
+
+
+async def test_provision_infra_prepends_reply_topic_before_extras(monkeypatch) -> None:
+    import calfcord._provisioning as mod
+
+    captured: dict = {}
+
+    async def _record_provision(client, topics) -> None:
+        captured["topics"] = list(topics)
+
+    monkeypatch.setattr(mod, "provision_extra_topics", _record_provision)
+    client = _fake_client()
+    client.reply_topic = "calf.reply"
+
+    await provision_infra(client, extra_topics=["x.topic", "y.topic"])
+
+    # Reply topic first, then the runner's blind-spot extras, in order.
+    assert captured["topics"] == ["calf.reply", "x.topic", "y.topic"]
+
+
+async def test_provision_infra_never_starts_the_broker(monkeypatch) -> None:
+    """The 0.5.4 contract: the Worker owns broker.start(). provision_infra must
+    NOT touch the broker — a stray start here would re-introduce the #180 reply-topic
+    hang (a direct start before any invoke) on a no-auto-create broker."""
+    import calfcord._provisioning as mod
+
+    monkeypatch.setattr(mod, "provision_extra_topics", AsyncMock())
+    client = _fake_client()
+    client.reply_topic = "calf.reply"
+    client.broker.start = AsyncMock()
+
+    await provision_infra(client)
+
+    client.broker.start.assert_not_awaited()
 
 
 # --- provision_and_start_broker: the provision-BEFORE-broker.start() invariant ---

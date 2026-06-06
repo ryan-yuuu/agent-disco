@@ -1,21 +1,20 @@
 """Unit tests for ``calfkit-tools`` runner helpers.
 
 Covers the pure helpers (``_resolve_timeout``, ``_resolve_channel_name``,
-``_resolve_category_name``, ``_resolve_tool_nodes``) and the
-``_run_worker`` shutdown contract. The full ``_amain`` requires Discord
-auth, a Kafka broker, and an agents directory — too heavy for a unit
-test. Operators will see boot failures of those in stderr; the
-contracts worth pinning are the local validation helpers, the
-init-call shape (so private_chat receives the fetcher), and the
-supervisor-restart invariant.
+``_resolve_category_name``, ``_resolve_tool_nodes``) and the boot wiring
+(``provision_infra`` then ``worker.run()``). The full ``_amain`` requires
+Discord auth, a Kafka broker, and an agents directory — too heavy for a unit
+test. Operators will see boot failures of those in stderr; the contracts worth
+pinning are the local validation helpers, the init-call shape (so private_chat
+receives the fetcher), and the provision-before-run lifecycle ordering.
 """
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from calfkit.worker import Worker
 
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.tools import runner
@@ -224,32 +223,95 @@ class TestInitWiringFromRunner:
         assert private_chat._discord_client is discord_client
 
 
-class TestRunWorkerShutdownContract:
-    """The supervisor-restart invariant: any non-signal exit from the
-    worker must raise out of ``_run_worker`` so the process exits
-    non-zero. Pins both the crash path and the unexpected-clean-return
-    path; without one of these tests a future refactor that re-swallowed
-    either case would not surface."""
+class TestAmainBootWiring:
+    """The 0.5.4 boot contract: ``_amain`` provisions calfcord's blind-spot
+    topics (``provision_infra`` — the #180 reply topic) BEFORE handing the
+    lifecycle to the managed ``worker.run()``. The Worker now owns signals +
+    broker start/stop, so the runner no longer hand-rolls a shutdown loop; what
+    must stay pinned is the provision-before-run ordering (a stray run before
+    provisioning would hang the reply dispatcher on a no-auto-create broker).
+    """
 
-    async def test_worker_crash_propagates(self) -> None:
-        """An exception inside ``worker.run()`` must escape ``_run_worker``
-        so the surrounding ``asyncio.run`` exits non-zero."""
-        crash = ValueError("simulated kafka drop")
-        worker = MagicMock(spec=Worker)
-        worker.run = AsyncMock(side_effect=crash)
+    async def test_provision_infra_runs_before_worker_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DISCORD_GUILD_ID", "123")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "t")
+
+        order: list[str] = []
+        client = MagicMock()
+
+        @asynccontextmanager
+        async def _fake_sender(_settings):
+            yield MagicMock()
+
+        @asynccontextmanager
+        async def _fake_persona(_settings):
+            persona = MagicMock()
+            persona.client = MagicMock()
+            yield persona
+
+        @asynccontextmanager
+        async def _fake_connect(*_a, **_k):
+            yield client
+
+        worker = MagicMock()
+
+        async def _run() -> None:
+            order.append("run")
+
+        worker.run = _run
+
+        async def _provision(_client) -> None:
+            order.append("provision")
+
+        monkeypatch.setattr(runner, "DiscordSender", lambda _s: _fake_sender(_s))
+        monkeypatch.setattr(runner, "DiscordPersonaSender", lambda _s: _fake_persona(_s))
+        monkeypatch.setattr(runner.Client, "connect", lambda *a, **k: _fake_connect(*a, **k))
+        monkeypatch.setattr(runner, "provision_infra", _provision)
+        monkeypatch.setattr(runner, "Worker", lambda *_a, **_k: worker)
+        monkeypatch.setattr(runner.private_chat, "init", lambda **_k: None)
+        monkeypatch.setattr(runner, "A2AChannelResolver", lambda *_a, **_k: MagicMock())
+        monkeypatch.setattr(runner, "_resolve_tool_nodes", lambda _r: [MagicMock()])
+
+        await runner._amain()
+
+        assert order == ["provision", "run"]
+
+    async def test_worker_run_crash_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A crash inside the managed ``worker.run()`` must escape ``_amain`` so
+        the surrounding ``asyncio.run`` exits non-zero and the supervisor
+        restarts the process — the lifecycle guarantee is now native to
+        ``Worker.run()``, but the runner must not swallow it."""
+        monkeypatch.setenv("DISCORD_GUILD_ID", "123")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "t")
+
+        @asynccontextmanager
+        async def _fake_sender(_settings):
+            yield MagicMock()
+
+        @asynccontextmanager
+        async def _fake_persona(_settings):
+            persona = MagicMock()
+            persona.client = MagicMock()
+            yield persona
+
+        @asynccontextmanager
+        async def _fake_connect(*_a, **_k):
+            yield MagicMock()
+
+        worker = MagicMock()
+        worker.run = AsyncMock(side_effect=ValueError("simulated kafka drop"))
+
+        monkeypatch.setattr(runner, "DiscordSender", lambda _s: _fake_sender(_s))
+        monkeypatch.setattr(runner, "DiscordPersonaSender", lambda _s: _fake_persona(_s))
+        monkeypatch.setattr(runner.Client, "connect", lambda *a, **k: _fake_connect(*a, **k))
+        monkeypatch.setattr(runner, "provision_infra", AsyncMock())
+        monkeypatch.setattr(runner, "Worker", lambda *_a, **_k: worker)
+        monkeypatch.setattr(runner.private_chat, "init", lambda **_k: None)
+        monkeypatch.setattr(runner, "A2AChannelResolver", lambda *_a, **_k: MagicMock())
+        monkeypatch.setattr(runner, "_resolve_tool_nodes", lambda _r: [MagicMock()])
+
         with pytest.raises(ValueError, match="simulated kafka drop"):
-            await runner._run_worker(worker)
-
-    async def test_worker_unexpected_clean_return_raises(self) -> None:
-        """A clean ``worker.run()`` return without a shutdown signal is
-        unexpected — must synthesize a RuntimeError so supervisors
-        configured for ``Restart=on-failure`` restart us."""
-        worker = MagicMock(spec=Worker)
-
-        async def returns_immediately() -> None:
-            return None
-
-        worker.run = AsyncMock(side_effect=returns_immediately)
-        with pytest.raises(RuntimeError, match="returned unexpectedly"):
-            await runner._run_worker(worker)
+            await runner._amain()
 

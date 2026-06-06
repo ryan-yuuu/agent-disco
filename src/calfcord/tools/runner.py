@@ -39,8 +39,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING, provision_and_start_broker
-from calfcord._worker_runtime import run_worker_until_signal
+from calfcord._provisioning import PROVISIONING, provision_infra
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.discord.sender import DiscordSender
@@ -140,18 +139,6 @@ def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
     return nodes
 
 
-async def _run_worker(worker: Worker) -> None:
-    """Run ``worker`` until SIGINT/SIGTERM, then drain cleanly.
-
-    Delegates to the shared :func:`calfcord._worker_runtime.run_worker_until_signal`
-    so the shutdown contract (signal-driven drain plus the
-    "clean return without a signal is a crash" supervisor invariant) is
-    defined in exactly one place across runners. Kept as a thin local
-    wrapper because existing tests reference ``_run_worker`` by name.
-    """
-    await run_worker_until_signal(worker, drain_label="tools worker")
-
-
 async def _amain() -> None:
     settings = DiscordSettings()  # type: ignore[call-arg]
     if settings.guild_id is None:
@@ -169,11 +156,10 @@ async def _amain() -> None:
         DiscordPersonaSender(settings) as persona_sender,
         Client.connect(server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING) as client,
     ):
-        # Provision the reply topic, then eagerly start the broker so the reply
-        # dispatcher is live before any tool tries to ``execute_node``. The
-        # worker's tool-node topics are provisioned later by Worker.run()'s
-        # startup hook (via _run_worker below).
-        await provision_and_start_broker(client)
+        # Provision the client reply topic (the calfkit#180 blind spot) before
+        # handing the lifecycle to Worker.run(), which owns broker.start() and
+        # provisions this worker's tool-node topics itself during startup.
+        await provision_infra(client)
 
         resolver = A2AChannelResolver(
             sender,
@@ -210,7 +196,7 @@ async def _amain() -> None:
             category_name,
             os.environ.get("CALFCORD_TOOLS_INCLUDE") or "<unset>",
         )
-        await _run_worker(worker)
+        await worker.run()
 
 
 def main() -> None:
