@@ -121,16 +121,30 @@ run only the broker in Docker but the calfcord processes natively on the host,
 advertise the host address: `TANSU_ADVERTISE=localhost docker compose up tansu`,
 then point the native processes at `localhost:9092`.)
 
-### Known calfkit lifecycle limitations
+### Worker lifecycle
 
-Two of these processes — the bridge and `calfkit-agent` — don't use calfkit's
-managed `Worker.run()`. They hand-roll their own start/serve/drain loop because
-that path can't yet publish lifecycle events at precise points (agent presence /
-departure announcements), co-run a second foreground service (the bridge's
-Discord gateway), or cede OS-signal ownership to the application. The constraints,
-their evidence, and the upstream feature requests tracking them
-([calfkit-sdk #165–#168](https://github.com/calf-ai/calfkit-sdk/issues/165)) are
-documented in
+Every Kafka-hosting process now runs on calfkit 0.6.0's **managed** `Worker`
+lifecycle, so start/serve/drain (and topic provisioning) live in one place
+instead of five hand-rolled loops:
+
+- **tools / router / `calfkit-agent`** use the blocking `Worker.run()` (it owns
+  the foreground and OS signals) via the shared
+  [`run_worker_until_signal`](../src/calfcord/_worker_runtime.py) helper.
+  `calfkit-agent` publishes its presence / departure control-plane events from
+  `after_startup` / `on_shutdown` lifecycle hooks (producer live at exactly those
+  points), and declares its blind-spot topics from an `on_startup` hook.
+- **the bridge** is the single deliberate **embedded** variant: it co-runs the
+  Discord gateway (a foreground WebSocket) and owns SIGINT/SIGTERM, so it drives
+  the worker via the non-blocking, signal-free `Worker.start()` / `Worker.stop()`
+  surface, keeping its own signal handling and ordered shutdown. Its blind-spot
+  topics are declared from an `on_startup` hook, and the raw state-consumer
+  subscriber is registered before `start()` so every consumer group joins before
+  the gateway accepts Discord events (register-before-serve).
+
+The historical analysis of the gaps that forced the old hand-rolled loops — and
+the upstream feature requests that closed them
+([calfkit-sdk #165–#168](https://github.com/calf-ai/calfkit-sdk/issues/165)) —
+is kept for reference in
 [`design/calfkit-worker-lifecycle-gaps.md`](./design/calfkit-worker-lifecycle-gaps.md).
 
 ## Agent-to-agent communication

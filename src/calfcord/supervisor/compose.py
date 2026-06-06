@@ -23,10 +23,14 @@ The shape is the §13.2 Phase-0 contract, pinned against Process Compose
 * ``bridge`` and roster members gate on the broker via ``depends_on``
   (``process_healthy``); readiness is an ``exec`` probe (the bridge has no HTTP
   server) calling ``<launcher> _healthcheck <component>``.
-* ``restart: always`` for the substrate + agents (they exit 0 on a clean,
-  signal-less return, so ``on_failure`` would never fire); ``on_failure`` for
-  ``tools`` / ``router`` / ``mcp`` (they force a non-zero exit via
-  ``run_worker_until_signal``). Never ``exit_on_failure``.
+* ``restart: always`` for the substrate (``broker``, ``bridge``); ``on_failure``
+  for the whole roster — every agent *and* ``tools`` / ``router`` / ``mcp`` — which
+  now all run via ``run_worker_until_signal`` and therefore force a non-zero exit
+  on any uncommanded exit (a crash *or* a clean signal-less return), while an
+  operator-commanded ``stop`` is suppressed from restart by Process Compose
+  regardless of exit code. (The bridge stays ``always``: it owns its own signals
+  and exits 0 on a clean shutdown, so ``on_failure`` would never fire to recover
+  it from an uncommanded clean return.) Never ``exit_on_failure``.
 
 The REST port is intentionally absent: it is a flag to ``process-compose up``
 (``-p <PC_PORT>``), not a field in the project file (design §13.2).
@@ -181,16 +185,17 @@ def build_compose_project(
     )
 
     # Roster — declared disabled; each member clocks in on an explicit start and
-    # gates on the broker being healthy. Agents exit 0 on a clean return so they
-    # need restart: always; tools/router/mcp force a non-zero exit so on_failure
-    # restarts them correctly.
+    # gates on the broker being healthy. Every roster member (agents *and*
+    # tools/router/mcp) runs via run_worker_until_signal, which forces a non-zero
+    # exit on any uncommanded exit, so on_failure restarts a crash while an
+    # operator-commanded stop is suppressed from restart by Process Compose.
     for agent_id in agent_ids:
         processes[agent_id] = _process(
             command=f"{launcher} run agent {agent_id}",
             home=home,
             name=agent_id,
             disabled=True,
-            restart_policy="always",
+            restart_policy="on_failure",
             depends_on={"broker": _HEALTHY},
         )
 

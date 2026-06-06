@@ -11,23 +11,30 @@ ensurer can declare:
 * A **Worker's node topics** are auto-provisioned only on the *managed* run
   surfaces (``Worker.run()`` / ``start()`` / ``async with``), whose
   ``_on_startup`` hook declares :func:`~calfkit.provisioning.topics_for_nodes`
-  into the same ensurer. The tools/mcp/router runners use ``Worker.run()`` and
-  so get their node topics for free.
+  into the same ensurer. The tools/mcp/router/agents runners use ``Worker.run()``
+  and the bridge uses the embedded ``Worker.start()`` — all managed surfaces — so
+  every Worker-hosted process gets its node topics for free.
 
 Two gaps remain that calfcord fills explicitly via :func:`provision_extra_topics`
 (and, before a bare start, :func:`provision_and_start_broker`):
 
-* **Hand-rolled node topics.** The bridge and agents runners deliberately
-  hand-roll ``register_handlers()`` + a bare ``broker.start()`` instead of
-  ``Worker.run()`` (see ``docs/design/calfkit-worker-lifecycle-gaps.md``), so the
-  managed ``_on_startup`` ensurer never fires — they must provision their node
-  topics themselves via :func:`~calfkit.provisioning.topics_for_nodes` over the
-  node list they built.
+* **Hand-rolled node topics.** The control-plane probe deliberately decomposes
+  ``Worker.run()`` — wiring a raw ``broker.subscriber(...)`` and then a bare
+  ``broker.start()`` — because it owns a one-shot read (see
+  ``docs/design/calfkit-worker-lifecycle-gaps.md``). The managed ``_on_startup``
+  ensurer never fires for it, so it provisions its (blind-spot-only) topics
+  itself before the bare start. (The bridge USED to be such a caller; it now
+  folds onto the embedded ``Worker.start()`` managed surface, so calfkit
+  auto-provisions its node topics and it only declares its blind spots — below.)
 * **Blind-spot topics** that ``topics_for_nodes()`` cannot see at all: raw
   FastStream broker subscribers, boot-time publish targets, and no-subscriber
   callback topics. The per-runner ``*_infra_topics`` sets below name exactly
-  which, and apply on the managed runners too (router) where the gap is a
-  publish-only target rather than a node topic.
+  which. On the managed runners these are declared into the client's startup
+  ensurer from a worker ``on_startup`` hook so they ride calfkit's single
+  pre-start provisioning pass: the agents runner declares
+  :func:`agent_infra_topics` and the bridge declares :func:`bridge_infra_topics`
+  that way, and the router's publish-only discard target is the one case
+  provisioned via the standalone :func:`provision_extra_topics` instead.
 
 Why these particular extras (and not the rest of the cross-process contracts in
 ``calfcord.topics`` / ``calfcord.control_plane.topics``): every other shared
@@ -79,6 +86,13 @@ def bridge_infra_topics() -> list[str]:
     not a Worker node). ``bridge.discovery`` is *published* at boot (the
     discovery ping) possibly before any agent is up, so the bridge cannot rely
     on an agent having created it.
+
+    Declared into the client's startup ensurer from the bridge's
+    ``Worker.on_startup`` hook (pre-broker-start;
+    :func:`calfcord.bridge.gateway._register_blind_spot_topics`), so they are
+    created in calfkit's single managed provisioning pass alongside the node
+    topics + reply topic, before the raw state consumer's group joins or the
+    discovery ping publishes.
     """
     return list(_SHARED_CONTROL_PLANE_TOPICS)
 
@@ -90,6 +104,12 @@ def agent_infra_topics(agent_ids: Iterable[str]) -> list[str]:
     control sink, ``agent.state`` published at boot before the bridge may be up)
     plus one ``agent.{id}.control.in`` per hosted agent (each a raw control-sink
     subscriber).
+
+    Declared into the client's startup ensurer from the agents runner's
+    ``Worker.on_startup`` hook (pre-broker-start), so they are created in
+    calfkit's single managed provisioning pass alongside the node topics +
+    reply topic, before any raw control sink consumes or the presence publish
+    fires.
     """
     return [*_SHARED_CONTROL_PLANE_TOPICS, *(control_topic_for(agent_id) for agent_id in agent_ids)]
 
@@ -136,15 +156,13 @@ async def provision_and_start_broker(
 ) -> None:
     """Provision ``topics`` the ensurer can't see, then bring the broker up.
 
-    For the **hand-rolled** runners only (agents, bridge, probe): they wire
-    subscribers with ``register_handlers()`` / raw ``broker.subscriber(...)`` and
-    then a bare ``broker.start()``, bypassing the managed ``Worker.run()``
-    lifecycle — so calfkit's ``_on_startup`` ensurer never fires and does NOT
-    provision their node topics. On a broker that does not auto-create topics that
-    bare start blocks forever unless every subscribed topic already exists, so the
-    caller passes the full blind-spot set here — its node topics (via
-    :func:`~calfkit.provisioning.topics_for_nodes` over the node list it built)
-    plus its ``*_infra_topics`` — and they are created BEFORE the bare start.
+    For the **hand-rolled** control-plane probe only: it wires a raw
+    ``broker.subscriber(...)`` and then a bare ``broker.start()``, bypassing the
+    managed Worker lifecycle — so calfkit's ``_on_startup`` ensurer never fires
+    and does NOT provision its topics. On a broker that does not auto-create
+    topics that bare start blocks forever unless every subscribed topic already
+    exists, so the caller passes its blind-spot set here and they are created
+    BEFORE the bare start.
 
     The client reply topic is intentionally NOT included: calfkit 0.6.0's
     connect-hook auto-provisions it on every start path (calf-ai/calfkit-sdk#180),
@@ -154,10 +172,13 @@ async def provision_and_start_broker(
     ``broker.running`` guard avoids a non-idempotent second ``start()`` if the
     broker was already brought up (e.g. by an earlier lazy first publish).
 
-    The tools/mcp/router runners do NOT use this helper: they run via
-    ``Worker.run()``, whose managed lifecycle auto-provisions reply + node topics;
-    the router provisions only its publish-only blind spot separately and lets
-    ``Worker.run()`` own the broker start.
+    The Worker-hosted runners do NOT use this helper: tools/mcp/router/agents run
+    via ``Worker.run()`` and the bridge via the embedded ``Worker.start()``,
+    whose managed lifecycle auto-provisions reply + node topics; the router
+    provisions only its publish-only blind spot via :func:`provision_extra_topics`,
+    and the agents runner and bridge declare their blind-spot topics into the
+    startup ensurer from an ``on_startup`` hook — all letting the managed broker
+    start do the provisioning.
     """
     await provision_extra_topics(server_urls, topics)
     if not client.broker.running:

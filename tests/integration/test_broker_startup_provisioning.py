@@ -1,10 +1,13 @@
 """Gated REAL-broker test for the hand-rolled provision-before-bare-start path.
 
-The bridge / agents / probe runners wire subscribers with
-``register_handlers()`` / raw ``broker.subscriber(...)`` and then a BARE
-``await client.broker.start()`` — they do NOT use the managed ``Worker.run()``
-lifecycle. On a broker that does NOT auto-create topics (e.g. Tansu) that bare
-start blocks forever if any subscribed topic does not yet exist.
+After the Tier-3 lifecycle unification, only the control-plane **probe**
+(:func:`calfcord.control_plane.probe.probe_live_roster`) still wires a raw
+``broker.subscriber(...)`` and then a BARE ``await client.broker.start()`` — the
+agents and bridge runners now use the managed ``Worker`` lifecycle (``run()`` /
+embedded ``start()``), which declares their node topics for them. On a broker
+that does NOT auto-create topics (e.g. Tansu) a bare start blocks forever if any
+subscribed topic does not yet exist, so the bare-start path must provision its
+topics first.
 
 calfkit 0.6.0 changed the provisioning surface this rests on:
 

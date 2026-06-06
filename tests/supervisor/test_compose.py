@@ -106,27 +106,30 @@ def test_roster_has_no_readiness_probe() -> None:
         assert "readiness_probe" not in procs[name]
 
 
-def test_substrate_and_agents_restart_always() -> None:
-    # broker/bridge/agents exit 0 on a clean signal-less return, so on_failure
-    # would never fire — they must restart: always.
+def test_substrate_restart_always() -> None:
+    # broker/bridge exit 0 on a clean signal-less return, so on_failure would
+    # never fire — they must restart: always to recover an uncommanded clean exit.
     procs = _processes()
-    for name in ("broker", "bridge", "assistant", "scribe"):
+    for name in ("broker", "bridge"):
         availability = procs[name]["availability"]
         assert availability["restart"] == "always"
         assert availability["backoff_seconds"] == 2
         assert availability["max_restarts"] == 0
 
 
-def test_tools_router_mcp_restart_on_failure() -> None:
-    # tools/router/mcp use run_worker_until_signal → non-zero exit, so on_failure
-    # restarts them; backoff matches the substrate.
+def test_roster_restart_on_failure() -> None:
+    # The whole roster — agents *and* tools/router/mcp — now runs via
+    # run_worker_until_signal, which forces a non-zero exit on any uncommanded
+    # exit (crash or clean signal-less return), so on_failure restarts a crash
+    # while an operator-commanded stop is suppressed from restart by Process
+    # Compose. Backoff matches the substrate.
     procs = _processes()
-    for name in ("tools", "router", "mcp"):
+    for name in ("assistant", "scribe", "tools", "router", "mcp"):
         availability = procs[name]["availability"]
         assert availability["restart"] == "on_failure"
         assert availability["backoff_seconds"] == 2
         # Unlimited restarts (0) is the deliberate policy for this group too, so
-        # pin it like the always group — a future finite cap shouldn't slip in silently.
+        # pin it like the substrate group — a future finite cap shouldn't slip in.
         assert availability["max_restarts"] == 0
 
 

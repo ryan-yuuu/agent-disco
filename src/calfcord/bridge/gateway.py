@@ -24,8 +24,11 @@ The bridge process does both halves of the Discord I/O:
 
 The consumer's handler is registered on the same calfkit
 :class:`~calfkit.Client` connection that the ingress publishes through.
-We deliberately register handlers without calling
-:meth:`Worker.run` — see the rationale at the call site in :func:`main`.
+The bridge is calfcord's single deliberate **embedded** Worker variant: it
+co-runs the Discord gateway (a foreground WebSocket) and owns SIGINT/SIGTERM,
+so it drives the worker via :meth:`Worker.start` / :meth:`Worker.stop`
+(signals opted OUT) rather than :meth:`Worker.run` (which would own the
+foreground and install a colliding signal set) — see :func:`main`.
 """
 
 from __future__ import annotations
@@ -44,10 +47,10 @@ from pathlib import Path
 
 import discord
 from calfkit.client import Client
-from calfkit.provisioning import topics_for_nodes
 from calfkit.worker import Worker
+from calfkit.worker.lifecycle import LifecycleContext
 
-from calfcord._provisioning import PROVISIONING, bridge_infra_topics, provision_and_start_broker
+from calfcord._provisioning import PROVISIONING, bridge_infra_topics
 from calfcord.bridge.history import ChannelHistoryFetcher
 from calfcord.bridge.ingress import (
     AmbientRosterEmptyError,
@@ -766,6 +769,36 @@ class _GatewayClient(discord.Client):
         await self._gateway._on_message(message)
 
 
+def _register_blind_spot_topics(worker: Worker, client: Client) -> None:
+    """Declare the bridge's blind-spot topics into the managed pre-start pass.
+
+    The bridge's three nodes (outbox / synthesized / steps) have their topics —
+    plus the framework return inboxes and the client reply topic — auto-declared
+    by the managed ``Worker.start()`` lifecycle and the connect-time pre-start
+    hook. Two control-plane topics the bridge touches RAW are invisible to that
+    node-walk and must still exist before their first use on a no-auto-create
+    broker (Tansu):
+
+    * ``agent.state`` — consumed by the raw state-consumer subscriber (not a
+      Worker node), registered before ``worker.start()``.
+    * ``bridge.discovery`` — *published* at boot by the on_ready discovery ping,
+      possibly before any agent is up to create it.
+
+    Both are declared here as a single ``on_startup`` hook (resource phase, which
+    runs BEFORE ``broker.start()``), so calfkit's single pre-start provisioning
+    pass creates them alongside the node topics — before the state consumer's
+    group joins or the discovery ping publishes. This keeps the WHICH-topics
+    DOMAIN concern in one named place, separate from the worker LIFECYCLE that
+    schedules it; it mirrors the agents runner's blind-spot hook on the embedded
+    surface. The standalone ``provision_extra_topics`` is the alternative but
+    opens a second admin connection rather than reusing the broker's.
+    """
+
+    @worker.on_startup
+    async def _declare(ctx: LifecycleContext[Worker]) -> None:
+        client._startup_ensurer.declare(bridge_infra_topics())
+
+
 def main() -> None:
     """CLI entry point. Loads config, constructs the gateway, runs until SIGINT/SIGTERM."""
     logging.basicConfig(
@@ -879,30 +912,28 @@ def main() -> None:
                         typing_notifier=typing_notifier,
                     )
 
-                    # Register the consumer's handler on the broker *before*
-                    # broker.start() so its consumer group joins ahead of the
-                    # gateway accepting Discord events. Otherwise an agent reply
-                    # arriving in the brief window after publish but before the
-                    # consumer-group has joined would be missed (subscribers
-                    # default to auto_offset_reset="latest").
-                    #
-                    # We use Worker only for handler registration — not Worker.run.
-                    # Calling Worker.run would (a) call register_handlers again
-                    # (which errors on the second call), and (b) start an inner
-                    # FastStream serve loop whose signal handling overlaps with
-                    # the loop we install below. broker.start() activates every
-                    # registered subscriber on its own, which is what we need.
                     bridge_nodes = [consumer_node, synthesized_node, steps_node]
                     worker = Worker(calfkit_client, bridge_nodes)
-                    worker.register_handlers()
+                    # Declare the bridge's blind-spot topics (agent.state,
+                    # bridge.discovery) into the client's startup ensurer via a
+                    # pre-broker-start hook, so calfkit's single provisioning pass
+                    # creates them alongside the node topics + reply topic before
+                    # any subscriber consumes — required on a no-auto-create
+                    # broker (Tansu). See :func:`_register_blind_spot_topics`.
+                    _register_blind_spot_topics(worker, calfkit_client)
 
-                    # Register the state-event projection subscriber on the
-                    # broker BEFORE broker.start(). State events from
-                    # already-running agents will arrive after on_ready
-                    # publishes the discovery ping; the subscriber must be
-                    # live by then. ``schedule_resync`` is a bound method
-                    # whose signature matches the consumer callback shape
-                    # (``(agent_id: str) -> None``), so pass it directly.
+                    # Register the raw state-event projection subscriber on the
+                    # broker BEFORE ``worker.start()`` (which starts the broker).
+                    # register-before-serve is load-bearing: this consumer group
+                    # — and the three node groups ``worker.start()`` joins — must
+                    # join before the gateway accepts Discord events AND before
+                    # the on_ready discovery ping publishes, or a state event /
+                    # reply arriving in the gap is LOST (auto_offset_reset=latest).
+                    # State events from already-running agents arrive in reply to
+                    # that ping, so the subscriber must be live by then.
+                    # ``schedule_resync`` is a bound method whose signature
+                    # matches the consumer callback shape (``(agent_id) -> None``),
+                    # so pass it directly.
                     #
                     # Imported here (not at module top) to avoid a circular
                     # import: ``state_consumer`` imports ``AgentRegistry``,
@@ -919,73 +950,78 @@ def main() -> None:
                         on_departed=gateway._slash.schedule_resync,
                     )
 
-                    # The bridge hand-rolls register_handlers + a bare
-                    # broker.start (it interleaves the raw state-consumer
-                    # subscriber registration above and runs its own gateway loop,
-                    # so it cannot delegate to Worker.run()). That bypasses
-                    # Worker.run()'s _on_startup hook, so calfkit does NOT
-                    # auto-provision the registered nodes' topics — compute them
-                    # ourselves with topics_for_nodes() over the same node list we
-                    # built (the calfkit 0.6.0 replacement for the removed
-                    # Worker.provision_topics()). Add the control-plane topics
-                    # node-walking can't see: agent.state (a raw subscriber) and
-                    # bridge.discovery (the discovery ping is published at boot,
-                    # before any agent may be up). The client reply topic
-                    # (discord.outbox) is the outbox node's inbox, so
-                    # topics_for_nodes already covers it. All created BEFORE the
-                    # bare broker.start() inside provision_and_start_broker (which
-                    # also auto-creates the reply topic via calfkit's connect-hook,
-                    # and guards on broker.running so faststream's non-idempotent
-                    # KafkaSubscriber.start is never called twice). No-ops on an
-                    # auto-creating broker; required on Tansu.
-                    await provision_and_start_broker(
-                        calfkit_client,
-                        server_urls,
-                        [*topics_for_nodes(bridge_nodes), *bridge_infra_topics()],
-                    )
-
-                    stop = asyncio.Event()
-                    loop = asyncio.get_running_loop()
-                    for sig in (signal.SIGINT, signal.SIGTERM):
-                        loop.add_signal_handler(sig, stop.set)
-
-                    gateway_task = asyncio.create_task(gateway.start())
-                    stop_task = asyncio.create_task(stop.wait())
-
-                    # Keep the bridge heartbeat fresh on a timer for the whole
-                    # run (design §12.1). ``_on_ready`` writes the first beat
-                    # synchronously (before slash-sync); this task refreshes it
-                    # every few seconds, but gated on ``gateway.connected`` — so a
-                    # dropped Discord gateway stops the writes and the beat ages
-                    # past its TTL rather than lying green. Identity is the bot
-                    # display string the getter resolves once ready (never a
-                    # token, §12.3). Started AFTER the gateway task so the loop is
-                    # only alive while the gateway is; cancelled in the finally
-                    # below (``run_refresher`` swallows CancelledError cleanly).
-                    refresher_task = asyncio.create_task(
-                        run_refresher(
-                            _resolve_health_home(),
-                            _HEALTH_COMPONENT,
-                            is_healthy=lambda: gateway.connected,
-                            identity=lambda: gateway.bot_identity,
-                        )
-                    )
                     try:
-                        await asyncio.wait(
-                            {gateway_task, stop_task},
-                            return_when=asyncio.FIRST_COMPLETED,
+                        # Embedded managed lifecycle: ``worker.start()`` runs the
+                        # on_startup hooks (register the node handlers + declare
+                        # the node/blind-spot topics) → ``broker.start()``
+                        # (calfkit's pre-start hook provisions everything declared,
+                        # then EVERY registered consumer group — the three nodes
+                        # AND the raw state consumer above — joins) →
+                        # after_startup. It does NOT install signal handlers (that
+                        # is the ``Worker.run()`` surface), so the bridge keeps
+                        # SIGINT/SIGTERM ownership for its own foreground (the
+                        # Discord gateway). Inside the ``try`` so the ``finally``'s
+                        # ``stop()`` always runs — a no-op if the worker never
+                        # started, idempotent otherwise — so neither a failed boot
+                        # nor a clean run ever leaks the broker connection.
+                        await worker.start()
+
+                        stop = asyncio.Event()
+                        loop = asyncio.get_running_loop()
+                        for sig in (signal.SIGINT, signal.SIGTERM):
+                            loop.add_signal_handler(sig, stop.set)
+
+                        gateway_task = asyncio.create_task(gateway.start())
+                        stop_task = asyncio.create_task(stop.wait())
+
+                        # Keep the bridge heartbeat fresh on a timer for the
+                        # whole run (design §12.1). ``_on_ready`` writes the first
+                        # beat synchronously (before slash-sync); this task
+                        # refreshes it every few seconds, but gated on
+                        # ``gateway.connected`` — so a dropped Discord gateway
+                        # stops the writes and the beat ages past its TTL rather
+                        # than lying green. Identity is the bot display string the
+                        # getter resolves once ready (never a token, §12.3).
+                        # Started AFTER the gateway task so the loop is only alive
+                        # while the gateway is; cancelled in the finally below
+                        # (``run_refresher`` swallows CancelledError cleanly).
+                        refresher_task = asyncio.create_task(
+                            run_refresher(
+                                _resolve_health_home(),
+                                _HEALTH_COMPONENT,
+                                is_healthy=lambda: gateway.connected,
+                                identity=lambda: gateway.bot_identity,
+                            )
                         )
+                        try:
+                            await asyncio.wait(
+                                {gateway_task, stop_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            for t in (gateway_task, stop_task, refresher_task):
+                                if not t.done():
+                                    t.cancel()
+                            # Await the cancelled refresher so its task is
+                            # retrieved here (no "Task was destroyed but it is
+                            # pending" warning). ``run_refresher`` catches
+                            # CancelledError and returns cleanly, so this await
+                            # does NOT re-raise.
+                            await refresher_task
+                            await typing_notifier.aclose()
+                            await gateway.close()
                     finally:
-                        for t in (gateway_task, stop_task, refresher_task):
-                            if not t.done():
-                                t.cancel()
-                        # Await the cancelled refresher so its task is retrieved
-                        # here (no "Task was destroyed but it is pending"
-                        # warning). ``run_refresher`` catches CancelledError and
-                        # returns cleanly, so this await does NOT re-raise.
-                        await refresher_task
-                        await typing_notifier.aclose()
-                        await gateway.close()
+                        # Drain the broker LAST — after the gateway is closed and
+                        # the foreground tasks are cancelled — so any in-flight
+                        # agent reply on ``discord.outbox`` is posted before the
+                        # broker disconnects. ``stop()`` runs the worker's
+                        # on_shutdown → broker.stop (drain) → after_shutdown and
+                        # is a no-op if the worker never started, so this is safe
+                        # even on a failed boot. It is bracketed INSIDE the
+                        # persona-sender / connection / transcript ``async with``
+                        # contexts so the broker drains before the connection
+                        # disconnects.
+                        await worker.stop()
 
     asyncio.run(_run())
 

@@ -61,17 +61,16 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from calfkit.client import Client
-from calfkit.provisioning import topics_for_nodes
 from calfkit.worker import Worker
+from calfkit.worker.lifecycle import LifecycleContext, ServingContext
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING, agent_infra_topics, provision_and_start_broker
+from calfcord._provisioning import PROVISIONING, agent_infra_topics
+from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.agents.loader import load_agent_targets, load_agents_dir
@@ -403,57 +402,98 @@ def _build_node_or_bootstrap_error(
         ) from e
 
 
-async def _run_worker(
-    *,
-    num_agents: int,
-    on_shutdown_signal: Callable[[], Awaitable[None]] | None = None,
-) -> None:
-    """Block until SIGINT/SIGTERM, then run the shutdown callback.
+async def _run_worker(worker: Worker) -> None:
+    """Run ``worker`` until SIGINT/SIGTERM, then drain cleanly.
 
-    Pre-condition: the caller has already invoked
-    :meth:`Worker.register_handlers` and ``broker.start()``. Subscribers
-    are consuming on background tasks owned by FastStream; this function
-    only keeps the event loop alive so those tasks (and the surrounding
-    ``Client.connect``/``DiscordPersonaSender`` async-context managers)
-    stay live until a shutdown signal arrives.
+    Delegates to the shared :func:`calfcord._worker_runtime.run_worker_until_signal`
+    so the shutdown contract (signal-driven drain plus the "clean return
+    without a signal is a crash" supervisor invariant) is defined in exactly
+    one place across runners — mirroring :func:`calfcord.tools.runner._run_worker`
+    and :func:`calfcord.router.runner._run_worker`. Kept as a thin local
+    wrapper because the runner unit tests reference ``_run_worker`` by name.
 
-    The drain log line names the agent count so a Ctrl-C in all-mode
-    doesn't look hung while N consumer groups close.
-
-    ``on_shutdown_signal`` is an optional async callback invoked once the
-    signal has been received and *before* this function returns — i.e.
-    while the broker is still alive — so last-gasp publishes (e.g.
-    :class:`AgentDepartureEvent`) can fire successfully. The callback's
-    own exceptions are logged and swallowed so a misbehaving callback
-    cannot block teardown.
-
-    Runtime crashes in the broker or in handler tasks no longer surface
-    through this helper: they propagate through the publishes that
-    interact with the broker, or through FastStream's own task
-    supervision. We deliberately do not spawn a foreground
-    ``worker.run()`` task here — that would re-enter ``register_handlers``
-    and install a second FastStream signal-handler set that overlaps
-    with the one this function installs (the same reason the bridge
-    decomposes ``Worker.run`` manually in ``bridge/gateway.py``).
+    The agents runner used to hand-decompose ``Worker.run()`` so it could
+    publish presence/departure events at precise lifecycle points. Those are
+    now :func:`Worker.after_startup` / :func:`Worker.on_shutdown` hooks (see
+    :func:`_register_lifecycle_hooks`), so the agents runner joins the managed
+    ``Worker.run()`` path used by tools/mcp/router.
     """
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+    await run_worker_until_signal(worker, drain_label="agents worker")
 
-    logger.info(
-        "worker running with %d node(s); awaiting shutdown signal", num_agents,
-    )
-    await stop.wait()
-    logger.info("shutdown signal received, draining %d agent(s)", num_agents)
 
-    if on_shutdown_signal is not None:
-        try:
-            await on_shutdown_signal()
-        except Exception:
-            logger.exception(
-                "on_shutdown_signal callback raised; continuing teardown",
+def _register_lifecycle_hooks(
+    worker: Worker,
+    client: Client,
+    definition_refs: list[AgentDefinitionRef],
+) -> None:
+    """Wire the agents runner's three lifecycle hooks onto ``worker``.
+
+    Separates worker LIFECYCLE (connect/provision/serve/drain, owned by
+    :func:`run_worker_until_signal`) from DOMAIN concerns (blind-spot topic
+    declaration, presence, departure), each expressed as a small named
+    single-purpose hook. The ordering each hook depends on is guaranteed by
+    calfkit's lifecycle engine, not by hand-sequencing in a boot loop:
+
+    * ``on_startup`` (resource phase, BEFORE ``broker.start()``) declares the
+      blind-spot topics into the client's startup ensurer so they are created
+      in calfkit's single pre-start provisioning pass, before the raw control
+      sinks consume / the presence publish fires.
+    * ``after_startup`` (broker up, producer live) announces each hosted
+      agent's initial state — :func:`publish_state_event` raises
+      ``IncorrectState`` unless the producer is connected, which is exactly
+      why presence must run here and not earlier.
+    * ``on_shutdown`` (broker still up, before drain) publishes a departure
+      for each agent, best-effort and bounded, so peers/bridge see us leave
+      before the broker disconnects.
+    """
+    # Deferred import: see the NOTE on control_plane imports near the top.
+    from calfcord.control_plane.builders import build_state_event
+    from calfcord.control_plane.publish import publish_state_event
+
+    agent_ids = [ref.current.agent_id for ref in definition_refs]
+
+    @worker.on_startup
+    async def _declare_blind_spot_topics(ctx: LifecycleContext[Worker]) -> None:
+        """Fold the agents' blind-spot topics into calfkit's pre-start pass.
+
+        ``topics_for_nodes`` (auto-declared by the managed ``Worker.run()``
+        ``_on_startup`` hook) covers the node topics + the framework return
+        inboxes, and the connect-hook auto-provisions the client reply topic.
+        The control-plane topics the agent touches RAW — ``agent.state``
+        (boot-time presence publish), ``bridge.discovery`` (raw control-sink
+        subscriber), and one ``agent.{id}.control.in`` per hosted agent — are
+        invisible to ``topics_for_nodes``, so we declare them here. This hook
+        runs before ``broker.start()``, so the ensurer's pre-start pass creates
+        them before any raw subscriber consumes or the presence publish fires.
+        """
+        client._startup_ensurer.declare(agent_infra_topics(agent_ids))
+
+    @worker.after_startup
+    async def _announce_presence(ctx: ServingContext[Worker]) -> None:
+        """Publish each hosted agent's startup state once the producer is live.
+
+        One process hosts many agents, so this single hook iterates every ref.
+        Subscribers are now consuming, so a peer agent already running sees this
+        and adds us to its roster, and the bridge's state-consumer projects us
+        into its registry for slash-command re-registration.
+        """
+        for ref in definition_refs:
+            await publish_state_event(
+                client, build_state_event(ref.current, cause="startup"),
             )
+            logger.info("announced startup for agent=%s", ref.current.agent_id)
+
+    @worker.on_shutdown
+    async def _publish_departures(ctx: ServingContext[Worker]) -> None:
+        """Best-effort departure publish for each agent, before broker.stop().
+
+        Runs while the broker producer is still live (the ``serving`` shutdown
+        bracket), so the last-gasp departures actually reach Kafka. Bounded and
+        log-never-raise inside :func:`_publish_departures_best_effort`; calfkit's
+        own ``on_shutdown`` teardown is additionally log-never-raise, so a stuck
+        producer cannot block process teardown.
+        """
+        await _publish_departures_best_effort(client, definition_refs)
 
 
 async def _publish_departures_best_effort(
@@ -536,9 +576,7 @@ async def _prewarm_codex_if_needed(
 async def _amain(args: argparse.Namespace) -> None:
     """Build and run the agent(s). Pure-ish: callers configure logging+env."""
     # Deferred imports: see the NOTE on control_plane imports near the top.
-    from calfcord.control_plane.builders import build_state_event
     from calfcord.control_plane.definition_ref import AgentDefinitionRef
-    from calfcord.control_plane.publish import publish_state_event
     from calfcord.control_plane.sink import register_control_sink
 
     agents_dir = Path(os.getenv(_AGENTS_DIR_ENV, _AGENTS_DIR_DEFAULT))
@@ -565,66 +603,30 @@ async def _amain(args: argparse.Namespace) -> None:
             nodes.append(node)
             ref = AgentDefinitionRef(current=definition)
             definition_refs.append(ref)
-            # Must run before ``worker.register_handlers`` + ``broker.start``
-            # below — once FastStream is consuming, new subscribers on the
-            # same broker are not supported. Broker is connected the moment
-            # ``Client.connect`` enters, so registration here is valid.
+            # Raw control-plane subscriber: must register BEFORE the broker
+            # starts (once FastStream is consuming, adding subscribers on the
+            # same broker is unsupported) and BEFORE the discovery topic is
+            # consumed. ``Worker.run()`` starts the broker inside _run_worker
+            # below, so registering here — and declaring the topics it consumes
+            # via the on_startup blind-spot hook — preserves register-before-serve.
             register_control_sink(calfkit_client, ref)
 
         worker = Worker(calfkit_client, nodes)
-        worker.register_handlers()
-
-        # Provision the agents' node topics + the control-plane infra topics,
-        # then start the broker — all BEFORE publish_state_event below, which
-        # raises ``IncorrectState`` unless the producer is connected, and before
-        # the broker subscribes the reply dispatcher / control sinks (which on a
-        # no-auto-create broker must already exist).
-        #
-        # This is the HAND-ROLLED path: register_handlers() + a bare
-        # broker.start() bypass Worker.run()'s _on_startup hook, so calfkit does
-        # NOT auto-provision the node topics — we compute them ourselves with
-        # topics_for_nodes() over the same node list we built (the calfkit 0.6.0
-        # replacement for the removed Worker.provision_topics()). The client
-        # reply topic is excluded: calfkit's connect-hook auto-provisions it on
-        # the broker.start() inside provision_and_start_broker. Decomposing
-        # Worker.run this way (rather than calling worker.run() from _run_worker)
-        # also avoids a second FastStream signal-handler set overlapping the one
-        # _run_worker installs.
-        await provision_and_start_broker(
-            calfkit_client,
-            server_urls,
-            [
-                *topics_for_nodes(nodes),
-                *agent_infra_topics(ref.current.agent_id for ref in definition_refs),
-            ],
-        )
+        # Managed lifecycle: ``Worker.run()`` (via _run_worker) auto-registers
+        # handlers and auto-provisions the node topics + framework return inboxes
+        # at broker start, and the connect-hook auto-provisions the client reply
+        # topic — so the runner no longer hand-rolls register_handlers() /
+        # topics_for_nodes() / a bare broker.start(). Presence, departure, and
+        # the blind-spot topic declaration are the three lifecycle hooks wired
+        # here; each runs at the precise broker-lifecycle moment it needs.
+        _register_lifecycle_hooks(worker, calfkit_client, definition_refs)
 
         logger.info(
             "starting worker with %d agent(s): %s",
             len(nodes),
             ", ".join(n.node_id for n in nodes),
         )
-
-        # Announce initial state. Subscribers are now consuming, so any
-        # peer agent already running will see this and add us to its
-        # roster, and the bridge's state-consumer projects us into its
-        # registry for slash-command re-registration.
-        for ref in definition_refs:
-            event = build_state_event(ref.current, cause="startup")
-            await publish_state_event(calfkit_client, event)
-            logger.info(
-                "announced startup for agent=%s", ref.current.agent_id,
-            )
-
-        async def _on_shutdown() -> None:
-            await _publish_departures_best_effort(
-                calfkit_client, definition_refs,
-            )
-
-        await _run_worker(
-            num_agents=len(nodes),
-            on_shutdown_signal=_on_shutdown,
-        )
+        await _run_worker(worker)
 
 
 def main() -> None:

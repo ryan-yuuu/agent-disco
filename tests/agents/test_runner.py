@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from calfkit.worker import Worker
+from calfkit.worker.lifecycle import LifecycleContext, ServingContext
 
+from calfcord._provisioning import agent_infra_topics
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.runner import (
     BootstrapError,
@@ -21,6 +23,7 @@ from calfcord.agents.runner import (
     _parse_channel_ids,
     _prewarm_codex_if_needed,
     _publish_departures_best_effort,
+    _register_lifecycle_hooks,
     _resolve_agent_specs,
     _run_worker,
     bootstrap_env_var,
@@ -722,9 +725,20 @@ class _FakeConnection:
         self.calls.append({"topic": topic, "payload": payload, "key": key})
 
 
+class _FakeEnsurer:
+    """Records every declare() call so a blind-spot hook can be asserted."""
+
+    def __init__(self) -> None:
+        self.declared: list[str] = []
+
+    def declare(self, topics: Any, *, framework: bool = False) -> None:
+        self.declared.extend(topics)
+
+
 class _FakeClient:
     def __init__(self) -> None:
         self._connection = _FakeConnection()
+        self._startup_ensurer = _FakeEnsurer()
 
 
 class _StuckConnection:
@@ -845,101 +859,106 @@ class TestPublishDeparturesBestEffort:
         assert elapsed < timeout + 0.5, f"total elapsed {elapsed:.3f}s exceeded parallel budget"
 
 
-class TestRunWorkerShutdownCallback:
-    """``_run_worker`` blocks on a SIGINT/SIGTERM stop event and runs an
-    optional ``on_shutdown_signal`` callback while the broker is still
-    alive. The caller (``_amain``) is responsible for ``register_handlers``
-    + ``broker.start``; this helper only owns the signal-wait + drain hook.
+class TestRunWorkerShutdownContract:
+    """After the Tier-3 migration the agents runner joins the managed
+    ``Worker.run()`` path: ``_run_worker(worker)`` delegates to the shared
+    :func:`run_worker_until_signal`, so the supervisor-restart invariant
+    mirrors tools/runner.py and router/runner.py — any non-signal exit
+    raises so the process exits non-zero.
+    """
+
+    async def test_worker_crash_propagates(self) -> None:
+        crash = ValueError("simulated kafka drop")
+        worker = MagicMock(spec=Worker)
+        worker.run = AsyncMock(side_effect=crash)
+        with pytest.raises(ValueError, match="simulated kafka drop"):
+            await _run_worker(worker)
+
+    async def test_worker_unexpected_clean_return_raises(self) -> None:
+        """A clean ``worker.run()`` return without a shutdown signal is
+        unexpected — synthesize a RuntimeError so supervisors restart."""
+        worker = MagicMock(spec=Worker)
+
+        async def returns_immediately() -> None:
+            return None
+
+        worker.run = AsyncMock(side_effect=returns_immediately)
+        with pytest.raises(RuntimeError, match="returned unexpectedly"):
+            await _run_worker(worker)
+
+
+class TestRegisterLifecycleHooks:
+    """``_register_lifecycle_hooks`` wires the agents runner's three lifecycle
+    hooks onto a Worker. Each is exercised in isolation by pulling it off the
+    worker's hook registry and invoking it with a fake context — no broker,
+    no FastStream — so the presence/departure/blind-spot DOMAIN logic is
+    tested apart from the worker LIFECYCLE that schedules it.
     """
 
     @staticmethod
-    def _disable_signal_handlers(
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> dict[int, Any]:
-        """Patch ``loop.add_signal_handler`` to capture (sig, callback) pairs
-        rather than register OS-level handlers. Tests can fire a captured
-        handler synchronously to simulate a signal without process-level
-        side effects."""
-        loop = asyncio.get_running_loop()
-        captured: dict[int, Any] = {}
+    def _wire(refs: list[AgentDefinitionRef]) -> tuple[Worker, _FakeClient]:
+        client = _FakeClient()
+        worker = Worker(client)  # type: ignore[arg-type]
+        _register_lifecycle_hooks(worker, client, refs)  # type: ignore[arg-type]
+        return worker, client
 
-        def _fake_add(sig: int, cb: Any, *args: Any) -> None:
-            captured[sig] = cb
+    def test_registers_exactly_one_hook_per_phase(self) -> None:
+        """One on_startup (declare), one after_startup (presence), one
+        on_shutdown (departure) — the three documented lifecycle moments."""
+        worker, _ = self._wire([_make_ref("echo")])
+        assert len(worker._hooks_for("on_startup")) == 1
+        assert len(worker._hooks_for("after_startup")) == 1
+        assert len(worker._hooks_for("on_shutdown")) == 1
+        # No resource brackets / after_shutdown — those are calfkit-managed.
+        assert worker._hooks_for("after_shutdown") == []
 
-        monkeypatch.setattr(loop, "add_signal_handler", _fake_add)
-        return captured
+    async def test_on_startup_declares_blind_spot_topics(self) -> None:
+        """The pre-broker-start hook declares the agents' blind-spot topics
+        (agent.state, bridge.discovery, one control topic per hosted agent)
+        into the client's startup ensurer — so calfkit's single provisioning
+        pass creates them before any raw subscriber consumes."""
+        refs = [_make_ref("echo"), _make_ref("scribe")]
+        worker, client = self._wire(refs)
 
-    async def test_callback_fires_on_signal(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """SIGINT triggers on_shutdown_signal before _run_worker returns."""
-        captured = self._disable_signal_handlers(monkeypatch)
-        callback_fired = asyncio.Event()
+        hook = worker._hooks_for("on_startup")[0]
+        await hook(LifecycleContext(worker, worker.resources))
 
-        async def _on_shutdown() -> None:
-            callback_fired.set()
+        expected = agent_infra_topics(["echo", "scribe"])
+        assert client._startup_ensurer.declared == expected
+        # The shared control-plane pair + one control topic per agent.
+        assert "agent.state" in client._startup_ensurer.declared
+        assert "bridge.discovery" in client._startup_ensurer.declared
+        assert "agent.echo.control.in" in client._startup_ensurer.declared
+        assert "agent.scribe.control.in" in client._startup_ensurer.declared
 
-        run_task = asyncio.create_task(
-            _run_worker(num_agents=1, on_shutdown_signal=_on_shutdown),
-        )
-        # Give _run_worker a chance to register handlers + start the wait.
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if signal.SIGINT in captured:
-                break
-        assert signal.SIGINT in captured, "handler never registered"
+    async def test_after_startup_announces_presence_once_per_agent(self) -> None:
+        """The presence hook (producer live) publishes one startup state event
+        per hosted agent to agent.state, partition-keyed by agent_id."""
+        refs = [_make_ref("echo"), _make_ref("scribe")]
+        worker, client = self._wire(refs)
 
-        # Synchronously set the stop event the way the real signal handler would.
-        captured[signal.SIGINT]()
-        await run_task
-        assert callback_fired.is_set()
+        hook = worker._hooks_for("after_startup")[0]
+        await hook(ServingContext(worker, worker.resources, MagicMock()))
 
-    async def test_callback_not_required(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Passing ``on_shutdown_signal=None`` is a no-op past the stop wait."""
-        captured = self._disable_signal_handlers(monkeypatch)
+        calls = client._connection.calls
+        assert len(calls) == 2
+        assert {c["topic"] for c in calls} == {"agent.state"}
+        assert sorted(c["payload"]["agent_id"] for c in calls) == ["echo", "scribe"]
+        # Startup cause + partition key so the bridge orders our events correctly.
+        assert {c["payload"]["cause"] for c in calls} == {"startup"}
+        assert {c["key"] for c in calls} == {b"echo", b"scribe"}
 
-        run_task = asyncio.create_task(_run_worker(num_agents=1))
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if signal.SIGINT in captured:
-                break
-        assert signal.SIGINT in captured, "handler never registered"
+    async def test_on_shutdown_publishes_departure_per_agent(self) -> None:
+        """The departure hook (broker still up) publishes one departure per
+        agent before the broker stops, via _publish_departures_best_effort."""
+        refs = [_make_ref("echo"), _make_ref("scribe")]
+        worker, client = self._wire(refs)
 
-        captured[signal.SIGINT]()
-        # Must complete without raising — the absence of a callback is
-        # not an error.
-        await run_task
+        hook = worker._hooks_for("on_shutdown")[0]
+        await hook(ServingContext(worker, worker.resources, MagicMock()))
 
-    async def test_callback_exception_is_swallowed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """An exception from ``on_shutdown_signal`` is logged at ERROR
-        and swallowed — a misbehaving callback must not block teardown."""
-        captured = self._disable_signal_handlers(monkeypatch)
-
-        async def _bad_callback() -> None:
-            raise RuntimeError("callback boom")
-
-        with caplog.at_level(logging.ERROR):
-            run_task = asyncio.create_task(
-                _run_worker(num_agents=1, on_shutdown_signal=_bad_callback),
-            )
-            for _ in range(50):
-                await asyncio.sleep(0)
-                if signal.SIGINT in captured:
-                    break
-            assert signal.SIGINT in captured, "handler never registered"
-            captured[signal.SIGINT]()
-            # Must NOT raise — callback errors are swallowed.
-            await run_task
-
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert any("on_shutdown_signal callback raised" in r.message for r in errors), (
-            f"expected callback-raised log, got: {[r.message for r in errors]}"
-        )
+        calls = client._connection.calls
+        assert len(calls) == 2
+        assert {c["topic"] for c in calls} == {"agent.state"}
+        assert {c["payload"]["kind"] for c in calls} == {"departure"}
+        assert sorted(c["payload"]["agent_id"] for c in calls) == ["echo", "scribe"]

@@ -5,8 +5,8 @@ calfkit 0.6.0 auto-provisions the client reply topic on EVERY broker-start path
 ``Worker.run()``/``start()``/``async with`` paths. What it still cannot see are
 calfcord's cross-process topics that are raw FastStream broker subscribers,
 boot-time publish targets, or no-subscriber callback topics — and, on the
-hand-rolled ``register_handlers()`` + bare ``broker.start()`` paths (agents,
-bridge), the node topics too (no managed lifecycle fires the ensurer). These
+hand-rolled ``register_handlers()`` + bare ``broker.start()`` paths (bridge,
+probe), the node topics too (no managed lifecycle fires the ensurer). These
 tests pin the exact extra-topic sets each runner must provision, plus the shared
 policy and the provision-before-bare-start ordering.
 """
@@ -139,7 +139,7 @@ async def test_provision_extra_topics_propagates_provisioner_failure(monkeypatch
 
 
 # --- provision_and_start_broker: the provision-BEFORE-bare-broker.start() invariant ---
-# Regression fence for the hand-rolled (agents/bridge/probe) paths: on those, the
+# Regression fence for the hand-rolled (bridge/probe) paths: on those, the
 # managed Worker lifecycle never fires, so calfcord must provision the node +
 # blind-spot topics itself BEFORE the bare broker.start(). (The reply topic now
 # auto-provisions via the connect-hook, so it is no longer this helper's job.)
