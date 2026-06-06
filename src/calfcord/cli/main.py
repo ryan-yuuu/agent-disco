@@ -32,7 +32,7 @@ from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._prompts import make_prompter
 from calfcord.health.check import default_broker_probe, healthcheck
-from calfcord.supervisor import lifecycle
+from calfcord.supervisor import lifecycle, roster
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -87,6 +87,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     tools_p = agent_sub.add_parser("tools", help="Interactively edit an agent's tool list.")
     tools_p.add_argument("name", nargs="?", help="Agent name (omit to pick interactively).")
+
+    # Roster lifecycle (design §2 / §3.4-§3.5): a teammate clocking in/out of the
+    # *running* office. These are thin veneers over
+    # :mod:`calfcord.supervisor.roster`; the duplicate guard, the workspace check,
+    # and the §13.1 not-a-declared-slot steer live there. ``start``/``stop``/
+    # ``restart`` take a required positional name; ``ps`` (the *running* roster, as
+    # opposed to ``list``'s *defined* roster) takes none.
+    start_p = agent_sub.add_parser("start", help="Bring an agent online: a teammate clocks into the live org.")
+    start_p.add_argument("name", help="Agent name.")
+
+    stop_p = agent_sub.add_parser("stop", help="Take an agent offline: a teammate clocks out.")
+    stop_p.add_argument("name", help="Agent name.")
+
+    restart_p = agent_sub.add_parser("restart", help="Reload a running agent after editing its .md.")
+    restart_p.add_argument("name", help="Agent name.")
+
+    agent_sub.add_parser("ps", help="Show RUNNING agents (vs. `agent list`, which shows DEFINED agents).")
 
     # ``router`` mirrors ``agent``: a verb group, not a leaf. ``required=True``
     # makes a bare ``calfcord router`` print help + exit non-zero so the group
@@ -183,8 +200,54 @@ def _collect_set_updates(args: argparse.Namespace) -> dict[str, str]:
     return updates
 
 
+_ROSTER_COMMANDS = frozenset({"start", "stop", "restart", "ps"})
+
+
+def _run_agent_roster(command: str, name: str | None) -> int:
+    """Dispatch a roster verb (``agent start|stop|restart|ps``) — §3.4-§3.5.
+
+    Like :func:`_run_lifecycle`, these drive the *install-scoped* Process Compose
+    supervisor: its REST port is derived from ``$CALFCORD_HOME`` and the roster
+    ops talk to it (and, for ``start``/``ps``, to the broker-wide control-plane
+    probe). A dev run (no ``CALFCORD_HOME``) has no stable home for the supervisor,
+    so these verbs refuse to run there with the same actionable native-install
+    message rather than driving a half-built invocation against the project tree.
+
+    ``server_urls`` comes from ``CALF_HOST_URL`` (defaulting to ``localhost``, the
+    same default the runners, the broker healthcheck, and ``start`` use); it feeds
+    the §3.5 duplicate guard (``start``) and the §3.4 logical-roster probe
+    (``ps``). ``stop``/``restart`` need no probe. Each roster coroutine's POSIX
+    exit code is propagated unchanged.
+    """
+    home = _resolve_home()
+    if home is None:
+        print(
+            f"error: `calfcord agent {command}` needs a native install — set "
+            "CALFCORD_HOME (or run the installer) so the supervisor has a stable home."
+        )
+        return 1
+
+    if command == "stop":
+        return asyncio.run(roster.agent_stop(home, name=name))
+    if command == "restart":
+        return asyncio.run(roster.agent_restart(home, name=name))
+
+    # ``start`` and ``ps`` additionally consult the broker-wide control-plane
+    # probe, so they need the broker URL.
+    server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+    if command == "ps":
+        return asyncio.run(roster.agent_ps(home, server_urls=server_urls))
+    return asyncio.run(roster.agent_start(home, name=name, server_urls=server_urls))
+
+
 def _run_agent(args: argparse.Namespace) -> int:
     """Dispatch a ``calfcord agent <verb>`` command, resolving the install paths once."""
+    # Roster verbs drive the supervisor, not the agents *files*, so they short-
+    # circuit BEFORE the disk-path resolution the file verbs share — and keep the
+    # *running* view (`ps`) distinct from the *defined* view (`list`).
+    if args.agent_command in _ROSTER_COMMANDS:
+        return _run_agent_roster(args.agent_command, getattr(args, "name", None))
+
     home = _resolve_home()
     env_path, agents_dir = init.resolve_paths(home)
     cmd = args.agent_command

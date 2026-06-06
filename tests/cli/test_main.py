@@ -16,7 +16,7 @@ import pytest
 from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, doctor, init, router_setup
 from calfcord.cli import main as main_mod
 from calfcord.cli.main import main
-from calfcord.supervisor import lifecycle
+from calfcord.supervisor import lifecycle, roster
 
 
 def test_main_help_exits_zero() -> None:
@@ -578,3 +578,256 @@ def test_main_status_without_home_errors_native_install(
     monkeypatch.setattr(lifecycle, "status", _boom)
     assert main(["status"]) == 1
     assert "native install" in capsys.readouterr().out
+
+
+# --- roster lifecycle: agent start / stop / restart / ps -------------------
+
+
+@pytest.mark.parametrize("verb", ["start", "stop", "restart", "ps"])
+def test_main_agent_roster_help_exits_zero(verb: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["agent", verb, "--help"])
+    assert exc.value.code == 0
+
+
+@pytest.mark.parametrize("verb", ["start", "stop", "restart"])
+def test_main_agent_roster_requires_name(verb: str) -> None:
+    # The name is positional + required: a bare `agent start` (no name) must
+    # error (exit 2), never silently act on nothing.
+    with pytest.raises(SystemExit) as exc:
+        main(["agent", verb])
+    assert exc.value.code == 2
+
+
+def test_main_agent_start_dispatches_with_resolved_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `agent start <name>` resolves home from CALFCORD_HOME, reads server_urls
+    # from CALF_HOST_URL, asyncio.runs roster.agent_start with the resolved
+    # home + name + server_urls, and propagates its exit code.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
+
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, name, server_urls, **kwargs):
+        captured.update(home=home_arg, name=name, server_urls=server_urls)
+        return 0
+
+    monkeypatch.setattr(roster, "agent_start", _start)
+    assert main(["agent", "start", "assistant"]) == 0
+    assert captured == {
+        "home": home,
+        "name": "assistant",
+        "server_urls": "broker.example:9092",
+    }
+
+
+def test_main_agent_start_propagates_nonzero_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    async def _start(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr(roster, "agent_start", _start)
+    assert main(["agent", "start", "assistant"]) == 1
+
+
+def test_main_agent_start_defaults_host_url_to_localhost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # CALF_HOST_URL unset → "localhost" (the same default the runners + lifecycle
+    # use), so the broker-wide duplicate probe is still buildable on a dev box.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALF_HOST_URL", raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _start(home_arg, *, name, server_urls, **kwargs):
+        captured["server_urls"] = server_urls
+        return 0
+
+    monkeypatch.setattr(roster, "agent_start", _start)
+    assert main(["agent", "start", "assistant"]) == 0
+    assert captured["server_urls"] == "localhost"
+
+
+def test_main_agent_start_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Roster ops drive the install-scoped supervisor (derived port under
+    # $CALFCORD_HOME), so a dev run with no home refuses with a clear message
+    # rather than asyncio.run a half-built invocation against the dev tree.
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("roster.agent_start must not run without a home")
+
+    monkeypatch.setattr(roster, "agent_start", _boom)
+    assert main(["agent", "start", "assistant"]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+def test_main_agent_stop_dispatches_with_resolved_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `agent stop <name>` needs no broker probe — just the resolved home + name.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    captured: dict[str, object] = {}
+
+    async def _stop(home_arg, *, name, **kwargs):
+        captured.update(home=home_arg, name=name)
+        return 0
+
+    monkeypatch.setattr(roster, "agent_stop", _stop)
+    assert main(["agent", "stop", "assistant"]) == 0
+    assert captured == {"home": home, "name": "assistant"}
+
+
+def test_main_agent_stop_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    async def _stop(*args, **kwargs):
+        return 3
+
+    monkeypatch.setattr(roster, "agent_stop", _stop)
+    assert main(["agent", "stop", "assistant"]) == 3
+
+
+def test_main_agent_stop_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("roster.agent_stop must not run without a home")
+
+    monkeypatch.setattr(roster, "agent_stop", _boom)
+    assert main(["agent", "stop", "assistant"]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+def test_main_agent_restart_dispatches_with_resolved_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    captured: dict[str, object] = {}
+
+    async def _restart(home_arg, *, name, **kwargs):
+        captured.update(home=home_arg, name=name)
+        return 0
+
+    monkeypatch.setattr(roster, "agent_restart", _restart)
+    assert main(["agent", "restart", "assistant"]) == 0
+    assert captured == {"home": home, "name": "assistant"}
+
+
+def test_main_agent_restart_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    async def _restart(*args, **kwargs):
+        return 2
+
+    monkeypatch.setattr(roster, "agent_restart", _restart)
+    assert main(["agent", "restart", "assistant"]) == 2
+
+
+def test_main_agent_restart_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("roster.agent_restart must not run without a home")
+
+    monkeypatch.setattr(roster, "agent_restart", _boom)
+    assert main(["agent", "restart", "assistant"]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+def test_main_agent_ps_dispatches_with_resolved_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `agent ps` takes no name; it resolves home + server_urls and asyncio.runs
+    # roster.agent_ps (the running view), distinct from `agent list` (defined).
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
+
+    captured: dict[str, object] = {}
+
+    async def _ps(home_arg, *, server_urls, **kwargs):
+        captured.update(home=home_arg, server_urls=server_urls)
+        return 0
+
+    monkeypatch.setattr(roster, "agent_ps", _ps)
+    assert main(["agent", "ps"]) == 0
+    assert captured == {"home": home, "server_urls": "broker.example:9092"}
+
+
+def test_main_agent_ps_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    async def _ps(*args, **kwargs):
+        return 4
+
+    monkeypatch.setattr(roster, "agent_ps", _ps)
+    assert main(["agent", "ps"]) == 4
+
+
+def test_main_agent_ps_without_home_errors_native_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("roster.agent_ps must not run without a home")
+
+    monkeypatch.setattr(roster, "agent_ps", _boom)
+    assert main(["agent", "ps"]) == 1
+    assert "native install" in capsys.readouterr().out
+
+
+def test_main_agent_list_and_ps_are_distinct(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `agent list` (defined agents) must NOT route to the roster `agent ps`
+    # (running agents). They share the `agent` verb group but are different ops.
+    _use_dirs(monkeypatch, tmp_path)
+
+    def _run_list(agents_dir: Path, *, as_json: bool) -> int:
+        return 0
+
+    def _ps_boom(*args, **kwargs):
+        raise AssertionError("`agent list` must not dispatch to roster.agent_ps")
+
+    monkeypatch.setattr(agent_inspect, "run_list", _run_list)
+    monkeypatch.setattr(roster, "agent_ps", _ps_boom)
+    assert main(["agent", "list"]) == 0
