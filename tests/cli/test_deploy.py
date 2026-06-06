@@ -173,7 +173,10 @@ def _k8s_configmap_host_url(server_urls: str) -> str:
 
 @pytest.mark.parametrize(
     "server_urls",
-    ["localhost", "localhost:9092", "127.0.0.1", "127.0.0.1:9092", ""],
+    # Includes the IPv6 loopback in both the bare ("::1") and bracketed
+    # ("[::1]:9092") wire forms — the unbracketed form does not survive urlsplit
+    # as a hostname, so it is normalised explicitly.
+    ["localhost", "localhost:9092", "127.0.0.1", "127.0.0.1:9092", "", "::1", "[::1]:9092"],
 )
 def test_k8s_localhost_broker_resolves_to_in_cluster_service(server_urls: str) -> None:
     # The bundled-broker manifest ships a Service named `broker` at broker:9092, so a
@@ -193,6 +196,17 @@ def test_k8s_external_broker_passes_through_verbatim() -> None:
     # A real external/managed Kafka must flow through unchanged — only loopback is
     # rewritten to the in-cluster Service.
     assert _k8s_configmap_host_url(_BROKER) == _BROKER
+
+
+@pytest.mark.parametrize(
+    "server_urls",
+    # A multi-broker bootstrap list is the operator's explicit cross-host target,
+    # not a single loopback to rewrite — and is not a single URL `urlsplit` can
+    # parse, so it must flow through verbatim (never crash `calfcord deploy k8s`).
+    ["127.0.0.1:9092,host2:9092", "broker-a:9092,broker-b:9092"],
+)
+def test_k8s_multi_broker_bootstrap_passes_through_verbatim(server_urls: str) -> None:
+    assert _k8s_configmap_host_url(server_urls) == server_urls
 
 
 def test_k8s_renders_one_deployment_per_process_type() -> None:

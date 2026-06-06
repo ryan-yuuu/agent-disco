@@ -90,13 +90,29 @@ def _resolve_config_host_url(server_urls: str) -> str:
     listener port). A real external/non-loopback broker passes through verbatim.
     """
     candidate = server_urls.strip()
+    # A multi-broker bootstrap list (e.g. "h1:9092,h2:9092") is the operator's
+    # explicit cross-host target — not a single loopback to rewrite — and is not a
+    # single URL ``urlsplit`` can parse, so pass it through verbatim.
+    if "," in candidate:
+        return server_urls
+    # The bare (unbracketed) IPv6 loopback does not survive ``urlsplit`` as a
+    # ``.hostname`` (only the bracketed "[::1]" form does), so normalise it here;
+    # a bare "::1" carries no port, so it resolves to the broker's default.
+    if candidate.lower() == "::1":
+        return f"{_K8S_BROKER_SERVICE}:{_K8S_BROKER_PORT}"
     # urlsplit needs a scheme to populate .hostname/.port; the wire form is bare
     # host:port (e.g. "localhost:9092"), so prepend a dummy scheme to parse it.
-    parsed = urlsplit(f"//{candidate}")
-    host = (parsed.hostname or "").lower()
+    # ``.port`` raises ValueError on a non-integer/out-of-range port; an
+    # unparseable value is not a loopback we can confidently rewrite, so fall back
+    # to the verbatim passthrough rather than crash ``calfcord deploy``.
+    try:
+        parsed = urlsplit(f"//{candidate}")
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or _K8S_BROKER_PORT
+    except ValueError:
+        return server_urls
     if host not in _LOOPBACK_HOSTS:
         return server_urls
-    port = parsed.port or _K8S_BROKER_PORT
     return f"{_K8S_BROKER_SERVICE}:{port}"
 
 

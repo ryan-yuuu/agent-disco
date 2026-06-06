@@ -193,8 +193,10 @@ def _home_marker(home: str) -> str:
     """The home-specific path the rendered project embeds in every process.
 
     Each declared process's ``log_location`` is ``<home>/state/logs/<name>.log``
-    (see :func:`compose._log_location`), so ``<home>/state`` is a substring of the
-    answering supervisor's config iff that supervisor was launched for THIS home.
+    (see :func:`compose._log_location`), and that absolute path opens every
+    quoted string value in which it appears — so ``<home>/state`` is a prefix of
+    one of the answering supervisor's quoted config paths iff that supervisor was
+    launched for THIS home (see :func:`_supervisor_belongs_to_home`).
     """
     return os.path.join(home, "state")
 
@@ -226,8 +228,15 @@ async def _supervisor_belongs_to_home(
         return None
     # Robust to whatever JSON key Process Compose uses for the log path (the API
     # shape is version-fragile, §12.4 Risk #2): scan the whole serialized config
-    # for this home's marker rather than pinning a single field name.
-    return _home_marker(home) in repr(info)
+    # rather than pinning a single field name. Match the marker only where it
+    # OPENS a quoted path value (repr quotes string values, and the absolute
+    # home path starts the log_location/working_dir it appears in) so a home
+    # whose path is a *suffix* of another's — e.g. "/calf" vs "/data/calf" —
+    # cannot false-positive on a bare substring scan and silently adopt the
+    # other install's colliding supervisor.
+    marker = _home_marker(home)
+    serialized = repr(info)
+    return f"'{marker}" in serialized or f'"{marker}' in serialized
 
 
 def _bridge_is_ready(state: object) -> bool:
