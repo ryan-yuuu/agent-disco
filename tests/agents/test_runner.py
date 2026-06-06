@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from calfcord._provisioning import agent_infra_topics
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.runner import (
     BootstrapError,
@@ -22,7 +23,6 @@ from calfcord.agents.runner import (
     _prewarm_codex_if_needed,
     _publish_departures_best_effort,
     _resolve_agent_specs,
-    _run_worker,
     bootstrap_env_var,
 )
 from calfcord.agents.state import AgentRuntimeState, AgentStateStore
@@ -845,101 +845,248 @@ class TestPublishDeparturesBestEffort:
         assert elapsed < timeout + 0.5, f"total elapsed {elapsed:.3f}s exceeded parallel budget"
 
 
-class TestRunWorkerShutdownCallback:
-    """``_run_worker`` blocks on a SIGINT/SIGTERM stop event and runs an
-    optional ``on_shutdown_signal`` callback while the broker is still
-    alive. The caller (``_amain``) is responsible for ``register_handlers``
-    + ``broker.start``; this helper only owns the signal-wait + drain hook.
+class _RecordingWorker:
+    """A stand-in :class:`calfkit.Worker` that captures the presence-hook
+    closures the runner registers via ``@worker.after_startup`` /
+    ``@worker.on_shutdown``.
+
+    The decorators mirror the real Worker's contract: they register the hook
+    and return it unchanged, so a test can later invoke the captured closure to
+    exercise the inlined presence logic without standing up a broker. ``run`` is
+    an awaitable no-op (the managed lifecycle is calfkit's, not under test here).
+    """
+
+    def __init__(self) -> None:
+        self.after_startup_hook: Any = None
+        self.on_shutdown_hook: Any = None
+        self.run_called = False
+
+    def after_startup(self, fn: Any) -> Any:
+        self.after_startup_hook = fn
+        return fn
+
+    def on_shutdown(self, fn: Any) -> Any:
+        self.on_shutdown_hook = fn
+        return fn
+
+    async def run(self) -> None:
+        self.run_called = True
+
+
+class TestAmainPresenceHooks:
+    """0.5.4 boot contract for the agents runner: presence is published via
+    inlined ``@worker.after_startup`` / ``@worker.on_shutdown`` hooks rather
+    than a hand-rolled run loop. ``_amain`` must register the raw control sink
+    before ``run()``, provision the agents' blind-spot topics before ``run()``,
+    and wire the two presence hooks so that:
+
+    * ``after_startup`` publishes a "startup" state event per agent and
+      **raises** on a publish failure (a failed announce leaves the agent
+      invisible and calfcord has no presence reconciliation — fail the boot);
+    * ``on_shutdown`` publishes departures best-effort (logs + swallows).
     """
 
     @staticmethod
-    def _disable_signal_handlers(
+    def _patch_boot(
         monkeypatch: pytest.MonkeyPatch,
-    ) -> dict[int, Any]:
-        """Patch ``loop.add_signal_handler`` to capture (sig, callback) pairs
-        rather than register OS-level handlers. Tests can fire a captured
-        handler synchronously to simulate a signal without process-level
-        side effects."""
-        loop = asyncio.get_running_loop()
-        captured: dict[int, Any] = {}
+        *,
+        client: object,
+        agent_ids: list[str],
+    ) -> _RecordingWorker:
+        """Stub every heavy boot collaborator and return the recording worker.
 
-        def _fake_add(sig: int, cb: Any, *args: Any) -> None:
-            captured[sig] = cb
+        Leaves the deferred control-plane functions (``publish_state_event``,
+        ``register_control_sink``, ``build_state_event``) for each test to set
+        on their *source* modules, since ``_amain`` imports them lazily inside
+        the function body."""
+        from calfcord.agents import runner as agents_runner
 
-        monkeypatch.setattr(loop, "add_signal_handler", _fake_add)
-        return captured
-
-    async def test_callback_fires_on_signal(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """SIGINT triggers on_shutdown_signal before _run_worker returns."""
-        captured = self._disable_signal_handlers(monkeypatch)
-        callback_fired = asyncio.Event()
-
-        async def _on_shutdown() -> None:
-            callback_fired.set()
-
-        run_task = asyncio.create_task(
-            _run_worker(num_agents=1, on_shutdown_signal=_on_shutdown),
-        )
-        # Give _run_worker a chance to register handlers + start the wait.
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if signal.SIGINT in captured:
-                break
-        assert signal.SIGINT in captured, "handler never registered"
-
-        # Synchronously set the stop event the way the real signal handler would.
-        captured[signal.SIGINT]()
-        await run_task
-        assert callback_fired.is_set()
-
-    async def test_callback_not_required(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Passing ``on_shutdown_signal=None`` is a no-op past the stop wait."""
-        captured = self._disable_signal_handlers(monkeypatch)
-
-        run_task = asyncio.create_task(_run_worker(num_agents=1))
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if signal.SIGINT in captured:
-                break
-        assert signal.SIGINT in captured, "handler never registered"
-
-        captured[signal.SIGINT]()
-        # Must complete without raising — the absence of a callback is
-        # not an error.
-        await run_task
-
-    async def test_callback_exception_is_swallowed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """An exception from ``on_shutdown_signal`` is logged at ERROR
-        and swallowed — a misbehaving callback must not block teardown."""
-        captured = self._disable_signal_handlers(monkeypatch)
-
-        async def _bad_callback() -> None:
-            raise RuntimeError("callback boom")
-
-        with caplog.at_level(logging.ERROR):
-            run_task = asyncio.create_task(
-                _run_worker(num_agents=1, on_shutdown_signal=_bad_callback),
+        specs = [
+            (
+                AgentDefinition(
+                    agent_id=aid,
+                    display_name=aid.title(),
+                    description=f"Test agent {aid}.",
+                    system_prompt=f"You are {aid}.",
+                ),
+                MagicMock(spec=AgentRuntimeState),
+                MagicMock(spec=AgentStateStore),
             )
-            for _ in range(50):
-                await asyncio.sleep(0)
-                if signal.SIGINT in captured:
-                    break
-            assert signal.SIGINT in captured, "handler never registered"
-            captured[signal.SIGINT]()
-            # Must NOT raise — callback errors are swallowed.
-            await run_task
+            for aid in agent_ids
+        ]
 
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert any("on_shutdown_signal callback raised" in r.message for r in errors), (
-            f"expected callback-raised log, got: {[r.message for r in errors]}"
+        @asynccontextmanager
+        async def _fake_persona(*_a: Any, **_k: Any):
+            yield MagicMock()
+
+        @asynccontextmanager
+        async def _fake_connect(*_a: Any, **_k: Any):
+            yield client
+
+        monkeypatch.setattr(agents_runner, "_resolve_agent_specs", AsyncMock(return_value=specs))
+        monkeypatch.setattr(agents_runner, "_prewarm_codex_if_needed", AsyncMock())
+        monkeypatch.setattr(agents_runner, "DiscordSettings", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(
+            agents_runner, "DiscordPersonaSender", lambda *a, **k: _fake_persona()
         )
+        monkeypatch.setattr(
+            agents_runner.Client, "connect", lambda *a, **k: _fake_connect(*a, **k)
+        )
+
+        def _fake_factory(*_a: Any, **_k: Any) -> MagicMock:
+            factory = MagicMock()
+            factory.build_node.side_effect = lambda d, *_a, **_k: MagicMock(node_id=d.agent_id)
+            return factory
+
+        monkeypatch.setattr(agents_runner, "AgentFactory", _fake_factory)
+
+        worker = _RecordingWorker()
+        monkeypatch.setattr(agents_runner, "Worker", lambda *_a, **_k: worker)
+        return worker
+
+    async def test_registers_control_sink_then_provisions_then_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The raw control sink registers BEFORE the managed lifecycle starts,
+        the blind-spot topics are provisioned BEFORE ``run()``, and the agents'
+        ``agent_infra_topics`` are passed through to ``provision_infra``."""
+        from calfcord.agents import runner as agents_runner
+        from calfcord.control_plane import publish as cp_publish
+        from calfcord.control_plane import sink as cp_sink
+
+        order: list[str] = []
+        client = MagicMock()
+        worker = self._patch_boot(monkeypatch, client=client, agent_ids=["echo", "scribe"])
+
+        monkeypatch.setattr(
+            cp_sink, "register_control_sink", lambda *_a, **_k: order.append("sink")
+        )
+        monkeypatch.setattr(cp_publish, "publish_state_event", AsyncMock())
+
+        provision = AsyncMock(side_effect=lambda *a, **k: order.append("provision"))
+        monkeypatch.setattr(agents_runner, "provision_infra", provision)
+
+        async def _run() -> None:
+            order.append("run")
+
+        worker.run = _run  # type: ignore[method-assign]
+
+        await agents_runner._amain(_parse_args([]))
+
+        # Two sinks (one per agent) register before provisioning, which is
+        # before the managed run().
+        assert order == ["sink", "sink", "provision", "run"]
+        provision.assert_awaited_once_with(
+            client, extra_topics=agent_infra_topics(["echo", "scribe"])
+        )
+
+    async def test_after_startup_publishes_startup_per_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``after_startup`` hook publishes one "startup" state event per
+        hosted agent once the broker is live."""
+        from calfcord.agents import runner as agents_runner
+        from calfcord.control_plane import publish as cp_publish
+        from calfcord.control_plane import sink as cp_sink
+
+        client = MagicMock()
+        worker = self._patch_boot(monkeypatch, client=client, agent_ids=["echo", "scribe"])
+
+        monkeypatch.setattr(cp_sink, "register_control_sink", lambda *_a, **_k: None)
+        publish = AsyncMock()
+        monkeypatch.setattr(cp_publish, "publish_state_event", publish)
+        monkeypatch.setattr(agents_runner, "provision_infra", AsyncMock())
+
+        await agents_runner._amain(_parse_args([]))
+
+        # Hook captured but not fired during boot — the broker fires it.
+        assert worker.after_startup_hook is not None
+        publish.assert_not_awaited()
+
+        await worker.after_startup_hook(MagicMock())  # the ServingContext
+
+        assert publish.await_count == 2
+        published_ids = sorted(
+            call.args[1].agent_id for call in publish.await_args_list
+        )
+        assert published_ids == ["echo", "scribe"]
+
+    async def test_after_startup_raises_when_publish_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A publish failure in ``after_startup`` must RAISE (not swallow) so the
+        0.5.4 contract unwinds the boot — an agent that can't announce is
+        invisible and calfcord has no presence reconciliation to fall back on."""
+        from calfcord.agents import runner as agents_runner
+        from calfcord.control_plane import publish as cp_publish
+        from calfcord.control_plane import sink as cp_sink
+
+        client = MagicMock()
+        worker = self._patch_boot(monkeypatch, client=client, agent_ids=["echo"])
+
+        monkeypatch.setattr(cp_sink, "register_control_sink", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            cp_publish,
+            "publish_state_event",
+            AsyncMock(side_effect=RuntimeError("kafka producer down")),
+        )
+        monkeypatch.setattr(agents_runner, "provision_infra", AsyncMock())
+
+        await agents_runner._amain(_parse_args([]))
+
+        with pytest.raises(RuntimeError, match="kafka producer down"):
+            await worker.after_startup_hook(MagicMock())
+
+    async def test_on_shutdown_publishes_departures_best_effort(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``on_shutdown`` hook delegates to ``_publish_departures_best_effort``
+        (logs + swallows) so a missed goodbye never blocks teardown."""
+        from calfcord.agents import runner as agents_runner
+        from calfcord.control_plane import publish as cp_publish
+        from calfcord.control_plane import sink as cp_sink
+
+        client = MagicMock()
+        worker = self._patch_boot(monkeypatch, client=client, agent_ids=["echo", "scribe"])
+
+        monkeypatch.setattr(cp_sink, "register_control_sink", lambda *_a, **_k: None)
+        monkeypatch.setattr(cp_publish, "publish_state_event", AsyncMock())
+        monkeypatch.setattr(agents_runner, "provision_infra", AsyncMock())
+
+        departures = AsyncMock()
+        monkeypatch.setattr(agents_runner, "_publish_departures_best_effort", departures)
+
+        await agents_runner._amain(_parse_args([]))
+
+        assert worker.on_shutdown_hook is not None
+        departures.assert_not_awaited()  # not during boot
+
+        await worker.on_shutdown_hook(MagicMock())  # the ServingContext
+
+        departures.assert_awaited_once()
+        # First positional arg is the client; second is the list of refs.
+        assert departures.await_args.args[0] is client
+        passed_ids = [ref.current.agent_id for ref in departures.await_args.args[1]]
+        assert passed_ids == ["echo", "scribe"]
+
+    async def test_worker_run_crash_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crash inside the managed ``worker.run()`` must escape ``_amain`` so
+        ``asyncio.run`` exits non-zero and the supervisor restarts the process —
+        native to ``Worker.run()`` now, but the runner must not swallow it."""
+        from calfcord.agents import runner as agents_runner
+        from calfcord.control_plane import publish as cp_publish
+        from calfcord.control_plane import sink as cp_sink
+
+        client = MagicMock()
+        worker = self._patch_boot(monkeypatch, client=client, agent_ids=["echo"])
+
+        monkeypatch.setattr(cp_sink, "register_control_sink", lambda *_a, **_k: None)
+        monkeypatch.setattr(cp_publish, "publish_state_event", AsyncMock())
+        monkeypatch.setattr(agents_runner, "provision_infra", AsyncMock())
+
+        worker.run = AsyncMock(side_effect=ValueError("simulated kafka drop"))  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError, match="simulated kafka drop"):
+            await agents_runner._amain(_parse_args([]))

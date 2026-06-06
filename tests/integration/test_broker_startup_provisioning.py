@@ -1,14 +1,26 @@
-"""Gated REAL-broker regression test for the provision-before-broker.start()
-invariant — the bug that hung calfcord runners on Tansu.
+"""Gated REAL-broker self-enforcing canary for calf-ai/calfkit-sdk#180 — the
+upstream gap that still forces calfcord to pre-provision the client reply topic
+before a worker-owned ``broker.start()`` on Tansu.
 
-The router/tools/mcp/agents runners bring their reply dispatcher up with a
-DIRECT ``await client.broker.start()``. On a broker that does NOT auto-create
-topics, that start() blocks forever if the client's reply topic does not yet
-exist: calfkit registers a reply-dispatcher subscriber on ``client.reply_topic``
-at connect, but only provisions that topic lazily on the first ``_invoke`` —
-which these processes never do. The fix is to provision the reply topic (and
-each runner's node/infra topics) BEFORE the direct broker.start(). This module
-exercises that mechanism against a live no-auto-create broker.
+Under the 0.5.4 managed lifecycle ``Worker.run()``/``Worker.start()`` performs a
+DIRECT ``broker.start()``. On a broker that does NOT auto-create topics, that
+start() blocks forever if the client's reply topic does not yet exist: calfkit
+registers a reply-dispatcher subscriber on ``client.reply_topic`` at connect, but
+only provisions that topic lazily on the first ``_invoke`` — which a direct start
+never triggers. calfcord works around this in
+:func:`calfcord._provisioning.provision_infra` by creating the reply topic before
+handing the lifecycle to the worker.
+
+This module pins #180 as a **self-announcing exit gate** rather than asserting the
+*broken* behavior reproduces (a red test after a calfkit bump is the kind of noise
+that gets xfail'd and forgotten, leaving the workaround as permanent cruft).
+:func:`test_direct_start_succeeds_without_reply_topic_provisioning` asserts the
+behavior we WANT (a direct start succeeds without the pre-provision) and is marked
+``xfail(strict=True)``: while #180 is open the start hangs, the body times out, and
+the test is an expected failure (silent); the moment calfkit fixes #180 the start
+returns cleanly, the test XPASSes, and ``strict=True`` turns that XPASS into a hard
+failure — forcing removal of ``provision_infra``'s reply-topic line (see the
+``TODO(calfkit#180)`` there).
 
 Gated behind ``CALF_TEST_KAFKA`` (mirrors calfkit's integration lane): with no
 such broker configured it skips cleanly. Point it at native Tansu to run for
@@ -31,8 +43,6 @@ import pytest
 from calfkit import Client, ProvisioningConfig, Worker
 from calfkit.nodes import consumer
 
-from calfcord._provisioning import provision_and_start_broker
-
 pytestmark = pytest.mark.skipif(
     not os.getenv("CALF_TEST_KAFKA"),
     reason="set CALF_TEST_KAFKA=1 (+ CALF_TEST_KAFKA_BOOTSTRAP) against a NO-auto-create broker (e.g. Tansu)",
@@ -40,7 +50,6 @@ pytestmark = pytest.mark.skipif(
 
 BOOTSTRAP = os.getenv("CALF_TEST_KAFKA_BOOTSTRAP", "localhost:9092")
 _START_OK_TIMEOUT = 15.0  # a healthy start returns in well under a second
-_HANG_PROBE_TIMEOUT = 6.0  # long enough to distinguish a hang from a clean start
 
 
 def _build_worker(client: Any) -> Any:
@@ -57,36 +66,26 @@ def _build_worker(client: Any) -> Any:
     return worker
 
 
-async def test_provision_and_start_broker_starts_cleanly_on_no_autocreate_broker() -> None:
-    """The fix: provision_and_start_broker provisions the client reply topic +
-    the worker's node topics, so a hand-rolled direct broker.start() returns
-    cleanly on a broker that does not auto-create topics."""
-    client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
-    worker = _build_worker(client)
-    try:
-        await asyncio.wait_for(
-            provision_and_start_broker(client, worker=worker),
-            timeout=_START_OK_TIMEOUT,
-        )
-        assert client.broker.running
-    finally:
-        with contextlib.suppress(Exception):
-            await client.close()
-
-
-async def test_direct_start_hangs_without_reply_topic_provisioning() -> None:
-    """The bug this fix guards against: provisioning only the node topics (NOT
-    the client reply topic) and then a direct broker.start() blocks on the
-    missing reply topic. Asserting the hang documents the failure mode and acts
-    as a canary — if calfkit ever provisions reply topics eagerly, this stops
-    timing out and provision_and_start_broker's reply-topic step can be dropped
-    (tracked upstream: calf-ai/calfkit-sdk#180)."""
+@pytest.mark.xfail(
+    strict=True,
+    reason="calf-ai/calfkit-sdk#180: a direct broker.start() hangs without the reply "
+    "topic pre-provisioned. XPASSes (hard-fails, by strict=True) when #180 lands — "
+    "drop provision_infra's reply-topic line then.",
+)
+async def test_direct_start_succeeds_without_reply_topic_provisioning() -> None:
+    """Self-enforcing #180 canary: provision ONLY the worker's node topics (NOT
+    the client reply topic), then a direct ``broker.start()`` — the path
+    ``Worker.run()``/``start()`` takes. We assert it SUCCEEDS within a generous
+    timeout; while #180 is open it hangs and times out (expected failure). When
+    calfkit provisions reply topics eagerly this returns cleanly, the test
+    XPASSes, and ``strict=True`` flips it red — forcing removal of
+    ``provision_infra``'s reply-topic workaround."""
     client = Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True))
     worker = _build_worker(client)
     await worker.provision_topics()  # node topics only — reply topic left missing
     try:
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(client.broker.start(), timeout=_HANG_PROBE_TIMEOUT)
+        await asyncio.wait_for(client.broker.start(), timeout=_START_OK_TIMEOUT)
+        assert client.broker.running
     finally:
         with contextlib.suppress(Exception):
             await client.close()
