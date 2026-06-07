@@ -75,10 +75,19 @@ class _StubClient:
         workspace_up: bool = True,
         start_raises: Exception | None = None,
         list_processes_result: object = None,
+        fail_start: dict[str, Exception] | None = None,
+        fail_stop: dict[str, Exception] | None = None,
+        fail_restart: dict[str, Exception] | None = None,
     ) -> None:
         self._workspace_up = workspace_up
         self._start_raises = start_raises
         self._list_processes_result = list_processes_result or []
+        # Per-name failure scripts let the bulk best-effort tests fail ONE item and
+        # assert the sweep continues; absent (the default), no per-name op fails, so
+        # the single-op tests above are unaffected.
+        self._fail_start = fail_start or {}
+        self._fail_stop = fail_stop or {}
+        self._fail_restart = fail_restart or {}
         self.start_calls: list[str] = []
         self.stop_calls: list[str] = []
         self.restart_calls: list[str] = []
@@ -94,16 +103,22 @@ class _StubClient:
 
     async def start_process(self, name: str):
         self.start_calls.append(name)
+        if name in self._fail_start:
+            raise self._fail_start[name]
         if self._start_raises is not None:
             raise self._start_raises
         return {}
 
     async def stop_process(self, name: str):
         self.stop_calls.append(name)
+        if name in self._fail_stop:
+            raise self._fail_stop[name]
         return {}
 
     async def restart_process(self, name: str):
         self.restart_calls.append(name)
+        if name in self._fail_restart:
+            raise self._fail_restart[name]
         return {}
 
     async def list_processes(self):
@@ -148,6 +163,71 @@ async def test_agent_start_refuses_duplicate_when_probe_shows_live(tmp_path, cap
     out = capsys.readouterr().out
     assert "already running in the organization" in out
     assert "assistant" in out
+
+
+# --- agent_start: already-running-here is a restart (behavior #2) ------------
+
+
+async def test_agent_start_local_running_restarts_not_duplicate_refusal(tmp_path, capsys):
+    """`start` on a name that is Running on THIS host → restart, not the refusal.
+
+    Behavior #2: a re-`start` of a locally-running instance is the useful
+    idempotency — reload it in place (the same effect as `restart`). This must take
+    precedence over the org-wide duplicate guard: the guard refuses (and tells you
+    it is running elsewhere), but a *local* running instance is ours to restart, so
+    we never reach the probe and never print the refusal.
+    """
+    client = _StubClient(
+        list_processes_result=[{"name": "assistant", "status": "Running"}]
+    )
+    # The probe would also report it live; the local-running branch must win BEFORE
+    # the guard, so the probe is never consulted.
+    probe = _StubProbe([_defn("assistant")])
+
+    rc = await roster.agent_start(
+        _home(tmp_path),
+        name="assistant",
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    assert client.restart_calls == ["assistant"]  # restarted in place
+    assert client.start_calls == []  # NOT a fresh start
+    assert probe.calls == []  # local-running short-circuits before the org probe
+    out = capsys.readouterr().out
+    assert "assistant" in out
+    assert "restarted" in out
+    assert "already running in the organization" not in out
+
+
+async def test_agent_start_remote_running_keeps_duplicate_refusal(tmp_path, capsys):
+    """`start` on a name live on ANOTHER host (not local) → keep the §3.5 refusal.
+
+    Behavior #2 only restarts a *local* running instance; a name answering on a
+    different host is the duplicate-guard case (starting a second would
+    double-reply / split-brain), so refuse with the org-wide message and return 0.
+    """
+    client = _StubClient(
+        list_processes_result=[]  # not running on THIS host
+    )
+    probe = _StubProbe([_defn("assistant")])  # answering on another host
+
+    rc = await roster.agent_start(
+        _home(tmp_path),
+        name="assistant",
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    assert client.restart_calls == []  # not ours to restart
+    assert client.start_calls == []  # no duplicate started
+    assert probe.calls == [_SERVERS]  # the guard did query the org
+    out = capsys.readouterr().out
+    assert "already running in the organization" in out
 
 
 # --- agent_start: happy path ------------------------------------------------
@@ -436,6 +516,235 @@ async def test_agent_restart_workspace_down(tmp_path, capsys):
     client = _StubClient(workspace_up=False)
 
     rc = await roster.agent_restart(_home(tmp_path), name="assistant", client=client)
+
+    assert rc == 1
+    assert client.restart_calls == []
+    out = capsys.readouterr().out
+    assert "workspace not running" in out
+
+
+# --- agent_start_all: sweep every DEFINED agent (behavior #1) ---------------
+
+
+async def test_agent_start_all_mixes_running_stopped_and_remote(tmp_path, capsys):
+    """`start --all` runs the single-start logic per DEFINED id (decision B).
+
+    The caller passes the defined ids; each runs through `agent_start`'s body, so a
+    locally-running one restarts (behavior #2), a stopped one starts, and one only
+    answering on another host hits the duplicate-refusal. All three are honored in
+    one sweep; every id gets a per-item line; an all-success sweep returns 0.
+    """
+    client = _StubClient(
+        list_processes_result=[{"name": "local_up", "status": "Running"}]
+    )
+    probe = _StubProbe([_defn("remote")])  # answering elsewhere, not here
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["local_up", "stopped", "remote"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    assert client.restart_calls == ["local_up"]  # running here → restarted
+    assert client.start_calls == ["stopped"]  # not anywhere → started
+    out = capsys.readouterr().out
+    assert "restarted" in out  # local_up
+    assert "online" in out  # stopped
+    assert "already running in the organization" in out  # remote
+
+
+async def test_agent_start_all_empty_defined_set(tmp_path, capsys):
+    """No defined agents → an explicit "none" line and a clean 0."""
+    client = _StubClient()
+    probe = _StubProbe([])
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=[],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 0
+    assert client.start_calls == []
+    out = capsys.readouterr().out
+    assert "no agents defined" in out
+
+
+async def test_agent_start_all_continues_past_a_hard_failure_returns_1(tmp_path, capsys):
+    """A hard failure on one id must not abort the sweep; return 1 if any failed.
+
+    Best-effort: a 5xx (genuine infra fault) on one id raises inside the single
+    start, but the sweep catches it, keeps going for the rest, and reports a
+    non-zero summary so the operator knows something needs attention.
+    """
+    boom = ProcessComposeError("HTTP 500: wedged supervisor", status_code=500)
+    client = _StubClient(fail_start={"bad": boom})
+    probe = _StubProbe([])  # nobody live → each id reaches start_process
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["good", "bad", "later"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 1  # at least one hard-failed
+    # The sweep continued past the failure: every id was attempted, including the
+    # one AFTER the failing one.
+    assert client.start_calls == ["good", "bad", "later"]
+
+
+async def test_agent_start_all_workspace_down(tmp_path, capsys):
+    """Supervisor unreachable → the shared not-running hint, exit 1, nothing started."""
+    client = _StubClient(workspace_up=False)
+    probe = _StubProbe([])
+
+    rc = await roster.agent_start_all(
+        _home(tmp_path),
+        agent_ids=["assistant"],
+        server_urls=_SERVERS,
+        client=client,
+        probe=probe,
+    )
+
+    assert rc == 1
+    assert client.start_calls == []
+    assert probe.calls == []
+    out = capsys.readouterr().out
+    assert "workspace not running" in out
+
+
+# --- agent_stop_all: every LOCAL Running agent (behavior #1) -----------------
+
+
+async def test_agent_stop_all_targets_only_running_local_agents(tmp_path, capsys):
+    """`stop --all` stops every Running local AGENT — never the substrate/singletons.
+
+    The target set is the same physical filter `ps` uses: Running processes whose
+    name is not a reserved (substrate/tools/router/mcp) process. A Stopped agent is
+    not a target. An all-success sweep returns 0.
+    """
+    client = _StubClient(
+        list_processes_result=[
+            {"name": "broker", "status": "Running"},  # substrate — never
+            {"name": "tools", "status": "Running"},  # singleton — never
+            {"name": "router", "status": "Running"},  # singleton — never
+            {"name": "mcp", "status": "Running"},  # singleton — never
+            {"name": "assistant", "status": "Running"},  # agent → stop
+            {"name": "scheduler", "status": "Running"},  # agent → stop
+            {"name": "dormant", "status": "Stopped"},  # not Running → skip
+        ]
+    )
+
+    rc = await roster.agent_stop_all(_home(tmp_path), client=client)
+
+    assert rc == 0
+    assert sorted(client.stop_calls) == ["assistant", "scheduler"]
+    for never in ("broker", "tools", "router", "mcp", "dormant"):
+        assert never not in client.stop_calls
+
+
+async def test_agent_stop_all_empty_running_set(tmp_path, capsys):
+    """No agents running locally → an explicit "none" line and a clean 0."""
+    client = _StubClient(list_processes_result=[{"name": "broker", "status": "Running"}])
+
+    rc = await roster.agent_stop_all(_home(tmp_path), client=client)
+
+    assert rc == 0
+    assert client.stop_calls == []
+    out = capsys.readouterr().out
+    assert "no agents running locally" in out
+
+
+async def test_agent_stop_all_continues_past_a_failure_returns_1(tmp_path, capsys):
+    """One failing stop must not abort the sweep; return 1 if any failed."""
+    client = _StubClient(
+        list_processes_result=[
+            {"name": "a", "status": "Running"},
+            {"name": "b", "status": "Running"},
+            {"name": "c", "status": "Running"},
+        ],
+        fail_stop={"b": RuntimeError("stop blew up")},
+    )
+
+    rc = await roster.agent_stop_all(_home(tmp_path), client=client)
+
+    assert rc == 1
+    assert sorted(client.stop_calls) == ["a", "b", "c"]  # every one attempted
+
+
+async def test_agent_stop_all_workspace_down(tmp_path, capsys):
+    """Supervisor unreachable → the shared not-running hint, exit 1, nothing stopped."""
+    client = _StubClient(workspace_up=False)
+
+    rc = await roster.agent_stop_all(_home(tmp_path), client=client)
+
+    assert rc == 1
+    assert client.stop_calls == []
+    out = capsys.readouterr().out
+    assert "workspace not running" in out
+
+
+# --- agent_restart_all: every LOCAL Running agent (behavior #1) --------------
+
+
+async def test_agent_restart_all_targets_only_running_local_agents(tmp_path, capsys):
+    """`restart --all` restarts every Running local AGENT (same target as stop)."""
+    client = _StubClient(
+        list_processes_result=[
+            {"name": "bridge", "status": "Running"},  # substrate — never
+            {"name": "assistant", "status": "Running"},  # agent → restart
+            {"name": "dormant", "status": "Stopped"},  # not Running → skip
+        ]
+    )
+
+    rc = await roster.agent_restart_all(_home(tmp_path), client=client)
+
+    assert rc == 0
+    assert client.restart_calls == ["assistant"]
+    assert "bridge" not in client.restart_calls
+    assert "dormant" not in client.restart_calls
+
+
+async def test_agent_restart_all_empty_running_set(tmp_path, capsys):
+    """No agents running locally → an explicit "none" line and a clean 0."""
+    client = _StubClient(list_processes_result=[])
+
+    rc = await roster.agent_restart_all(_home(tmp_path), client=client)
+
+    assert rc == 0
+    assert client.restart_calls == []
+    out = capsys.readouterr().out
+    assert "no agents running locally" in out
+
+
+async def test_agent_restart_all_continues_past_a_failure_returns_1(tmp_path, capsys):
+    """One failing restart must not abort the sweep; return 1 if any failed."""
+    client = _StubClient(
+        list_processes_result=[
+            {"name": "a", "status": "Running"},
+            {"name": "b", "status": "Running"},
+        ],
+        fail_restart={"a": RuntimeError("restart blew up")},
+    )
+
+    rc = await roster.agent_restart_all(_home(tmp_path), client=client)
+
+    assert rc == 1
+    assert sorted(client.restart_calls) == ["a", "b"]  # every one attempted
+
+
+async def test_agent_restart_all_workspace_down(tmp_path, capsys):
+    """Supervisor unreachable → the shared not-running hint, exit 1, nothing restarted."""
+    client = _StubClient(workspace_up=False)
+
+    rc = await roster.agent_restart_all(_home(tmp_path), client=client)
 
     assert rc == 1
     assert client.restart_calls == []

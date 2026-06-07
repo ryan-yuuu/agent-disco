@@ -101,6 +101,22 @@ def test_set_writes_multiple_simple_fields(tmp_path: Path) -> None:
     assert reparsed.thinking_effort == "high"
 
 
+def test_set_success_prints_next_step_block(tmp_path: Path, capsys) -> None:
+    """A successful ``set`` names the fields it wrote, then the EXACT terse
+    next-step block (behavior #3): the restart sentence (naming the resolved
+    provider in the provider-wide caveat), a blank line, the indented
+    `agent restart <name>` command — the roster verb, not the old runner banner."""
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe")  # seed provider is anthropic
+    assert agent_lifecycle.run_set(agents_dir, "scribe", {"description": "New desc."}) == 0
+    out = capsys.readouterr().out
+    assert "Updated scribe (description)." in out
+    assert (
+        "Restart scribe to apply (and any other agents on anthropic if the "
+        "provider/key changed):\n\n  calfcord agent restart scribe"
+    ) in out
+
+
 def test_set_tools_writes_exactly_those(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe", tools_line=None)
