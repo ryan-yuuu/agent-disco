@@ -328,16 +328,50 @@ class TestEmbeddedBootOrdering:
             f"accepts Discord events; got {order.events}"
         )
 
-    async def test_worker_stopped_last_in_ordered_shutdown(self, _patched_run, monkeypatch) -> None:
+    async def test_typing_notifier_closes_after_broker_drain(self, _patched_run, monkeypatch) -> None:
         from calfcord.bridge import gateway as gw
 
         order, _ = _patched_run
         await _boot_to_serving_then_sigint(gw, order, monkeypatch)
 
-        # The shutdown drains the worker (broker) AFTER the gateway is closed, so
-        # any in-flight reply on discord.outbox posts before the broker drops.
-        assert order.events.index("typing.aclose") < order.events.index("gateway.close")
+        # Ordered shutdown: stop the Discord ingress (gateway.close), drain the
+        # broker (worker.stop — so in-flight discord.outbox replies post before
+        # disconnect), THEN close the typing notifier. A steps-consumer hop
+        # draining at shutdown can still fire typing, so the notifier must OUTLIVE
+        # the drain (aclose cancels in-flight tasks — closing it before the drain
+        # would fire a draining hop into a cancelled notifier).
         assert order.events.index("gateway.close") < order.events.index("worker.stop"), (
             f"worker.stop (broker drain) must run after gateway.close so in-flight "
             f"replies drain before the broker disconnects; got {order.events}"
         )
+        assert order.events.index("worker.stop") < order.events.index("typing.aclose"), (
+            f"typing_notifier.aclose() must run AFTER the broker drain so a draining "
+            f"steps hop never fires a cancelled notifier; got {order.events}"
+        )
+
+    async def test_fatal_gateway_crash_propagates_and_still_tears_down(self, _patched_run, monkeypatch) -> None:
+        from calfcord.bridge import gateway as gw
+
+        order, handles = _patched_run
+
+        # A FATAL gateway failure (not a shutdown signal): gateway.start() raises
+        # instead of blocking. asyncio.wait does NOT propagate a task's exception,
+        # so without an explicit re-raise the bridge would exit 0 — a crash
+        # masquerading as a clean stop. _run must re-raise it (non-zero exit ⇒
+        # supervisor restart) while still running the ordered teardown.
+        async def _crashing_start() -> None:
+            order.record("gateway.start")
+            raise RuntimeError("gateway websocket died")
+
+        monkeypatch.setattr(handles.gateway, "start", _crashing_start)
+        monkeypatch.setattr(gw, "DiscordSettings", lambda *a, **k: _run_settings())
+        monkeypatch.setenv("CALF_HOST_URL", "localhost")
+
+        coro = _extract_run_coro(gw)
+        with pytest.raises(RuntimeError, match="gateway websocket died"):
+            await coro
+
+        # Teardown still ran: ingress closed, broker drained, notifier closed.
+        assert "gateway.close" in order.events
+        assert "worker.stop" in order.events
+        assert "typing.aclose" in order.events
