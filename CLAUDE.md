@@ -16,13 +16,11 @@ Project dependencies are managed with **`uv`**.
 
 Calfcord is **four independent process types that communicate through Kafka**. Each is safe to deploy on its own host; switching deployment styles needs no code changes. `docs/architecture.md` is the authoritative source. Calfkit nodes are distributed by design, so agents, tools, and other integrations cannot be assumed to share a host filesystem. Configuration, control plane concerns, and other shared data must be shared over the network by default.
 
-## Git conventions
+## Conventions
 
 - **Commits/PRs landing on `main` use conventional-commit prefixes**: `feat:`, `fix:`, `chore:`, `docs:`,
-  `refactor:`, `test:`, `perf:`, `style:`. Pick the narrowest accurate one. PR titles follow the same style
-  (squash-merge inherits them).
-- **Ruff clean for new/changed files.** CI's lint job is `continue-on-error` only while a small pre-existing
-  baseline of errors is cleared — don't add to it and don't fix unrelated baseline errors in the same PR.
+  `refactor:`, `test:`, `perf:`, `style:`. Pick the narrowest accurate one. PR titles follow the same style.
+- Ruff clean for new/changed files.
 - Comments and docstrings explain *why*, not *what*.
 
 ## Sub-agents
