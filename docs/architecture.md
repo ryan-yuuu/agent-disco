@@ -87,19 +87,13 @@ from the teammates you stand up on demand:
   its first heartbeat on Discord `on_ready`, so "substrate healthy" *means*
   "connected to Discord"). The broker is a fast-fail precondition; the bridge
   readiness is what the gate waits on.
-- **Roster** — the **agents**, **tools**, **router**, and **mcp** hosts. These
+- **Roster** — the **agents**, **tools**, and **router** hosts. These
   are the teammates that clock into the live office. `start` deliberately does
   **not** auto-start any roster member — "nothing runs that you didn't start" is
   a trust property — so you bring each one online explicitly: `calfcord agent
-  start <name>`, `calfcord router start`, `calfcord tools start`, `calfcord mcp
-  start` (and the matching `stop`). `calfcord agent restart <name>` reloads a
-  running agent after you edit its `.md`.
-
-> **There are effectively five process types, not four.** The `mcp` host is a
-> roster member alongside agents, tools, and router. It is called out separately
-> from the [four processes](#the-four-processes) above because it holds MCP
-> transport config and secrets and is bridge-adjacent; see
-> [`mcp-tools.md`](./mcp-tools.md).
+  start <name>`, `calfcord router start`, `calfcord tools start` (and the
+  matching `stop`). `calfcord agent restart <name>` reloads a running agent
+  after you edit its `.md`.
 
 The minimum path to a live agent is two honest commands — open the office, then
 clock a teammate in:
@@ -129,7 +123,7 @@ veneer over the supervisor's REST API.
 
 This is where the layer split becomes mechanical. In the generated config the
 substrate (broker, bridge) is declared `autostart`, while every defined agent,
-plus tools, router, and mcp, is declared but **disabled** — present but not
+plus tools and router, is declared but **disabled** — present but not
 started until you run its `start`. The supervisor absorbs the lifecycle work
 calfcord would otherwise hand-roll:
 
@@ -140,7 +134,7 @@ calfcord would otherwise hand-roll:
   `calfcord _healthcheck <component>` against the per-component heartbeat files
   under `$CALFCORD_HOME/state/health/`.
 - **Autorestart** — the bridge and agents exit 0 on a clean return, so they use
-  `restart: always`; tools, router, and mcp run on the
+  `restart: always`; tools and router run on the
   [`run_worker_until_signal`](../src/calfcord/_worker_runtime.py) helper that
   forces a non-zero exit on a clean, signal-less return, so they use
   `restart: on_failure`. An intentional `stop` does not trigger a restart.
@@ -224,7 +218,7 @@ broker restart and calfcord re-creates the topics it needs on startup. Writing
 the value to `.env` rather than `export`ing it means every `uv run` terminal
 picks it up via `python-dotenv` without a per-shell re-export.
 
-> The `calfcord broker` and `calfcord run <bridge|agent|router|tools|mcp>` shim
+> The `calfcord broker` and `calfcord run <bridge|agent|router|tools>` shim
 > verbs are the same low-level escape hatches surfaced for when you want one
 > process in the foreground without the supervisor. The supervised native path
 > above is what most installs use.

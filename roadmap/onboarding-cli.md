@@ -1,7 +1,7 @@
 # Onboarding & CLI UX — Smoother Quickstart, Daemonized Services, Clearer Commands
 
 **Status:** In progress. The **CLI command-surface** group shipped (top-level help, friendly
-`calfcord run` / `mcp` / `auth` verbs, and `calfcord doctor`) via
+`calfcord run` / `auth` verbs, and `calfcord doctor`) via
 [PR #34](https://github.com/ryan-yuuu/calfcord/pull/34). The **process-lifecycle** work
 (`calfcord up` / `install-daemon`) and the **onboarding-sequencing** flip remain. Partly built on
 [`roadmap/tansu-broker.md`](tansu-broker.md).
@@ -34,10 +34,9 @@ onboarding default.
 ## Shipped so far ([PR #34](https://github.com/ryan-yuuu/calfcord/pull/34))
 
 - **Top-level help** — `calfcord -h` / `--help` / `help` all print usage.
-- **Friendly run verbs** — `calfcord run <bridge|agent|router|tools|mcp>`, with `calfcord calfkit-*`
+- **Friendly run verbs** — `calfcord run <bridge|agent|router|tools>`, with `calfcord calfkit-*`
   kept as hidden aliases (resolves the "agent" overload and stops leaking the internal `calfkit-` name).
-- **Surfaced commands** — `calfcord mcp <add|codegen>` and `calfcord auth` are first-class, not
-  passthrough-only.
+- **Surfaced commands** — `calfcord auth` is first-class, not passthrough-only.
 - **`calfcord doctor`** — a config preflight (config file, broker reachability, Discord token + app id,
   agents parse) with a ✓/⚠/✗ report and a non-zero exit on failure.
 - **A "what you can do" guide** — [`docs/using-calfcord.md`](../docs/using-calfcord.md), the

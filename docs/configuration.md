@@ -1,7 +1,7 @@
 # Configuration
 
 Every calfcord component — the substrate (broker + bridge) and the roster (agents,
-tools, router, MCP) — is configured through environment variables, read from a
+tools, router) — is configured through environment variables, read from a
 `.env` file (loaded via `python-dotenv`). On a native install the `calfcord` shim
 reads `$CALFCORD_HOME/config/.env`; `calfcord init` writes most of this for you.
 This page is the complete reference, including variables `init` doesn't set.
@@ -112,7 +112,7 @@ Everything the running workspace writes lives under `$CALFCORD_HOME/state/`:
 
 | Path | What's there |
 |---|---|
-| `$CALFCORD_HOME/state/logs/<name>.log` | Per-component stdout/stderr (`broker`, `bridge`, each agent, `tools`/`router`/`mcp`), plus the supervisor's own `process-compose.log`. Tail with `calfcord logs [component] [-f]`. |
+| `$CALFCORD_HOME/state/logs/<name>.log` | Per-component stdout/stderr (`broker`, `bridge`, each agent, `tools`/`router`), plus the supervisor's own `process-compose.log`. Tail with `calfcord logs [component] [-f]`. |
 | `$CALFCORD_HOME/state/health/<component>.json` | Heartbeat files each long-lived component refreshes; `calfcord doctor` and the supervisor's readiness probes read these. |
 | `$CALFCORD_HOME/state/agents/<name>.json` | Per-agent channel-subscription state (see `CALFKIT_STATE_DIR` above and the next section). |
 | `$CALFCORD_HOME/state/process-compose.yaml` | The generated supervisor project — derived state, regenerated on every `start`. Don't edit it. |
@@ -127,7 +127,7 @@ after that, the state file wins.
 ## Applying changes
 
 `.env` is read **once, at process boot** — each component (every agent, the
-router, the tools/MCP hosts, the bridge) loads its environment when it starts and
+router, the tools host, the bridge) loads its environment when it starts and
 holds it for its lifetime. Changing a key, URL, or override in `.env` therefore
 does **nothing** to an already-running process; you have to **restart the process
 that reads it** for the new value to take effect. (This is the same one-shot
@@ -143,19 +143,18 @@ Which restart depends on which process reads the value you changed:
 | A key several agents share (e.g. `ANTHROPIC_API_KEY`, `CALFKIT_AGENT_DEFAULT_MODEL`) | `calfcord agent restart --all` (every agent on this host) |
 | The router's provider/model (`CALFKIT_ROUTER_*`, `router set`/`edit`) | `calfcord router restart` |
 | Anything the tools host reads | `calfcord tools restart` |
-| Anything the MCP host reads | `calfcord mcp restart` |
-| A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `calfcord stop && calfcord start`, then bring the roster back up on the new value: `calfcord agent start --all` plus `calfcord tools start` / `router start` / `mcp start` for any of those you run |
+| A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `calfcord stop && calfcord start`, then bring the roster back up on the new value: `calfcord agent start --all` plus `calfcord tools start` / `router start` for any of those you run |
 
 > **Boot-time gotcha for workspace-wide values.** `calfcord stop` tears the
 > **whole** workspace down (broker + bridge **and** every agent and singleton),
 > and `calfcord start` brings up the **substrate only** (broker + bridge) — it
 > does *not* bring the roster back. So after changing a value the *roster* reads
-> (like `CALF_HOST_URL`, which every agent, tool, router, and MCP host dials),
+> (like `CALF_HOST_URL`, which every agent, tool, and router dials),
 > `calfcord stop && calfcord start` leaves you with the substrate up but **no
 > agents running**. Re-start the roster on the new value with `calfcord agent
 > start --all` (which targets every *defined* agent — `agent restart --all` would
 > be a no-op here, because nothing is running to restart) **and** `calfcord tools
-> start` / `router start` / `mcp start` for whichever singletons you run. All of
+> start` / `router start` for whichever singletons you run. All of
 > these are local — they act on this host's processes.
 
 ## See also

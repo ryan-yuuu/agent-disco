@@ -171,7 +171,7 @@ above.
 
 Besides hand-editing this array, you can edit a deployed agent's tool
 list interactively with `calfcord agent tools [<name>]` (an
-InquirerPy multi-select over the builtin + MCP tool universe; omit
+InquirerPy multi-select over the builtin tool universe; omit
 `<name>` to pick from a list). It writes an explicit `tools:` list back
 to the `.md`. The same checkbox is reachable as the *Tools* row of
 `calfcord agent edit`, and `calfcord agent set <name> --tools "a,b,c"`

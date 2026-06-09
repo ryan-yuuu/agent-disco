@@ -26,8 +26,8 @@ For the lifecycle model these entries assume (substrate vs. roster), see
 ## Lifecycle & daemon
 
 calfcord runs as two layers: a **substrate** (broker + bridge) that `calfcord
-start` brings up in the background, and a **roster** (agents, tools, router,
-mcp) that you clock in on demand with `calfcord agent start <name>` and friends.
+start` brings up in the background, and a **roster** (agents, tools, router)
+that you clock in on demand with `calfcord agent start <name>` and friends.
 Most "it's running but quiet" reports come from confusing the two — the office
 is open, but no teammate has clocked in yet. The entries below are ordered the
 way you'll meet them: from "I started the substrate and expected a reply" down
@@ -204,7 +204,7 @@ but the running component still behaves the old way: the same key is rejected, t
 old model still answers, the agent still points at the old broker.
 
 **What it means.** `.env` is read **once, at process boot**. Each component (every
-agent, the router, the tools/MCP hosts, the bridge) loads its environment when it
+agent, the router, the tools host, the bridge) loads its environment when it
 starts and holds it for its lifetime, so editing `.env` does nothing to a process
 that's *already running*. You have to **restart the process that reads the value**
 for the new setting to take effect.
@@ -216,7 +216,6 @@ calfcord agent restart <name>     # one agent's key / model / provider changed
 calfcord agent restart --all      # a key SEVERAL agents share (e.g. ANTHROPIC_API_KEY) — this host's agents
 calfcord router restart           # the router's provider/model changed
 calfcord tools restart            # something the tools host reads changed
-calfcord mcp restart              # something the MCP host reads changed
 ```
 
 For a **workspace-wide value the whole roster reads** (e.g. `CALF_HOST_URL`),
@@ -232,8 +231,8 @@ calfcord agent start --all        # ...then bring every defined agent back up on
 > only** — it does not bring the roster back. So `stop && start` leaves you with
 > the substrate up but **no agents running**: use `agent start --all` (every
 > *defined* agent), not `agent restart --all` (which would be a no-op, since
-> nothing is running to restart). Add `calfcord tools start` / `router start` /
-> `mcp start` for whichever singletons you run. That's the boot-time gotcha to
+> nothing is running to restart). Add `calfcord tools start` / `router start`
+> for whichever singletons you run. That's the boot-time gotcha to
 > watch for. The full change → command mapping lives in
 > [configuration.md](./configuration.md#applying-changes).
 

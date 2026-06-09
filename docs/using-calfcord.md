@@ -7,7 +7,7 @@ live list.
 
 > Mental model: your **workspace** is the always-on substrate — a local message bus (the broker) and the
 > Discord bridge — that `calfcord init` started in the background. Everything else is the **roster**: agents,
-> the tools host, the ambient router, and any MCP servers. Roster members clock in and out on demand while the
+> the tools host, and the ambient router. Roster members clock in and out on demand while the
 > workspace stays open. `calfcord start` opens the workspace; `calfcord ... start` brings each teammate online.
 
 ## Check that it will actually start
@@ -167,30 +167,6 @@ calfcord tools stop
 
 → What each tool does and how to write your own: [authoring-tools.md](authoring-tools.md).
 
-## Give your agents more tools (MCP)
-
-Add an external tool server (Gmail, Calendar, …) — `add` and `codegen` use the same server name and
-transport:
-
-```bash
-calfcord mcp add gmail --command "npx -y @org/gmail-mcp" --env GMAIL_TOKEN
-calfcord mcp codegen gmail --command "npx -y @org/gmail-mcp"
-```
-
-`add` records how to reach the server in `mcp.json` (here, that it reads `GMAIL_TOKEN` from your
-environment); `codegen` connects to the server and generates the tool schema agents load. Then list
-the tool in an agent's `tools:`. MCP tools are namespaced `mcp/<server>` — for example,
-`tools: [mcp/gmail]`.
-
-MCP tools are served by their own roster host, so bring it online alongside the others:
-
-```bash
-calfcord mcp start         # the MCP host that holds the server connections + secrets
-calfcord mcp stop
-```
-
-→ Full MCP workflow: [mcp-tools.md](mcp-tools.md).
-
 ## Use your ChatGPT subscription as the model
 
 Don't want to pay per token? Sign in with a ChatGPT Plus/Pro account (Codex) — a device-code flow
@@ -255,7 +231,6 @@ calfcord run bridge        # the Discord gateway
 calfcord run agent <name>  # one agent in the foreground
 calfcord run router        # the ambient router
 calfcord run tools         # the built-in tools host
-calfcord run mcp           # the MCP host
 calfcord broker            # the bundled native broker, standalone
 ```
 

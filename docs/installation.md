@@ -77,8 +77,8 @@ Two layers are worth keeping straight:
   `calfcord start` brings it up (detached, health-gated); `calfcord stop` closes
   it. `start` brings up **only** the substrate — nothing else runs that you
   didn't ask for.
-- **The roster** — your agents, the tools host, the ambient router, and the MCP
-  host. These are teammates that clock into the running office on demand:
+- **The roster** — your agents, the tools host, and the ambient router. These
+  are teammates that clock into the running office on demand:
   `calfcord agent start <name>`, `calfcord tools start`, and so on.
 
 > **Reboot non-survival.** The workspace is session-scoped — it does **not**

@@ -19,7 +19,7 @@ Distributed by design: agents and tools are independently deployable anywhere. H
 - ✏️ **Easily onboard new agents to the team.** A new agent can be configured in a Markdown file, independently deployed, and added to the team in <2 minutes.
 - 🤝 **Agents seamlessly collaborate.** Agents chat with each other through private chats, and every exchange is recorded in a Discord thread.
 - 🧠 **Bring your own model.** Anthropic, OpenAI, other OpenAI-compatible APIs, or use your ChatGPT Plus/Pro subscription (via Codex) — set it per agent.
-- 🛠️ **Built-in tools + MCP support.** Agents can get task-tracking, computer filesystem access, and web search tools by default. Plus, easily provide more tools to your team via MCP.
+- 🛠️ **Built-in tools.** Agents can get task-tracking, computer filesystem access, and web search tools by default.
 
 ## Quick start
 
@@ -101,7 +101,7 @@ Pick your next move by goal:
 | I want to… | Go to |
 |---|---|
 | Create or customize an agent (fields, models, tools) | [`docs/authoring-agents.md`](./docs/authoring-agents.md) |
-| Give agents more tools / add MCP servers | [`docs/authoring-tools.md`](./docs/authoring-tools.md), [`docs/mcp-tools.md`](./docs/mcp-tools.md) |
+| Give agents more tools | [`docs/authoring-tools.md`](./docs/authoring-tools.md) |
 | Let agents answer messages without an `@mention` | [`docs/ambient-routing.md`](./docs/ambient-routing.md) |
 | Use my ChatGPT Plus/Pro subscription (Codex) | [`docs/codex-auth.md`](./docs/codex-auth.md) |
 | Have agents talk to each other (A2A) | [`docs/a2a-threads.md`](./docs/a2a-threads.md) |
@@ -168,7 +168,6 @@ plumbing:
   - **`calfkit-router`** — decides who answers un-mentioned ambient messages.
     `calfcord router start`.
   - **`calfkit-tools`** — runs the tool(s). `calfcord tools start`.
-  - **`calfkit-mcp`** — hosts your MCP servers. `calfcord mcp start`.
 
 Every one of these is an independent microservice talking over the broker, so
 any of them can run on any host. Move the roster onto other machines and point
@@ -190,7 +189,6 @@ environment-variable reference.
 - [`docs/discord-setup.md`](./docs/discord-setup.md) — create the Discord app (~5 min).
 - [`docs/authoring-agents.md`](./docs/authoring-agents.md) — every agent frontmatter field.
 - [`docs/authoring-tools.md`](./docs/authoring-tools.md) — add a built-in tool.
-- [`docs/mcp-tools.md`](./docs/mcp-tools.md) — give agents MCP servers as tools.
 - [`docs/architecture.md`](./docs/architecture.md) — the substrate/roster model, the worker process types, deployment matrix, run modes.
 - [`docs/configuration.md`](./docs/configuration.md) — full environment-variable reference.
 - [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.

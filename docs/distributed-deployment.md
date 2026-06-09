@@ -127,7 +127,7 @@ What each target renders:
 - **`k8s`** — **reference** manifests (clearly annotated as such): a
   bundled broker workload + Service, a ConfigMap with the shared
   `CALF_HOST_URL`, and one Deployment per process type (bridge / router /
-  tools / mcp) plus one per *defined* agent — each running a `calfkit-*`
+  tools) plus one per *defined* agent — each running a `calfkit-*`
   console script on the shipped image, dialing the shared broker. This is
   the Altitude-3 distributed shape, **not** `calfcord start` (there is no
   in-pod supervisor; each process type is its own workload). Secrets
