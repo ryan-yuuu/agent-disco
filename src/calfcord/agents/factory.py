@@ -82,6 +82,7 @@ from collections.abc import Callable
 
 from calfkit._vendor.pydantic_ai import ToolOutput
 from calfkit.client import Client
+from calfkit.mcp import MCPToolboxRef
 from calfkit.nodes import Agent
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient
@@ -95,7 +96,7 @@ from calfcord.agents.routing import ROUTER_OUTPUT_TOOL_NAME, RoutingDecision
 from calfcord.agents.state import AgentRuntimeState, AgentStateStore
 from calfcord.agents.thinking import build_model_settings
 from calfcord.discord.persona import DiscordPersonaSender
-from calfcord.mcp.agent_select import McpToolSelector, selectors_from_entries
+from calfcord.mcp.agent_select import selectors_from_entries
 from calfcord.mcp.selector import is_mcp_selector
 from calfcord.topics import AGENT_STEPS_TOPIC, AMBIENT_INGRESS_TOPIC
 
@@ -397,7 +398,7 @@ class AgentFactory:
             subscribe_topics,
             definition.thinking_effort,
             [t.tool_schema.name for t in tools]
-            + [f"mcp:{s.server}" for s in mcp_selectors],
+            + [f"mcp:{s.toolbox_id}" for s in mcp_selectors],
         )
 
         # ``publish_topic=AGENT_STEPS_TOPIC`` makes FastStream mirror every
@@ -538,7 +539,7 @@ class AgentFactory:
 
     def _resolve_tools(
         self, definition: AgentDefinition
-    ) -> tuple[list[ToolNodeDef], list[McpToolSelector]]:
+    ) -> tuple[list[ToolNodeDef], list[MCPToolboxRef]]:
         """Resolve ``definition.tools`` into builtin nodes + deferred MCP selectors.
 
         The flat ``tools:`` list mixes two kinds of entry, partitioned here:
@@ -547,7 +548,7 @@ class AgentFactory:
           in-memory tool registry, with an aggregate unknown-name
           :class:`ValueError` (every unknown name in one message);
         * ``mcp/...`` selectors collapse into one
-          :class:`~calfcord.mcp.agent_select.McpToolSelector` per server
+          :class:`~calfkit.mcp.MCPToolboxRef` per server
           (:func:`~calfcord.mcp.agent_select.selectors_from_entries`),
           resolved per turn against the capability view — never against any
           local registry, so there is nothing further to validate here.

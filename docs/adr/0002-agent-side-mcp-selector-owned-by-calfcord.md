@@ -1,5 +1,19 @@
 # Agents resolve MCP tools via a calfcord-owned selector, never via MCPToolbox
 
+**Status: superseded.** calfkit 0.9.1 shipped the public by-name constructor
+this ADR was waiting for (`MCPToolboxRef`,
+[calfkit-sdk#212](https://github.com/calf-ai/calfkit-sdk/issues/212)), and the
+hand-rolled `McpToolSelector` was deleted
+([#41](https://github.com/ryan-yuuu/calfcord/issues/41)). What this ADR
+defends survives the swap: agents still never construct an `MCPToolbox`
+(`MCPToolboxRef` is identity-only — no connection params, no secrets), the
+import-isolation test still pins the boundary, resolution stays non-strict
+(the upstream default, never overridden), MCP stays an explicit per-agent
+grant outside the builtins default, and the phonebook still strips `mcp/`
+selectors. The per-server merge of frontmatter entries remains calfcord-owned
+in `calfcord.mcp.agent_select.selectors_from_entries`. The original record
+follows.
+
 Agents turn `mcp/...` frontmatter entries into calfcord's own `McpToolSelector`
 (`calfcord/mcp/agent_select.py`) — a ~10-line implementation of calfkit's
 public `ToolSelector` protocol over `resolve_capability` — instead of using the

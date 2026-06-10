@@ -339,8 +339,9 @@ src/calfcord/
 │   ├── discovery.py  # auto-discovery loader (walks builtin/ at import)
 │   └── runner.py     # calfkit-tools entry point
 └── mcp/           # MCP integration: selector (frontmatter grammar),
-                   # agent_select (per-turn resolution), config (mcp.json
-                   # loader), runner (calfkit-mcp entry point)
+                   # agent_select (frontmatter -> per-server toolbox refs),
+                   # config (mcp.json loader), runner (calfkit-mcp entry
+                   # point)
 
 agents/                 # agent .md definitions (live)
 config/mcp.json         # MCP server registry (native install; 0600)

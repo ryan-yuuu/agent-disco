@@ -8,6 +8,7 @@ so no provider client is constructed.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -690,7 +691,7 @@ class TestToolsWiring:
         ``_tool_selectors``) — one per server, with explicit tool picks
         merged into a sorted ``include`` tuple. The deferred side is what
         makes the Worker auto-register the capability view."""
-        from calfcord.mcp.agent_select import McpToolSelector
+        from calfkit.mcp import MCPToolboxRef
 
         _, model_factory = _model_factory_spy()
         fake_shell = _fake_tool_node("shell")
@@ -708,9 +709,33 @@ class TestToolsWiring:
         agent = worker._nodes[0]
         assert agent.tools == list(fake_shell.tool_bindings())
         assert agent._tool_selectors == [
-            McpToolSelector("docs"),
-            McpToolSelector("gmail", include=("search", "send")),
+            MCPToolboxRef("docs"),
+            MCPToolboxRef("gmail", include=("search", "send")),
         ]
+
+    def test_build_log_lists_mcp_grants_by_server(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The build log enumerates MCP grants as ``mcp:<server>`` — the
+        operator-facing record of which servers an agent may reach. The
+        label rides on the upstream ref's ``toolbox_id`` field, so a silent
+        upstream rename must fail here, not in production logs."""
+        _, model_factory = _model_factory_spy()
+        factory = AgentFactory(
+            persona_sender=MagicMock(),
+            calfkit_client=MagicMock(),
+            model_client_factory=model_factory,
+            tool_registry={"shell": _fake_tool_node("shell")},
+        )
+        with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
+            factory.build(
+                _definition(tools=("shell", "mcp/gmail/send", "mcp/docs")),
+                AgentRuntimeState(channels=[100]),
+                MagicMock(),
+            )
+        message = next(
+            r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent")
+        )
+        assert "mcp:docs" in message
+        assert "mcp:gmail" in message
 
     def test_mcp_only_agent_builds_with_no_builtin_bindings(self) -> None:
         """An agent may declare only MCP tools; it builds with zero static
