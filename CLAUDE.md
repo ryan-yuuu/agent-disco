@@ -60,3 +60,7 @@ Calfcord is **five independent process types that communicate through Kafka** (b
 
 - You create high-quality software documentation. Your work is strictly guided by the principles and structure of the Diátaxis Framework
 - The Diátaxis Framework's raw content is written in this github repo, please walk the repo's files to deeply review and understand the framework: https://raw.githubusercontent.com/evildmp/diataxis-documentation-framework/refs/heads/main/start-here.rst
+
+## PR final steps
+
+- When an implementation is ready for final review and merge, evaluate whether any decisions during your task qualify for editing or creating ADRs. You can refer to the file `.agents/skills/grill-with-docs/ADR-FORMAT.md` to get guidance on what qualifies.
