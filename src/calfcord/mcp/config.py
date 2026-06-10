@@ -169,6 +169,36 @@ def load_mcp_servers(path: Path) -> dict[str, MCPToolbox]:
     return servers
 
 
+def load_one_server(path: Path, name: str) -> MCPToolbox:
+    """Parse ``mcp.json`` and build ONLY server ``name``'s toolbox.
+
+    The whole file is still shape-validated (a broken sibling entry should
+    fail every reader), but ``$VAR`` expansion — the secrets-touching step —
+    runs only for the selected entry: server processes are isolated by
+    design, so another server's unset secret must not fail this one's boot.
+
+    Raises :class:`McpConfigError` for a missing/invalid file, an empty
+    registry (pointing at ``calfcord mcp add``), or an unknown name (listing
+    what IS configured).
+    """
+    if not path.exists():
+        raise McpConfigError(
+            f"MCP config not found at {path} — create it (or run 'calfcord mcp add') first"
+        )
+    entries = dict(_validated_entries(path))
+    if not entries:
+        raise McpConfigError(
+            f"no MCP servers configured in {path}; add one with 'calfcord mcp add'"
+        )
+    entry = entries.get(name)
+    if entry is None:
+        configured = ", ".join(entries)
+        raise McpConfigError(
+            f"no MCP server named {name!r} in {path}; configured: {configured}"
+        )
+    return MCPToolbox(name, connection_params=_build_params(name, entry))
+
+
 def _validated_entries(path: Path) -> list[tuple[str, dict[str, Any]]]:
     """Read + shape-validate ``mcp.json`` without expanding any values."""
     try:

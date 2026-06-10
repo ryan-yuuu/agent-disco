@@ -30,6 +30,7 @@ from calfcord.mcp.config import (
     expand_vars,
     list_server_names,
     load_mcp_servers,
+    load_one_server,
     resolve_config_path,
 )
 
@@ -331,3 +332,58 @@ class TestExpandVarsEscapes:
 
     def test_double_dollar_before_braced_var_ships_literal_ref(self) -> None:
         assert expand_vars("$${VAR}", {}) == "${VAR}"
+
+
+class TestLoadOneServer:
+    def test_builds_only_the_named_toolbox(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path,
+            {"mcpServers": {"a": {"command": "a"}, "b": {"command": "b"}}},
+        )
+        toolbox = load_one_server(path, "b")
+        assert isinstance(toolbox, MCPToolbox)
+        assert toolbox.node_id == "b"
+
+    def test_sibling_unset_var_does_not_fail_selected_server(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-server isolation extends to secrets: only the SELECTED entry's
+        $VAR references are expanded, so an unrelated server's unset secret
+        cannot fail this one's boot."""
+        monkeypatch.delenv("NOPE_TOKEN", raising=False)
+        path = _write(
+            tmp_path,
+            {
+                "mcpServers": {
+                    "healthy": {"command": "x"},
+                    "broken": {"command": "y", "env": {"T": "$NOPE_TOKEN"}},
+                }
+            },
+        )
+        assert load_one_server(path, "healthy").node_id == "healthy"
+        with pytest.raises(McpConfigError, match="NOPE_TOKEN"):
+            load_one_server(path, "broken")
+
+    def test_unknown_name_lists_configured(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, {"mcpServers": {"a": {"command": "a"}, "b": {"command": "b"}}})
+        with pytest.raises(McpConfigError, match=r"(?s)nope.*a.*b"):
+            load_one_server(path, "nope")
+
+    def test_empty_registry_hints_add(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, {"mcpServers": {}})
+        with pytest.raises(McpConfigError, match="calfcord mcp add"):
+            load_one_server(path, "anything")
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(McpConfigError, match="not found"):
+            load_one_server(tmp_path / "nope.json", "x")
+
+    def test_sibling_shape_error_still_fails_loud(self, tmp_path: Path) -> None:
+        """Shape validation stays whole-file: a malformed sibling entry is a
+        config bug every reader should surface, unlike its unset secrets."""
+        path = _write(
+            tmp_path,
+            {"mcpServers": {"healthy": {"command": "x"}, "bad": {"evn": {}}}},
+        )
+        with pytest.raises(McpConfigError, match="bad"):
+            load_one_server(path, "healthy")

@@ -20,7 +20,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 CAPABILITY_TOPIC = "mcp.capabilities"
-_DEFAULT_TIMEOUT_SECONDS = 2.5
+# Bounded so the interactive editor stays snappy on a slow/filtered broker;
+# a healthy local broker replays the tiny compacted topic well inside this.
+_DEFAULT_TIMEOUT_SECONDS = 1.5
 
 
 def snapshot_capability_tools(

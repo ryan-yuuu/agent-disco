@@ -293,12 +293,3 @@ async def test_start_all_reads_process_list_once(tmp_path):
     assert rc == 0
     assert calls["n"] == 1
 
-
-async def test_start_all_invalid_name_counts_as_failure_but_continues(tmp_path, capsys):
-    client = _StubClient()
-    rc = await mcp_roster.mcp_start_all(
-        _home(tmp_path), servers=["Bad-Name", "alpha"], client=client
-    )
-    assert rc == 1
-    assert client.start_calls == ["mcp-alpha"]
-    assert "Bad-Name" in capsys.readouterr().out

@@ -223,12 +223,12 @@ async def mcp_start_all(
         print(_NOT_RUNNING_HINT)
         return 1
 
+    # No per-name validation here: ``servers`` comes from the validated
+    # mcp.json readers (list_server_names rejects bad names at parse time),
+    # unlike the single verbs' operator-typed input.
     running_slots = await _running_mcp_slots(client)
     worst = 0
     for server in servers:
-        if not _check_server_name(server):
-            worst = max(worst, 1)
-            continue
         worst = max(worst, await _start_checked(client, server, running_slots))
     return worst
 
@@ -239,21 +239,7 @@ async def mcp_stop_all(
     client: ProcessComposeClient | None = None,
 ) -> int:
     """Stop every *running* ``mcp-`` slot on this host."""
-    home = os.fspath(home)
-    client = resolve_client(client, home)
-
-    if not await workspace_is_up(client):
-        print(_NOT_RUNNING_HINT)
-        return 1
-
-    running = sorted(await _running_mcp_slots(client))
-    if not running:
-        print("no MCP servers running on this host")
-        return 0
-    for slot in running:
-        await client.stop_process(slot)
-        print(f"mcp server {slot.removeprefix(MCP_SLOT_PREFIX)} stopped")
-    return 0
+    return await _sweep_running(home, client, verb="stop")
 
 
 async def mcp_restart_all(
@@ -262,6 +248,21 @@ async def mcp_restart_all(
     client: ProcessComposeClient | None = None,
 ) -> int:
     """Restart every *running* ``mcp-`` slot on this host."""
+    return await _sweep_running(home, client, verb="restart")
+
+
+async def _sweep_running(
+    home: str | os.PathLike[str],
+    client: ProcessComposeClient | None,
+    *,
+    verb: str,
+) -> int:
+    """Stop or restart every Running ``mcp-`` slot (the shared sweep body).
+
+    Unlike the agent roster's bulk fns this has no per-item try/except: a
+    REST failure mid-sweep is genuine infra (the slots were just listed as
+    Running) and propagates loudly rather than being half-swallowed.
+    """
     home = os.fspath(home)
     client = resolve_client(client, home)
 
@@ -273,7 +274,9 @@ async def mcp_restart_all(
     if not running:
         print("no MCP servers running on this host")
         return 0
+    act = client.stop_process if verb == "stop" else client.restart_process
+    word = "stopped" if verb == "stop" else "restarted"
     for slot in running:
-        await client.restart_process(slot)
-        print(f"mcp server {slot.removeprefix(MCP_SLOT_PREFIX)} restarted")
+        await act(slot)
+        print(f"mcp server {slot.removeprefix(MCP_SLOT_PREFIX)} {word}")
     return 0

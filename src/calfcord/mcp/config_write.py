@@ -16,10 +16,10 @@ Writes are atomic (tmp + ``os.replace``) and keep the file at mode 0600
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
+from calfcord._atomic import atomic_write_text
 from calfcord.mcp.config import _SERVERS_KEY, McpConfigError, validate_entry_shape
 from calfcord.mcp.selector import is_valid_server_name
 
@@ -94,16 +94,9 @@ def _read_raw(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write(path: Path, raw: dict[str, Any]) -> None:
-    """Serialize ``raw`` to ``path`` via tmp + fsync + atomic rename, mode 0600."""
-    payload = json.dumps(raw, indent=2) + "\n"
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Serialize ``raw`` to ``path`` atomically at mode 0600.
+
+    Delegates to the package's shared writer — the same one the sibling
+    ``config/`` secret files (``.env`` upserts, the setup checkpoint) use.
+    """
+    atomic_write_text(path, json.dumps(raw, indent=2) + "\n", mode=0o600)

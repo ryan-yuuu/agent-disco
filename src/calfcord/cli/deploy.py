@@ -51,7 +51,7 @@ import yaml
 
 from calfcord.cli._agents import detect_agents
 from calfcord.cli._envfile import read_env
-from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
+from calfcord.cli._mcp import configured_mcp_servers_or_none
 
 # The shipped image tag the docker-compose build produces; the k8s reference
 # manifests default to it so a freshly-built local image runs unchanged.
@@ -487,10 +487,8 @@ def run(
             )
         manifest = render_systemd(home=str(home), launcher=launcher)
     elif target == "k8s":
-        try:
-            mcp_servers = list_server_names(resolve_config_path())
-        except McpConfigError as exc:
-            print(f"error: {exc}")
+        mcp_servers = configured_mcp_servers_or_none()
+        if mcp_servers is None:
             return 1
         manifest = render_k8s(
             agent_ids=roster, server_urls=server_urls, mcp_servers=mcp_servers

@@ -120,8 +120,9 @@ def run_add(
     home: Path | None,
 ) -> int:
     """Add one server to ``mcp.json`` (wizard or flags) and optionally start it."""
+    interactive = command is None and url is None
     try:
-        if command is not None or url is not None:
+        if not interactive:
             name, entry = _add_from_flags(
                 server=server, command=command, env=env, url=url, header=header, cwd=cwd
             )
@@ -149,7 +150,7 @@ def run_add(
     print(f"added MCP server {name!r} to {config_path}")
 
     wants_start = start or (
-        command is None and url is None and prompter.confirm(f"Start {name} now?", default=True)
+        interactive and prompter.confirm(f"Start {name} now?", default=True)
     )
     if not wants_start:
         print(
