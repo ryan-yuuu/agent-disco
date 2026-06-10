@@ -125,6 +125,18 @@ def list_server_names(path: Path) -> list[str]:
     return [name for name, _ in _validated_entries(path)]
 
 
+def list_server_entries(path: Path) -> list[tuple[str, dict[str, Any]]]:
+    """Configured ``(name, raw entry)`` pairs in declaration order, unexpanded.
+
+    The CLI's ``mcp list`` and the tools editor read this: like
+    :func:`list_server_names` it must work with secrets unset and treats a
+    missing file as empty, while an invalid file still raises.
+    """
+    if not path.exists():
+        return []
+    return _validated_entries(path)
+
+
 def load_mcp_servers(path: Path) -> dict[str, MCPToolbox]:
     """Parse ``mcp.json`` into one ready :class:`MCPToolbox` per server.
 

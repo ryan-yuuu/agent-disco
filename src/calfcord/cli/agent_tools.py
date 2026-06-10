@@ -24,6 +24,7 @@ restart rather than implying a live reload.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from calfcord.agents.definition import parse_agent_md
@@ -83,18 +84,29 @@ def _resolve_agent(prompter: Prompter, *, agents_dir: Path, name: str | None) ->
     return agents_dir / f"{chosen}.md"
 
 
-def _build_choices(current: set[str]) -> list[Choice]:
-    """Build the checkbox :class:`Choice` rows from the builtin tool registry.
+def _build_choices(
+    current: set[str],
+    *,
+    mcp_servers: list[str] | None = None,
+    live_tools: dict[str, list[str]] | None = None,
+) -> list[Choice]:
+    """Build the checkbox :class:`Choice` rows: builtins, MCP, then kept.
 
-    Each builtin ``name`` is a row, checked iff it is in ``current``.
-    Enumeration uses only the schema-only :data:`calfcord.tools.TOOL_REGISTRY`
-    seam (no transport, no secrets).
+    Builtins enumerate the schema-only :data:`calfcord.tools.TOOL_REGISTRY`
+    seam (no transport, no secrets), checked iff in ``current``.
 
-    Anything in ``current`` that is *not* a builtin (``mcp/...`` selectors,
-    or names from a registry this host doesn't carry) is appended as a
-    pre-checked "kept" row: unchecking is an explicit operator decision, and
-    an edit that only touched builtins can never silently drop a selector
-    the editor failed to enumerate.
+    MCP rows merge two sources: ``mcp_servers`` (this host's mcp.json names)
+    and ``live_tools`` (the broker's capability view — which also surfaces
+    servers OTHER hosts run). Each server gets an ``mcp/<server>`` "all
+    tools" row; each live-advertised tool gets an ``mcp/<server>/<tool>``
+    row. Never pre-checked unless already in ``current`` — MCP is always an
+    explicit grant.
+
+    Anything in ``current`` the rows above did not cover (a server that's
+    gone from config and view, a builtin this host doesn't carry) is
+    appended as a pre-checked "kept" row: unchecking is an explicit operator
+    decision, and an edit that only touched builtins can never silently drop
+    a selector the editor failed to enumerate.
     """
     from calfcord.tools import TOOL_REGISTRY
 
@@ -103,12 +115,52 @@ def _build_choices(current: set[str]) -> list[Choice]:
         summary = first_line(TOOL_REGISTRY[name].tool_schema.description)
         label = f"{name} — {summary}" if summary else name
         choices.append(Choice(name, label, name in current))
-    for kept in sorted(current - set(TOOL_REGISTRY)):
+
+    mcp_servers = mcp_servers or []
+    live_tools = live_tools or {}
+    for server in sorted(set(mcp_servers) | set(live_tools)):
+        all_row = f"mcp/{server}"
+        choices.append(
+            Choice(all_row, f"{all_row} — all tools from MCP server '{server}'", all_row in current)
+        )
+        for tool in sorted(live_tools.get(server, [])):
+            value = f"mcp/{server}/{tool}"
+            choices.append(Choice(value, f"{value} — (live)", value in current))
+
+    offered = {c.value for c in choices}
+    for kept in sorted(current - offered):
         choices.append(Choice(kept, f"{kept} — (kept: configured on this agent)", True))
     return choices
 
 
-def run(prompter: Prompter, *, agents_dir: Path, name: str | None) -> int:
+def _default_mcp_servers() -> list[str]:
+    """mcp.json server names; tolerant — a broken config degrades to none
+    (the strict readers surface the error; the editor must still open)."""
+    from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
+
+    try:
+        return list_server_names(resolve_config_path())
+    except McpConfigError:
+        return []
+
+
+def _default_live_tools() -> dict[str, list[str]]:
+    """Per-server tool names from the live capability view; {} offline."""
+    import os
+
+    from calfcord.mcp.capability_read import snapshot_capability_tools
+
+    return snapshot_capability_tools(os.getenv("CALF_HOST_URL") or "localhost")
+
+
+def run(
+    prompter: Prompter,
+    *,
+    agents_dir: Path,
+    name: str | None,
+    mcp_servers_fn: Callable[[], list[str]] | None = None,
+    live_tools_fn: Callable[[], dict[str, list[str]]] | None = None,
+) -> int:
     """Run the interactive tool editor and return an exit code.
 
     Resolves the agent, reads its RAW ``tools:`` declaration, shows the
@@ -142,7 +194,9 @@ def run(prompter: Prompter, *, agents_dir: Path, name: str | None) -> int:
 
         current = set(TOOL_REGISTRY)
 
-    choices = _build_choices(current)
+    mcp_servers = (mcp_servers_fn or _default_mcp_servers)()
+    live_tools = (live_tools_fn or _default_live_tools)()
+    choices = _build_choices(current, mcp_servers=mcp_servers, live_tools=live_tools)
 
     selected = prompter.checkbox(
         f"Tools for {agent_name}",

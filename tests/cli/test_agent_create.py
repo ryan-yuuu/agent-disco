@@ -368,3 +368,21 @@ def test_create_agent_does_not_write_default_provider_env(tmp_path: Path) -> Non
 def test_fake_prompter_satisfies_protocol() -> None:
     """Guard that the test fake stays structurally compatible with the seam."""
     assert isinstance(FakePrompter(), Prompter)
+
+
+def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
+    """The create wizard's tool checkbox includes ``mcp/<server>`` (and live
+    per-tool) rows alongside the pre-checked builtins — unchecked, because
+    MCP is an explicit grant that never rides the all-builtins default."""
+    from calfcord.cli import _agents, agent_tools
+
+    monkeypatch.setattr(agent_tools, "_default_mcp_servers", lambda: ["github"])
+    monkeypatch.setattr(agent_tools, "_default_live_tools", lambda: {"github": ["search"]})
+    prompter = FakePrompter(checkboxes=[["shell"]])
+    selected = _agents.pick_tools(prompter, "helper")
+    assert selected == ["shell"]
+    by_value = {c.value: c for c in prompter.last_checkbox_choices}
+    assert by_value["mcp/github"].checked is False
+    assert by_value["mcp/github/search"].checked is False
+    # Builtins are still the pre-checked default.
+    assert by_value["shell"].checked is True

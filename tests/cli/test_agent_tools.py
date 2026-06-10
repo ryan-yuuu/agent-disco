@@ -225,3 +225,85 @@ def test_first_line_strips_summary_and_backticks() -> None:
     assert agent_tools.first_line(None) == ""
     # The first NON-EMPTY line wins, with leading blank lines skipped.
     assert agent_tools.first_line("\n\n  <summary>second</summary>\nthird") == "second"
+
+
+# ------------------------------------------------------------- MCP rows ---
+
+
+def test_editor_offers_configured_mcp_server_rows(tmp_path: Path) -> None:
+    """Each configured server contributes an unchecked ``mcp/<server>`` row
+    (MCP is an explicit grant — never pre-checked unless already on the
+    agent)."""
+    agents_dir = tmp_path
+    _seed_agent(agents_dir, "helper", tools_line="[shell]")
+    fake = FakePrompter(checkbox_result=["shell"])
+    rc = agent_tools.run(
+        fake,
+        agents_dir=agents_dir,
+        name="helper",
+        mcp_servers_fn=lambda: ["github"],
+        live_tools_fn=lambda: {},
+    )
+    assert rc == 0
+    by_value = {c.value: c for c in fake.last_checkbox_choices}
+    assert "mcp/github" in by_value
+    assert by_value["mcp/github"].checked is False
+
+
+def test_editor_offers_live_discovered_tool_rows(tmp_path: Path) -> None:
+    """When the capability view is reachable, per-tool ``mcp/<server>/<tool>``
+    rows appear — including for servers another host configured (the broker
+    is the source of truth, not the local mcp.json)."""
+    agents_dir = tmp_path
+    _seed_agent(agents_dir, "helper", tools_line="[]")
+    fake = FakePrompter(checkbox_result=[])
+    rc = agent_tools.run(
+        fake,
+        agents_dir=agents_dir,
+        name="helper",
+        mcp_servers_fn=lambda: ["github"],
+        live_tools_fn=lambda: {"github": ["search_issues"], "remote_docs": ["lookup"]},
+    )
+    assert rc == 0
+    values = [c.value for c in fake.last_checkbox_choices]
+    assert "mcp/github" in values
+    assert "mcp/github/search_issues" in values
+    assert "mcp/remote_docs" in values
+    assert "mcp/remote_docs/lookup" in values
+
+
+def test_editor_prechecks_current_mcp_selections(tmp_path: Path) -> None:
+    agents_dir = tmp_path
+    _seed_agent(agents_dir, "helper", tools_line="[mcp/github/search_issues]")
+    fake = FakePrompter(checkbox_result=["mcp/github/search_issues"])
+    rc = agent_tools.run(
+        fake,
+        agents_dir=agents_dir,
+        name="helper",
+        mcp_servers_fn=lambda: ["github"],
+        live_tools_fn=lambda: {"github": ["search_issues", "create_issue"]},
+    )
+    assert rc == 0
+    by_value = {c.value: c for c in fake.last_checkbox_choices}
+    assert by_value["mcp/github/search_issues"].checked is True
+    assert by_value["mcp/github/create_issue"].checked is False
+    # No duplicate "kept" row for an entry the enumeration already covers.
+    assert sum(1 for c in fake.last_checkbox_choices if c.value == "mcp/github/search_issues") == 1
+
+
+def test_editor_mcp_enumeration_failure_degrades_to_kept_rows(tmp_path: Path) -> None:
+    """A broken mcp.json / unreachable broker must not break the editor: the
+    agent's existing selectors still appear as pre-checked kept rows."""
+    agents_dir = tmp_path
+    _seed_agent(agents_dir, "helper", tools_line="[mcp/github]")
+    fake = FakePrompter(checkbox_result=["mcp/github"])
+    rc = agent_tools.run(
+        fake,
+        agents_dir=agents_dir,
+        name="helper",
+        mcp_servers_fn=lambda: [],
+        live_tools_fn=lambda: {},
+    )
+    assert rc == 0
+    by_value = {c.value: c for c in fake.last_checkbox_choices}
+    assert by_value["mcp/github"].checked is True

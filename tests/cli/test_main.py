@@ -2006,3 +2006,83 @@ def test_main_start_passes_mcp_servers_from_config(
     assert main(["start"]) == 0
     assert captured["agent_ids"] == ["assistant"]
     assert captured["mcp_servers"] == ["github"]
+
+
+def test_main_mcp_add_dispatches_with_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    captured: dict[str, object] = {}
+
+    def _add(prompter, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(main_mod.mcp_admin, "run_add", _add)
+    assert (
+        main(
+            [
+                "mcp", "add", "github",
+                "--command", "npx -y srv",
+                "--env", "GITHUB_TOKEN",
+                "--force", "--start",
+            ]
+        )
+        == 0
+    )
+    assert captured["server"] == "github"
+    assert captured["command"] == "npx -y srv"
+    assert captured["env"] == ["GITHUB_TOKEN"]
+    assert captured["force"] is True
+    assert captured["start"] is True
+    assert captured["home"] == home
+    assert captured["config_path"] == home / "config" / "mcp.json"
+
+
+def test_main_mcp_add_works_without_home_dev_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """add/list/remove are config edits — they must work on dev runs (no
+    CALFCORD_HOME), targeting ./mcp.json; only the lifecycle verbs need the
+    supervisor home."""
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    captured: dict[str, object] = {}
+
+    def _add(prompter, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(main_mod.mcp_admin, "run_add", _add)
+    assert main(["mcp", "add", "github", "--command", "srv"]) == 0
+    assert captured["home"] is None
+    assert captured["config_path"] == Path("mcp.json")
+
+
+def test_main_mcp_list_dispatches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home = _mcp_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    captured: dict[str, object] = {}
+
+    def _list(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(main_mod.mcp_admin, "run_list", _list)
+    assert main(["mcp", "list"]) == 0
+    assert captured["home"] == home
+
+
+def test_main_mcp_remove_dispatches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _mcp_home(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    def _remove(prompter, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(main_mod.mcp_admin, "run_remove", _remove)
+    assert main(["mcp", "remove", "github", "--force"]) == 0
+    assert captured["server"] == "github"
+    assert captured["force"] is True

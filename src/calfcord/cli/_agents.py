@@ -270,20 +270,26 @@ def pick_tools(prompter: Prompter, name: str) -> list[str]:
 
     Every builtin (sorted :data:`calfcord.tools.TOOL_REGISTRY`) is offered
     pre-checked so the default is the same "all builtins" set a frontmatter that
-    omits ``tools:`` would expand to. Enumeration uses only the schema-only
-    ``TOOL_REGISTRY`` seam (no transport, no secrets). If a write/shell tool
-    ends up selected we print the security caution, because anyone who can
-    @mention the agent can then drive it.
+    omits ``tools:`` would expand to; MCP rows (``mcp/<server>`` from mcp.json
+    plus live-discovered per-tool rows) are offered UNCHECKED because MCP is an
+    explicit grant that never rides that default. Row building is shared with
+    the ``agent tools`` editor (:func:`calfcord.cli.agent_tools._build_choices`)
+    so the two surfaces can't drift. If a write/shell tool ends up selected we
+    print the security caution, because anyone who can @mention the agent can
+    then drive it.
     """
-    from calfcord.cli._prompts import Choice
-    from calfcord.cli.agent_tools import first_line
+    from calfcord.cli.agent_tools import (
+        _build_choices,
+        _default_live_tools,
+        _default_mcp_servers,
+    )
     from calfcord.tools import TOOL_REGISTRY
 
-    choices: list[Choice] = []
-    for tool_name in sorted(TOOL_REGISTRY):
-        summary = first_line(TOOL_REGISTRY[tool_name].tool_schema.description)
-        label = f"{tool_name} — {summary}" if summary else tool_name
-        choices.append(Choice(tool_name, label, True))
+    choices = _build_choices(
+        set(TOOL_REGISTRY),  # builtins pre-checked; MCP rows start unchecked
+        mcp_servers=_default_mcp_servers(),
+        live_tools=_default_live_tools(),
+    )
 
     selected = prompter.checkbox(
         f"Tools for {name} (all selected — deselect any you don't want):",

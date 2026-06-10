@@ -30,6 +30,7 @@ from calfcord.cli import (
     explain,
     init,
     logs,
+    mcp_admin,
     router_config,
 )
 from calfcord.cli._agents import detect_agents
@@ -203,6 +204,34 @@ def _build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="Act on all servers (start: every configured; stop/restart: every running).",
         )
+
+    add_p = mcp_sub.add_parser(
+        "add",
+        help="Add a server to mcp.json (interactive wizard when no flags are given).",
+    )
+    add_p.add_argument("server", nargs="?", help="Server name (omit to be prompted).")
+    add_p.add_argument(
+        "--command",
+        dest="command_line",
+        help="stdio launch line (quoted; shlex-split into command+args).",
+    )
+    add_p.add_argument("--url", help="Streamable-HTTP endpoint URL.")
+    add_p.add_argument(
+        "--env", action="append", default=[], metavar="NAME[=VALUE]",
+        help="stdio env entry; bare NAME passes $NAME through. Repeatable.",
+    )
+    add_p.add_argument(
+        "--header", action="append", default=[], metavar="KEY=VALUE",
+        help="HTTP header entry. Repeatable.",
+    )
+    add_p.add_argument("--cwd", help="stdio working directory.")
+    add_p.add_argument("--force", action="store_true", help="Replace an existing entry.")
+    add_p.add_argument("--dry-run", action="store_true", help="Print the entry; write nothing.")
+    add_p.add_argument("--start", action="store_true", help="Start the server after writing.")
+    mcp_sub.add_parser("list", help="List configured MCP servers (and their local state).")
+    remove_p = mcp_sub.add_parser("remove", help="Remove a server from mcp.json.")
+    remove_p.add_argument("server", help="Server name to remove.")
+    remove_p.add_argument("--force", action="store_true", help="Skip the confirmation prompt.")
 
     # Substrate lifecycle (design §2 / §13): bring the always-on office (broker +
     # bridge) up detached, close it, and glance at the org board. These are thin
@@ -514,6 +543,37 @@ def _run_mcp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     the supervisor themselves).
     """
     command = args.mcp_command
+
+    # Config-edit verbs (add/list/remove) are home-optional: they target the
+    # resolved mcp.json (dev runs edit ./mcp.json) and only *optionally* touch
+    # the supervisor (add's start step, list's state column) when a home exists.
+    if command in ("add", "list", "remove"):
+        config_path = resolve_config_path()
+        home = _resolve_home()
+        if command == "add":
+            return mcp_admin.run_add(
+                make_prompter(),
+                config_path=config_path,
+                server=args.server,
+                command=args.command_line,
+                env=args.env,
+                url=args.url,
+                header=args.header,
+                cwd=args.cwd,
+                force=args.force,
+                dry_run=args.dry_run,
+                start=args.start,
+                home=home,
+            )
+        if command == "list":
+            return mcp_admin.run_list(config_path=config_path, home=home)
+        return mcp_admin.run_remove(
+            make_prompter(),
+            config_path=config_path,
+            server=args.server,
+            force=args.force,
+            home=home,
+        )
 
     # Argument validity before the native-install guard, mirroring the agent
     # roster: a bad invocation is a parser error (exit 2) even on a dev run.
