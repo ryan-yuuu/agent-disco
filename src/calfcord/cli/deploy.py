@@ -52,6 +52,7 @@ import yaml
 from calfcord.cli._agents import detect_agents
 from calfcord.cli._envfile import read_env
 from calfcord.cli._mcp import configured_mcp_servers_or_none
+from calfcord.supervisor.compose import mcp_slot_name
 
 # The shipped image tag the docker-compose build produces; the k8s reference
 # manifests default to it so a freshly-built local image runs unchanged.
@@ -357,7 +358,7 @@ def render_k8s(
     for server in mcp_servers or []:
         docs.append(
             _k8s_deployment(
-                name=f"mcp-{server}",
+                name=mcp_slot_name(server),
                 image=image,
                 command=["calfkit-mcp", server],
             )
