@@ -120,18 +120,15 @@ replacement is `calfcord.mcp.selector` restoring the old leaf grammar module
 (`is_mcp_selector` / `parse_mcp_selector` / `McpSelector` NamedTuple /
 `is_valid_server_name`).
 
-### D4. Agent-side resolution — calfcord-owned selector, no `mcp.json` on agent hosts
+### D4. Agent-side resolution — by-name toolbox refs, no `mcp.json` on agent hosts
 
 `AgentFactory._resolve_tools` partitions `tools:` into builtin names (resolved
 against `TOOL_REGISTRY`, unchanged) and MCP selectors, which are grouped per
-server and mapped to one `McpToolSelector` per server:
+server and mapped to one `MCPToolboxRef` per server — calfkit's public
+identity-only handle (since 0.9.1), constructible with just the server name:
 
 ```python
-@dataclass(frozen=True)
-class McpToolSelector:          # implements calfkit's ToolSelector protocol
-    server: str
-    include: tuple[str, ...] | None   # None = the bare mcp/<server> wildcard
-    def resolve_tools(self, view): return resolve_capability(view, self.server, include=self.include)
+MCPToolboxRef(server, include=...)   # include=None = the bare mcp/<server> wildcard
 ```
 
 - `mcp/<server>` plus `mcp/<server>/<tool>` for the same server merge the way
@@ -139,13 +136,18 @@ class McpToolSelector:          # implements calfkit's ToolSelector protocol
   (include=None); explicit-only selections produce a deduplicated, sorted
   include tuple.
 - Non-strict always (calfcord policy): an agent boots and runs even when its
-  MCP servers are down; the turn logs the degradation. Strictness can be
-  exposed later if a need appears.
-- calfkit's own `MCPToolbox.select()` returns a private `_ScopedSelector` and
-  requires constructing the toolbox (connection params) first — unusable on a
-  distributed agent host. calfcord's selector is ~10 lines against the public
-  `ToolSelector` protocol + `resolve_capability`. A calfkit issue will request
-  a public by-name selector constructor so this can collapse later.
+  MCP servers are down; the turn logs the degradation. `MCPToolboxRef` defaults
+  to non-strict and calfcord never overrides it; strictness can be exposed
+  later if a need appears.
+- History: calfkit 0.9.0 had no public way to build a selector by server name
+  (`MCPToolbox.select()` required connection params and returned a private
+  `_ScopedSelector`), so this shipped first as a calfcord-owned ~10-line
+  `McpToolSelector` over the public `ToolSelector` protocol. calfkit 0.9.1
+  shipped `MCPToolboxRef` ([calfkit-sdk#212](https://github.com/calf-ai/calfkit-sdk/issues/212)),
+  and the hand-rolled selector was deleted
+  ([#41](https://github.com/ryan-yuuu/calfcord/issues/41)). The per-server
+  merge of frontmatter entries stays calfcord-owned
+  (`calfcord.mcp.agent_select.selectors_from_entries`).
 - The LLM-facing tool name is whatever the server advertises (no rename layer:
   the old `<server>_<tool>` rename existed for codegen-era collision rules).
   Collisions: calfkit drops a toolbox tool whose name collides with a static

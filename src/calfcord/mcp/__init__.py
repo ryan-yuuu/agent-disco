@@ -1,12 +1,14 @@
-"""calfcord's MCP integration (calfkit 0.9.0 toolbox API).
+"""calfcord's MCP integration (calfkit toolbox API).
 
 Two strictly separated halves, mirroring the deployment boundary:
 
 * **Agent path** (any host): :mod:`calfcord.mcp.selector` parses the
   ``mcp/...`` entries in agent frontmatter and
-  :mod:`calfcord.mcp.agent_select` resolves them per turn against the
-  capability view calfkit maintains from the ``mcp.capabilities`` topic.
-  Schema-free and secret-free — agent hosts never read ``mcp.json``.
+  :mod:`calfcord.mcp.agent_select` groups them into per-server
+  :class:`~calfkit.mcp.MCPToolboxRef` handles, which calfkit resolves per
+  turn against the capability view it maintains from the
+  ``mcp.capabilities`` topic. Schema-free and secret-free — agent hosts
+  never read ``mcp.json``.
 
 * **Server path** (the host running the MCP servers):
   :mod:`calfcord.mcp.config` loads ``mcp.json`` (commands, URLs,

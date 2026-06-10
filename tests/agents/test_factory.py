@@ -690,7 +690,7 @@ class TestToolsWiring:
         ``_tool_selectors``) — one per server, with explicit tool picks
         merged into a sorted ``include`` tuple. The deferred side is what
         makes the Worker auto-register the capability view."""
-        from calfcord.mcp.agent_select import McpToolSelector
+        from calfkit.mcp import MCPToolboxRef
 
         _, model_factory = _model_factory_spy()
         fake_shell = _fake_tool_node("shell")
@@ -708,8 +708,8 @@ class TestToolsWiring:
         agent = worker._nodes[0]
         assert agent.tools == list(fake_shell.tool_bindings())
         assert agent._tool_selectors == [
-            McpToolSelector("docs"),
-            McpToolSelector("gmail", include=("search", "send")),
+            MCPToolboxRef("docs"),
+            MCPToolboxRef("gmail", include=("search", "send")),
         ]
 
     def test_mcp_only_agent_builds_with_no_builtin_bindings(self) -> None:
