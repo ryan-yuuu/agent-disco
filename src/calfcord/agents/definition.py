@@ -46,8 +46,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from calfcord.agents.identifier import AGENT_ID_PATTERN
-from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
 from calfcord.discord.avatar import dicebear_avatar_url
+from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
 
 Provider = Literal["anthropic", "openai", "openai-codex"]
 """Supported LLM provider tags for the ``provider`` frontmatter field.

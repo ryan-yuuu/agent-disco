@@ -93,9 +93,9 @@ from calfcord.agents.memory import memory_instructions
 from calfcord.agents.routing import ROUTER_OUTPUT_TOOL_NAME, RoutingDecision
 from calfcord.agents.state import AgentRuntimeState, AgentStateStore
 from calfcord.agents.thinking import build_model_settings
+from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.mcp.agent_select import McpToolSelector, selectors_from_entries
 from calfcord.mcp.selector import is_mcp_selector
-from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.topics import AGENT_STEPS_TOPIC, AMBIENT_INGRESS_TOPIC
 
 # NOTE: ``TOOL_REGISTRY`` is imported lazily inside :meth:`AgentFactory.__init__`.

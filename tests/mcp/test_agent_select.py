@@ -20,7 +20,7 @@ Pinned here:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from calfkit.models.capability import CapabilityRecord, CapabilityToolDef
@@ -37,7 +37,7 @@ def _record(server: str = "gmail", tools: tuple[str, ...] = ("search", "send")) 
             CapabilityToolDef(name=t, description=None, parameters_json_schema={"type": "object"})
             for t in tools
         ],
-        published_at=datetime.now(tz=timezone.utc),
+        published_at=datetime.now(tz=UTC),
     )
 
 

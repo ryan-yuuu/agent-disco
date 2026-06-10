@@ -172,7 +172,7 @@ class TestLoadHttp:
 class TestLoadRejections:
     def test_missing_file_raises_naming_path(self, tmp_path: Path) -> None:
         missing = tmp_path / "nope.json"
-        with pytest.raises(McpConfigError, match="nope.json"):
+        with pytest.raises(McpConfigError, match=r"nope\.json"):
             load_mcp_servers(missing)
 
     def test_malformed_json_raises(self, tmp_path: Path) -> None:
