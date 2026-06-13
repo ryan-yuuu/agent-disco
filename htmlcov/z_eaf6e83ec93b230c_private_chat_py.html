@@ -67,7 +67,7 @@
             <a id="nextFileLink" class="nav" href="z_eaf6e83ec93b230c_search_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-11 00:47 +0000
+            created at 2026-06-13 06:04 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -107,7 +107,7 @@
     <p class="pln"><span class="n"><a id="t23" href="#t23">23</a></span><span class="t"><span class="str">       * ``int`` (continue thread): fetch the prior thread history</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t24" href="#t24">24</a></span><span class="t"><span class="str">         (cache-bypassed), project it from the target's POV, then post</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t25" href="#t25">25</a></span><span class="t"><span class="str">         the caller's request projection into the existing thread.</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t26" href="#t26">26</a></span><span class="t"><span class="str">    5. ``Client.execute_node`` against ``agent.{target}.in`` with deps</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t26" href="#t26">26</a></span><span class="t"><span class="str">    5. ``Client.execute`` against ``agent.{target}.in`` with deps</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t27" href="#t27">27</a></span><span class="t"><span class="str">       ``{"discord": forwarded_wire, "caller_agent_id": &lt;caller>, "phonebook": ...}``</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t28" href="#t28">28</a></span><span class="t"><span class="str">       and the computed ``message_history``. Default 60s timeout &#8212;</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t29" href="#t29">29</a></span><span class="t"><span class="str">       fail-fast on no consumer or timeout.</span>&nbsp;</span><span class="r"></span></p>
@@ -681,7 +681,7 @@
     <p class="run run2"><span class="n"><a id="t597" href="#t597">597</a></span><span class="t">        <span class="nam">res</span><span class="op">.</span><span class="nam">timeout_seconds</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t598" href="#t598">598</a></span><span class="t">    <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t599" href="#t599">599</a></span><span class="t">    <span class="key">try</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t600" href="#t600">600</a></span><span class="t">        <span class="nam">result</span> <span class="op">=</span> <span class="key">await</span> <span class="nam">res</span><span class="op">.</span><span class="nam">client</span><span class="op">.</span><span class="nam">execute_node</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t600" href="#t600">600</a></span><span class="t">        <span class="nam">result</span> <span class="op">=</span> <span class="key">await</span> <span class="nam">res</span><span class="op">.</span><span class="nam">client</span><span class="op">.</span><span class="nam">execute</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t601" href="#t601">601</a></span><span class="t">            <span class="nam">user_prompt</span><span class="op">=</span><span class="nam">content</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t602" href="#t602">602</a></span><span class="t">            <span class="nam">topic</span><span class="op">=</span><span class="nam">target_topic</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t603" href="#t603">603</a></span><span class="t">            <span class="nam">deps</span><span class="op">=</span><span class="op">{</span>&nbsp;</span><span class="r"></span></p>
@@ -707,7 +707,7 @@
     <p class="run"><span class="n"><a id="t623" href="#t623">623</a></span><span class="t">    <span class="key">except</span> <span class="nam">TimeoutError</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t624" href="#t624">624</a></span><span class="t">        <span class="com"># Returning as a string (rather than raising) is deliberate: if we</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t625" href="#t625">625</a></span><span class="t">        <span class="com"># raise, the tool's ReturnCall never fires and the calling agent's</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t626" href="#t626">626</a></span><span class="t">        <span class="com"># execute_node also times out &#8212; two timeouts for one logical</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t626" href="#t626">626</a></span><span class="t">        <span class="com"># execute also times out &#8212; two timeouts for one logical</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t627" href="#t627">627</a></span><span class="t">        <span class="com"># failure. An error string lets the LLM see the failure and adapt.</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t628" href="#t628">628</a></span><span class="t">        <span class="nam">logger</span><span class="op">.</span><span class="nam">warning</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t629" href="#t629">629</a></span><span class="t">            <span class="str">"private_chat timeout caller=%s target=%s topic=%s timeout=%.1fs"</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
@@ -728,7 +728,7 @@
     <p class="pln"><span class="n"><a id="t644" href="#t644">644</a></span><span class="t">        <span class="com"># calfkit's runtime handler (which has no domain context). Keeps the</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t645" href="#t645">645</a></span><span class="t">        <span class="com"># documented contract &#8212; infra failures raise ``RuntimeError`` &#8212; uniform.</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t646" href="#t646">646</a></span><span class="t">        <span class="nam">_raise_infra</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t647" href="#t647">647</a></span><span class="t">            <span class="fst">f"</span><span class="fst">execute_node failed against </span><span class="op">{</span><span class="nam">target_topic</span><span class="op">!</span><span class="nam">r</span><span class="op">}</span><span class="fst">: </span><span class="op">{</span><span class="nam">e</span><span class="op">}</span><span class="fst">"</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t647" href="#t647">647</a></span><span class="t">            <span class="fst">f"</span><span class="fst">execute failed against </span><span class="op">{</span><span class="nam">target_topic</span><span class="op">!</span><span class="nam">r</span><span class="op">}</span><span class="fst">: </span><span class="op">{</span><span class="nam">e</span><span class="op">}</span><span class="fst">"</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t648" href="#t648">648</a></span><span class="t">            <span class="nam">caller</span><span class="op">=</span><span class="nam">caller_agent_id</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t649" href="#t649">649</a></span><span class="t">            <span class="nam">target</span><span class="op">=</span><span class="nam">target_agent_id</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t650" href="#t650">650</a></span><span class="t">            <span class="nam">correlation_id</span><span class="op">=</span><span class="nam">correlation_id</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
@@ -798,7 +798,7 @@
     <p class="pln"><span class="n"><a id="t714" href="#t714">714</a></span><span class="t"><span class="str">    sharing policy via</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t715" href="#t715">715</a></span><span class="t"><span class="str">    :mod:`calfcord.discord.retry_feedback`. The orchestration</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t716" href="#t716">716</a></span><span class="t"><span class="str">    differs because A2A is synchronous inside the caller's</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t717" href="#t717">717</a></span><span class="t"><span class="str">    ``execute_node`` RPC, whereas the bridge republishes</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t717" href="#t717">717</a></span><span class="t"><span class="str">    ``execute`` RPC, whereas the bridge republishes</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t718" href="#t718">718</a></span><span class="t"><span class="str">    fire-and-forget across the Kafka consumer boundary.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t719" href="#t719">719</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t720" href="#t720">720</a></span><span class="t"><span class="str">    On ``"drop"`` or ``"transient"`` errors (per</span>&nbsp;</span><span class="r"></span></p>
@@ -919,7 +919,7 @@
     <p class="pln"><span class="n"><a id="t835" href="#t835">835</a></span><span class="t">                <span class="com"># parity with the bridge outbox's retry-publish-failure</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t836" href="#t836">836</a></span><span class="t">                <span class="com"># handler at :func:`bridge.outbox._handle_post_failure`.</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t837" href="#t837">837</a></span><span class="t">                <span class="nam">logger</span><span class="op">.</span><span class="nam">exception</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t838" href="#t838">838</a></span><span class="t">                    <span class="str">"a2a retry execute_node failed caller=%s target=%s "</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t838" href="#t838">838</a></span><span class="t">                    <span class="str">"a2a retry execute failed caller=%s target=%s "</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t839" href="#t839">839</a></span><span class="t">                    <span class="str">"attempt=%d; chunk-splitting latest reply and "</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t840" href="#t840">840</a></span><span class="t">                    <span class="str">"returning to caller"</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t841" href="#t841">841</a></span><span class="t">                    <span class="nam">caller_agent_id</span><span class="op">,</span> <span class="nam">target_agent_id</span><span class="op">,</span> <span class="nam">attempts_used</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
@@ -948,8 +948,8 @@
     <p class="pln"><span class="n"><a id="t864" href="#t864">864</a></span><span class="t"><span class="str">    plus the failed reply appended to history.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t865" href="#t865">865</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t866" href="#t866">866</a></span><span class="t"><span class="str">    Mirrors :func:`calfcord.bridge.outbox._publish_retry`</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t867" href="#t867">867</a></span><span class="t"><span class="str">    but uses :meth:`Client.execute_node` (sync await) instead of</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t868" href="#t868">868</a></span><span class="t"><span class="str">    :meth:`Client.invoke_node` (fire-and-forget), because A2A is</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t867" href="#t867">867</a></span><span class="t"><span class="str">    but uses :meth:`Client.execute` (sync await) instead of</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t868" href="#t868">868</a></span><span class="t"><span class="str">    :meth:`Client.send` (fire-and-forget), because A2A is</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t869" href="#t869">869</a></span><span class="t"><span class="str">    inside the caller's RPC.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t870" href="#t870">870</a></span><span class="t"><span class="str">    """</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t871" href="#t871">871</a></span><span class="t">    <span class="nam">reminder</span> <span class="op">=</span> <span class="nam">build_retry_reminder</span><span class="op">(</span><span class="nam">error</span><span class="op">,</span> <span class="nam">failed_text</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
@@ -959,7 +959,7 @@
     <p class="run run2"><span class="n"><a id="t875" href="#t875">875</a></span><span class="t">        <span class="nam">failed_text</span><span class="op">=</span><span class="nam">failed_text</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t876" href="#t876">876</a></span><span class="t">    <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t877" href="#t877">877</a></span><span class="t">    <span class="nam">target_topic</span> <span class="op">=</span> <span class="nam">_AGENT_INBOX_TOPIC_TEMPLATE</span><span class="op">.</span><span class="nam">format</span><span class="op">(</span><span class="nam">agent_id</span><span class="op">=</span><span class="nam">target_agent_id</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t878" href="#t878">878</a></span><span class="t">    <span class="nam">result</span> <span class="op">=</span> <span class="key">await</span> <span class="nam">res</span><span class="op">.</span><span class="nam">client</span><span class="op">.</span><span class="nam">execute_node</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t878" href="#t878">878</a></span><span class="t">    <span class="nam">result</span> <span class="op">=</span> <span class="key">await</span> <span class="nam">res</span><span class="op">.</span><span class="nam">client</span><span class="op">.</span><span class="nam">execute</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t879" href="#t879">879</a></span><span class="t">        <span class="nam">user_prompt</span><span class="op">=</span><span class="nam">reminder</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t880" href="#t880">880</a></span><span class="t">        <span class="nam">topic</span><span class="op">=</span><span class="nam">target_topic</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t881" href="#t881">881</a></span><span class="t">        <span class="nam">deps</span><span class="op">=</span><span class="op">{</span>&nbsp;</span><span class="r"></span></p>
@@ -1513,7 +1513,7 @@
             <a class="nav" href="z_eaf6e83ec93b230c_search_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-11 00:47 +0000
+            created at 2026-06-13 06:04 +0000
         </p>
     </div>
 </footer>

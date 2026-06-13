@@ -67,7 +67,7 @@
             <a id="nextFileLink" class="nav" href="z_e595c9e16d535ca8_schema_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-11 00:47 +0000
+            created at 2026-06-13 06:04 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -85,8 +85,8 @@
     <p class="pln"><span class="n"><a id="t1" href="#t1">1</a></span><span class="t"><span class="str">"""Publish helpers for the control plane.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t2" href="#t2">2</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t3" href="#t3">3</a></span><span class="t"><span class="str">These functions reach into ``client._connection`` (a FastStream KafkaBroker)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t4" href="#t4">4</a></span><span class="t"><span class="str">because calfkit's public ``Client`` API exposes only ``invoke_node`` / ``execute_node``,</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t5" href="#t5">5</a></span><span class="t"><span class="str">both of which are agent invocations -- not what we want for plain control-plane</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t4" href="#t4">4</a></span><span class="t"><span class="str">because calfkit's public ``Client`` API exposes only ``send`` / ``start`` / ``execute``,</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t5" href="#t5">5</a></span><span class="t"><span class="str">all of which are agent invocations -- not what we want for plain control-plane</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t6" href="#t6">6</a></span><span class="t"><span class="str">messages. The private-attribute access is documented here in one place so a</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t7" href="#t7">7</a></span><span class="t"><span class="str">future calfkit upgrade that exposes a public ``Client.publish`` is a single-</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t8" href="#t8">8</a></span><span class="t"><span class="str">file swap.</span>&nbsp;</span><span class="r"></span></p>
@@ -219,7 +219,7 @@
             <a class="nav" href="z_e595c9e16d535ca8_schema_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-11 00:47 +0000
+            created at 2026-06-13 06:04 +0000
         </p>
     </div>
 </footer>

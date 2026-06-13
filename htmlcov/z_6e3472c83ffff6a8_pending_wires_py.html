@@ -67,7 +67,7 @@
             <a id="nextFileLink" class="nav" href="z_6e3472c83ffff6a8_registry_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-11 00:47 +0000
+            created at 2026-06-13 06:04 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -102,7 +102,7 @@
     <p class="pln"><span class="n"><a id="t18" href="#t18">18</a></span><span class="t"><span class="str">**What's in a `PendingEntry`** (beyond the bare wire):</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t19" href="#t19">19</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t20" href="#t20">20</a></span><span class="t"><span class="str">* ``wire`` &#8212; the original :class:`WireMessage`.</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t21" href="#t21">21</a></span><span class="t"><span class="str">* ``message_history`` &#8212; snapshot of what was passed to ``invoke_node``.</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t21" href="#t21">21</a></span><span class="t"><span class="str">* ``message_history`` &#8212; snapshot of what was passed to ``send``.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t22" href="#t22">22</a></span><span class="t"><span class="str">  Used by the outbox to reconstruct a faithful retry envelope when a</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t23" href="#t23">23</a></span><span class="t"><span class="str">  Discord post fails with an agent-fixable error (length, etc.).</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t24" href="#t24">24</a></span><span class="t"><span class="str">  Without this snapshot the retry would have to re-fetch + re-project</span>&nbsp;</span><span class="r"></span></p>
@@ -178,7 +178,7 @@
     <p class="pln"><span class="n"><a id="t94" href="#t94">94</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t95" href="#t95">95</a></span><span class="t">    <span class="nam">wire</span><span class="op">:</span> <span class="nam">WireMessage</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t96" href="#t96">96</a></span><span class="t">    <span class="nam">message_history</span><span class="op">:</span> <span class="nam">tuple</span><span class="op">[</span><span class="nam">ModelMessage</span><span class="op">,</span> <span class="op">...</span><span class="op">]</span> <span class="op">=</span> <span class="nam">field</span><span class="op">(</span><span class="nam">default_factory</span><span class="op">=</span><span class="nam">tuple</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t97" href="#t97">97</a></span><span class="t">    <span class="str">"""Snapshot of ``message_history`` passed to the original ``invoke_node``.</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t97" href="#t97">97</a></span><span class="t">    <span class="str">"""Snapshot of ``message_history`` passed to the original ``send``.</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t98" href="#t98">98</a></span><span class="t"><span class="str">    Tuple (not list) for shallow immutability; combined with the</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t99" href="#t99">99</a></span><span class="t"><span class="str">    frozen dataclass, callers cannot accidentally mutate the snapshot."""</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t100" href="#t100">100</a></span><span class="t">    <span class="nam">initial_message_history_length</span><span class="op">:</span> <span class="nam">int</span> <span class="op">=</span> <span class="num">0</span>&nbsp;</span><span class="r"></span></p>
@@ -196,7 +196,7 @@
     <p class="run run2"><span class="n"><a id="t112" href="#t112">112</a></span><span class="t"><span class="str">    as fresh "steps" into the new transcript thread.</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t113" href="#t113">113</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t114" href="#t114">114</a></span><span class="t"><span class="str">    The default ``0`` is correct for callsites that don't pass a</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t115" href="#t115">115</a></span><span class="t"><span class="str">    ``message_history`` to ``invoke_node`` (e.g. an A2A invocation</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t115" href="#t115">115</a></span><span class="t"><span class="str">    ``message_history`` to the call (e.g. an A2A invocation</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t116" href="#t116">116</a></span><span class="t"><span class="str">    starting from scratch); they would also have nothing to skip.</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t117" href="#t117">117</a></span><span class="t"><span class="str">    """</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t118" href="#t118">118</a></span><span class="t">    <span class="nam">temp_instructions</span><span class="op">:</span> <span class="nam">str</span> <span class="op">|</span> <span class="key">None</span> <span class="op">=</span> <span class="key">None</span>&nbsp;</span><span class="r"></span></p>
@@ -209,7 +209,7 @@
     <p class="run run2"><span class="n"><a id="t125" href="#t125">125</a></span><span class="t"><span class="str">    Forwarded verbatim on retries so a user-configured</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t126" href="#t126">126</a></span><span class="t"><span class="str">    ``thinking_effort=high`` run doesn't silently degrade to the</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t127" href="#t127">127</a></span><span class="t"><span class="str">    model client's baked-in default on the retry. Mutable ``dict``</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t128" href="#t128">128</a></span><span class="t"><span class="str">    type matches calfkit's :meth:`Client.invoke_node` parameter</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t128" href="#t128">128</a></span><span class="t"><span class="str">    type matches calfkit's :meth:`Client.send` parameter</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t129" href="#t129">129</a></span><span class="t"><span class="str">    signature; the snapshot discipline is enforced by the frozen</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t130" href="#t130">130</a></span><span class="t"><span class="str">    enclosing dataclass &#8212; callers see a reference but cannot rebind</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t131" href="#t131">131</a></span><span class="t"><span class="str">    the field."""</span>&nbsp;</span><span class="r"></span></p>
@@ -369,7 +369,7 @@
             <a class="nav" href="z_6e3472c83ffff6a8_registry_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.1">coverage.py v7.14.1</a>,
-            created at 2026-06-11 00:47 +0000
+            created at 2026-06-13 06:04 +0000
         </p>
     </div>
 </footer>

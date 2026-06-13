@@ -5,7 +5,7 @@
 | Name                                           |    Stmts |     Miss |   Branch |   BrPart |   Cover |   Missing |
 |----------------------------------------------- | -------: | -------: | -------: | -------: | ------: | --------: |
 | src/calfcord/\_atomic.py                       |       19 |        0 |        2 |        0 |    100% |           |
-| src/calfcord/\_provisioning.py                 |       28 |        0 |        6 |        0 |    100% |           |
+| src/calfcord/\_provisioning.py                 |       25 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/\_worker\_runtime.py              |       41 |        0 |       14 |        0 |    100% |           |
 | src/calfcord/agents/definition.py              |      107 |        0 |       32 |        0 |    100% |           |
 | src/calfcord/agents/factory.py                 |      127 |        2 |       34 |        2 |     98% |  186, 200 |
@@ -22,11 +22,11 @@
 | src/calfcord/agents/thinking.py                |       25 |        4 |       12 |        2 |     84% |101-105, 114-118 |
 | src/calfcord/ambient\_routing.py               |       17 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/bridge/egress.py                  |       79 |        3 |       18 |        0 |     97% |   193-199 |
-| src/calfcord/bridge/gateway.py                 |      313 |       31 |       56 |        7 |     89% |321-325, 329-330, 396-397, 426, 428, 431, 453-458, 654, 667-688, 742-743, 757, 770, 812, 1010-\>1015, 1057 |
+| src/calfcord/bridge/gateway.py                 |      311 |       31 |       56 |        7 |     89% |318-322, 326-327, 393-394, 423, 425, 428, 450-455, 651, 664-685, 739-740, 754, 767, 809, 1009-\>1014, 1056 |
 | src/calfcord/bridge/history.py                 |      202 |        5 |       62 |        5 |     96% |282, 443-\>445, 455-\>457, 477-\>479, 721-728, 781 |
-| src/calfcord/bridge/ingress.py                 |      212 |       11 |       70 |        7 |     94% |159-\>161, 648-652, 697, 772, 784-796, 869-870, 890, 919 |
+| src/calfcord/bridge/ingress.py                 |      211 |       11 |       70 |        7 |     94% |157-\>159, 641-645, 690, 765, 777-789, 862-863, 883, 912 |
 | src/calfcord/bridge/normalizer.py              |       89 |        2 |       22 |        2 |     96% |   83, 288 |
-| src/calfcord/bridge/outbox.py                  |      171 |        9 |       42 |        4 |     94% |569, 598, 620-629, 800-807, 832-\>exit, 835-836 |
+| src/calfcord/bridge/outbox.py                  |      165 |        7 |       40 |        3 |     95% |572, 601, 623-632, 800-807 |
 | src/calfcord/bridge/pending\_wires.py          |       62 |        0 |       12 |        1 |     99% | 270-\>272 |
 | src/calfcord/bridge/registry.py                |       92 |        0 |       24 |        0 |    100% |           |
 | src/calfcord/bridge/slash.py                   |      164 |       37 |       18 |        0 |     77% |96-97, 134, 166, 194-195, 277-278, 340-341, 375-378, 388-389, 402-406, 411-418, 430-465 |
@@ -96,10 +96,10 @@
 | src/calfcord/providers/codex/token\_store.py   |       44 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/router/config.py                  |        9 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/router/definition.py              |       27 |        0 |        0 |        0 |    100% |           |
-| src/calfcord/router/fanout.py                  |       58 |        1 |       12 |        1 |     97% |       119 |
+| src/calfcord/router/fanout.py                  |       55 |        1 |       10 |        1 |     97% |       119 |
 | src/calfcord/router/prompt.py                  |       49 |        0 |        8 |        0 |    100% |           |
 | src/calfcord/router/roster.py                  |       12 |        0 |        2 |        0 |    100% |           |
-| src/calfcord/router/runner.py                  |       60 |       22 |        6 |        2 |     64% |82-86, 119-\>121, 159-189, 193-204, 208 |
+| src/calfcord/router/runner.py                  |       59 |       21 |        6 |        2 |     65% |81-85, 118-\>120, 158-185, 189-200, 204 |
 | src/calfcord/supervisor/\_workspace.py         |       21 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/supervisor/client.py              |       59 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/supervisor/component.py           |       44 |        0 |       12 |        1 |     98% |   72-\>71 |
@@ -117,8 +117,8 @@
 | src/calfcord/tools/builtin/workspace.py        |       19 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/tools/discovery.py                |      115 |        2 |       60 |        0 |     99% |   254-264 |
 | src/calfcord/tools/runner.py                   |       45 |       10 |        4 |        1 |     78% |61-65, 139-148, 152 |
-| src/calfcord/topics.py                         |       13 |        0 |        0 |        0 |    100% |           |
-| **TOTAL**                                      | **8665** |  **616** | **2250** |  **134** | **92%** |           |
+| src/calfcord/topics.py                         |       11 |        0 |        0 |        0 |    100% |           |
+| **TOTAL**                                      | **8647** |  **613** | **2246** |  **133** | **92%** |           |
 
 
 ## Setup coverage badge
