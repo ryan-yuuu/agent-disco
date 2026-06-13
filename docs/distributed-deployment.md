@@ -515,7 +515,7 @@ invoked:
   reply within 60s` string and can adapt.
 - **Every other builtin tool** (`shell`, `read_file`, etc.) currently
   has **no default per-call timeout** at the calfkit layer. If the
-  tool's host is down, the calling agent's `execute_node` RPC blocks
+  tool's host is down, the calling agent's `execute` RPC blocks
   until the broker drops the connection or the operator restarts the
   agent. Mitigation: enforce a deadline inside the tool body itself
   (e.g. `shell`'s upstream openhands executor accepts a `timeout`

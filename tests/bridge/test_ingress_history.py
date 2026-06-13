@@ -9,12 +9,11 @@ or Discord.
 These complement the focused unit tests in
 :mod:`tests.bridge.test_history` by asserting the *wiring* between
 ``ingress.handle``, the fetcher, and the consumer-facing ``message_history``
-parameter on :meth:`Client.invoke_node`.
+parameter on :meth:`Client.send`.
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -141,17 +140,12 @@ def _record(
     )
 
 
-def _fresh_handle() -> Any:
-    h = MagicMock()
-    h._future = asyncio.Future()
-    return h
-
-
 @pytest.fixture
 def client() -> MagicMock:
     c = MagicMock()
-    c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c.reply_topic = "discord.outbox"
+    # calfkit 0.10.0: ``Client.send`` is fire-and-forget and returns the
+    # correlation_id (a ``str``), not an awaitable reply handle.
+    c.send = AsyncMock(side_effect=lambda *_a, **_kw: "corr-id")
     return c
 
 
@@ -260,8 +254,8 @@ class TestSlashHistoryFetch:
         await ingress.handle(_slash_wire(slash_target="scribe"))
 
         fetcher.fetch.assert_not_called()
-        # ...and invoke_node still runs, with empty history.
-        kw = client.invoke_node.call_args.kwargs
+        # ...and the send still runs, with empty history.
+        kw = client.send.call_args.kwargs
         assert kw["message_history"] == []
 
     async def test_pre_ready_fetcher_none_returns_empty_history(
@@ -276,7 +270,7 @@ class TestSlashHistoryFetch:
 
         await ingress.handle(_slash_wire())
 
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         assert kw["message_history"] == []
 
     async def test_unknown_target_returns_empty_history(
@@ -304,7 +298,7 @@ class TestSlashHistoryFetch:
 
 
 class TestSlashHistoryProjection:
-    async def test_history_passed_to_invoke_node(
+    async def test_history_passed_to_send(
         self,
         client: MagicMock,
         pending_wires: PendingWires,
@@ -325,7 +319,11 @@ class TestSlashHistoryProjection:
 
         await ingress.handle(_slash_wire(slash_target="scribe"))
 
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
+        # Slash sends address their reply at the Discord outbox so the
+        # agent's terminal reply lands back on the bridge.
+        assert kw["reply_to"] == "discord.outbox"
+        assert "output_type" not in kw
         message_history: list[ModelMessage] = kw["message_history"]
         assert len(message_history) == 2
         # ryan's msg → ModelRequest from scribe's POV.
@@ -349,7 +347,7 @@ class TestSlashHistoryProjection:
 
         await ingress.handle(_slash_wire(slash_target="scribe"))
 
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         message_history = kw["message_history"]
         assert len(message_history) == 5  # trimmed
         # Confirm we kept the MOST RECENT 5 (records[-5:]).
@@ -375,7 +373,7 @@ class TestSlashPrefetchedHistory:
         )
 
         fetcher.fetch.assert_not_called()
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         message_history = kw["message_history"]
         assert len(message_history) == 1
         assert "from envelope" in message_history[0].parts[0].content
@@ -396,7 +394,7 @@ class TestSlashPrefetchedHistory:
         await ingress.handle(_slash_wire(slash_target="scribe"), prefetched_history=())
 
         fetcher.fetch.assert_not_called()
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         assert kw["message_history"] == []
 
 
@@ -423,7 +421,12 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
+        # Ambient sends are true fire-and-forget: no point-to-point
+        # reply address — the router's decision flows forward on its
+        # publish_topic, never back to the bridge.
+        assert kw["reply_to"] is None
+        assert "output_type" not in kw
         deps = kw["deps"]
         assert "history" in deps
         history = deps["history"]
@@ -452,8 +455,8 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        kw = client.invoke_node.call_args.kwargs
-        # message_history is passed straight through to invoke_node.
+        kw = client.send.call_args.kwargs
+        # message_history is passed straight through to send.
         for m in kw["message_history"]:
             assert isinstance(m, ModelRequest)
 
@@ -530,7 +533,7 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         assert kw["deps"]["history"] == []
 
     async def test_ambient_router_history_trim_keeps_newest(
@@ -555,7 +558,7 @@ class TestAmbientHistory:
 
         await ingress.handle(_ambient_wire())
 
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         router_msgs = kw["message_history"]
         assert len(router_msgs) == 10
         # Newest 10 are msg-20 .. msg-29; oldest in the kept slice is msg-20,
@@ -703,7 +706,7 @@ class TestTaskThreadStarterEndToEnd:
         parent.fetch_message.assert_awaited_once_with(thread_id)
         # ...and projected as the OLDEST entry: a ModelRequest carrying the
         # task statement, ahead of scribe's own prior reply.
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         message_history: list[ModelMessage] = kw["message_history"]
         assert len(message_history) == 2
         assert isinstance(message_history[0], ModelRequest)
@@ -753,5 +756,5 @@ class TestTaskThreadStarterEndToEnd:
         )
         await ingress.handle(wire)
 
-        kw = client.invoke_node.call_args.kwargs
+        kw = client.send.call_args.kwargs
         assert kw["message_history"] == []

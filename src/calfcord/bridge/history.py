@@ -825,7 +825,7 @@ def project_history(
             §4, §7.6.
 
     Returns:
-        A list suitable for ``Client.invoke_node(message_history=...)``.
+        A list suitable for ``Client.send(message_history=...)``.
         May be empty.
 
     **What this function deliberately does NOT do**:

@@ -23,7 +23,7 @@ Flow per invocation:
        * ``int`` (continue thread): fetch the prior thread history
          (cache-bypassed), project it from the target's POV, then post
          the caller's request projection into the existing thread.
-    5. ``Client.execute_node`` against ``agent.{target}.in`` with deps
+    5. ``Client.execute`` against ``agent.{target}.in`` with deps
        ``{"discord": forwarded_wire, "caller_agent_id": <caller>, "phonebook": ...}``
        and the computed ``message_history``. Default 60s timeout —
        fail-fast on no consumer or timeout.
@@ -597,7 +597,7 @@ async def private_chat(
         res.timeout_seconds,
     )
     try:
-        result = await res.client.execute_node(
+        result = await res.client.execute(
             user_prompt=content,
             topic=target_topic,
             deps={
@@ -623,7 +623,7 @@ async def private_chat(
     except TimeoutError:
         # Returning as a string (rather than raising) is deliberate: if we
         # raise, the tool's ReturnCall never fires and the calling agent's
-        # execute_node also times out — two timeouts for one logical
+        # execute also times out — two timeouts for one logical
         # failure. An error string lets the LLM see the failure and adapt.
         logger.warning(
             "private_chat timeout caller=%s target=%s topic=%s timeout=%.1fs",
@@ -644,7 +644,7 @@ async def private_chat(
         # calfkit's runtime handler (which has no domain context). Keeps the
         # documented contract — infra failures raise ``RuntimeError`` — uniform.
         _raise_infra(
-            f"execute_node failed against {target_topic!r}: {e}",
+            f"execute failed against {target_topic!r}: {e}",
             caller=caller_agent_id,
             target=target_agent_id,
             correlation_id=correlation_id,
@@ -714,7 +714,7 @@ async def _post_response_with_feedback_retries(
     sharing policy via
     :mod:`calfcord.discord.retry_feedback`. The orchestration
     differs because A2A is synchronous inside the caller's
-    ``execute_node`` RPC, whereas the bridge republishes
+    ``execute`` RPC, whereas the bridge republishes
     fire-and-forget across the Kafka consumer boundary.
 
     On ``"drop"`` or ``"transient"`` errors (per
@@ -835,7 +835,7 @@ async def _post_response_with_feedback_retries(
                 # parity with the bridge outbox's retry-publish-failure
                 # handler at :func:`bridge.outbox._handle_post_failure`.
                 logger.exception(
-                    "a2a retry execute_node failed caller=%s target=%s "
+                    "a2a retry execute failed caller=%s target=%s "
                     "attempt=%d; chunk-splitting latest reply and "
                     "returning to caller",
                     caller_agent_id, target_agent_id, attempts_used,
@@ -864,8 +864,8 @@ async def _execute_retry_with_feedback(
     plus the failed reply appended to history.
 
     Mirrors :func:`calfcord.bridge.outbox._publish_retry`
-    but uses :meth:`Client.execute_node` (sync await) instead of
-    :meth:`Client.invoke_node` (fire-and-forget), because A2A is
+    but uses :meth:`Client.execute` (sync await) instead of
+    :meth:`Client.send` (fire-and-forget), because A2A is
     inside the caller's RPC.
     """
     reminder = build_retry_reminder(error, failed_text)
@@ -875,7 +875,7 @@ async def _execute_retry_with_feedback(
         failed_text=failed_text,
     )
     target_topic = _AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=target_agent_id)
-    result = await res.client.execute_node(
+    result = await res.client.execute(
         user_prompt=reminder,
         topic=target_topic,
         deps={

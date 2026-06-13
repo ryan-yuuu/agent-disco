@@ -103,7 +103,7 @@ async def test_hand_rolled_start_is_clean_and_consumes_on_no_autocreate_broker()
         # Prove the subscriber is genuinely live, not merely "start() returned":
         # a separate client publishes to the inbox and the handler must fire.
         async with Client.connect(BOOTSTRAP, provisioning=ProvisioningConfig(enabled=True)) as producer:
-            await producer.emit_to_node("ping", inbox)
+            await producer.send("ping", inbox)
             await asyncio.wait_for(consumed.wait(), timeout=_CONSUME_TIMEOUT)
     finally:
         with contextlib.suppress(Exception):

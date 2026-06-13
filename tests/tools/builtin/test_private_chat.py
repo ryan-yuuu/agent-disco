@@ -195,7 +195,7 @@ def deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     overridden by continue-path tests.
     """
     client = MagicMock(spec=Client)
-    client.execute_node = AsyncMock()
+    client.execute = AsyncMock()
     persona_sender = MagicMock(spec=DiscordPersonaSender)
     persona_sender.send = _sequential_send_mock(
         _REQUEST_SENT_MESSAGE_ID, _RESPONSE_SENT_MESSAGE_ID
@@ -529,7 +529,7 @@ class TestContinueThreadNonMessageableChannel:
         assert "not accessible" in out
         # No tag on error — LLM must drop the bad id, not try to continue it.
         assert "<thread_id>" not in out
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
 
 
 class TestContinueThreadOtherDiscordExceptions:
@@ -548,19 +548,19 @@ class TestContinueThreadOtherDiscordExceptions:
             await pc.private_chat(
                 _ctx(caller="alice"), "bob", "follow up", thread_id=777
             )
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
 
 
 class TestNewThreadPath:
     """Coverage for the default ``thread_id=None`` branch."""
 
     async def test_resolves_unified_channel_once(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         deps["resolver"].resolve_unified_channel.assert_awaited_once_with()
 
     async def test_returns_tagged_response(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         # Format pinned: <thread_id>NNN</thread_id>\n{response}.
         assert out == f"<thread_id>{_NEW_THREAD_ID}</thread_id>\nbob's reply"
@@ -570,10 +570,10 @@ class TestNewThreadPath:
         template) project forward to the A2A target, so a memory agent reached
         via A2A still receives its memory instructions — while the A2A-specific
         keys remain overrides, not the caller's forwarded values."""
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         ctx = _ctx(caller="alice", extra_deps={"memory_prompt": "TEMPLATE {{MEMORY_DIR}}"})
         await pc.private_chat(ctx, "bob", "hello")
-        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]
+        forwarded = deps["client"].execute.await_args.kwargs["deps"]
         assert forwarded["memory_prompt"] == "TEMPLATE {{MEMORY_DIR}}"
         # A2A-owned keys are overridden after the spread (this hop's caller,
         # the forwarded wire, the refreshed roster) — not the caller's copies.
@@ -583,15 +583,15 @@ class TestNewThreadPath:
     async def test_forwarding_is_transparent_no_phantom_key(self, deps: dict[str, Any]) -> None:
         """A caller without an ambient key doesn't get one fabricated downstream
         — the spread forwards only what's present."""
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
-        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]
+        forwarded = deps["client"].execute.await_args.kwargs["deps"]
         assert "memory_prompt" not in forwarded
 
     async def test_first_send_to_unified_channel_without_thread_id(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         # First call = caller's request projection. Posted to the unified
         # channel (no thread_id) so it can serve as the thread anchor.
@@ -602,7 +602,7 @@ class TestNewThreadPath:
     async def test_create_anchored_thread_called_with_sent_id_and_name(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "summarize the spec")
         deps["resolver"].create_anchored_thread.assert_awaited_once()
         call = deps["resolver"].create_anchored_thread.await_args
@@ -610,19 +610,19 @@ class TestNewThreadPath:
         assert call.args == (_UNIFIED_CHANNEL_ID, _REQUEST_SENT_MESSAGE_ID)
         assert call.kwargs["name"] == "alice→bob: summarize the spec"
 
-    async def test_execute_node_receives_empty_message_history(
+    async def test_execute_receives_empty_message_history(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         assert (
-            deps["client"].execute_node.await_args.kwargs["message_history"] == []
+            deps["client"].execute.await_args.kwargs["message_history"] == []
         )
 
     async def test_response_posted_into_new_thread(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         # Second call = target's response projection, posted into the
         # newly-anchored thread.
@@ -635,14 +635,14 @@ class TestNewThreadPath:
     ) -> None:
         """Default branch must not touch the fetcher — no thread exists yet
         to read from."""
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         deps["fetch_thread_history"].assert_not_called()
 
     async def test_return_value_matches_documented_pattern(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("multi\nline\nreply")
+        deps["client"].execute.return_value = _result("multi\nline\nreply")
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         # The DOTALL pattern in the docstring must match the actual return.
         match = _RETURN_TAG_PATTERN.match(out)
@@ -650,7 +650,7 @@ class TestNewThreadPath:
         assert int(match.group(1)) == _NEW_THREAD_ID
 
     async def test_caller_persona_sent_first(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         await pc.private_chat(_ctx(caller="alice"), "bob", "alice asks")
         first_persona = deps["persona_sender"].send.await_args_list[0].args[0]
         assert first_persona.name == "Alice Bot"
@@ -658,7 +658,7 @@ class TestNewThreadPath:
         assert first_content == "alice asks"
 
     async def test_target_persona_sent_second(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         await pc.private_chat(_ctx(caller="alice"), "bob", "alice asks")
         second_persona = deps["persona_sender"].send.await_args_list[1].args[0]
         assert second_persona.name == "Bob Bot"
@@ -673,7 +673,7 @@ class TestContinueThreadPath:
         self, deps: dict[str, Any]
     ) -> None:
         phonebook = [_entry("alice"), _entry("bob", history_turns=15)]
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(
             _ctx(caller="alice", phonebook=phonebook), "bob", "follow up", thread_id=777
         )
@@ -707,7 +707,7 @@ class TestContinueThreadPath:
 
         deps["fetch_thread_history"].side_effect = record_fetch
         deps["persona_sender"].send = record_send
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
         # First two events are exactly fetch → send (then more sends for the response).
         assert call_order[0] == "fetch"
@@ -719,14 +719,14 @@ class TestContinueThreadPath:
         """Even on continue we still resolve the channel — the cache makes
         this cheap after the first call but the call still happens (the
         request projection needs the channel id)."""
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
         deps["resolver"].resolve_unified_channel.assert_awaited_once_with()
 
     async def test_create_anchored_thread_never_called_on_continue(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
         deps["resolver"].create_anchored_thread.assert_not_called()
 
@@ -741,29 +741,29 @@ class TestContinueThreadPath:
             _record("alice asked", author_agent_id="alice"),
             _record("bob replied", author_agent_id="bob"),
         ]
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
-        passed_history = deps["client"].execute_node.await_args.kwargs["message_history"]
+        passed_history = deps["client"].execute.await_args.kwargs["message_history"]
         # Two records, one from each side; passes both through.
         assert len(passed_history) == 2
 
-    async def test_message_history_passed_to_execute_node(
+    async def test_message_history_passed_to_execute(
         self, deps: dict[str, Any]
     ) -> None:
         """Distinct from the per-POV projection test — pins that the
-        history actually rides on the ``execute_node`` kwarg."""
+        history actually rides on the ``execute`` kwarg."""
         deps["fetch_thread_history"].return_value = [
             _record("alice asked", author_agent_id="alice"),
         ]
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
-        history = deps["client"].execute_node.await_args.kwargs["message_history"]
+        history = deps["client"].execute.await_args.kwargs["message_history"]
         assert len(history) == 1
 
     async def test_request_projection_posted_into_thread(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
         first = deps["persona_sender"].send.await_args_list[0]
         assert first.kwargs["channel_id"] == _UNIFIED_CHANNEL_ID
@@ -772,7 +772,7 @@ class TestContinueThreadPath:
     async def test_response_projection_posted_into_same_thread(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "follow up", thread_id=777)
         second = deps["persona_sender"].send.await_args_list[1]
         assert second.kwargs["channel_id"] == _UNIFIED_CHANNEL_ID
@@ -781,7 +781,7 @@ class TestContinueThreadPath:
     async def test_return_tag_carries_same_thread_id(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         out = await pc.private_chat(
             _ctx(caller="alice"), "bob", "follow up", thread_id=777
         )
@@ -806,8 +806,8 @@ class TestContinueThreadFetcherErrors:
         assert "omitting thread_id" in out
         # No tag on error.
         assert "<thread_id>" not in out
-        # execute_node was never reached.
-        deps["client"].execute_node.assert_not_called()
+        # execute was never reached.
+        deps["client"].execute.assert_not_called()
 
     async def test_fetcher_not_found_returns_recoverable_error(
         self, deps: dict[str, Any]
@@ -819,7 +819,7 @@ class TestContinueThreadFetcherErrors:
         assert "error:" in out
         assert "thread 777" in out
         assert "<thread_id>" not in out
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
 
     async def test_fetcher_http_5xx_raises_runtime_error(
         self, deps: dict[str, Any]
@@ -831,7 +831,7 @@ class TestContinueThreadFetcherErrors:
             await pc.private_chat(
                 _ctx(caller="alice"), "bob", "follow up", thread_id=777
             )
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
 
     async def test_fetcher_error_logs_caller_target_thread(
         self,
@@ -869,8 +869,8 @@ class TestNewThreadAnchorFailure:
         # The first persona.send (request projection) happened; that's
         # acceptable orphan data.
         assert deps["persona_sender"].send.await_count >= 1
-        # The execute_node call never happened.
-        deps["client"].execute_node.assert_not_called()
+        # The execute call never happened.
+        deps["client"].execute.assert_not_called()
 
     async def test_anchor_failure_on_not_found_raises(
         self, deps: dict[str, Any]
@@ -911,7 +911,7 @@ class TestNewThreadAnchorFailure:
         ), pytest.raises(RuntimeError, match="no anchor message available"):
             await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         deps["resolver"].create_anchored_thread.assert_not_called()
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
 
 
 class TestInputErrors:
@@ -923,7 +923,7 @@ class TestInputErrors:
         out = await pc.private_chat(_ctx(caller="alice"), "alice", "x")
         assert "cannot privately chat with itself" in out
         assert "<thread_id>" not in out
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
 
     async def test_unknown_target_returns_error_with_known_list(
         self, deps: dict[str, Any]
@@ -933,7 +933,7 @@ class TestInputErrors:
         assert "alice" in out
         assert "bob" in out
         assert "<thread_id>" not in out
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
 
 
 class TestInfraErrors:
@@ -967,7 +967,7 @@ class TestInfraErrors:
         """Symmetric to the bundle check: a present-but-wrong-typed
         ``a2a_client`` (e.g. the runner keyed the wrong object) must fail here
         with the real cause, not later as an opaque AttributeError on
-        ``client.execute_node``."""
+        ``client.execute``."""
         bundle = pc._A2ADiscord(
             persona_sender=MagicMock(spec=DiscordPersonaSender),
             resolver=MagicMock(spec=A2AChannelResolver),
@@ -1074,7 +1074,7 @@ class TestRequestProjectionBestEffort:
     ) -> None:
         """On continue, a persistent transient request projection failure
         is logged and accepted; the RPC still runs."""
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _http_exc(discord.HTTPException, 503),  # request attempt 1
@@ -1098,7 +1098,7 @@ class TestRequestProjectionBestEffort:
     ) -> None:
         import logging as _logging
 
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _http_exc(discord.HTTPException, 503),
@@ -1124,7 +1124,7 @@ class TestRequestProjectionBestEffort:
         """First attempt fails transient, second succeeds. Pins that the
         retry loop still returns the eventual ``SentMessage`` (needed for
         the new-thread anchor)."""
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _http_exc(discord.HTTPException, 503),
@@ -1149,7 +1149,7 @@ class TestRequestProjectionBestEffort:
     async def test_retry_sleeps_with_module_constant(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _http_exc(discord.HTTPException, 503),
@@ -1167,7 +1167,7 @@ class TestRequestProjectionBestEffort:
     async def test_non_discord_projection_error_propagates(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=RuntimeError("sender not started")
         )
@@ -1177,7 +1177,7 @@ class TestRequestProjectionBestEffort:
     async def test_forbidden_propagates_without_retry(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=_http_exc(discord.Forbidden, 403)
         )
@@ -1188,7 +1188,7 @@ class TestRequestProjectionBestEffort:
     async def test_not_found_propagates_without_retry(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         deps["persona_sender"].send = AsyncMock(
             side_effect=_http_exc(discord.NotFound, 404)
         )
@@ -1209,7 +1209,7 @@ class TestResponseProjectionRaises:
     async def test_transient_5xx_raises_infra(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request side OK
@@ -1229,7 +1229,7 @@ class TestResponseProjectionRaises:
         """403 Forbidden is non-agent-fixable (missing Manage Webhooks
         permission) — the LLM can't fix permission issues by changing
         content. Retry-with-feedback does not fire."""
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request side OK
@@ -1259,7 +1259,7 @@ class TestResponseProjectionRaises:
         exception would escape uncaught and the caller's LLM would see
         a raw ``RateLimited`` traceback bypassing the documented
         ``RuntimeError`` contract."""
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _sent_message(_REQUEST_SENT_MESSAGE_ID),  # request side OK
@@ -1282,7 +1282,7 @@ class TestResponseProjectionRaises:
     ) -> None:
         import logging as _logging
 
-        deps["client"].execute_node.return_value = _result("bob's reply")
+        deps["client"].execute.return_value = _result("bob's reply")
         deps["persona_sender"].send = AsyncMock(
             side_effect=[
                 _sent_message(_REQUEST_SENT_MESSAGE_ID),
@@ -1297,11 +1297,11 @@ class TestResponseProjectionRaises:
         assert "correlation_id=tool-corr" in joined
 
 
-class TestExecuteNodeFailures:
+class TestExecuteFailures:
     async def test_timeout_returns_error_string_not_raise(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.side_effect = TimeoutError()
+        deps["client"].execute.side_effect = TimeoutError()
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert "did not reply" in out
         assert "bob" in out
@@ -1311,7 +1311,7 @@ class TestExecuteNodeFailures:
     async def test_timeout_skips_response_projection(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.side_effect = TimeoutError()
+        deps["client"].execute.side_effect = TimeoutError()
         await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         # Only the request projection ran (1 send call).
         assert deps["persona_sender"].send.await_count == 1
@@ -1320,8 +1320,8 @@ class TestExecuteNodeFailures:
         self, deps: dict[str, Any]
     ) -> None:
         original = ConnectionError("kafka unreachable")
-        deps["client"].execute_node.side_effect = original
-        with pytest.raises(RuntimeError, match="execute_node failed") as ei:
+        deps["client"].execute.side_effect = original
+        with pytest.raises(RuntimeError, match="execute failed") as ei:
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         msg = str(ei.value)
         assert "agent.bob.in" in msg
@@ -1335,7 +1335,7 @@ class TestExecuteNodeFailures:
         import logging as _logging
 
         original = RuntimeError("some calfkit internal")
-        deps["client"].execute_node.side_effect = original
+        deps["client"].execute.side_effect = original
         with caplog.at_level(_logging.ERROR), pytest.raises(RuntimeError) as ei:
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert ei.value is not original
@@ -1348,7 +1348,7 @@ class TestExecuteNodeFailures:
     async def test_cancelled_error_propagates_untouched(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.side_effect = asyncio.CancelledError()
+        deps["client"].execute.side_effect = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
 
@@ -1362,7 +1362,7 @@ class TestResolverFailure:
         )
         with pytest.raises(discord.Forbidden):
             await pc.private_chat(_ctx(caller="alice"), "bob", "x")
-        deps["client"].execute_node.assert_not_called()
+        deps["client"].execute.assert_not_called()
         deps["persona_sender"].send.assert_not_called()
         deps["resolver"].create_anchored_thread.assert_not_called()
 
@@ -1390,7 +1390,7 @@ class TestEmptyResponseInsideThread:
         """Empty content placeholder behavior still applies inside a
         thread — regression for the projection's empty-content branch
         when posting to a thread_id."""
-        deps["client"].execute_node.return_value = _result("")
+        deps["client"].execute.return_value = _result("")
         await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         second = deps["persona_sender"].send.await_args_list[1]
         assert second.kwargs["content"] == "(empty response)"
@@ -1399,7 +1399,7 @@ class TestEmptyResponseInsideThread:
     async def test_empty_response_posts_placeholder_into_continued_thread(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("")
+        deps["client"].execute.return_value = _result("")
         await pc.private_chat(_ctx(caller="alice"), "bob", "x", thread_id=777)
         second = deps["persona_sender"].send.await_args_list[1]
         assert second.kwargs["content"] == "(empty response)"
@@ -1408,7 +1408,7 @@ class TestEmptyResponseInsideThread:
     async def test_none_response_treated_as_empty(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result(None)
+        deps["client"].execute.return_value = _result(None)
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         # Return surface: tag + newline + empty string. We assert the
         # tag is present and the post-newline body is empty.
@@ -1425,7 +1425,7 @@ class TestReturnTagFormat:
     async def test_success_return_starts_with_tag(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("hello")
+        deps["client"].execute.return_value = _result("hello")
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert out.startswith(f"<thread_id>{_NEW_THREAD_ID}</thread_id>\n")
 
@@ -1441,7 +1441,7 @@ class TestReturnTagFormat:
         out = await pc.private_chat(_ctx(caller="alice"), "carol", "x")
         assert "<thread_id>" not in out
         # timeout
-        deps["client"].execute_node.side_effect = TimeoutError()
+        deps["client"].execute.side_effect = TimeoutError()
         out = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         assert "<thread_id>" not in out
 
@@ -1450,7 +1450,7 @@ class TestReturnTagFormat:
     ) -> None:
         """Call with thread_id=None, parse the returned thread id, call
         again with that id and assert the fetcher received it."""
-        deps["client"].execute_node.return_value = _result("first reply")
+        deps["client"].execute.return_value = _result("first reply")
         first = await pc.private_chat(_ctx(caller="alice"), "bob", "hello")
         returned_thread_id = _parse_tag(first)
         assert returned_thread_id == _NEW_THREAD_ID
@@ -1479,54 +1479,54 @@ class TestForwardedWire:
     async def test_forwarded_wire_overrides_slash_target_and_kind(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         inbound = _wire(kind="message", content="orig")
         await pc.private_chat(_ctx(caller="alice", wire=inbound), "bob", "new")
-        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
+        forwarded = deps["client"].execute.await_args.kwargs["deps"]["discord"]
         assert forwarded["slash_target"] == "bob"
         assert forwarded["kind"] == "slash"
 
     async def test_forwarded_wire_content_is_a2a_payload(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         inbound = _wire(content="original")
         await pc.private_chat(
             _ctx(caller="alice", wire=inbound), "bob", "the a2a request"
         )
-        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
+        forwarded = deps["client"].execute.await_args.kwargs["deps"]["discord"]
         assert forwarded["content"] == "the a2a request"
 
     async def test_forwarded_wire_preserves_channel_and_author(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         inbound = _wire(channel_id=777)
         await pc.private_chat(_ctx(caller="alice", wire=inbound), "bob", "x")
-        forwarded = deps["client"].execute_node.await_args.kwargs["deps"]["discord"]
+        forwarded = deps["client"].execute.await_args.kwargs["deps"]["discord"]
         assert forwarded["channel_id"] == 777
         assert forwarded["author"]["display_name"] == "ryan"
 
     async def test_passes_caller_agent_id_in_deps(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "msg")
-        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
+        passed_deps = deps["client"].execute.await_args.kwargs["deps"]
         assert passed_deps["caller_agent_id"] == "alice"
 
     async def test_invokes_target_inbox_topic(
         self, deps: dict[str, Any]
     ) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice"), "bob", "msg")
-        call = deps["client"].execute_node.await_args
+        call = deps["client"].execute.await_args
         assert call.kwargs["topic"] == "agent.bob.in"
 
     async def test_uses_configured_timeout(self, deps: dict[str, Any]) -> None:
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(), "bob", "x")
-        assert deps["client"].execute_node.await_args.kwargs["timeout"] == 30.0
+        assert deps["client"].execute.await_args.kwargs["timeout"] == 30.0
 
     async def test_passes_temp_instructions_for_target(
         self, deps: dict[str, Any]
@@ -1536,9 +1536,9 @@ class TestForwardedWire:
             _entry("bob", tools=("private_chat",)),
             _entry("carol"),
         ]
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
-        instructions = deps["client"].execute_node.await_args.kwargs[
+        instructions = deps["client"].execute.await_args.kwargs[
             "temp_instructions"
         ]
         assert instructions is not None
@@ -1553,9 +1553,9 @@ class TestForwardedWire:
             _entry("bob", tools=("private_chat",)),
             _entry("carol"),
         ]
-        deps["client"].execute_node.return_value = _result("ok")
+        deps["client"].execute.return_value = _result("ok")
         await pc.private_chat(_ctx(caller="alice", phonebook=phonebook), "bob", "x")
-        passed_deps = deps["client"].execute_node.await_args.kwargs["deps"]
+        passed_deps = deps["client"].execute.await_args.kwargs["deps"]
         propagated = passed_deps["phonebook"]
         ids = sorted(e["agent_id"] for e in propagated)
         assert ids == ["alice", "bob", "carol"]
@@ -1591,9 +1591,9 @@ class TestA2ARetryWithFeedback:
         audit thread shows, and the caller's LLM gets the same view."""
         long_reply = "x" * 3000
         short_reply = "x" * 1000
-        # execute_node is called twice: first for the original
+        # execute is called twice: first for the original
         # response, second for the retry.
-        deps["client"].execute_node = AsyncMock(
+        deps["client"].execute = AsyncMock(
             side_effect=[_result(long_reply), _result(short_reply)]
         )
         deps["persona_sender"].send = AsyncMock(
@@ -1607,8 +1607,8 @@ class TestA2ARetryWithFeedback:
         # Caller sees the shorter retry reply, not the rejected one.
         assert short_reply in returned
         assert long_reply not in returned
-        # Two execute_node calls (original + retry).
-        assert deps["client"].execute_node.await_count == 2
+        # Two execute calls (original + retry).
+        assert deps["client"].execute.await_count == 2
         # Three persona_sender.send calls (request + failed response + retried response).
         assert deps["persona_sender"].send.await_count == 3
 
@@ -1635,7 +1635,7 @@ class TestA2ARetryWithFeedback:
             UserPromptPart,
         )
         long_reply = "x" * 3000
-        deps["client"].execute_node = AsyncMock(
+        deps["client"].execute = AsyncMock(
             side_effect=[_result(long_reply), _result("short")]
         )
         deps["persona_sender"].send = AsyncMock(
@@ -1658,8 +1658,8 @@ class TestA2ARetryWithFeedback:
             "bob",
             "the original caller content",
         )
-        # Inspect the retry call's kwargs (second execute_node).
-        retry_call = deps["client"].execute_node.await_args_list[1]
+        # Inspect the retry call's kwargs (second execute).
+        retry_call = deps["client"].execute.await_args_list[1]
         kwargs = retry_call.kwargs
         # User prompt is the system-reminder.
         assert "<system-reminder>" in kwargs["user_prompt"]
@@ -1697,9 +1697,9 @@ class TestA2ARetryWithFeedback:
         """The retry path also projects the caller's ambient deps (e.g. the
         bridge-seeded memory-prompt template) forward, so a memory agent that
         hits a content-rejection retry still gets its memory instructions on the
-        retry turn. Guards the spread at the second (retry) execute_node site —
+        retry turn. Guards the spread at the second (retry) execute site —
         which the main-path projection test does not exercise."""
-        deps["client"].execute_node = AsyncMock(
+        deps["client"].execute = AsyncMock(
             side_effect=[_result("x" * 3000), _result("short")]
         )
         deps["persona_sender"].send = AsyncMock(
@@ -1722,7 +1722,7 @@ class TestA2ARetryWithFeedback:
             "bob",
             "the original caller content",
         )
-        retry_deps = deps["client"].execute_node.await_args_list[1].kwargs["deps"]
+        retry_deps = deps["client"].execute.await_args_list[1].kwargs["deps"]
         assert retry_deps["memory_prompt"] == "TEMPLATE {{MEMORY_DIR}}"
         # A2A-owned keys still override the forwarded copies on the retry too.
         assert retry_deps["caller_agent_id"] == "alice"
@@ -1735,7 +1735,7 @@ class TestA2ARetryWithFeedback:
         falls back to chunk-splitting the latest text into the audit
         thread; caller receives the FULL untruncated latest text."""
         long_reply = "x" * 5000  # forces chunk_split to produce >=3 chunks
-        deps["client"].execute_node = AsyncMock(
+        deps["client"].execute = AsyncMock(
             return_value=_result(long_reply)
         )
         # Side-effect plan: request OK; 3 response attempts all 400; then
@@ -1754,12 +1754,12 @@ class TestA2ARetryWithFeedback:
         )
         returned = await pc.private_chat(_ctx(caller="alice"), "bob", "x")
         # Caller gets the FULL latest text (which here is the same as
-        # the original since execute_node always returns long_reply).
+        # the original since execute always returns long_reply).
         assert long_reply in returned
-        # execute_node called 3 times: original + 2 retries.
-        assert deps["client"].execute_node.await_count == 3
+        # execute called 3 times: original + 2 retries.
+        assert deps["client"].execute.await_count == 3
 
-    async def test_retry_execute_node_failure_falls_back_to_chunks(
+    async def test_retry_execute_failure_falls_back_to_chunks(
         self,
         deps: dict[str, Any],
     ) -> None:
@@ -1767,7 +1767,7 @@ class TestA2ARetryWithFeedback:
         propagate — chunk-split the current text and return it. The
         caller still gets a useful reply."""
         long_reply = "x" * 5000
-        deps["client"].execute_node = AsyncMock(
+        deps["client"].execute = AsyncMock(
             side_effect=[
                 _result(long_reply),       # original response
                 TimeoutError("retry hung"),  # retry RPC times out
@@ -1797,7 +1797,7 @@ class TestA2ARetryWithFeedback:
         no-empty-content rule via the placeholder, so the empty retry
         simply burns one attempt slot."""
         long_reply = "x" * 3000
-        deps["client"].execute_node = AsyncMock(
+        deps["client"].execute = AsyncMock(
             side_effect=[
                 _result(long_reply),
                 _result(""),  # retry returns empty

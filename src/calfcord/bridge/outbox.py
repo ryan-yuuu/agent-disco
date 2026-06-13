@@ -24,14 +24,16 @@ consistent lookup) in the bridge-local :class:`PendingWires` map that
 consumer share a process; this works as long as both live in the
 bridge daemon.
 
-Co-existence with the calfkit reply dispatcher: the bridge's
-:class:`~calfkit.Client` is connected with
-``reply_topic="discord.outbox"`` so the dispatcher's subscriber and
-this consumer's subscriber sit in different consumer groups on the
-same topic. Kafka multicasts each envelope to both. The dispatcher's
-"no pending future" WARNING is therefore expected on every agent reply
-(no caller has registered a future); it's noise from a benign code
-path, not a defect.
+Subscribers on ``discord.outbox``: this consumer is the sole
+steady-state reader. The bridge's :class:`~calfkit.Client` does NOT
+name this topic as its reply inbox — it takes its own throwaway
+auto-generated inbox, and agent replies are addressed here explicitly
+via ``send(reply_to="discord.outbox")`` at the ingress and retry
+publish sites. Because the dispatcher no longer subscribes here, the
+old "no pending future" WARNING on every reply is gone. (The init
+wizard's first-reply detector also subscribes, transiently and in its
+own consumer group; see
+:func:`calfcord.control_plane.first_reply.wait_for_first_reply`.)
 
 Gate semantics: a single ``final_output_parts`` non-emptiness gate
 filters out intermediate hops (tool completions, mid-loop state
@@ -131,10 +133,11 @@ def build_outbox_consumer(
         calfkit_client: The bridge's calfkit Client. Used by the
             retry-with-feedback path to publish a revised invocation
             envelope to ``agent.{aid}.in`` when a Discord post fails
-            with an agent-fixable error (length, formatting). The
-            outbox's "fire-and-forget cancel" of the retry's
-            ``InvocationHandle._future`` matches the existing
-            ingress pattern.
+            with an agent-fixable error (length, formatting). The retry
+            publishes fire-and-forget via ``Client.send``
+            (``reply_to="discord.outbox"``); ``send`` registers no reply
+            future, so there is nothing to cancel — matching the ingress
+            pattern.
         transcript_store: Bridge-local SQLite store and the SOLE
             transcript writer. On the terminal hop, when the turn used
             tools (the structured slice ``message_history[initial_len:-1]``
@@ -763,15 +766,12 @@ async def _publish_retry(
     reply to the original user message — the user sees one reply
     anchored to their question regardless of retries.
 
-    The handle's future is cancelled (fire-and-forget) matching the
-    :class:`BridgeIngress` pattern; the eventual reply is observed
-    by the outbox consumer in a different consumer group. The
-    cancel is guarded against a hypothetical future where
-    ``InvocationHandle`` makes ``_future`` lazy/optional — a missing
-    attribute is logged at DEBUG and swallowed because the publish
-    itself already succeeded; raising here would cause the caller's
-    chunk-split fallback to double-post (the retry envelope already
-    in flight + the chunked copy from the fallback).
+    The retry publishes with :meth:`Client.send` (``reply_to`` =
+    ``discord.outbox``), matching the :class:`BridgeIngress` pattern:
+    no reply future is registered, so there is nothing to cancel and
+    nothing to leak, and the publish is the only step that can raise.
+    The eventual reply is observed by the outbox consumer in a
+    different consumer group.
     """
     wire = entry.wire
     reminder = build_retry_reminder(error, failed_text)
@@ -806,41 +806,20 @@ async def _publish_retry(
         )
         memory_deps = {}
 
-    handle = await client.invoke_node(
+    await client.send(
         user_prompt=reminder,
         topic=_AGENT_INBOX_TOPIC_TEMPLATE.format(agent_id=agent_id),
+        reply_to=DISCORD_OUTBOX_TOPIC,
         correlation_id=wire.event_id,
         deps={
             "discord": wire.model_dump(mode="json"),
             "phonebook": phonebook_to_deps(phonebook),
             **memory_deps,
         },
-        output_type=str,
         temp_instructions=entry.temp_instructions,
         message_history=retry_history,
         model_settings=entry.model_settings,
     )
-    # Guard against an InvocationHandle without a ``_future``. The
-    # cancel is a leak-prevention optimization, not a correctness
-    # invariant — the bridge's outbox consumer (a separate consumer
-    # group) observes the eventual reply regardless. Don't let an
-    # AttributeError here misroute control flow to the
-    # ``except Exception`` in :func:`_handle_post_failure`'s caller,
-    # which would chunk-split a reply whose retry has already been
-    # published.
-    future = getattr(handle, "_future", None)
-    if future is not None:
-        try:
-            future.cancel()
-        except Exception:
-            logger.debug(
-                "handle._future.cancel() raised on retry publish "
-                "event_id=%s agent=%s; pending-future leak possible "
-                "but publish already succeeded",
-                wire.event_id,
-                agent_id,
-                exc_info=True,
-            )
 
 
 async def _post_chunked_fallback(

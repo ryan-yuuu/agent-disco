@@ -178,8 +178,11 @@ def _patched_run(monkeypatch):
         client.client = MagicMock()
         yield client
 
+    connect_calls: list[dict[str, Any]] = []
+
     @asynccontextmanager
     async def _fake_connect(*_a, **_k):
+        connect_calls.append(_k)
         yield MagicMock()
 
     @asynccontextmanager
@@ -234,6 +237,7 @@ def _patched_run(monkeypatch):
     handles.gateway = fake_gateway
     handles.register_state_consumer = register_state_consumer
     handles.typing_notifier = typing_notifier
+    handles.connect_calls = connect_calls
     return order, handles
 
 
@@ -316,6 +320,30 @@ class TestEmbeddedBootOrdering:
             f"the raw state consumer must register before worker.start so its "
             f"group joins before the broker serves; got {order.events}"
         )
+
+    async def test_bridge_client_does_not_claim_outbox_as_reply_inbox(self, _patched_run, monkeypatch) -> None:
+        """Regression guard for the calfkit 0.10.0 send-API migration.
+
+        The bridge ``Client`` must NOT name ``discord.outbox`` as its own
+        ``reply_topic`` — it takes a private auto-generated inbox. This is the
+        load-bearing precondition for the ingress/retry sites calling
+        ``send(reply_to="discord.outbox")``: calfkit's ``send`` raises
+        ``ValueError`` if ``reply_to`` equals the client's own reply inbox. If
+        someone re-adds ``reply_topic=DISCORD_OUTBOX_TOPIC`` to the bridge
+        connect, every mocked unit test stays green but the bridge breaks at
+        runtime on the first agent reply — so pin it here.
+        """
+        from calfcord.bridge import gateway as gw
+
+        order, handles = _patched_run
+        await _boot_to_serving_then_sigint(gw, order, monkeypatch)
+
+        assert handles.connect_calls, "the bridge never called Client.connect"
+        for kwargs in handles.connect_calls:
+            assert kwargs.get("reply_topic") != "discord.outbox", (
+                "the bridge Client must not name discord.outbox as its own reply "
+                "inbox — send(reply_to='discord.outbox') would raise on the guard"
+            )
 
     async def test_worker_start_before_gateway_start(self, _patched_run, monkeypatch) -> None:
         from calfcord.bridge import gateway as gw

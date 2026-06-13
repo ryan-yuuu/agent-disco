@@ -4,10 +4,10 @@ Two callers post LLM-generated text to Discord and both want the same
 "if Discord rejects it, tell the LLM and let it adapt" loop:
 
 * :mod:`calfcord.bridge.outbox` — channel replies, posted
-  fire-and-forget via ``client.invoke_node`` on retry.
+  fire-and-forget via ``client.send`` on retry.
 * :mod:`calfcord.tools.builtin.private_chat` — A2A audit
   projections, posted synchronously inside the caller's
-  ``execute_node`` RPC on retry.
+  ``execute`` RPC on retry.
 
 The two orchestration mechanisms cannot share their transport (one is
 async-via-Kafka-consumer, the other is await-inside-RPC), but they DO
@@ -158,8 +158,8 @@ def build_retry_reminder(
 
     Returns:
         A string suitable to pass as ``user_prompt`` to
-        :meth:`Client.invoke_node` (bridge) or
-        :meth:`Client.execute_node` (A2A) for the retry envelope.
+        :meth:`Client.send` (bridge) or
+        :meth:`Client.execute` (A2A) for the retry envelope.
     """
     override = _RETRY_REMINDER_OVERRIDES.get((error.status, error.code))
     if override is not None:

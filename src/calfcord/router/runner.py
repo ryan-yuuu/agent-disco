@@ -18,12 +18,12 @@ The runner needs only Kafka + an LLM API key — no Discord access.
 Specifically:
 
 * :class:`calfkit.client.Client` — connected with a private reply
-  topic distinct from the bridge's ``discord.outbox`` so the router's
-  ReturnCall on its ``publish_topic`` doesn't get echoed to the bridge
-  outbox consumer. The router's reply ALSO goes to
-  ``_calf.ambient.callback-discard`` (the bridge ingress's discard
-  topic for ambient invocations); we use our own reply topic so the
-  client's reply dispatcher has somewhere to listen.
+  topic distinct from the bridge's ``discord.outbox``. The router never
+  awaits a reply on it: the fan-out publishes with ``send(reply_to=None)``
+  and the routing decision flows forward on the router's ``publish_topic``
+  (``routing.decisions``). The named inbox just gives the client's reply
+  dispatcher a stable topic to subscribe to, off any topic the bridge
+  consumes.
 
 The factory's :class:`DiscordPersonaSender` parameter is unused on the
 router build path, so we pass ``None`` here rather than instantiating
@@ -47,7 +47,7 @@ from calfkit.client import Client
 from calfkit.worker import Worker
 from dotenv import load_dotenv
 
-from calfcord._provisioning import PROVISIONING, provision_extra_topics, router_infra_topics
+from calfcord._provisioning import PROVISIONING
 from calfcord._worker_runtime import run_worker_until_signal
 from calfcord.agents.definition import AgentDefinition
 from calfcord.agents.factory import AgentFactory, resolve_provider
@@ -68,14 +68,13 @@ class BootstrapError(RuntimeError):
     """
 
 _REPLY_TOPIC = "calfkit.router.reply"
-"""Named reply topic for the router client. ``Client.connect``
-requires a reply topic; no envelope is ever actually delivered here
-because the router process never makes an outgoing call that
-returns to itself (the fan-out's ``invoke_node`` calls
-target ``bridge.synthesized.in``, and the synthesized-in consumer
-neither replies nor produces a ReturnCall on the router's
-correlation_id). Picking a unique name keeps the dispatcher
-subscription off any topic the bridge consumes."""
+"""Named reply topic for the router client. No envelope is ever
+delivered here: the router process never makes a call that returns to
+itself (the fan-out's ``send`` calls target ``bridge.synthesized.in``
+with ``reply_to=None``, and the synthesized-in consumer neither replies
+nor produces a ReturnCall on the router's correlation_id). A unique
+name keeps the dispatcher subscription off any topic the bridge
+consumes and avoids per-restart reply-topic churn."""
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -165,13 +164,10 @@ async def _amain() -> None:
         # This runner uses the managed Worker (started via _run_worker below),
         # whose _on_startup hook + the connect-time pre-start hook auto-provision
         # the router/fan-out node topics AND the client reply topic at broker
-        # start. The only gap is the ambient discard topic: it is a publish-only
-        # terminal-callback target with no subscriber, so topics_for_nodes() can
-        # never see it. Provision it explicitly now (the standalone provisioner
-        # opens its own admin connection, so this is fine before the broker
-        # start that Worker.start() owns); on a no-auto-create broker the router's
-        # ambient ReturnCall publish would otherwise fail.
-        await provision_extra_topics(server_urls, router_infra_topics())
+        # start. The router has no blind-spot topics to provision separately:
+        # ambient sends use ``reply_to=None`` (no terminal-callback target), so
+        # every topic it touches is a node ``subscribe_topics`` / ``publish_topic``
+        # the managed pass already covers.
 
         # The factory's persona_sender is unused on the router build
         # path; ``None`` is the explicit "I don't need Discord" call

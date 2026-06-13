@@ -27,22 +27,22 @@ Two gaps remain that calfcord fills explicitly via :func:`provision_extra_topics
   folds onto the embedded ``Worker.start()`` managed surface, so calfkit
   auto-provisions its node topics and it only declares its blind spots — below.)
 * **Blind-spot topics** that ``topics_for_nodes()`` cannot see at all: raw
-  FastStream broker subscribers, boot-time publish targets, and no-subscriber
-  callback topics. The per-runner ``*_infra_topics`` sets below name exactly
-  which. On the managed runners these are declared into the client's startup
-  ensurer from a worker ``on_startup`` hook so they ride calfkit's single
-  pre-start provisioning pass: the agents runner declares
-  :func:`agent_infra_topics` and the bridge declares :func:`bridge_infra_topics`
-  that way, and the router's publish-only discard target is the one case
-  provisioned via the standalone :func:`provision_extra_topics` instead.
+  FastStream broker subscribers and boot-time publish targets. The per-runner
+  ``*_infra_topics`` sets below name exactly which. On the managed runners these
+  are declared into the client's startup ensurer from a worker ``on_startup``
+  hook so they ride calfkit's single pre-start provisioning pass: the agents
+  runner declares :func:`agent_infra_topics` and the bridge declares
+  :func:`bridge_infra_topics` that way. (The router has no blind-spot topics:
+  since ambient sends use ``reply_to=None``, there is no terminal-callback
+  target to provision — its only topics are node ``subscribe_topics`` /
+  ``publish_topic`` the managed ensurer already covers.)
 
 Why these particular extras (and not the rest of the cross-process contracts in
 ``calfcord.topics`` / ``calfcord.control_plane.topics``): every other shared
 topic is also a node ``subscribe_topics``/``publish_topic`` on the process that
 needs it created early, so the ensurer already covers it. Only the raw
-control-plane subscribers, the boot-time publishes (which cannot wait for the
-peer process to create the topic), and the no-subscriber discard topic fall
-through — those are listed here.
+control-plane subscribers and the boot-time publishes (which cannot wait for the
+peer process to create the topic) fall through — those are listed here.
 """
 
 from __future__ import annotations
@@ -58,7 +58,6 @@ from calfcord.control_plane.topics import (
     BRIDGE_DISCOVERY_TOPIC,
     control_topic_for,
 )
-from calfcord.topics import AMBIENT_REPLY_DISCARD_TOPIC
 
 if TYPE_CHECKING:
     from calfkit.client import Client
@@ -112,17 +111,6 @@ def agent_infra_topics(agent_ids: Iterable[str]) -> list[str]:
     fires.
     """
     return [*_SHARED_CONTROL_PLANE_TOPICS, *(control_topic_for(agent_id) for agent_id in agent_ids)]
-
-
-def router_infra_topics() -> list[str]:
-    """Non-node topics the router must ensure exist.
-
-    The ambient discard topic is the router's terminal-callback target for
-    ambient invocations and has no subscriber, so ``topics_for_nodes()`` omits
-    it; on a no-auto-create broker the router's reply publish would otherwise
-    fail.
-    """
-    return [AMBIENT_REPLY_DISCARD_TOPIC]
 
 
 async def provision_extra_topics(server_urls: str | Iterable[str], topics: Iterable[str]) -> None:
@@ -188,11 +176,10 @@ async def provision_and_start_broker(
 
     The Worker-hosted runners do NOT use this helper: tools/router/agents run
     via ``Worker.run()`` and the bridge via the embedded ``Worker.start()``,
-    whose managed lifecycle auto-provisions reply + node topics; the router
-    provisions only its publish-only blind spot via :func:`provision_extra_topics`,
-    and the agents runner and bridge declare their blind-spot topics into the
-    startup ensurer from an ``on_startup`` hook — all letting the managed broker
-    start do the provisioning.
+    whose managed lifecycle auto-provisions reply + node topics; the router has
+    no blind-spot topics at all, and the agents runner and bridge declare theirs
+    into the startup ensurer from an ``on_startup`` hook — all letting the
+    managed broker start do the provisioning.
     """
     await provision_extra_topics(server_urls, topics)
     if not client.broker.running:

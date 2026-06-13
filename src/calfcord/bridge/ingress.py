@@ -66,7 +66,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
 )
-from calfkit.client import Client, InvocationHandle
+from calfkit.client import Client
 
 from calfcord.agents.definition import Provider
 from calfcord.agents.factory import DEFAULT_PROVIDER, resolve_provider
@@ -91,9 +91,7 @@ from calfcord.router.roster import build_router_temp_instructions
 from calfcord.topics import (
     AMBIENT_INGRESS_TOPIC as _AMBIENT_INGRESS_TOPIC,
 )
-from calfcord.topics import (
-    AMBIENT_REPLY_DISCARD_TOPIC as _AMBIENT_REPLY_DISCARD_TOPIC,
-)
+from calfcord.topics import DISCORD_OUTBOX_TOPIC
 
 logger = logging.getLogger(__name__)
 
@@ -331,13 +329,13 @@ class BridgeIngress:
         Only the slash branch writes to :class:`PendingWires` (before
         publishing, so a fast agent reply can never race the
         outbox's lookup). The ambient branch deliberately does NOT
-        populate ``PendingWires``: the router's reply lands on the
-        discard topic and is never looked up by the original
-        ``event_id``; the synthesized wires the fan-out generates
-        each carry their own fresh ``event_id``, and those are what
-        the outbox correlates on. See the inline comment at the
-        ambient branch for the LRU-eviction failure mode that
-        skipping prevents.
+        populate ``PendingWires``: the router's terminal reply is
+        suppressed (ambient sends use ``reply_to=None``) and the
+        original ``event_id`` is never looked up; the synthesized wires
+        the fan-out generates each carry their own fresh ``event_id``,
+        and those are what the outbox correlates on. See the inline
+        comment at the ambient branch for the LRU-eviction failure mode
+        that skipping prevents.
 
         Per-call ``model_settings`` resolution: when
         ``wire.slash_target`` is set, we look up the target agent's
@@ -345,17 +343,14 @@ class BridgeIngress:
         provider-specific override. Ambient messages send no override
         (the router's effort comes from its own definition).
 
-        Cancelling the invocation handle's future immediately after
-        publish is load-bearing on both branches: :meth:`Client.invoke_node`
-        unconditionally registers a pending future with the reply
-        dispatcher (the dispatcher will otherwise resolve+pop it on
-        the first reply, but a no-reply event would leak ``_pending``
-        forever, and a redelivered ``correlation_id`` would raise
-        inside ``_ReplyDispatcher.expect``). Cancelling the future
-        triggers its ``add_done_callback`` to pop the registry entry
-        synchronously. The bridge's egress is the outbox consumer in
-        a different consumer group, so the actual reply is still
-        observed.
+        Both branches publish with :meth:`Client.send`, which registers
+        **no** reply future — there is nothing to cancel and nothing to
+        leak. The slash branch names ``discord.outbox`` as the
+        ``reply_to`` return address so the agent's terminal reply lands
+        there; the ambient branch uses ``reply_to=None`` (the router's
+        decision flows forward on its ``publish_topic``, not back to us).
+        Either way the bridge's egress is the outbox consumer in a
+        different consumer group, so the actual reply is still observed.
         """
         # Build the phonebook fresh on every invocation so any future
         # hot-add on the registry takes effect immediately. The same
@@ -399,15 +394,15 @@ class BridgeIngress:
                 )
                 return
             # NOTE: we do NOT populate pending_wires on the ambient
-            # branch. The router's reply lands on the discard topic
-            # and is never looked up by event_id; the synthesized
-            # wires fan-out generates each get their own fresh
-            # event_id (and that's what the outbox correlates on).
-            # Inserting here would waste an LRU slot per ambient
-            # message and could evict legitimate slash entries under
-            # load.
+            # branch. The router's terminal reply is suppressed
+            # (ambient uses ``reply_to=None``) and is never looked up
+            # by event_id; the synthesized wires fan-out generates each
+            # get their own fresh event_id (and that's what the outbox
+            # correlates on). Inserting here would waste an LRU slot per
+            # ambient message and could evict legitimate slash entries
+            # under load.
             try:
-                handle = await self._publish_ambient(wire, phonebook)
+                await self._publish_ambient(wire, phonebook)
             except AmbientRosterEmptyError:
                 # ``_publish_ambient`` already logged the
                 # operator-actionable ERROR identifying the empty
@@ -432,7 +427,7 @@ class BridgeIngress:
                 wire, prefetched_history
             )
             # Load-bearing ordering: ``put`` MUST precede the
-            # ``invoke_node`` publish. The outbox consumer reads
+            # ``send`` publish. The outbox consumer reads
             # ``PendingWires`` keyed on ``correlation_id`` (= wire
             # ``event_id``) to recover the original channel/message/
             # author context for its Discord post. A fast assistant
@@ -447,7 +442,7 @@ class BridgeIngress:
             # Snapshot the per-invocation context into the
             # PendingEntry so the outbox can rebuild a faithful retry
             # envelope on Discord-post failure. All snapshot fields
-            # mirror what we're about to pass to ``invoke_node``:
+            # mirror what we're about to pass to ``send``:
             # the projected ``message_history`` (frozen as a tuple),
             # the peer-roster ``temp_instructions``, and the per-call
             # ``model_settings`` (provider-specific thinking-effort).
@@ -465,16 +460,16 @@ class BridgeIngress:
                 ),
             )
             try:
-                handle = await self._client.invoke_node(
+                await self._client.send(
                     user_prompt=wire.content,
                     topic=self._ingress_topic_template.format(cid=wire.channel_id),
+                    reply_to=DISCORD_OUTBOX_TOPIC,
                     correlation_id=wire.event_id,
                     deps={
                         "discord": wire.model_dump(mode="json"),
                         "phonebook": phonebook_to_deps(phonebook),
                         **self._memory_prompt_deps(),
                     },
-                    output_type=str,
                     model_settings=model_settings,
                     temp_instructions=temp_instructions,
                     message_history=message_history,
@@ -491,13 +486,11 @@ class BridgeIngress:
                 )
                 raise
 
-        handle._future.cancel()
-
     async def _publish_ambient(
         self,
         wire: WireMessage,
         phonebook: list[PhonebookEntry],
-    ) -> InvocationHandle[Any]:
+    ) -> None:
         """Publish an ambient wire to the router's ingress topic.
 
         The original wire, the publisher's phonebook snapshot, and the
@@ -585,22 +578,22 @@ class BridgeIngress:
         # projected from, but shipped unprojected so a fan-out to N
         # agents keeps N separable perspectives off one fetch.
         history_dump = [r.model_dump(mode="json") for r in records]
+        # ``reply_to=None``: true fire-and-forget. The router's terminal
+        # decision flows FORWARD on its ``publish_topic``
+        # (``routing.decisions``, where the fan-out consumer subscribes),
+        # never back to us — so we suppress the point-to-point callback
+        # entirely rather than directing it at a throwaway topic.
+        #
         # Use a FRESH correlation_id (not ``wire.event_id``) for the
-        # ambient publish. The router's reply lands on the discard
-        # topic and is never looked up by event_id, and the fan-out
-        # mints its own fresh event_ids for each synthesized wire —
-        # so nothing downstream needs to correlate to the original.
-        # Using ``wire.event_id`` here was an avoidable collision
-        # risk against the calfkit reply dispatcher's pending-future
-        # map: a Discord redelivery (after a gateway reconnect)
-        # could re-enter the dispatcher with the same id before our
-        # ``cancel()`` had popped the prior entry, causing
-        # ``_ReplyDispatcher.expect`` to raise. A fresh uuid7
-        # decouples this path from the wire's identity entirely.
-        return await self._client.invoke_node(
+        # ambient publish. ``send`` registers no future, so this no
+        # longer guards a dispatcher collision; it simply keeps the
+        # router invocation's trace identity separate from the wire.
+        # Nothing downstream correlates to the original: the fan-out
+        # mints its own fresh event_id per synthesized wire.
+        await self._client.send(
             user_prompt=wire.content,
             topic=_AMBIENT_INGRESS_TOPIC,
-            reply_topic=_AMBIENT_REPLY_DISCARD_TOPIC,
+            reply_to=None,
             deps={
                 "discord": wire_dict,
                 "phonebook": phonebook_dict,

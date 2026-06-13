@@ -3,23 +3,23 @@
 The bridge branches on ``wire.kind``:
 
 * ``kind="slash"`` publishes to ``discord.channel.{cid}.in`` via
-  ``client.invoke_node`` (existing behavior — covered by
-  ``test_ingress.py``).
+  ``client.send`` with ``reply_to="discord.outbox"`` (existing
+  behavior — covered by ``test_ingress.py``).
 * ``kind="message"`` (ambient) publishes to ``discord.ambient.in`` via
-  ``client.invoke_node`` with the original wire, phonebook, and channel
-  history on ``deps`` and the discard reply_topic.
+  ``client.send`` with the original wire, phonebook, and channel
+  history on ``deps`` and ``reply_to=None`` (true fire-and-forget — the
+  router's decision flows forward on its ``publish_topic``, not back to
+  the bridge, so the terminal callback is suppressed entirely).
 
-These tests pin the ambient publish shape: topic, reply_topic, deps
+These tests pin the ambient publish shape: topic, ``reply_to``, deps
 contents (wire / phonebook / history), user_prompt, and per-call
 temp_instructions (router roster).
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,7 +27,6 @@ import pytest
 from calfcord.agents.definition import AgentDefinition
 from calfcord.bridge.ingress import (
     _AMBIENT_INGRESS_TOPIC,
-    _AMBIENT_REPLY_DISCARD_TOPIC,
     BridgeIngress,
 )
 from calfcord.bridge.pending_wires import PendingWires
@@ -93,17 +92,12 @@ def _registry() -> AgentRegistry:
     )
 
 
-def _fresh_handle() -> MagicMock:
-    handle = MagicMock()
-    handle._future = asyncio.get_event_loop().create_future()
-    return handle
-
-
 @pytest.fixture
 def client() -> MagicMock:
     c = MagicMock()
-    c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c.reply_topic = "discord.outbox"
+    # ``Client.send`` is fire-and-forget: it registers no reply future and
+    # returns the invocation's ``correlation_id`` (a ``str``), not a handle.
+    c.send = AsyncMock(return_value="cid-stub")
     return c
 
 
@@ -120,9 +114,9 @@ class TestSlashUnchanged:
     ) -> None:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(kind="slash", slash_target="scribe"))
-        client.invoke_node.assert_awaited_once()
+        client.send.assert_awaited_once()
         assert (
-            client.invoke_node.await_args.kwargs["topic"] == "discord.channel.6789.in"
+            client.send.await_args.kwargs["topic"] == "discord.channel.6789.in"
         )
 
     async def test_slash_writes_to_pending_wires(
@@ -136,18 +130,18 @@ class TestSlashUnchanged:
 
 
 class TestAmbientPublish:
-    """Ambient wires go through the router via ``client.invoke_node``."""
+    """Ambient wires go through the router via ``client.send``."""
 
     async def test_ambient_does_not_use_channel_topic(
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
-        """Ambient and slash both publish via ``invoke_node`` now, so
+        """Ambient and slash both publish via ``send`` now, so
         the distinguishing property is the topic: an ambient wire must
         NOT land on a per-channel ``discord.channel.{cid}.in`` topic
         (which would skip the router and broadcast to every assistant)."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        topic = client.invoke_node.await_args.kwargs["topic"]
+        topic = client.send.await_args.kwargs["topic"]
         assert not topic.startswith("discord.channel.")
 
     async def test_ambient_publishes_to_ambient_ingress_topic(
@@ -155,35 +149,43 @@ class TestAmbientPublish:
     ) -> None:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        kwargs = client.invoke_node.await_args.kwargs
+        kwargs = client.send.await_args.kwargs
         assert kwargs["topic"] == _AMBIENT_INGRESS_TOPIC == "discord.ambient.in"
 
-    async def test_ambient_uses_discard_reply_topic(
+    async def test_ambient_suppresses_reply_with_none_reply_to(
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
-        """The router's reply lands on the caller's reply_topic; we
-        route it to a no-subscriber topic so it doesn't echo to the
-        bridge's outbox consumer or anywhere visible."""
+        """The ambient send is true fire-and-forget: ``reply_to=None``.
+        The router's terminal decision flows FORWARD on its
+        ``publish_topic`` (``routing.decisions``, where the fan-out
+        consumer subscribes), never back to the bridge — so the
+        point-to-point terminal callback is suppressed entirely rather
+        than directed at a throwaway discard topic.
+
+        With ``reply_to=None`` the published ``CallFrame``'s
+        ``callback_topic`` is ``None`` (asserted faithfully against the
+        real broker wire in ``test_ambient_routing_e2e.py``). Also pin
+        that the pre-0.10 ``reply_topic`` kwarg is gone — ``send`` takes
+        ``reply_to``, not ``reply_topic``."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        kwargs = client.invoke_node.await_args.kwargs
-        assert (
-            kwargs["reply_topic"]
-            == _AMBIENT_REPLY_DISCARD_TOPIC
-            == "_calf.ambient.callback-discard"
-        )
+        kwargs = client.send.await_args.kwargs
+        assert kwargs["reply_to"] is None
+        # The old invoke_node ``reply_topic`` kwarg must not survive the
+        # migration to ``send``.
+        assert "reply_topic" not in kwargs
 
     async def test_ambient_correlation_id_is_fresh_uuid7(
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
         """The ambient publish uses a FRESH ``correlation_id`` rather
-        than reusing ``wire.event_id``. The router's reply lands on
-        the discard topic and is never looked up by event_id, and
-        the fan-out mints its own ids for synthesized wires —
-        nothing downstream correlates to the original event_id.
-        Decoupling the ambient ``correlation_id`` from
-        ``wire.event_id`` removes a collision risk against the
-        reply dispatcher's pending-future map on Discord
+        than reusing ``wire.event_id``. ``send`` registers no reply
+        future, and the fan-out mints its own ids for synthesized
+        wires — nothing downstream correlates to the original
+        event_id. Decoupling the ambient ``correlation_id`` from
+        ``wire.event_id`` keeps the router invocation's trace identity
+        separate from the wire and removes any collision risk against
+        the reply dispatcher's pending-future map on Discord
         redeliveries (gateway reconnects).
 
         Asserts the decoupling invariant only — not the specific
@@ -191,7 +193,7 @@ class TestAmbientPublish:
         generator should not require updating this test."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(event_id="evt-abc"))
-        cid = client.invoke_node.await_args.kwargs["correlation_id"]
+        cid = client.send.await_args.kwargs["correlation_id"]
         # Must be a non-empty string and must NOT equal the wire's
         # event_id (which is what the old behavior would have set).
         assert isinstance(cid, str)
@@ -208,7 +210,7 @@ class TestAmbientPublish:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(content="who's free at 3pm?"))
         assert (
-            client.invoke_node.await_args.kwargs["user_prompt"]
+            client.send.await_args.kwargs["user_prompt"]
             == "who's free at 3pm?"
         )
 
@@ -222,7 +224,7 @@ class TestAmbientPublish:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-deps-1")
         await ingress.handle(wire)
-        deps = client.invoke_node.await_args.kwargs["deps"]
+        deps = client.send.await_args.kwargs["deps"]
         assert deps["discord"]["event_id"] == "evt-deps-1"
         assert deps["discord"]["channel_id"] == 6789
 
@@ -231,7 +233,7 @@ class TestAmbientPublish:
     ) -> None:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        deps = client.invoke_node.await_args.kwargs["deps"]
+        deps = client.send.await_args.kwargs["deps"]
         ids = sorted(e["agent_id"] for e in deps["phonebook"])
         # Both assistants are in the phonebook; the router is filtered
         # out by ``phonebook_from_registry`` (Issue 3).
@@ -249,7 +251,7 @@ class TestAmbientPublish:
         still present and JSON-list-shaped."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        deps = client.invoke_node.await_args.kwargs["deps"]
+        deps = client.send.await_args.kwargs["deps"]
         assert deps["history"] == []
 
     async def test_ambient_deps_has_all_three_keys(
@@ -260,7 +262,7 @@ class TestAmbientPublish:
         or dropped key) would silently break the router pipeline."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        deps = client.invoke_node.await_args.kwargs["deps"]
+        deps = client.send.await_args.kwargs["deps"]
         assert set(deps) == {"discord", "phonebook", "history"}
 
     async def test_ambient_injects_router_temp_instructions(
@@ -272,7 +274,7 @@ class TestAmbientPublish:
         of tool presence."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        instructions = client.invoke_node.await_args.kwargs["temp_instructions"]
+        instructions = client.send.await_args.kwargs["temp_instructions"]
         assert instructions is not None
         # Roster includes both assistants but NOT the router itself.
         assert "scheduler" in instructions
@@ -283,33 +285,29 @@ class TestAmbientPublish:
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
         """Only the slash branch writes to PendingWires. The ambient
-        branch deliberately skips the ``put`` because the router's
-        reply goes to the discard topic (the original event_id is
-        never looked up) and the synthesized fan-out wires each get
-        their own fresh event_id. Populating here would waste LRU
-        slots and could evict legitimate slash entries under load."""
+        branch deliberately skips the ``put`` because ``send`` registers
+        no reply future (the original event_id is never looked up) and
+        the synthesized fan-out wires each get their own fresh event_id.
+        Populating here would waste LRU slots and could evict legitimate
+        slash entries under load."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-pending-1")
         await ingress.handle(wire)
         assert pending_wires.get(wire.event_id) is None
 
-    async def test_ambient_cancels_dispatcher_future(
+    async def test_ambient_send_registers_no_reply_future(
         self, client: MagicMock, pending_wires: PendingWires
     ) -> None:
-        """Same cancel-after-publish idiom as the slash path: the
-        pending future would otherwise leak."""
-        captured: dict[str, Any] = {}
-
-        async def _invoke(*_a: Any, **_kw: Any) -> Any:
-            handle = MagicMock()
-            handle._future = asyncio.get_event_loop().create_future()
-            captured["handle"] = handle
-            return handle
-
-        client.invoke_node.side_effect = _invoke
+        """The ambient publish goes through ``Client.send`` — true
+        fire-and-forget: ``send`` registers NO reply future with the
+        dispatcher and returns a bare ``correlation_id`` (a ``str``), so
+        there is nothing to cancel and nothing to leak."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        assert captured["handle"]._future.cancelled()
+        client.send.assert_awaited_once()
+        # ``send`` returns the correlation_id string, not a handle — there
+        # is no ``_future`` to leak or cancel.
+        assert isinstance(client.send.return_value, str)
 
     async def test_ambient_publish_logs_info(
         self,
@@ -378,7 +376,7 @@ class TestAmbientNonHumanFilter:
             author_display_name="Scribe",
         )
         await ingress.handle(wire)
-        client.invoke_node.assert_not_called()
+        client.send.assert_not_called()
         assert pending_wires.get(wire.event_id) is None
 
     async def test_ambient_from_bot_author_dropped(
@@ -391,7 +389,7 @@ class TestAmbientNonHumanFilter:
             author_display_name="some-bot",
         )
         await ingress.handle(wire)
-        client.invoke_node.assert_not_called()
+        client.send.assert_not_called()
         assert pending_wires.get(wire.event_id) is None
 
     async def test_ambient_from_human_still_publishes(
@@ -402,7 +400,7 @@ class TestAmbientNonHumanFilter:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-human")
         await ingress.handle(wire)
-        client.invoke_node.assert_awaited_once()
+        client.send.assert_awaited_once()
 
 
 class TestAmbientFailureHandling:
@@ -418,7 +416,7 @@ class TestAmbientFailureHandling:
         site. PendingWires is unaffected because the ambient branch
         never inserted (see
         ``test_ambient_does_not_populate_pending_wires``)."""
-        client.invoke_node.side_effect = RuntimeError("kafka down")
+        client.send.side_effect = RuntimeError("kafka down")
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire(event_id="evt-fail-1")
         with (
@@ -486,7 +484,7 @@ class TestAmbientEmptyRosterAbort:
         ingress = BridgeIngress(client, router_only_registry, pending_wires)
         with pytest.raises(AmbientRosterEmptyError):
             await ingress.handle(_wire())
-        client.invoke_node.assert_not_called()
+        client.send.assert_not_called()
 
     async def test_logs_error_with_event_id_and_channel(
         self,
