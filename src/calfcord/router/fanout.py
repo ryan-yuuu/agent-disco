@@ -7,7 +7,7 @@ output, this consumer:
 1. Reads the :class:`RoutingDecision` from ``result.output``.
 2. Recovers the original :class:`WireMessage`, the publisher's phonebook
    snapshot, and the channel history from ``result.deps`` — the same
-   ``deps`` dict the bridge ingress passed to ``invoke_node``, carried
+   ``deps`` dict the bridge ingress passed to ``send``, carried
    forward through the router run to the consumer (calfkit's ``ConsumerContext``
    exposes inbound producer deps on ``ConsumerContext.deps``).
 3. For the chosen ``agent_id`` (after defensive self-filter and
@@ -72,7 +72,7 @@ def build_fanout_consumer(
     Args:
         client: Connected calfkit :class:`Client`. The closure uses it
             to publish the synthesized wire via
-            :meth:`Client.invoke_node`.
+            :meth:`Client.send` (``reply_to=None``).
         router_agent_id: The router's own ``agent_id`` (typically
             :data:`ROUTER_AGENT_ID`). The consumer defensively filters
             this id out — the LLM should never pick the router itself,
@@ -283,18 +283,18 @@ def build_fanout_consumer(
             "history": deps.get("history", []),
         }
 
-        # ``handle`` lives outside the try so the finally clause
-        # below can cancel its future even if a later step (e.g.
-        # the success-log) raises. The fire-and-forget cancel is
-        # load-bearing: the dispatcher's pending future would
-        # otherwise leak; cancelling triggers the
-        # ``add_done_callback`` that pops the registry entry.
+        # ``send(reply_to=None)``: fire-and-forget into the next pipeline
+        # stage. The synthesized wire re-enters the bridge ingress as a
+        # slash and the chosen agent's reply exits via ``discord.outbox``
+        # (a different correlation entirely); this synthesized publish's
+        # own terminal callback is meaningless, so we suppress it. ``send``
+        # registers no reply future — there is nothing to cancel or leak.
         # Same idiom as :meth:`BridgeIngress.handle`.
-        handle = None
         try:
-            handle = await client.invoke_node(
+            await client.send(
                 user_prompt="",
                 topic=SYNTHESIZED_INGRESS_TOPIC,
+                reply_to=None,
                 deps=synth_deps,
                 correlation_id=synthesized.event_id,
             )
@@ -326,8 +326,5 @@ def build_fanout_consumer(
                 exc_info=True,
             )
             raise
-        finally:
-            if handle is not None:
-                handle._future.cancel()
 
     return _fan_out

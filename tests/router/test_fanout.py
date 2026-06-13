@@ -2,7 +2,7 @@
 
 Drives ``ConsumerNode.handler`` directly with synthetic ``Envelope``s
 so we exercise the gate, the deps lookup, the router-self-filter, and
-the per-target ``invoke_node`` publish — all without Kafka, FastStream,
+the per-target ``send`` publish — all without Kafka, FastStream,
 or an LLM.
 
 The original :class:`WireMessage`, phonebook, and history ride on the
@@ -12,7 +12,6 @@ envelope's ``context.deps`` and reach the consumer via ``result.deps``
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -166,11 +165,16 @@ def _envelope(
     # reads a missing "discord" key and fails closed).
     context_deps = deps if isinstance(deps, dict) else {}
 
+    # The inbound (router-produced) frame the fan-out consumes. The bridge
+    # publishes the ambient hop with ``reply_to=None``, so this frame's
+    # ``callback_topic`` is ``None`` on the wire; the fan-out reads
+    # ``result.deps`` / ``result.output`` and never inspects it, so the
+    # exact value is immaterial to the consumer under test.
     call_stack = CallFrameStack()
     call_stack.push(
         CallFrame(
             target_topic="routing.decisions",
-            callback_topic="_calf.ambient.callback-discard",
+            callback_topic=None,
         )
     )
     return Envelope(
@@ -187,18 +191,14 @@ def _headers(*, emitter: str = ROUTER_AGENT_ID, emitter_kind: str = "agent") -> 
 def client() -> MagicMock:
     """Fake calfkit Client with the attributes the fan-out publish touches.
 
-    Attaches a fresh-future side-effect on ``invoke_node`` so the
-    consumer's ``handle._future.cancel()`` runs against a real awaitable.
+    The fan-out publishes via ``Client.send`` — fire-and-forget. ``send``
+    registers no reply future and returns the invocation's
+    ``correlation_id`` (a ``str``), so the fake just returns a stub id;
+    there is no handle or ``_future`` to track.
     """
     c = MagicMock()
     c.reply_topic = "calfkit.router.reply"
-
-    def _invoke_handle(*_a: Any, **_kw: Any) -> MagicMock:
-        handle = MagicMock()
-        handle._future = asyncio.get_event_loop().create_future()
-        return handle
-
-    c.invoke_node = AsyncMock(side_effect=_invoke_handle)
+    c.send = AsyncMock(return_value="cid-stub")
     return c
 
 
@@ -218,7 +218,7 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        assert client.invoke_node.await_count == 1
+        assert client.send.await_count == 1
 
     async def test_publishes_to_synthesized_ingress_topic(
         self, client: MagicMock, broker: MagicMock
@@ -232,7 +232,7 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client.invoke_node.await_args_list[0].kwargs
+        kwargs = client.send.await_args_list[0].kwargs
         assert kwargs["topic"] == SYNTHESIZED_INGRESS_TOPIC
         assert kwargs["topic"] == "bridge.synthesized.in"
 
@@ -253,7 +253,7 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client.invoke_node.await_args_list[0].kwargs
+        kwargs = client.send.await_args_list[0].kwargs
         synth_event_id = kwargs["deps"]["discord"]["event_id"]
         # Fresh — not the original ambient's event_id.
         assert synth_event_id != _CORRELATION_ID
@@ -270,7 +270,7 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client.invoke_node.await_args_list[0].kwargs
+        kwargs = client.send.await_args_list[0].kwargs
         # deps["discord"] carries the synthesized wire dict.
         wire = kwargs["deps"]["discord"]
         assert wire["kind"] == "slash"
@@ -294,24 +294,24 @@ class TestHappyPath:
             headers=_headers(),
             broker=broker,
         )
-        kwargs = client.invoke_node.await_args_list[0].kwargs
+        kwargs = client.send.await_args_list[0].kwargs
         assert kwargs["correlation_id"] == kwargs["deps"]["discord"]["event_id"]
 
-    async def test_cancels_handle_future(
+    async def test_synthesized_publish_is_fire_and_forget(
         self, client: MagicMock, broker: MagicMock
     ) -> None:
-        """Mirrors :meth:`BridgeIngress.handle`'s cancel-after-publish so
-        the dispatcher's pending future doesn't leak."""
-        captured: list[Any] = []
+        """The synthesized publish goes through ``Client.send`` with
+        ``reply_to=None`` — true fire-and-forget into the next pipeline
+        stage. The synthesized wire re-enters the bridge ingress as a
+        slash and the chosen agent's reply exits via ``discord.outbox``
+        (a different correlation entirely), so this publish's own
+        terminal callback is meaningless and is suppressed.
 
-        async def _invoke(*_a: Any, **_kw: Any) -> Any:
-            handle = MagicMock()
-            handle._future = asyncio.get_event_loop().create_future()
-            captured.append(handle)
-            return handle
-
-        client.invoke_node.side_effect = _invoke
-
+        ``send`` registers no reply future and returns a bare
+        ``correlation_id`` — there is no handle or ``_future`` to cancel
+        or leak (the pre-0.10 ``invoke_node`` path is gone). Pin both
+        the ``reply_to=None`` suppression and the absence of the old
+        ``reply_topic`` kwarg."""
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
         await consumer.handler(
             envelope=_envelope(
@@ -324,8 +324,14 @@ class TestHappyPath:
             broker=broker,
         )
 
-        assert len(captured) == 1
-        assert captured[0]._future.cancelled()
+        client.send.assert_awaited_once()
+        kwargs = client.send.await_args_list[0].kwargs
+        assert kwargs["reply_to"] is None
+        # The removed ``invoke_node`` ``reply_topic`` kwarg must not
+        # survive the migration to ``send``.
+        assert "reply_topic" not in kwargs
+        # ``send`` returns the correlation_id string, not a handle.
+        assert isinstance(client.send.return_value, str)
 
 
 class TestHistoryForwarding:
@@ -374,7 +380,7 @@ class TestHistoryForwarding:
             broker=broker,
         )
 
-        kwargs = client.invoke_node.await_args_list[0].kwargs
+        kwargs = client.send.await_args_list[0].kwargs
         published_deps = kwargs["deps"]
         assert "history" in published_deps
         forwarded = published_deps["history"]
@@ -400,7 +406,7 @@ class TestHistoryForwarding:
             broker=broker,
         )
 
-        forwarded = client.invoke_node.await_args_list[0].kwargs["deps"]["history"]
+        forwarded = client.send.await_args_list[0].kwargs["deps"]["history"]
         # No input history key → fan-out forwards deps.get("history", []).
         assert forwarded == []
 
@@ -425,7 +431,7 @@ class TestHistoryForwarding:
             headers=_headers(),
             broker=broker,
         )
-        published_deps = client.invoke_node.await_args_list[0].kwargs["deps"]
+        published_deps = client.send.await_args_list[0].kwargs["deps"]
         assert set(published_deps) == {"discord", "history"}
 
 
@@ -451,7 +457,7 @@ class TestRouterSelfFilter:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warn_records, "expected a WARN log line"
         msg = warn_records[0].message
@@ -493,7 +499,7 @@ class TestErrorPaths:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert warn_records, "expected a WARN log line"
         msg = warn_records[0].message
@@ -509,7 +515,7 @@ class TestErrorPaths:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A broker hiccup, serialization error, or connection drop
-        during ``invoke_node`` would otherwise silently drop the user's
+        during ``send`` would otherwise silently drop the user's
         ambient message — the envelope is ACKed under
         ``AckPolicy.ACK_FIRST`` so the consumer harness won't
         redeliver. The fan-out logs ERROR with full operator-debuggable
@@ -520,7 +526,7 @@ class TestErrorPaths:
         (matches the ``raise_routing_contract_error`` paths)."""
         client = MagicMock()
         client.reply_topic = "calfkit.router.reply"
-        client.invoke_node = AsyncMock(
+        client.send = AsyncMock(
             side_effect=RuntimeError("broker hiccup")
         )
 
@@ -568,7 +574,7 @@ class TestErrorPaths:
             headers=_headers(),
             broker=broker,
         )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
 
     async def test_missing_discord_dep_logs_infra_error(
         self,
@@ -591,7 +597,7 @@ class TestErrorPaths:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         assert any(
             "infra error" in r.message
             and "deps['discord']" in r.message
@@ -612,7 +618,7 @@ class TestErrorPaths:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         assert any(
             "infra error" in r.message
             and "deps['discord']" in r.message
@@ -638,7 +644,7 @@ class TestErrorPaths:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         assert any(
             "infra error" in r.message
             and "deps['discord']" in r.message
@@ -746,7 +752,7 @@ class TestPhonebookValidation:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         assert any(
             "unknown agent_id" in r.message
             and "hallucinated_agent" in r.message
@@ -781,7 +787,7 @@ class TestPhonebookValidation:
                 headers=_headers(),
                 broker=broker,
             )
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
 
     async def test_missing_phonebook_logs_infra_error(
         self,
@@ -814,7 +820,7 @@ class TestPhonebookValidation:
                 broker=broker,
             )
         # Fail-closed: nothing published.
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         assert any(
             "missing deps['phonebook']" in r.message for r in caplog.records
         )
@@ -836,7 +842,7 @@ class TestPhonebookValidation:
             headers=_headers(),
             broker=broker,
         )
-        assert client.invoke_node.await_count == 1
+        assert client.send.await_count == 1
 
     async def test_malformed_phonebook_entry_logs_infra_error(
         self,
@@ -870,7 +876,7 @@ class TestPhonebookValidation:
                 broker=broker,
             )
         # phonebook_from_deps raises → infra error → nothing published.
-        assert client.invoke_node.await_count == 0
+        assert client.send.await_count == 0
         assert any(
             "deps['phonebook']" in r.message for r in caplog.records
         )
@@ -887,13 +893,8 @@ class TestReasoningIsolation:
     ) -> None:
         client = MagicMock()
         client.reply_topic = "calfkit.router.reply"
-
-        async def _invoke(*_a: Any, **_kw: Any) -> Any:
-            handle = MagicMock()
-            handle._future = asyncio.get_event_loop().create_future()
-            return handle
-
-        client.invoke_node = AsyncMock(side_effect=_invoke)
+        # ``send`` is fire-and-forget: no handle, returns a correlation_id str.
+        client.send = AsyncMock(return_value="cid-stub")
         consumer = build_fanout_consumer(client, router_agent_id=ROUTER_AGENT_ID)
 
         secret = "SECRET_REASONING_DO_NOT_LEAK"
@@ -911,12 +912,12 @@ class TestReasoningIsolation:
         )
         # The synthesized wire should carry the ORIGINAL ambient
         # content, never the reasoning.
-        synth_wire = client.invoke_node.await_args.kwargs["deps"]["discord"]
+        synth_wire = client.send.await_args.kwargs["deps"]["discord"]
         assert synth_wire["content"] == "please summarize the meeting notes"
         assert secret not in synth_wire["content"]
         # Belt-and-suspenders: nothing in the published kwargs should
         # contain the secret.
-        all_kwargs_repr = repr(client.invoke_node.await_args.kwargs)
+        all_kwargs_repr = repr(client.send.await_args.kwargs)
         assert secret not in all_kwargs_repr
 
 

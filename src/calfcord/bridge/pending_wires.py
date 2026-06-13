@@ -18,7 +18,7 @@ computed them.)
 **What's in a `PendingEntry`** (beyond the bare wire):
 
 * ``wire`` — the original :class:`WireMessage`.
-* ``message_history`` — snapshot of what was passed to ``invoke_node``.
+* ``message_history`` — snapshot of what was passed to ``send``.
   Used by the outbox to reconstruct a faithful retry envelope when a
   Discord post fails with an agent-fixable error (length, etc.).
   Without this snapshot the retry would have to re-fetch + re-project
@@ -94,7 +94,7 @@ class PendingEntry:
 
     wire: WireMessage
     message_history: tuple[ModelMessage, ...] = field(default_factory=tuple)
-    """Snapshot of ``message_history`` passed to the original ``invoke_node``.
+    """Snapshot of ``message_history`` passed to the original ``send``.
     Tuple (not list) for shallow immutability; combined with the
     frozen dataclass, callers cannot accidentally mutate the snapshot."""
     initial_message_history_length: int = 0
@@ -112,7 +112,7 @@ class PendingEntry:
     as fresh "steps" into the new transcript thread.
 
     The default ``0`` is correct for callsites that don't pass a
-    ``message_history`` to ``invoke_node`` (e.g. an A2A invocation
+    ``message_history`` to the call (e.g. an A2A invocation
     starting from scratch); they would also have nothing to skip.
     """
     temp_instructions: str | None = None
@@ -125,7 +125,7 @@ class PendingEntry:
     Forwarded verbatim on retries so a user-configured
     ``thinking_effort=high`` run doesn't silently degrade to the
     model client's baked-in default on the retry. Mutable ``dict``
-    type matches calfkit's :meth:`Client.invoke_node` parameter
+    type matches calfkit's :meth:`Client.send` parameter
     signature; the snapshot discipline is enforced by the frozen
     enclosing dataclass — callers see a reference but cannot rebind
     the field."""

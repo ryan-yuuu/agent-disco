@@ -10,7 +10,7 @@ Drives a single ambient wire through every seam:
         ↓ pending_wires + channel topic publish
     Bridge slash path (the assistant-bound invocation)
 
-The Kafka edges (``Client.invoke_node``) are faked. Everything else —
+The Kafka edges (``Client.send``) are faked. Everything else —
 the consumer machinery, the deps packing/unpacking, the gate, the deps
 propagation, the synthesized-wire mutation, the pending_wires
 bookkeeping — is real.
@@ -23,7 +23,6 @@ field that doesn't round-trip cleanly, an event_id collision in
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -116,6 +115,12 @@ def _build_fanout_envelope_from_router_output(
     on every publish, so the consumer reads the original wire / phonebook
     / history from ``result.deps``. We carry the SAME deps dict the bridge
     ingress published on the ambient hop.
+
+    The bridge published that ambient hop with ``send(reply_to=None)``, so
+    the inbound frame's ``callback_topic`` is ``None`` on the wire (calfkit
+    records ``callback_topic = reply_to`` verbatim — see ``Client._send``).
+    The fan-out reads ``result.deps`` / ``result.output`` and never
+    inspects the frame, so this mirrors real behavior faithfully.
     """
     state = State()
     # The router's terminal output is parsed as RoutingDecision via the
@@ -128,7 +133,7 @@ def _build_fanout_envelope_from_router_output(
                 _internal_list=[
                     CallFrame(
                         target_topic="routing.decisions",
-                        callback_topic="<test-discard>",
+                        callback_topic=None,
                     )
                 ]
             )
@@ -140,11 +145,15 @@ def _build_fanout_envelope_from_router_output(
 def _build_synthesized_envelope(*, synth_deps: dict[str, Any]) -> Envelope:
     """Construct the envelope the synthesized-in @consumer would see.
 
-    Equivalent to what the fan-out's ``invoke_node`` writes to
+    Equivalent to what the fan-out's ``send`` writes to
     ``bridge.synthesized.in`` — the synthesized wire and forwarded
     history travel on ``deps``. We carry the SAME deps dict the fan-out
     published, so any key-name drift between the fan-out and the
     synthesized-in consumer surfaces here.
+
+    The fan-out published this hop with ``send(reply_to=None)``, so the
+    inbound frame's ``callback_topic`` is ``None`` on the wire (calfkit
+    records ``callback_topic = reply_to`` verbatim — see ``Client._send``).
     """
     state = State()
     return Envelope(
@@ -153,7 +162,7 @@ def _build_synthesized_envelope(*, synth_deps: dict[str, Any]) -> Envelope:
                 _internal_list=[
                     CallFrame(
                         target_topic=SYNTHESIZED_INGRESS_TOPIC,
-                        callback_topic="<test-discard>",
+                        callback_topic=None,
                     )
                 ]
             )
@@ -162,16 +171,15 @@ def _build_synthesized_envelope(*, synth_deps: dict[str, Any]) -> Envelope:
     )
 
 
-def _fresh_handle() -> MagicMock:
-    handle = MagicMock()
-    handle._future = asyncio.get_event_loop().create_future()
-    return handle
-
-
 def _fresh_client() -> MagicMock:
     c = MagicMock()
-    c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c.reply_topic = "discord.outbox"
+    # ``Client.send`` is fire-and-forget: it registers no reply future and
+    # returns the invocation's ``correlation_id`` (a ``str``), not a handle.
+    # Echo the passed ``correlation_id`` so the stub mirrors the real
+    # contract (``send`` returns the id it published under).
+    c.send = AsyncMock(
+        side_effect=lambda *_a, **kw: kw.get("correlation_id", "cid-stub")
+    )
     return c
 
 
@@ -204,11 +212,16 @@ class TestAmbientRoutingEndToEnd:
 
         # Step 2: verify the ambient publish landed on the ambient
         # topic with the wire packed onto deps. (Only the ambient hop
-        # has fired so far — the slash branch also uses invoke_node but
+        # has fired so far — the slash branch also uses send but
         # runs later, in Step 5.)
-        bridge_client.invoke_node.assert_awaited_once()
-        ambient_call = bridge_client.invoke_node.await_args
+        bridge_client.send.assert_awaited_once()
+        ambient_call = bridge_client.send.await_args
         assert ambient_call.kwargs["topic"] == _AMBIENT_INGRESS_TOPIC
+        # The ambient hop is true fire-and-forget: ``reply_to=None``
+        # suppresses the terminal callback entirely (calfkit records the
+        # published CallFrame's ``callback_topic`` as ``reply_to`` verbatim,
+        # so ``None`` here means no point-to-point reply rides the broker).
+        assert ambient_call.kwargs["reply_to"] is None
         ambient_deps = ambient_call.kwargs["deps"]
         assert ambient_deps["discord"]["event_id"] == "evt-original-1"
         # Ambient publish must NOT populate pending_wires (Group C).
@@ -236,9 +249,14 @@ class TestAmbientRoutingEndToEnd:
         # the synthesized topic for the chosen agent, with a fresh
         # event_id and the original ambient's channel/message/author
         # preserved on deps["discord"].
-        assert router_client.invoke_node.await_count == 1
-        synth_publish = router_client.invoke_node.await_args_list[0].kwargs
+        assert router_client.send.await_count == 1
+        synth_publish = router_client.send.await_args_list[0].kwargs
         assert synth_publish["topic"] == SYNTHESIZED_INGRESS_TOPIC
+        # The synthesized hop is also fire-and-forget: ``reply_to=None``
+        # suppresses this publish's own terminal callback (the chosen
+        # agent's reply exits via ``discord.outbox`` under a different
+        # correlation entirely).
+        assert synth_publish["reply_to"] is None
         synth_deps = synth_publish["deps"]
         synth_wire_dict = synth_deps["discord"]
         assert synth_wire_dict["slash_target"] == "scribe"
@@ -268,11 +286,11 @@ class TestAmbientRoutingEndToEnd:
         # Step 6: the bridge's ingress should have published exactly
         # one slash invocation for the chosen agent on the channel
         # topic. Both the ambient (Step 1) and slash hops use
-        # invoke_node, so filter by the channel-topic prefix to isolate
+        # send, so filter by the channel-topic prefix to isolate
         # the slash publish.
         slash_calls = [
             c.kwargs
-            for c in bridge_client.invoke_node.await_args_list
+            for c in bridge_client.send.await_args_list
             if c.kwargs["topic"].startswith("discord.channel.")
         ]
         assert len(slash_calls) == 1

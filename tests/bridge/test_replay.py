@@ -25,9 +25,7 @@ Coverage (see
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -152,17 +150,12 @@ def _registry(scribe_history_turns: int = 30) -> AgentRegistry:
     )
 
 
-def _fresh_handle() -> Any:
-    h = MagicMock()
-    h._future = asyncio.Future()
-    return h
-
-
 @pytest.fixture
 def client() -> MagicMock:
     c = MagicMock()
-    c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c.reply_topic = "discord.outbox"
+    # calfkit 0.10.0: ``Client.send`` is fire-and-forget and returns the
+    # correlation_id (a ``str``), not an awaitable reply handle.
+    c.send = AsyncMock(side_effect=lambda *_a, **_kw: "corr-id")
     return c
 
 
@@ -398,7 +391,11 @@ class TestSlashReplay:
 
         await ingress.handle(_slash_wire(slash_target="scribe", message_id=30))
 
-        message_history = client.invoke_node.call_args.kwargs["message_history"]
+        kw = client.send.call_args.kwargs
+        # Slash sends address their reply at the Discord outbox; no output_type.
+        assert kw["reply_to"] == "discord.outbox"
+        assert "output_type" not in kw
+        message_history = kw["message_history"]
         # request, ModelResponse(tool call), ModelRequest(tool return), final reply.
         assert len(message_history) == 4
         assert isinstance(message_history[0], ModelRequest)
@@ -434,7 +431,7 @@ class TestSlashReplay:
         wire = _slash_wire(event_id="evt-consist", slash_target="scribe", message_id=30)
         await ingress.handle(wire)
 
-        message_history = client.invoke_node.call_args.kwargs["message_history"]
+        message_history = client.send.call_args.kwargs["message_history"]
         entry = pending_wires.get("evt-consist")
         assert entry is not None
         assert entry.initial_message_history_length == len(message_history)
@@ -461,7 +458,7 @@ class TestSlashReplay:
 
         await ingress.handle(_slash_wire(slash_target="scribe", message_id=30))
 
-        message_history = client.invoke_node.call_args.kwargs["message_history"]
+        message_history = client.send.call_args.kwargs["message_history"]
         assert len(message_history) == 2  # just request + final reply, no splice
         assert not any(
             isinstance(p, (ToolCallPart, ToolReturnPart))
@@ -488,7 +485,7 @@ class TestSlashReplay:
 
         await ingress.handle(_slash_wire(slash_target="scribe", message_id=30))
 
-        message_history = client.invoke_node.call_args.kwargs["message_history"]
+        message_history = client.send.call_args.kwargs["message_history"]
         assert len(message_history) == 2
 
     async def test_clear_truncated_reply_is_never_hydrated(
@@ -570,8 +567,12 @@ class TestSlashReplay:
 
         # Router path never touches the transcript store.
         store.get_by_final_message_ids.assert_not_called()
+        kw = client.send.call_args.kwargs
+        # Ambient/router sends are fire-and-forget: no point-to-point reply.
+        assert kw["reply_to"] is None
+        assert "output_type" not in kw
         # And the router's message_history carries no tool parts.
-        router_msgs = client.invoke_node.call_args.kwargs["message_history"]
+        router_msgs = kw["message_history"]
         assert all(isinstance(m, ModelRequest) for m in router_msgs)
 
 

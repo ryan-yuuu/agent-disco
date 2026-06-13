@@ -183,21 +183,13 @@ def pending_wires() -> PendingWires:
 def calfkit_client() -> MagicMock:
     """Fake calfkit Client for the outbox's retry-publish path.
 
-    ``invoke_node`` returns an ``InvocationHandle``-shaped mock whose
-    ``_future`` is a real ``asyncio.Future``; the outbox cancels this
-    future after publishing (fire-and-forget pattern matches
-    :class:`BridgeIngress`), so it must be cancellable to avoid
-    ``RuntimeWarning: coroutine never awaited``.
+    ``send`` is fire-and-forget on calfkit 0.10.0: it registers no reply
+    future and returns the ``str`` correlation_id (matching
+    :class:`BridgeIngress`), so the mock returns a plain string — there
+    is no ``InvocationHandle`` and nothing to cancel.
     """
-    import asyncio as _asyncio
-
-    def _make_handle(*_a: Any, **_kw: Any) -> MagicMock:
-        h = MagicMock()
-        h._future = _asyncio.get_event_loop().create_future()
-        return h
-
     c = MagicMock()
-    c.invoke_node = AsyncMock(side_effect=_make_handle)
+    c.send = AsyncMock(return_value=_CORRELATION_ID)
     return c
 
 

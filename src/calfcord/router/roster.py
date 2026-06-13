@@ -41,7 +41,7 @@ def build_router_temp_instructions(
     Returns ``None`` when there is nothing useful to advertise — the
     phonebook is empty, or after filtering out the router itself the
     list is empty. Callers can pass the result straight through to
-    :meth:`Client.invoke_node`
+    :meth:`Client.send`
     (``temp_instructions=None`` is treated as no-op by calfkit).
 
     Args:

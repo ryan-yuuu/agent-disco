@@ -89,11 +89,8 @@ from calfcord.discord.typing import TypingNotifier
 from calfcord.health.heartbeat import write_beat
 from calfcord.health.refresher import run_refresher
 from calfcord.router.definition import build_router_definition
-from calfcord.topics import DISCORD_OUTBOX_TOPIC
 
 logger = logging.getLogger(__name__)
-
-_REPLY_TOPIC = DISCORD_OUTBOX_TOPIC
 
 # The component name the bridge writes its heartbeat under and that
 # ``calfcord _healthcheck bridge`` reads back (design §4.2 / §12.1).
@@ -823,18 +820,20 @@ def main() -> None:
     async def _run() -> None:
         # The bridge owns its own persona sender (separate from agent processes')
         # because it posts replies on behalf of every agent. The calfkit client
-        # connects with a named reply topic so calfkit's reply dispatcher hears
-        # every agent ReturnCall — even though we no longer await its futures
-        # (the outbox consumer below handles every reply), the dispatcher's
-        # subscriber is still registered as a side-effect of Client.connect.
-        # Its "no pending future" WARNINGs on every reply are expected; see
-        # calfcord.bridge.outbox.
+        # takes its OWN auto-generated reply inbox (no ``reply_topic=``): the
+        # bridge never awaits a reply on its own future — every agent reply is
+        # addressed to ``discord.outbox`` via ``send(reply_to=...)`` and consumed
+        # by the outbox consumer below (a separate consumer group). Decoupling the
+        # client inbox from ``discord.outbox`` is what lets that
+        # ``send(reply_to="discord.outbox")`` pass calfkit's "reply_to is not your
+        # own inbox" guard, and it retires the old "no pending future" WARN spam
+        # the invoke-then-cancel pattern produced on every reply.
         # Kept as nested ``async with`` (not combined) so each context's
         # rationale comment stays attached to it and the degrade/lifecycle reads
         # top-to-bottom; the noqa silences SIM117's "combine them" hint.
         async with DiscordPersonaSender(settings) as persona_sender:  # noqa: SIM117
             async with Client.connect(
-                server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING
+                server_urls, provisioning=PROVISIONING
             ) as calfkit_client:
                 pending_wires = PendingWires()
                 ingress = BridgeIngress(

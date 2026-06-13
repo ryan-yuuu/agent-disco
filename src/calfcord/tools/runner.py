@@ -111,7 +111,7 @@ async def _amain() -> None:
         # No manual provisioning: this runner uses the managed Worker (started
         # via _run_worker below), whose _on_startup hook + the connect-time
         # pre-start hook auto-provision the worker's tool-node topics AND the
-        # client reply topic at broker start. Tools only ``execute_node`` while
+        # client reply topic at broker start. Tools only ``execute`` while
         # consuming a message — which can only happen after ``Worker.start()`` has
         # started the broker — so no eager start is needed for the dispatcher.
         tool_nodes = _resolve_tool_nodes(TOOL_REGISTRY)

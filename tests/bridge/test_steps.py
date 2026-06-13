@@ -1022,7 +1022,7 @@ class TestThreadOriginatedWire:
 
 class TestInitialCursorSeed:
     """The cursor must skip the projected channel-history prefix that
-    ``BridgeIngress`` passes into ``invoke_node`` — otherwise the agent's
+    ``BridgeIngress`` passes into ``send`` — otherwise the agent's
     prior channel replies (rendered by ``project_history`` as
     ``ModelResponse(TextPart(...))``) get re-counted as fresh steps."""
 

@@ -1,8 +1,8 @@
 """Publish helpers for the control plane.
 
 These functions reach into ``client._connection`` (a FastStream KafkaBroker)
-because calfkit's public ``Client`` API exposes only ``invoke_node`` / ``execute_node``,
-both of which are agent invocations -- not what we want for plain control-plane
+because calfkit's public ``Client`` API exposes only ``send`` / ``start`` / ``execute``,
+all of which are agent invocations -- not what we want for plain control-plane
 messages. The private-attribute access is documented here in one place so a
 future calfkit upgrade that exposes a public ``Client.publish`` is a single-
 file swap.

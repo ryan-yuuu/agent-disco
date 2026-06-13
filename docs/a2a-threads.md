@@ -57,8 +57,8 @@ calfkit-tools process
    │    2. Project to callee POV via project_history().
    │    3. Post caller-request as caller persona INSIDE the thread.
    │
-   ├─ execute_node(target.in, user_prompt=content,
-   │              message_history=<projected or empty>)
+   ├─ execute(target.in, user_prompt=content,
+   │          message_history=<projected or empty>)
    │
    ├─ Post target-response as target persona INSIDE the thread.
    │
@@ -194,7 +194,7 @@ is an accepted risk. Reconsider if a real foot-gun fires.
 |---|---|---|
 | `_raise_infra` with `discord.Forbidden` from `create_anchored_thread` | Bot lacks `Create Public Threads` on the audit channel | Grant the permission |
 | Repeated `error: thread {id} not accessible` returned to LLM | Bot lacks `Read Message History`, OR threads being deleted aggressively | Check permissions; check if a moderation rule is auto-deleting threads |
-| Tool times out on `execute_node` for the target | Target agent's process down, slow, or its queue backed up | Check the target agent's runner logs |
+| Tool times out on `execute` for the target | Target agent's process down, slow, or its queue backed up | Check the target agent's runner logs |
 | Persona projection failures logged at WARN | Discord rate-limit or transient 5xx | Usually self-healing; investigate if persistent |
 | Unified channel keeps getting recreated | `CALFKIT_A2A_CHANNEL_NAME` differs between tools-process restarts, OR the channel keeps getting deleted | Pin the env var; check for moderation rules |
 
@@ -216,7 +216,7 @@ single-call 100-message ceiling.
 
 No new Kafka traffic — the wire surface to the agent runner is
 unchanged. The callee receives the projected history through the
-standard `message_history` channel that `Client.execute_node` already
+standard `message_history` channel that `Client.execute` already
 accepts.
 
 ## What's not in v1

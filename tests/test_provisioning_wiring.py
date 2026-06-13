@@ -22,14 +22,12 @@ from calfcord._provisioning import (
     agent_infra_topics,
     bridge_infra_topics,
     provision_extra_topics,
-    router_infra_topics,
 )
 from calfcord.control_plane.topics import (
     AGENT_STATE_TOPIC,
     BRIDGE_DISCOVERY_TOPIC,
     control_topic_for,
 )
-from calfcord.topics import AMBIENT_REPLY_DISCARD_TOPIC
 
 _SERVERS = "h:9092"
 
@@ -58,10 +56,6 @@ def test_agent_infra_topics_add_one_control_topic_per_agent() -> None:
 
 def test_agent_infra_topics_with_no_agents_is_just_the_shared_pair() -> None:
     assert set(agent_infra_topics([])) == {AGENT_STATE_TOPIC, BRIDGE_DISCOVERY_TOPIC}
-
-
-def test_router_infra_topics_is_the_no_subscriber_discard_topic() -> None:
-    assert router_infra_topics() == [AMBIENT_REPLY_DISCARD_TOPIC]
 
 
 async def test_provision_extra_topics_noop_on_empty_never_touches_kafka(monkeypatch) -> None:
@@ -113,7 +107,10 @@ def test_runner_reply_topics_are_pairwise_distinct() -> None:
     from calfcord.router.runner import _REPLY_TOPIC as ROUTER
     from calfcord.tools.runner import _REPLY_TOPIC as TOOLS
 
-    # bridge's _REPLY_TOPIC is "discord.outbox" (the outbox consumer's inbox).
+    # "discord.outbox" is the bridge's outbox topic — its agents' ``reply_to``
+    # return address and the outbox consumer's inbox. The bridge client itself no
+    # longer names it as a reply inbox (it takes its own auto-generated inbox),
+    # but the router/tools reply inboxes must still not collide with it.
     assert len({ROUTER, TOOLS, "discord.outbox"}) == 3
 
 

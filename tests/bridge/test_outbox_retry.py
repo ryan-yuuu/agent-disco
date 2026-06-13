@@ -19,7 +19,6 @@ Pure-helper coverage (``build_retry_reminder``, ``build_retry_history``,
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -170,13 +169,14 @@ def persona_sender() -> AsyncMock:
 
 @pytest.fixture
 def calfkit_client() -> MagicMock:
-    def _handle(*_a: Any, **_kw: Any) -> MagicMock:
-        h = MagicMock()
-        h._future = asyncio.get_event_loop().create_future()
-        return h
+    """Fake calfkit Client for the outbox's retry-publish path.
 
+    ``send`` is fire-and-forget on calfkit 0.10.0: it registers no
+    reply future and returns the ``str`` correlation_id, so the mock
+    returns a plain string (no ``InvocationHandle``, nothing to cancel).
+    """
     c = MagicMock()
-    c.invoke_node = AsyncMock(side_effect=_handle)
+    c.send = AsyncMock(return_value=_CORRELATION_ID)
     return c
 
 
@@ -219,7 +219,7 @@ class TestHandlePostFailure:
             )
 
         # No retry, no chunk-split.
-        calfkit_client.invoke_node.assert_not_called()
+        calfkit_client.send.assert_not_called()
         persona_sender.send.assert_not_called()
         assert any("forbidden" in r.message and "Manage Webhooks" in r.message for r in caplog.records)
 
@@ -250,7 +250,7 @@ class TestHandlePostFailure:
                 turn_delta=None,
             )
 
-        calfkit_client.invoke_node.assert_not_called()
+        calfkit_client.send.assert_not_called()
         assert any("not found" in r.message.lower() and "channel" in r.message.lower() for r in caplog.records)
 
     async def test_5xx_after_smoothing_drops(
@@ -283,7 +283,7 @@ class TestHandlePostFailure:
                 turn_delta=None,
             )
 
-        calfkit_client.invoke_node.assert_not_called()
+        calfkit_client.send.assert_not_called()
         assert any("5xx + extra retry exhausted" in r.message for r in caplog.records)
 
     async def test_400_triggers_agent_retry(
@@ -314,7 +314,7 @@ class TestHandlePostFailure:
             )
 
         # Retry was published; no chunk-split.
-        calfkit_client.invoke_node.assert_awaited_once()
+        calfkit_client.send.assert_awaited_once()
         persona_sender.send.assert_not_called()
         # Retry counter advanced.
         assert pw.get_retry_count(_CORRELATION_ID) == 1
@@ -353,7 +353,7 @@ class TestHandlePostFailure:
             )
 
         # No retry; chunk-split fired.
-        calfkit_client.invoke_node.assert_not_called()
+        calfkit_client.send.assert_not_called()
         assert persona_sender.send.await_count >= 2
         assert any("retry budget exhausted" in r.message for r in caplog.records)
 
@@ -392,7 +392,7 @@ class TestHandlePostFailure:
                 turn_delta=None,
             )
 
-        calfkit_client.invoke_node.assert_not_called()
+        calfkit_client.send.assert_not_called()
         assert persona_sender.send.await_count >= 1
         assert any("evicted before retry could be claimed" in r.message for r in caplog.records)
 
@@ -407,7 +407,7 @@ class TestHandlePostFailure:
         entry = _entry()
         pw.put(_CORRELATION_ID, entry)
         broken_client = MagicMock()
-        broken_client.invoke_node = AsyncMock(side_effect=RuntimeError("kafka down"))
+        broken_client.send = AsyncMock(side_effect=RuntimeError("kafka down"))
 
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
@@ -427,7 +427,7 @@ class TestHandlePostFailure:
                 turn_delta=None,
             )
 
-        broken_client.invoke_node.assert_awaited_once()
+        broken_client.send.assert_awaited_once()
         # Counter STILL advanced (we claimed the attempt before the publish).
         assert pw.get_retry_count(_CORRELATION_ID) == 1
         # Chunk-split picked up.
@@ -447,7 +447,7 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "failed text", err)
 
-        kw = calfkit_client.invoke_node.call_args.kwargs
+        kw = calfkit_client.send.call_args.kwargs
         assert kw["correlation_id"] == _CORRELATION_ID
 
     async def test_envelope_targets_agent_inbox(self, calfkit_client: MagicMock) -> None:
@@ -456,7 +456,7 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "failed text", err)
 
-        kw = calfkit_client.invoke_node.call_args.kwargs
+        kw = calfkit_client.send.call_args.kwargs
         assert kw["topic"] == "agent.scribe.in"
 
     async def test_envelope_history_includes_original_prompt_and_failed_reply(self, calfkit_client: MagicMock) -> None:
@@ -469,7 +469,7 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "FAILED TEXT", err)
 
-        kw = calfkit_client.invoke_node.call_args.kwargs
+        kw = calfkit_client.send.call_args.kwargs
         history = kw["message_history"]
         # First entries: the original history (passed through).
         assert history[0] is original_history[0]
@@ -487,7 +487,7 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
-        kw = calfkit_client.invoke_node.call_args.kwargs
+        kw = calfkit_client.send.call_args.kwargs
         assert kw["user_prompt"].startswith("<system-reminder>")
         assert "HTTP 400" in kw["user_prompt"]
 
@@ -497,7 +497,7 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
-        kw = calfkit_client.invoke_node.call_args.kwargs
+        kw = calfkit_client.send.call_args.kwargs
         assert "phonebook" in kw["deps"]
         # Phonebook excludes the router; the registry has scribe + router.
         ids = {e["agent_id"] for e in kw["deps"]["phonebook"]}
@@ -531,7 +531,7 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, registry, entry, "scribe", "fail", err)
 
-        deps = calfkit_client.invoke_node.call_args.kwargs["deps"]
+        deps = calfkit_client.send.call_args.kwargs["deps"]
         assert MEMORY_PROMPT_DEPS_KEY in deps
         # The bridge ships the RAW (un-localized) template; the agent's hook
         # localizes ``{{MEMORY_DIR}}``, so the placeholder must survive on the wire.
@@ -548,7 +548,7 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
-        deps = calfkit_client.invoke_node.call_args.kwargs["deps"]
+        deps = calfkit_client.send.call_args.kwargs["deps"]
         assert MEMORY_PROMPT_DEPS_KEY not in deps
 
     async def test_envelope_preserves_temp_instructions(self, calfkit_client: MagicMock) -> None:
@@ -557,24 +557,29 @@ class TestPublishRetry:
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
-        kw = calfkit_client.invoke_node.call_args.kwargs
+        kw = calfkit_client.send.call_args.kwargs
         assert kw["temp_instructions"] == "peer roster here"
 
-    async def test_envelope_cancels_handle_future(self, calfkit_client: MagicMock) -> None:
-        """Fire-and-forget pattern: the handle's future is cancelled so
-        the reply dispatcher's pending-future map doesn't leak. We
-        verify the publish happened exactly once; the cancel is on the
-        returned handle (mocked) and would manifest as a coroutine-
-        never-awaited warning under pytest if the cancel was skipped —
-        the absence of that warning in the run is the proof of the
-        cancel.
+    async def test_envelope_publishes_fire_and_forget_to_outbox(self, calfkit_client: MagicMock) -> None:
+        """Fire-and-forget on calfkit 0.10.0: the retry publishes via
+        :meth:`Client.send` (which registers no reply future and returns
+        a ``str`` correlation_id, so there is nothing to cancel and
+        nothing to leak), and addresses its reply to ``discord.outbox``
+        so the eventual ReturnCall lands on the outbox consumer rather
+        than the bridge client's throwaway inbox.
+
+        Replaces the pre-0.10.0 ``test_envelope_cancels_handle_future``,
+        whose subject (cancelling ``InvocationHandle._future`` so the
+        dispatcher's pending-future map didn't leak) no longer exists:
+        ``send`` registers no future at all.
         """
         entry = _entry()
         err = _http_exc(discord.HTTPException, 400, code=50035)
 
         await _publish_retry(calfkit_client, _registry(), entry, "scribe", "fail", err)
 
-        calfkit_client.invoke_node.assert_awaited_once()
+        calfkit_client.send.assert_awaited_once()
+        assert calfkit_client.send.call_args.kwargs["reply_to"] == "discord.outbox"
 
 
 # ---------------------------------------------------------------------------
@@ -701,8 +706,8 @@ class TestEndToEnd:
         )
 
         # Retry envelope was published to agent.scribe.in.
-        calfkit_client.invoke_node.assert_awaited_once()
-        assert calfkit_client.invoke_node.call_args.kwargs["topic"] == "agent.scribe.in"
+        calfkit_client.send.assert_awaited_once()
+        assert calfkit_client.send.call_args.kwargs["topic"] == "agent.scribe.in"
 
     async def test_403_via_handler_does_not_retry(
         self,
@@ -722,7 +727,7 @@ class TestEndToEnd:
             broker=broker,
         )
 
-        calfkit_client.invoke_node.assert_not_called()
+        calfkit_client.send.assert_not_called()
 
     async def test_retry_success_logs_attempt_count(
         self,
@@ -801,7 +806,7 @@ class TestMultiRetrySequence:
         # Retries published: 2 (original failure publishes retry 1;
         # retry-1 failure publishes retry 2; retry-2 failure exhausts
         # budget and chunk-splits instead of publishing retry 3).
-        assert calfkit_client.invoke_node.await_count == MAX_REPLY_RETRY_ATTEMPTS
+        assert calfkit_client.send.await_count == MAX_REPLY_RETRY_ATTEMPTS
 
     async def test_retry_succeeded_log_uses_plural_for_n_greater_than_1(
         self,
@@ -865,7 +870,7 @@ class TestRateLimitedHandling:
             )
 
         # No retry published; operator-actionable WARN.
-        calfkit_client.invoke_node.assert_not_called()
+        calfkit_client.send.assert_not_called()
         assert any("rate-limit backoff exhausted" in r.message for r in caplog.records)
 
 

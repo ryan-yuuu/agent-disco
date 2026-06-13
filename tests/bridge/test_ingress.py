@@ -1,13 +1,12 @@
 """Unit tests for ``BridgeIngress.handle``.
 
-Mocks the calfkit ``Client.invoke_node`` and asserts the bridge
+Mocks the calfkit ``Client.send`` and asserts the bridge
 publishes the right envelope and maintains the ``PendingWires`` map.
 No Kafka, no Discord, no LLM.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +22,7 @@ from calfcord.bridge.ingress import BridgeIngress
 from calfcord.bridge.pending_wires import PendingWires
 from calfcord.bridge.registry import AgentRegistry
 from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.topics import DISCORD_OUTBOX_TOPIC
 
 
 def _wire(
@@ -80,32 +80,19 @@ def _registry(
     )
 
 
-def _fresh_handle() -> MagicMock:
-    """A fake InvocationHandle exposing a real asyncio.Future as ``_future``.
-
-    BridgeIngress.handle calls ``handle._future.cancel()`` after a successful
-    publish; using a real future makes that observable.
-    """
-    handle = MagicMock()
-    handle._future = asyncio.get_event_loop().create_future()
-    return handle
-
-
 @pytest.fixture
 def client() -> MagicMock:
     """Fake calfkit Client covering both ingress paths.
 
-    The slash branch publishes to a channel topic and the ambient
-    branch to the router's ambient ingress — both via
-    ``client.invoke_node``. It must return a handle whose ``_future``
-    is a real :class:`asyncio.Future` so the ingress's
-    cancel-after-publish step has something cancellable. The
-    ``reply_topic`` property is also touched when no explicit
-    reply_topic is passed.
+    The slash branch publishes to a channel topic (naming
+    ``discord.outbox`` as ``reply_to``) and the ambient branch to the
+    router's ambient ingress (``reply_to=None``) — both via
+    ``client.send``. ``send`` is fire-and-forget: it registers no reply
+    future and returns the ``str`` correlation_id, so the mock returns a
+    plain string rather than a handle.
     """
     c = MagicMock()
-    c.invoke_node = AsyncMock(side_effect=lambda *_a, **_kw: _fresh_handle())
-    c.reply_topic = "discord.outbox"
+    c.send = AsyncMock(return_value="corr-id")
     return c
 
 
@@ -123,10 +110,11 @@ class TestPublish:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
 
-        kwargs = client.invoke_node.call_args.kwargs
+        kwargs = client.send.call_args.kwargs
         assert kwargs["topic"] == "discord.channel.6789.in"
         assert kwargs["correlation_id"] == "evt-1"
-        assert kwargs["output_type"] is str
+        # The agent's terminal reply lands on the outbox topic.
+        assert kwargs["reply_to"] == DISCORD_OUTBOX_TOPIC
         # Full wire round-trips as a dep so the agent's gates can inspect it.
         assert kwargs["deps"]["discord"]["channel_id"] == 6789
         assert kwargs["deps"]["discord"]["slash_target"] == "scheduler"
@@ -142,7 +130,7 @@ class TestPublish:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
 
-        phonebook = client.invoke_node.call_args.kwargs["deps"]["phonebook"]
+        phonebook = client.send.call_args.kwargs["deps"]["phonebook"]
         assert isinstance(phonebook, list)
         ids = sorted(e["agent_id"] for e in phonebook)
         assert ids == ["scheduler", "scribe"]
@@ -151,32 +139,32 @@ class TestPublish:
         assert scribe["display_name"] == "Scribe"
         assert "description" in scribe
 
-    async def test_records_wire_in_pending_wires_before_invoke(
+    async def test_records_wire_in_pending_wires_before_send(
         self,
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        """Consumer might fire before invoke_node returns — wire must be visible already."""
+        """Consumer might fire before send returns — wire must be visible already."""
         observed: dict[str, WireMessage | None] = {}
 
-        async def _capture(*_args: Any, **kwargs: Any) -> Any:
+        async def _capture(*_args: Any, **kwargs: Any) -> str:
             entry = pending_wires.get(kwargs["correlation_id"])
             observed["wire"] = entry.wire if entry is not None else None
-            return MagicMock()
+            return kwargs["correlation_id"]
 
-        client.invoke_node.side_effect = _capture
+        client.send.side_effect = _capture
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire()
         await ingress.handle(wire)
 
         assert observed["wire"] is wire
 
-    async def test_pops_wire_when_invoke_raises(
+    async def test_pops_wire_when_send_raises(
         self,
         client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        client.invoke_node.side_effect = RuntimeError("kafka down")
+        client.send.side_effect = RuntimeError("kafka down")
         ingress = BridgeIngress(client, _registry(), pending_wires)
         wire = _wire()
 
@@ -185,28 +173,20 @@ class TestPublish:
 
         assert pending_wires.get(wire.event_id) is None
 
-    async def test_cancels_dispatcher_future_after_publish(
+    async def test_publishes_via_send_with_outbox_reply_to(
         self,
+        client: MagicMock,
         pending_wires: PendingWires,
     ) -> None:
-        """Cancellation pops the dispatcher's ``_pending`` entry so a no-reply
-        event doesn't leak the future, and a redelivered correlation_id
-        doesn't crash inside :meth:`_ReplyDispatcher.expect`."""
-        client = MagicMock()
-        captured: dict[str, Any] = {}
-
-        async def _invoke(*_args: Any, **kwargs: Any) -> Any:
-            handle = MagicMock()
-            handle._future = asyncio.get_event_loop().create_future()
-            captured["handle"] = handle
-            return handle
-
-        client.invoke_node = AsyncMock(side_effect=_invoke)
-
+        """The slash branch uses fire-and-forget ``Client.send`` — which
+        registers no reply future (nothing to cancel, nothing to leak) —
+        and names ``discord.outbox`` as the ``reply_to`` return address so
+        the agent's terminal reply lands on the bridge's outbox consumer."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
 
-        assert captured["handle"]._future.cancelled()
+        client.send.assert_awaited_once()
+        assert client.send.await_args.kwargs["reply_to"] == DISCORD_OUTBOX_TOPIC
 
 
 class TestModelSettings:
@@ -233,7 +213,7 @@ class TestModelSettings:
             client, _registry(scheduler_effort=effort), pending_wires
         )
         await ingress.handle(_wire(slash_target="scheduler"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] == expected
+        assert client.send.call_args.kwargs["model_settings"] == expected
 
     @pytest.mark.parametrize(
         ("effort", "expected_value"),
@@ -262,7 +242,7 @@ class TestModelSettings:
             client, _registry(scribe_effort=effort), pending_wires
         )
         await ingress.handle(_wire(slash_target="scribe"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] == {
+        assert client.send.call_args.kwargs["model_settings"] == {
             "openai_reasoning_effort": expected_value
         }
 
@@ -276,7 +256,7 @@ class TestModelSettings:
             client, _registry(scheduler_effort="none"), pending_wires
         )
         await ingress.handle(_wire(slash_target="scheduler"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] == {}
+        assert client.send.call_args.kwargs["model_settings"] == {}
 
     async def test_no_effort_in_definition_passes_none(
         self,
@@ -285,7 +265,7 @@ class TestModelSettings:
     ) -> None:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] is None
+        assert client.send.call_args.kwargs["model_settings"] is None
 
     async def test_ambient_message_passes_no_model_settings(
         self,
@@ -294,7 +274,7 @@ class TestModelSettings:
     ) -> None:
         """slash_target=None → bridge doesn't know the recipient → no
         per-call thinking override. The ambient publish goes via
-        ``invoke_node`` to the router's ambient ingress and passes no
+        ``send`` to the router's ambient ingress and passes no
         ``model_settings`` (the recipient that an override would target
         isn't known until the fan-out picks one)."""
         ingress = BridgeIngress(
@@ -303,8 +283,8 @@ class TestModelSettings:
         await ingress.handle(_wire(slash_target=None, kind="message"))
         # Ambient publishes once, to the router's ambient ingress —
         # not a channel topic.
-        client.invoke_node.assert_awaited_once()
-        kwargs = client.invoke_node.await_args.kwargs
+        client.send.assert_awaited_once()
+        kwargs = client.send.await_args.kwargs
         assert not kwargs["topic"].startswith("discord.channel.")
         # No per-call thinking override on the ambient publish.
         assert kwargs.get("model_settings") is None
@@ -318,7 +298,7 @@ class TestModelSettings:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         with caplog.at_level(logging.ERROR):
             await ingress.handle(_wire(slash_target="ghost"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] is None
+        assert client.send.call_args.kwargs["model_settings"] is None
         assert any("missing from registry" in r.message for r in caplog.records)
 
     async def test_provider_resolution_failure_degrades_to_no_override(
@@ -344,7 +324,7 @@ class TestModelSettings:
         with caplog.at_level(logging.WARNING):
             await ingress.handle(_wire(slash_target="scheduler"))
 
-        assert client.invoke_node.call_args.kwargs["model_settings"] is None
+        assert client.send.call_args.kwargs["model_settings"] is None
         assert any(
             "model_settings resolution failed" in r.message for r in caplog.records
         )
@@ -372,11 +352,11 @@ class TestModelSettings:
         ingress = BridgeIngress(client, registry, pending_wires)
 
         await ingress.handle(_wire(slash_target="scheduler"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] is None
+        assert client.send.call_args.kwargs["model_settings"] is None
 
         registry.apply_local_thinking_effort_override("scheduler", "high")
         await ingress.handle(_wire(event_id="evt-2", slash_target="scheduler"))
-        assert client.invoke_node.call_args.kwargs["model_settings"] == {
+        assert client.send.call_args.kwargs["model_settings"] == {
             "anthropic_thinking": {"type": "enabled", "budget_tokens": 31999}
         }
 
@@ -516,7 +496,7 @@ class TestTempInstructions:
         @-mention path is bridge-level, not tool-gated."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
-        instructions = client.invoke_node.call_args.kwargs["temp_instructions"]
+        instructions = client.send.call_args.kwargs["temp_instructions"]
         assert instructions is not None
         assert "scribe" in instructions  # roster present
         assert "@<agent_id>" in instructions  # mention block present
@@ -541,7 +521,7 @@ class TestTempInstructions:
         )
         ingress = BridgeIngress(client, solo, pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
-        assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
+        assert client.send.call_args.kwargs["temp_instructions"] is None
 
     async def test_ambient_messages_skip_slash_path(
         self,
@@ -550,7 +530,7 @@ class TestTempInstructions:
     ) -> None:
         """Ambient (no slash_target) is now routed to the router's
         ambient ingress (Phase 4), not to a channel topic. Ambient and
-        slash both publish via ``invoke_node`` now, so the invariant is
+        slash both publish via ``send`` now, so the invariant is
         the topic: an ambient publish MUST NOT land on a channel topic
         (which would bypass the router and broadcast to every
         assistant). The router-roster ``temp_instructions`` injection
@@ -558,8 +538,8 @@ class TestTempInstructions:
         ``tests/bridge/test_ingress_router.py``."""
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire(slash_target=None, kind="message"))
-        client.invoke_node.assert_awaited_once()
-        assert not client.invoke_node.await_args.kwargs["topic"].startswith(
+        client.send.assert_awaited_once()
+        assert not client.send.await_args.kwargs["topic"].startswith(
             "discord.channel."
         )
 
@@ -593,7 +573,7 @@ class TestTempInstructions:
         )
         ingress = BridgeIngress(client, registry, pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
-        instructions = client.invoke_node.call_args.kwargs["temp_instructions"]
+        instructions = client.send.call_args.kwargs["temp_instructions"]
         assert instructions is not None
         assert "scribe" in instructions
         assert "scheduler" not in instructions  # self excluded
@@ -615,7 +595,7 @@ class TestTempInstructions:
         ingress = BridgeIngress(client, _registry(), pending_wires)
         with caplog.at_level(logging.ERROR):
             await ingress.handle(_wire(slash_target="ghost"))
-        assert client.invoke_node.call_args.kwargs["temp_instructions"] is None
+        assert client.send.call_args.kwargs["temp_instructions"] is None
         assert any("missing from phonebook" in r.message for r in caplog.records)
 
 
@@ -648,7 +628,7 @@ class TestMemoryPromptInjection:
         _reset_memory_cache()
         ingress = BridgeIngress(client, _registry(), pending_wires)
         await ingress.handle(_wire())
-        assert MEMORY_PROMPT_DEPS_KEY not in client.invoke_node.call_args.kwargs["deps"]
+        assert MEMORY_PROMPT_DEPS_KEY not in client.send.call_args.kwargs["deps"]
 
     async def test_injected_raw_when_memory_agent_present(
         self,
@@ -658,7 +638,7 @@ class TestMemoryPromptInjection:
         _reset_memory_cache()
         ingress = BridgeIngress(client, self._memory_registry(), pending_wires)
         await ingress.handle(_wire(slash_target="scheduler"))
-        deps = client.invoke_node.call_args.kwargs["deps"]
+        deps = client.send.call_args.kwargs["deps"]
         assert MEMORY_PROMPT_DEPS_KEY in deps
         # The bridge ships the RAW template; per-agent localization is the
         # agent-side instructions hook's job, not the bridge's.
@@ -681,8 +661,8 @@ class TestMemoryPromptInjection:
             await ingress.handle(_wire(slash_target="scheduler"))
             await ingress.handle(_wire(slash_target="scheduler"))
         # Published despite the load failure; deps simply omits the key.
-        assert client.invoke_node.called
-        assert MEMORY_PROMPT_DEPS_KEY not in client.invoke_node.call_args.kwargs["deps"]
+        assert client.send.called
+        assert MEMORY_PROMPT_DEPS_KEY not in client.send.call_args.kwargs["deps"]
         # Logged exactly once across the two invocations (the one-shot latch).
         errs = [r for r in caplog.records if "failed to load the memory prompt" in r.getMessage()]
         assert len(errs) == 1

@@ -113,29 +113,31 @@ Four independent processes, communicating exclusively through Kafka:
 
 Slash and @-mention paths bypass the router entirely. They continue
 to publish directly from `BridgeIngress.handle` to
-`discord.channel.{cid}.in` with `reply_topic=discord.outbox`.
+`discord.channel.{cid}.in` via `client.send(reply_to="discord.outbox")`,
+so the targeted agent's terminal reply is delivered to the outbox
+consumer.
 
 ### Per-message flow (ambient)
 
 1. A human posts an ambient message (no `/slash`, no `@-mention`).
 2. Bridge normalizes to `kind="message"` and publishes to
-   `discord.ambient.in` with `reply_topic=_calf.ambient.callback-discard`.
-   The original wire, the phonebook, and the channel-history slice are
+   `discord.ambient.in` via `client.send(reply_to=None)`. With
+   `reply_to=None` the worker suppresses the terminal point-to-point
+   callback entirely — there is no second publish to wait on. The
+   original wire, the phonebook, and the channel-history slice are
    packed onto a single `deps` dict (`deps={"discord": ..., "phonebook":
-   ..., "history": ...}`) via the stock `client.invoke_node(...)` (see
-   "Implementation notes" for why).
+   ..., "history": ...}`) (see "Implementation notes" for why).
 3. Router agent consumes the envelope, runs its LLM with the phonebook
    roster injected as `temp_instructions`. The LLM emits one
    `dispatch(agent_id="scribe", reasoning="...")` tool call. Pydantic-ai's
    `ToolOutput` pattern terminates the agent loop on that call without
    running a tool body — one LLM turn, no second-pass narration.
-4. The router's `ReturnCall` publishes to two topics (existing calfkit
-   double-publish behavior):
-   - `_calf.ambient.callback-discard` (the inbound `reply_topic`) —
-     nobody subscribes; the envelope is retained per Kafka topic
-     retention and eventually discarded.
-   - `routing.decisions` (the router's `publish_topic`) — picked up
-     by the fan-out consumer.
+4. The router's `RoutingDecision` flows forward on the router's
+   `publish_topic` (`routing.decisions`), where the fan-out consumer
+   subscribes. Because the ambient publish used `reply_to=None`, the
+   worker produces no terminal callback envelope at all — the
+   broadcast to `routing.decisions` is the router's only output and is
+   independent of any callback.
 5. Fan-out consumer recovers the original wire, phonebook, and history
    from `result.deps` (`WireMessage.model_validate(result.deps["discord"])`,
    `phonebook_from_deps(result.deps["phonebook"])`, `result.deps.get("history", [])`)
@@ -148,9 +150,11 @@ to publish directly from `BridgeIngress.handle` to
      `kind="slash"`, `slash_target=<agent_id>`. Channel, message id,
      and author are preserved from the original ambient.
    - Publishes to `bridge.synthesized.in` via the stock
-     `client.invoke_node(deps={"discord": <synth wire dict>, "history":
-     <forwarded history list>})`. Fire-and-forget (the handle's future is
-     cancelled — same pattern as `BridgeIngress.handle`).
+     `client.send(reply_to=None, deps={"discord": <synth wire dict>,
+     "history": <forwarded history list>})`. `reply_to=None` makes this
+     a true fire-and-forget publish — `send` registers no reply future
+     and returns a correlation id, so there is no handle to cancel
+     (same pattern as the ambient publish in `BridgeIngress.handle`).
 6. Bridge synthesized-in consumer receives the envelope, recovers the
    synthesized wire from `result.deps["discord"]` and the forwarded
    history from `result.deps.get("history", [])`, validates both, and
@@ -170,9 +174,10 @@ to publish directly from `BridgeIngress.handle` to
 Bridge ingress branches on `wire.kind`:
 
 - `kind == "slash"` (real slash command or @-mention normalized to slash
-  by `MessageNormalizer`): publish to `discord.channel.{cid}.in`,
-  `reply_topic=discord.outbox`, deps populated. `PendingWires.put` on
-  the wire. Targeted assistant accepts; replies as before. The router is
+  by `MessageNormalizer`): publish to `discord.channel.{cid}.in` via
+  `client.send(reply_to="discord.outbox")`, deps populated. `PendingWires.put`
+  on the wire. Targeted assistant accepts; its terminal reply is delivered
+  to the outbox consumer, and it replies as before. The router is
   not invoked.
 - `kind == "message"`: ambient path (see above).
 
@@ -349,26 +354,7 @@ Before the first ambient message reaches production, the following
 **must** be true. None of these are enforced by the code — they are
 operator responsibilities the bridge cannot verify on its own.
 
-1. **Kafka topic retention on the discard topic** (privacy /
-   compliance). `_calf.ambient.callback-discard` receives a copy of
-   every ambient envelope, including the ambient `deps` — the original
-   Discord wire (author + plaintext content), the phonebook, and the
-   channel-history slice. Cluster default retention (typically 7 days)
-   would persist that on a topic nobody reads. Run BEFORE the first
-   ambient publish:
-
-   ```bash
-   kafka-configs.sh --alter --entity-type topics \
-       --entity-name _calf.ambient.callback-discard \
-       --add-config retention.ms=60000,cleanup.policy=delete
-   ```
-
-   Verify with `kafka-configs.sh --describe --entity-type topics
-   --entity-name _calf.ambient.callback-discard`. The topic name
-   starts with an underscore; some `kafka-topics.sh --list`
-   invocations hide it unless you pass the literal name.
-
-2. **Process startup order.** The router must be running before the
+1. **Process startup order.** The router must be running before the
    bridge starts accepting Discord traffic. Without the router, ambient
    messages publish to `discord.ambient.in` and sit there until
    retention expires; the user sees no reply. There is no in-process
@@ -378,12 +364,12 @@ operator responsibilities the bridge cannot verify on its own.
    hand-rolled deployment, coordinate via deployment ordering or a
    readiness probe upstream of the bridge.
 
-3. **External monitoring on the silent-router signal.** Wire an
+2. **External monitoring on the silent-router signal.** Wire an
    alert on the "publish-without-arrival" log diff (see "Hard
    cutover" below) AND on the `ambient publish aborted` ERROR
    rate. Both should be zero in steady state.
 
-4. **Secrets in `calfkit-router`'s environment.** The router needs
+3. **Secrets in `calfkit-router`'s environment.** The router needs
    credentials for whatever `provider` is set in `router.md` — the
    shipped default `openai-codex` needs the mounted Codex OAuth (see
    `docs/codex-auth.md`); `openai`/`anthropic` need `OPENAI_API_KEY` /
@@ -391,14 +377,16 @@ operator responsibilities the bridge cannot verify on its own.
    the router deployment's secret store, NOT just the bridge's — the
    router runs as an independent process with no shared filesystem.
 
-5. **calfkit version pin.** `pyproject.toml` pins `calfkit~=0.4.0`.
-   The ambient-routing pipeline depends on `NodeResult.deps` exposing
-   the inbound producer deps to `@consumer` functions — the public API
-   that landed in calfkit 0.4.0 (calfkit-sdk#144). Do NOT drop below
-   `0.4.0`: on `0.3.x` the consumers cannot read the wire/phonebook/
-   history back off `deps` and the fan-out chain breaks.
+4. **calfkit version pin.** `pyproject.toml` pins `calfkit~=0.10.0`.
+   The ambient-routing pipeline depends on two public APIs: `NodeResult.deps`
+   exposing the inbound producer deps to `@consumer` functions
+   (calfkit-sdk#144), and `Client.send(user_prompt, topic, *,
+   reply_to=...)` for the fire-and-forget publishes (the `reply_to=None`
+   suppression and `reply_to="discord.outbox"` delivery that replaced the
+   removed `Client.invoke_node`). Do NOT drop below `0.10.0`: earlier
+   releases lack `Client.send`, so the ingress and fan-out publishes break.
 
-6. **Discord "Read Message History" permission.** The bridge fetches
+5. **Discord "Read Message History" permission.** The bridge fetches
    recent channel history on every agent invocation and projects it
    into the agent's `message_history` (see "Conversation history"
    below). The fetch uses Discord REST `GET /channels/{id}/messages`,
@@ -676,30 +664,17 @@ on every publish.
 | `discord.ambient.in`                 | Bridge ingress (ambient branch)       | Router agent                   |
 | `routing.decisions`                  | Router agent (publish_topic)          | Fan-out @consumer              |
 | `bridge.synthesized.in`              | Fan-out @consumer                     | Bridge synthesized-in @consumer|
-| `_calf.ambient.callback-discard`     | Router agent (frame.callback_topic)   | nobody (intentional)           |
 
-The discard topic exists because calfkit's `_publish_action` always
-publishes `ReturnCall` to `frame.callback_topic` (= the caller's
-`reply_topic`) **in addition** to whatever `publish_topic` triggers via
-FastStream's `@publisher` wrapping. We point the discard topic at a
-no-op so the second publish lands somewhere harmless. The router's
-useful output goes via `publish_topic` to `routing.decisions`.
-
-**Operator action required — retention.** The discard topic receives
-a copy of every router envelope, which carries the ambient `deps` (the
-original Discord wire — author, content — plus the phonebook and the
-channel-history slice). The same envelope also goes to
-`routing.decisions` for the fan-out consumer, so we cannot strip the
-deps from the discard side without losing them from the consumed side.
-Configure short retention on the discard
-topic explicitly (the cluster default is typically 7 days, which
-would persist plaintext message history on a topic nobody reads):
-
-```bash
-kafka-configs.sh --alter --entity-type topics \
-    --entity-name _calf.ambient.callback-discard \
-    --add-config retention.ms=60000,cleanup.policy=delete
-```
+There is **no** callback/discard topic in this pipeline. The ambient
+and synthesized publishes both use `client.send(reply_to=None)`, which
+tells the worker to suppress the terminal point-to-point callback
+entirely — so no callback envelope is ever produced. The router's
+useful output reaches the fan-out solely via its `publish_topic`
+(`routing.decisions`); that broadcast is independent of any callback.
+A side benefit: with no callback topic, no plaintext copy of every
+ambient message (the wire, phonebook, and channel-history slice carried
+on `deps`) is persisted on a topic nobody reads — there is nothing
+extra for operators to retention-configure.
 
 ### Topics unchanged
 
@@ -743,7 +718,7 @@ author, etc.), the publisher's phonebook (to validate the chosen
 `agent_id`), and the channel-history slice (to forward to the chosen
 agent). All three ride on the invocation's `deps` dict — the same
 bare `dict[str, Any]` a tool reads as `ctx.deps["discord"]`. The
-bridge ingress packs them in one stock `client.invoke_node(deps=...)`
+bridge ingress packs them in one stock `client.send(deps=...)`
 call:
 
 ```python

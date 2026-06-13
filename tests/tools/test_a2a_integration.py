@@ -18,7 +18,6 @@ isolation (each builds its own dict shape).
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -132,12 +131,12 @@ class TestWireConventionRoundTrip:
         from calfcord.tools.builtin import private_chat as pc
 
         # Stub calfkit Client to capture the deps the bridge writes —
-        # no Kafka, no real publish. Reuses the same fixture pattern as
-        # tests/bridge/test_ingress.py.
+        # no Kafka, no real publish. The slash ingress publishes
+        # fire-and-forget via ``Client.send``, which returns a correlation
+        # id string (no handle/future to await), so the stub returns the
+        # wire's event id.
         client = MagicMock()
-        handle = MagicMock()
-        handle._future = asyncio.get_event_loop().create_future()
-        client.invoke_node = AsyncMock(return_value=handle)
+        client.send = AsyncMock(return_value="evt-1")
 
         registry = AgentRegistry(
             [
@@ -180,7 +179,7 @@ class TestWireConventionRoundTrip:
         await ingress.handle(wire)
 
         # What the bridge actually published in deps.
-        serialized = client.invoke_node.call_args.kwargs["deps"]["phonebook"]
+        serialized = client.send.call_args.kwargs["deps"]["phonebook"]
 
         # The tool consumes this on the other side. The full round-trip
         # must succeed AND preserve every field the tool reads.
