@@ -6,10 +6,10 @@
 env-driven transforms:
 
 * ``CALFCORD_TOOLS_INCLUDE`` — restrict the hosted/advertised surface to a
-  comma-separated allow-list of tool names. Per-tool Docker images
-  (``calfcord-package-tools``) bake this in so a container subscribes to
-  only the ``tool.<name>.input`` topics it was built for. Unset means
-  "register every node".
+  comma-separated allow-list of tool names. Set it on a tools host (e.g.
+  ``docker run -e CALFCORD_TOOLS_INCLUDE=… calfcord:latest calfkit-tools``)
+  so that host subscribes to only the listed ``tool.<name>.input`` topics.
+  Unset means "register every node".
 
 * ``CALFCORD_TOOLS_ALIAS`` — clone a node under one or more additional wire
   identities (``src=dst`` pairs), so the same tool body is reachable on a
@@ -205,7 +205,8 @@ def apply_deploy_filters(nodes: Sequence[ToolNodeDef]) -> dict[str, ToolNodeDef]
     its ``tool_schema.name``; an alias whose ``src`` matches a node also
     registers a clone under its ``dst``. The ``CALFCORD_TOOLS_INCLUDE``
     allow-list, when set, drops any name not listed (applied *after* alias
-    expansion so ``--rename a=b`` + ``--include b`` yields a true rename).
+    expansion so ``CALFCORD_TOOLS_ALIAS=a=b`` + ``CALFCORD_TOOLS_INCLUDE=b``
+    yields a true rename).
 
     Args:
         nodes: The full, explicit tool surface to expose. Order is

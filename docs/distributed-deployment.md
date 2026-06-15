@@ -7,9 +7,9 @@ working. The single thing that moves is where the broker lives — every
 process just dials a remote `CALF_HOST_URL` instead of a local one.
 
 That is the whole graduation. The rest of this page is the deep operator
-reference for the heavier shapes (per-tool images, per-agent crash
-isolation, broker auth) you reach for *after* the basic multi-host split
-is running.
+reference for the heavier shapes (narrowing a host's tool surface, pinning
+a tool to one box, per-agent crash isolation, broker auth) you reach for
+*after* the basic multi-host split is running.
 
 ## The portable invariant
 
@@ -152,8 +152,12 @@ require a native install (`$CALFCORD_HOME`) because the emitted manifests
 reference the install's shim launcher and home paths.
 
 The remaining sections are the **deep operator reference** for the
-graduation: splitting tools across hosts with slim images, pinning a tool
-to one box, mounting workspaces, and securing the broker.
+graduation: narrowing a host's tool surface, pinning a tool to one box,
+running the same tool on several hosts, per-agent crash isolation,
+mounting workspaces, and securing the broker. The mechanism throughout is
+**environment variables on the canonical `calfcord:latest` image** (set at
+`docker run`, in compose, in K8s, or in a bare-metal env) — there is no
+separate per-tool or per-agent image to build.
 
 ## 1. Why split
 
@@ -163,13 +167,15 @@ answering on `tool.terminal.input` is on the same host or behind a
 Tailscale exit node — calfkit's RPC layer abstracts the wire and
 calfcord inherits the contract.
 
-The killer use case is the **remote terminal tool**. Run
-`calfcord-package-tools terminal` on a remote dev box with that box's
-project bind-mounted at `/workspace`. Run the bridge + router + agent
-on your laptop. When the agent's LLM runs `git log` through `terminal`,
-the command executes against the remote box's filesystem — the LLM never
-knew the difference, but the side effects landed on a different
-machine.
+The killer use case is the **remote terminal tool**. On a remote dev box,
+run the canonical image narrowed to just `terminal` —
+`docker run -e CALFCORD_TOOLS_INCLUDE=terminal calfcord:latest calfkit-tools`
+(or, on a bare-metal install, `CALFCORD_TOOLS_INCLUDE=terminal uv run
+calfkit-tools`) — with that box's project bind-mounted at `/workspace`. Run
+the bridge + router + agent on your laptop. When the agent's LLM runs
+`git log` through `terminal`, the command executes against the remote box's
+filesystem — the LLM never knew the difference, but the side effects landed
+on a different machine.
 
 When NOT to split: single-host deployments don't benefit. The shipped
 `calfcord:latest` image hosts every tool and every agent on one
@@ -177,62 +183,64 @@ process; if you're on a laptop or a single VPS, `docker compose up` is
 fine. Splitting only buys something when the tool surface needs to
 reach resources on a different host than the agents.
 
-## 2. Building a per-tool image
+## 2. Narrowing a tools host to a subset
 
-The two packaging CLIs (`calfcord-package-tools`,
-`calfcord-package-agents`) are local-only — they build images, they don't
-push them. Push to whichever registry you want via plain `docker push`
-after the build. See `docs/security.md` § Distributed deployments for the
-threat model that goes with running tools on multiple hosts.
+There is no separate per-tool image to build. The canonical
+`calfcord:latest` ships every tool, and you narrow what a given host
+actually hosts at boot with the `CALFCORD_TOOLS_INCLUDE` env var — a
+comma-separated allow-list applied by
+`src/calfcord/tools/deploy_filters.py` (`apply_deploy_filters`) over the
+explicit `ALL_TOOLS` surface. Unset means "host every tool"; set, the host
+subscribes to only the `tool.<name>.input` topics it was told to keep. See
+`docs/security.md` § Distributed deployments for the threat model that goes
+with running tools on multiple hosts.
 
-The basic shape:
+The basic shape — host only `terminal`:
 
 ```bash
-uv run calfcord-package-tools terminal --tag my-terminal:1.0
+docker run -d \
+  --name calfcord-terminal \
+  --restart unless-stopped \
+  -e CALFCORD_TOOLS_INCLUDE=terminal \
+  calfcord:latest calfkit-tools
 ```
 
-That writes a slim Dockerfile that narrows the hosted tool surface via
-the `CALFCORD_TOOLS_INCLUDE=terminal` env var (applied at boot by
-`src/calfcord/tools/deploy_filters.py` over the explicit `ALL_TOOLS`
-list) and installs only the OS deps that `terminal` actually needs (none
-beyond the always-on `ca-certificates` + `git` — the hermes terminal
-uses bash + a PTY, so no `tmux`). The image is materially smaller than
-`calfcord:latest`:
+The trailing `calfkit-tools` overrides the image's default `calfkit-bridge`
+command so this container runs the tools process. On a bare-metal install
+the equivalent narrows the same surface from the real process environment:
 
 ```bash
-docker image inspect my-terminal:1.0 --format '{{.Size}}'
+CALFCORD_TOOLS_INCLUDE=terminal uv run calfkit-tools
 ```
 
-Verify the resulting registry contains only the tools you asked for:
+> **Read at import, not from in-process dotenv.** `CALFCORD_TOOLS_INCLUDE`
+> (and `CALFCORD_TOOLS_ALIAS`, below) are consumed when
+> `calfcord.tools` is *imported* — `TOOL_REGISTRY = apply_deploy_filters(...)`
+> runs at module load, before the runner's own `load_dotenv()`. So they must
+> be in the **real environment** of the process: pass them with
+> `--env-file config/.env` (or `export` them, or `-e` on `docker run`), not
+> a value the runner would have to read out of a dotenv file at runtime.
+> Inside a container `env_file:`/`-e` already puts them in the environment,
+> so the Docker path needs nothing extra.
+
+Verify the registry contains only the tools you asked for:
 
 ```bash
-docker run --rm --entrypoint /bin/sh my-terminal:1.0 \
+docker run --rm -e CALFCORD_TOOLS_INCLUDE=terminal --entrypoint /bin/sh calfcord:latest \
   -c "python -c 'from calfcord.tools import TOOL_REGISTRY; print(sorted(TOOL_REGISTRY))'"
 # ['terminal']
 ```
 
-OS-dep slimming is per-tool: `search_files` brings `ripgrep`; `terminal`
-and `execute_code` need nothing beyond the always-on `ca-certificates` +
-`git` (no `tmux` anymore). Other tools bring nothing extra.
-
-Multiple tools in one image:
+Host several tools by listing them:
 
 ```bash
-uv run calfcord-package-tools terminal read_file write_file patch \
-  --tag my-coding-tools:1.0
+docker run -d --restart unless-stopped \
+  -e CALFCORD_TOOLS_INCLUDE=terminal,read_file,write_file,patch \
+  calfcord:latest calfkit-tools
 ```
 
-To inspect the generated Dockerfile without building anything, pass
-`--dry-run`:
-
-```bash
-uv run calfcord-package-tools terminal --tag my-terminal:1.0 --dry-run
-```
-
-NOTE: v1 does no Python-dep slimming. Every generated image installs the
-full `pyproject.toml` deps. The size win comes from OS-dep slimming and
-from skipping unused tool *code paths* at runtime, not from a smaller
-Python wheel set.
+A typo in the allow-list that filters down to nothing fails fast — see
+§ 8, Empty registry.
 
 ## 3. Deploying the same tool on multiple hosts
 
@@ -242,38 +250,40 @@ deploy the `patch` worker on two hosts, both compete for messages
 on the same topic and the broker round-robins between them: the agent
 has no way to choose which host runs a given call.
 
-The `--rename SRC=DST` flag on `calfcord-package-tools` lets you expose
-the same Python tool body under a different schema name in the
-resulting image. The renamed tool subscribes to `tool.<DST>.input`
-instead, so two hosts can serve `patch` (one under its original
-name on a workstation, one renamed to `patch_eu` on a remote VM)
-and agents can call either by picking the appropriate name.
+The `CALFCORD_TOOLS_ALIAS=src=dst` env var lets you expose the same Python
+tool body under a different schema name on a given host. The aliased clone
+subscribes to `tool.<dst>.input` instead, so two hosts can serve `patch`
+(one under its original name on a workstation, one aliased to `patch_eu` on
+a remote VM) and agents can call either by picking the appropriate name.
 
-### Build the renamed image
+### Run the aliased host
+
+On the remote VM, set both env vars on the canonical image:
 
 ```bash
-uv run calfcord-package-tools patch \
-  --rename patch=patch_eu \
-  --tag patch-eu:1.0
+docker run -d \
+  --name calfcord-patch-eu \
+  --restart unless-stopped \
+  -e CALFCORD_TOOLS_ALIAS=patch=patch_eu \
+  -e CALFCORD_TOOLS_INCLUDE=patch_eu \
+  calfcord:latest calfkit-tools
 ```
 
-The positional name (`patch`) tells the build which Python tool
-body to include; `--rename` renames it in the resulting image. The
-generated Dockerfile bakes two env vars:
+What each env var does, both applied by `deploy_filters` at boot over
+`ALL_TOOLS`:
 
-- `CALFCORD_TOOLS_ALIAS=patch=patch_eu` — `deploy_filters` (the boot-time
-  transform over `ALL_TOOLS`) clones the `patch` `ToolNodeDef` under the
-  new name with all four name-bound fields rewritten (`tool_schema.name`,
-  `subscribe_topics`, `publish_topic`, `node_id`).
-- `CALFCORD_TOOLS_INCLUDE=patch_eu` — the filter drops the
-  original so this host subscribes ONLY to `tool.patch_eu.input`.
-  Without this, the host would subscribe to BOTH topics and race
-  with the workstation on `tool.patch.input`.
+- `CALFCORD_TOOLS_ALIAS=patch=patch_eu` — clones the `patch` `ToolNodeDef`
+  under the new name with all four name-bound fields rewritten
+  (`tool_schema.name`, `subscribe_topics`, `publish_topic`, `node_id`).
+- `CALFCORD_TOOLS_INCLUDE=patch_eu` — the include filter is applied *after*
+  alias expansion, so it drops the original and this host subscribes ONLY
+  to `tool.patch_eu.input`. Without it, the host would subscribe to BOTH
+  topics and race with the workstation on `tool.patch.input`.
 
-The CLI translates positional names through the alias map before
-baking `CALFCORD_TOOLS_INCLUDE`, so typing `patch` (the on-disk
-source name) produces the correct filter for the post-rename name —
-no operator math required.
+(Aliasing requires a stateless tool body. A tool that registers node-scoped
+resources or lifecycle hooks — only `todo` and `private_chat` today — can't
+be cloned under a second wire identity and `deploy_filters` raises rather
+than build a broken clone.)
 
 ### Configure the agent host
 
@@ -318,22 +328,26 @@ worker (whichever host subscribed to that topic) services the call.
   chase the chain — only `tmp` would be registered as a clone of
   `patch`, not `patch_eu`.
 
-## 4. Building a per-agent image
+## 4. Per-agent crash isolation
+
+The all-in-one `calfkit-agent` Worker hosts every agent in one process,
+which is fine for most deployments. If you want a misbehaving agent to be
+able to restart without touching its peers, split that single process into
+one per agent — all on the same `calfcord:latest` image, no custom build.
+
+`calfcord deploy docker` emits exactly this as a `compose.override.yml`
+snippet: one `calfkit-agent <name>` service per defined agent, each
+inheriting the base build/env from the shipped compose via `extends`. Run
+each with `restart: unless-stopped` so the supervisor recovers them
+independently.
 
 ```bash
-uv run calfcord-package-agents scribe --tag my-scribe:1.0
+calfcord deploy docker            # points at the real compose + prints the per-agent override
 ```
 
-The generated Dockerfile `COPY`s only `agents/scribe.md` instead of the
-full `agents/` directory. The selected agents are wired into the same
-`calfkit-agent` entrypoint as the all-in-one image.
-
-This is mostly useful for crash isolation per agent (a misbehaving
-agent's container can restart without touching its peers). Most
-deployments don't need it — the all-in-one `calfkit-agent` Worker hosts
-every agent in one process without trouble. If you do split, list each
-agent's image as its own compose service with `restart: unless-stopped`
-so the supervisor recovers them independently.
+Bare metal, the equivalent is running one `calfkit-agent` process per agent
+host rather than one Worker hosting all of them; every process dials the
+same broker.
 
 ## 4a. Running MCP servers on a separate host
 
@@ -415,8 +429,9 @@ docker run -d \
   -e DISCORD_APPLICATION_ID=$DISCORD_APPLICATION_ID \
   -e DISCORD_GUILD_ID=$DISCORD_GUILD_ID \
   -e CALFCORD_WORKSPACE_DIR=/workspace \
+  -e CALFCORD_TOOLS_INCLUDE=terminal \
   -v /home/me/my-project:/workspace \
-  my-terminal:1.0
+  calfcord:latest calfkit-tools
 ```
 
 The Discord env vars are required because `calfkit-tools` boots an
@@ -478,13 +493,14 @@ available.
 
 ## 7. Workspace mount semantics
 
-Per-tool images consume the same `CALFCORD_WORKSPACE_DIR` env var as
+A narrowed tools host consumes the same `CALFCORD_WORKSPACE_DIR` env var as
 the all-in-one image. Bind-mount the project root into that path:
 
 ```bash
-docker run -e CALFCORD_WORKSPACE_DIR=/workspace \
+docker run -e CALFCORD_TOOLS_INCLUDE=terminal \
+           -e CALFCORD_WORKSPACE_DIR=/workspace \
            -v /home/me/my-project:/workspace \
-           my-terminal:1.0
+           calfcord:latest calfkit-tools
 ```
 
 Once mounted, `read_file("foo.py")` inside the container operates on
@@ -538,7 +554,7 @@ exactly one consumer receives each call — effectively random per call.
 To intentionally scale horizontally, bump the partition count; to pin
 a tool to one host, see § 10.
 
-**Empty registry.** A per-tool image where `CALFCORD_TOOLS_INCLUDE`
+**Empty registry.** A tools host whose `CALFCORD_TOOLS_INCLUDE`
 filters down to nothing fails fast in `runner.py` with `TOOL_REGISTRY
 is empty; nothing to host`. Separately, the agent boot hard-fails with
 a "known tools: …" error if its `tools:` list references a name not in
@@ -550,25 +566,26 @@ one.
 Almost nothing, by design.
 
 - **Agent definitions stay identical.** An agent with
-  `tools: [terminal, web_fetch]` works the same whether the tools are in
-  one image, in two images on two hosts, or in the all-in-one
+  `tools: [terminal, web_fetch]` works the same whether the tools run in
+  one process, on two narrowed hosts, or in the all-in-one
   `calfcord:latest`. Kafka topic names don't change.
-- **Per-tool log isolation.** A misbehaving tool can crash its own
-  container without taking down the others; compose's
+- **Per-host log isolation.** A misbehaving tool host can crash and
+  restart without taking down the others; compose's
   `restart: unless-stopped` recovers each independently.
-- **Independent rollout.** Ship a new `terminal` by redeploying only
-  the `my-terminal` image — the bridge never read the tool code, so it
+- **Independent rollout.** Ship a new `terminal` by restarting only the
+  tools host that serves it — the bridge never read the tool code, so it
   needs no restart.
-- **No tool-authoring change.** The packaging CLIs change deployment
+- **No tool-authoring change.** Narrowing/aliasing change deployment
   topology, not the contract. `docs/authoring-tools.md`'s rules (the
   `agent_tool` decorator, the `"error: "` discriminator, the
   `RuntimeError` boundary) are unchanged.
 
 ## 10. Combining with all-in-one
 
-You can run `calfcord:latest` on host A AND a per-tool image like
-`my-terminal:1.0` on host B at the same time. Kafka load-balances calls to
-`tool.terminal.input` between them via consumer-group semantics — but
+You can run the full `calfcord:latest` tools host on host A AND a host B
+narrowed to `terminal` (`CALFCORD_TOOLS_INCLUDE=terminal`) at the same time.
+Kafka load-balances calls to `tool.terminal.input` between them via
+consumer-group semantics — but
 because each call lands on exactly ONE of the two consumers, the
 effective behavior is "terminal runs on either A or B, randomly per call".
 This is almost never what you want — and for the stateful tools

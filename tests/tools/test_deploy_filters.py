@@ -2,7 +2,7 @@
 
 ``apply_deploy_filters`` composes the tool registry from an explicit list
 of :class:`ToolNodeDef` objects, applying the deploy-time
-``CALFCORD_TOOLS_INCLUDE`` (per-tool images) and ``CALFCORD_TOOLS_ALIAS``
+``CALFCORD_TOOLS_INCLUDE`` (per-host tool narrowing) and ``CALFCORD_TOOLS_ALIAS``
 (multi-host rename) transforms. It is a pure function of (nodes, env): no
 filesystem walk, no import cycle. These tests build real ``ToolNodeDef``
 instances via ``agent_tool`` and exercise the transform directly.

@@ -117,7 +117,7 @@ def _resolve_tool_nodes(registry: dict[str, Any]) -> list[Any]:
     failure mode that would be very confusing in production logs.
 
     Empty-registry is most commonly caused by a typo in
-    ``CALFCORD_TOOLS_INCLUDE`` (per-tool images), so the SystemExit
+    ``CALFCORD_TOOLS_INCLUDE`` (per-host tool narrowing), so the SystemExit
     message includes the env var value to short-circuit the operator's
     "why is my registry empty" hunt. A complementary WARNING fires at
     composition time naming the specific typo'd entries (see

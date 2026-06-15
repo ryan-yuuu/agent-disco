@@ -46,7 +46,7 @@ class TestResolveToolNodes:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Empty-registry is most often caused by a typo in
-        ``CALFCORD_TOOLS_INCLUDE`` (per-tool images). The SystemExit
+        ``CALFCORD_TOOLS_INCLUDE`` (per-host tool narrowing). The SystemExit
         message must NAME the env var and surface its value so the
         operator can short-circuit a ``why is my registry empty`` hunt.
         A regression that strips the env-var attribution would pass

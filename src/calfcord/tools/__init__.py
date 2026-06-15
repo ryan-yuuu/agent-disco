@@ -23,7 +23,7 @@ never an artifact of which package version happens to be installed. The
 drift-guard in ``tests/tools/test_registry.py`` fails CI if this list and
 the package's published set diverge.
 
-Deploy-time narrowing (``CALFCORD_TOOLS_INCLUDE``, per-tool images) and
+Deploy-time narrowing (``CALFCORD_TOOLS_INCLUDE``, per-host tool subsets) and
 aliasing (``CALFCORD_TOOLS_ALIAS``, multi-host rename) are applied by
 :func:`~calfcord.tools.deploy_filters.apply_deploy_filters` — a pure
 transform over :data:`ALL_TOOLS`.

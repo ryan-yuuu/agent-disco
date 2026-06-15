@@ -81,9 +81,10 @@ consequences:
 - Future hot-add support on the bridge's registry takes effect without any agent
   or tool restart.
 
-For splitting tools and agents across multiple hosts (slim per-tool images via
-`calfcord-package-tools`, the multi-host `--rename` pattern, and broker
-auth/TLS), see [`distributed-deployment.md`](./distributed-deployment.md).
+For splitting tools and agents across multiple hosts (narrowing a host's tool
+surface with `CALFCORD_TOOLS_INCLUDE`, the multi-host `CALFCORD_TOOLS_ALIAS`
+pattern, and broker auth/TLS), see
+[`distributed-deployment.md`](./distributed-deployment.md).
 
 ### The MCP secrets boundary
 
@@ -184,8 +185,8 @@ org-wide over the broker, not per host: `agent start` first probes the live
 `agent.state` roster across the broker, so it will not start a duplicate of an
 agent that is already running anywhere in the organization.
 
-For the multi-host walkthrough (per-host broker config, slim per-role images, and
-broker auth/TLS) see
+For the multi-host walkthrough (per-host broker config, per-host tool narrowing,
+and broker auth/TLS) see
 [`distributed-deployment.md`](./distributed-deployment.md).
 
 ## Running modes

@@ -329,9 +329,8 @@ def parse_agent_md(path: Path) -> AgentDefinition:
         post = frontmatter.load(path)
     except yaml.YAMLError as e:
         # ``frontmatter.load`` lets ``yaml.YAMLError`` propagate unchanged,
-        # which would escape callers that catch only ``ValueError`` (e.g.
-        # ``calfcord-package-agents``'s narrowed ``except``). Re-raise as
-        # ``ValueError`` so the docstring's contract holds and the
+        # which would escape callers that catch only ``ValueError``. Re-raise
+        # as ``ValueError`` so the docstring's contract holds and the
         # malformed-YAML path is indistinguishable from a malformed-name
         # path at the caller's seam.
         raise ValueError(f"{path}: malformed YAML frontmatter: {e}") from e

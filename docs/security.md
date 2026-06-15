@@ -507,6 +507,6 @@ the holder the same blast radius as a leaked bot token gives them
 inside Discord.
 
 For the operational mechanics of splitting calfcord across hosts —
-including the network prereq, per-tool image build, and
-`CALFCORD_TOOLS_INCLUDE` pinning — see
+including the network prereq and per-host tool narrowing via
+`CALFCORD_TOOLS_INCLUDE` — see
 [`docs/distributed-deployment.md`](./distributed-deployment.md).
