@@ -83,10 +83,6 @@
 | src/calfcord/mcp/config\_write.py              |       44 |        1 |       14 |        0 |     98% |        82 |
 | src/calfcord/mcp/runner.py                     |       39 |       13 |        2 |        1 |     66% |68-79, 83-92, 96 |
 | src/calfcord/mcp/selector.py                   |       37 |        0 |       14 |        0 |    100% |           |
-| src/calfcord/packaging/\_build.py              |       53 |        3 |       12 |        2 |     92% |97, 152-153 |
-| src/calfcord/packaging/cli\_agents.py          |       40 |        1 |       10 |        1 |     96% |       104 |
-| src/calfcord/packaging/cli\_tools.py           |       76 |        1 |       28 |        1 |     98% |       273 |
-| src/calfcord/packaging/dockerfile.py           |       35 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/providers/codex/cli.py            |      151 |       79 |       40 |        1 |     43% |78-99, 103-110, 114-133, 143-153, 187-188, 222-246, 250 |
 | src/calfcord/providers/codex/factory\_hook.py  |       10 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/providers/codex/jwt.py            |       25 |        0 |        2 |        0 |    100% |           |
@@ -111,7 +107,7 @@
 | src/calfcord/tools/private\_chat.py            |      296 |        4 |       70 |        3 |     98% |1299-1306, 1361-1372 |
 | src/calfcord/tools/runner.py                   |       60 |        1 |        6 |        1 |     97% |       198 |
 | src/calfcord/topics.py                         |       11 |        0 |        0 |        0 |    100% |           |
-| **TOTAL**                                      | **8367** |  **582** | **2180** |  **126** | **92%** |           |
+| **TOTAL**                                      | **8163** |  **577** | **2124** |  **122** | **92%** |           |
 
 
 ## Setup coverage badge
