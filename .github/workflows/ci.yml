@@ -47,7 +47,7 @@ jobs:
     # Drop this flag once the baseline is zero.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up uv (+ Python 3.12)
         uses: astral-sh/setup-uv@v6
         with:
@@ -63,6 +63,19 @@ jobs:
   test:
     name: pytest
     runs-on: ubuntu-latest
+    # Test EVERY minor version in the supported window — the
+    # requires-python floor (3.12) through the version the Docker image
+    # ships (3.14), inclusive. A matrix lists discrete versions (not a
+    # range), so 3.13 is named explicitly; omitting it would leave an
+    # untested gap where intermediate-release changes (e.g. the 3.13
+    # stdlib ``audioop`` removal) could hide. One job definition fans out
+    # into parallel legs — we don't hand-write a job per version.
+    # ``fail-fast: false`` lets every leg's result land even if one fails,
+    # so a single-version break doesn't mask the others.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
     # Elevated for THIS job only (the workflow default is ``contents: read``).
     # python-coverage-comment-action needs ``contents: write`` to commit the
     # badge + coverage data to its data branch
@@ -75,11 +88,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up uv (+ Python 3.12)
+      - uses: actions/checkout@v6
+      - name: Set up uv (+ Python ${{ matrix.python-version }})
         uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
       - name: Install dependencies
         run: uv sync --frozen
@@ -89,6 +102,12 @@ jobs:
         run: uv run pytest -q --cov --cov-report=term-missing
       - name: Coverage comment
         id: coverage_comment
+        # Publish the badge + comment from ONE matrix leg only. Running the
+        # coverage action on every interpreter would race to commit the data
+        # branch, post duplicate comments, and collide on the upload-artifact
+        # name below. 3.12 (the requires-python floor) is the canonical
+        # reporter, keeping the badge stable across matrix changes.
+        if: matrix.python-version == '3.12'
         uses: py-cov-action/python-coverage-comment-action@v3
         with:
           GITHUB_TOKEN: ${{ github.token }}
@@ -97,7 +116,7 @@ jobs:
           MINIMUM_ORANGE: 70
       - name: Store coverage comment (for fork / Dependabot PRs)
         uses: actions/upload-artifact@v4
-        if: steps.coverage_comment.outputs.COMMENT_FILE_WRITTEN == 'true'
+        if: matrix.python-version == '3.12' && steps.coverage_comment.outputs.COMMENT_FILE_WRITTEN == 'true'
         with:
           name: python-coverage-comment-action
           path: python-coverage-comment-action.txt
@@ -106,8 +125,8 @@ jobs:
     name: docker build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
       - name: Build calfcord image
         # No ``push``; this job exists to catch Dockerfile breakage early.
         # ``type=gha`` cache keeps subsequent runs cheap.
