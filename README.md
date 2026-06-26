@@ -84,11 +84,12 @@
 | src/calfcord/mcp/config\_write.py              |       44 |        1 |       14 |        0 |     98% |        82 |
 | src/calfcord/mcp/runner.py                     |       39 |       13 |        2 |        1 |     66% |68-79, 83-92, 96 |
 | src/calfcord/mcp/selector.py                   |       37 |        0 |       14 |        0 |    100% |           |
-| src/calfcord/providers/codex/cli.py            |      151 |       79 |       40 |        1 |     43% |78-99, 103-110, 114-133, 143-153, 187-188, 222-246, 250 |
+| src/calfcord/providers/codex/\_paths.py        |        6 |        0 |        0 |        0 |    100% |           |
+| src/calfcord/providers/codex/cli.py            |      151 |       79 |       40 |        1 |     43% |79-100, 104-111, 115-134, 144-154, 188-189, 223-247, 251 |
 | src/calfcord/providers/codex/factory\_hook.py  |       10 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/providers/codex/jwt.py            |       25 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/providers/codex/model\_client.py  |       98 |        1 |       26 |        3 |     97% |189, 361-\>357, 374-\>377 |
-| src/calfcord/providers/codex/prompt\_cache.py  |      122 |       14 |       24 |        6 |     86% |108-110, 126-\>132, 178-179, 188, 192, 198, 200-\>190, 217-\>exit, 220-221, 241-245 |
+| src/calfcord/providers/codex/prompt\_cache.py  |      122 |       14 |       24 |        6 |     86% |111-113, 129-\>135, 181-182, 191, 195, 201, 203-\>193, 220-\>exit, 223-224, 244-248 |
 | src/calfcord/providers/codex/prompts.py        |      223 |       14 |       60 |        7 |     93% |207, 211-\>exit, 213, 216-217, 263-264, 314, 342-343, 348, 354, 377-378, 555 |
 | src/calfcord/providers/codex/token\_store.py   |       44 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/router/config.py                  |        9 |        0 |        0 |        0 |    100% |           |
@@ -108,7 +109,7 @@
 | src/calfcord/tools/private\_chat.py            |      296 |        4 |       70 |        3 |     98% |1299-1306, 1361-1372 |
 | src/calfcord/tools/runner.py                   |       60 |        1 |        6 |        1 |     97% |       198 |
 | src/calfcord/topics.py                         |       11 |        0 |        0 |        0 |    100% |           |
-| **TOTAL**                                      | **8285** |  **577** | **2156** |  **122** | **92%** |           |
+| **TOTAL**                                      | **8291** |  **577** | **2156** |  **122** | **92%** |           |
 
 
 ## Setup coverage badge
