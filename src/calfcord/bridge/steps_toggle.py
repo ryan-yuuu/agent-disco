@@ -45,7 +45,7 @@ from typing import Any
 
 import discord
 
-from calfcord.bridge.steps import _pluralize_steps, _render_tree_blocks
+from calfcord.bridge.steps_render import _pluralize_steps, _render_tree_blocks
 from calfcord.bridge.transcripts import TranscriptStoreLike
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ def render_steps(delta_json: str) -> tuple[str, int]:
 
     Deserializes the blob with pydantic-ai's ``ModelMessagesTypeAdapter``,
     runs the shared
-    :func:`~calfcord.bridge.steps._render_tree_blocks` to get one
+    :func:`~calfcord.bridge.steps_render._render_tree_blocks` to get one
     rendered string per visual block (a prose block, or a ``● tool(args)`` /
     ``⎿ result`` tree block), and joins them with a blank line. The text is
     returned in full — NO truncation; the caller decides whether it fits an
