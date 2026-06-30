@@ -53,11 +53,17 @@ class MentionRequest:
     ``mention_ids`` are the parsed ``@<id>`` tokens in order; ``wire`` is the raw
     Discord context the agent reads off ``deps["discord"]``; ``reply_target`` is
     the opaque discord.py object the reply / notice posts against.
+
+    ``message_id`` is the triggering Discord message id — the history-fetch anchor
+    (``before=``) and the transcript-replay join key. ``source_channel_id`` is the
+    un-flattened channel the message landed in (the thread itself, for history
+    fetching); ``channel_id`` is the flattened parent (the webhook host).
     """
 
     content: str
     mention_ids: tuple[str, ...]
     author_label: str
+    message_id: int
     source_channel_id: int
     channel_id: int
     wire: dict[str, Any]

@@ -165,6 +165,7 @@ def _req(content: str = "hello", mentions: tuple[str, ...] = ("scribe",)) -> Men
         content=content,
         mention_ids=mentions,
         author_label="alice",
+        message_id=1,
         source_channel_id=10,
         channel_id=10,
         wire={"channel_id": 10},
