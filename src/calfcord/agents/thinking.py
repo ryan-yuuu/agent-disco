@@ -121,3 +121,34 @@ def build_model_settings(
     raise ValueError(
         f"unknown provider {provider!r}; expected 'anthropic', 'openai', or 'openai-codex'"
     )
+
+
+def build_model_settings_union(effort: ThinkingEffort | None) -> dict[str, Any] | None:
+    """Build a **provider-blind** ``model_settings`` override for ``effort``.
+
+    The bridge no longer knows an agent's provider (the registry that carried it
+    is gone), and calfkit forwards ``model_settings`` raw with provider-specific
+    keys. So the C11 per-call override emits BOTH keys at once —
+    ``anthropic_thinking`` (a dict) and ``openai_reasoning_effort`` (a string):
+    whichever model the target agent runs reads only its own key (pydantic-ai
+    model clients ``.get()`` their key and ignore the foreign one), so one union
+    dict is correct regardless of provider. See R-A1.
+
+    Returns ``None`` for ``effort is None`` (no override) and ``{}`` for
+    ``"none"`` (explicit no-override), mirroring :func:`build_model_settings`.
+    """
+    if effort is None:
+        return None
+    if effort == "none":
+        return {}
+    settings: dict[str, Any] = {}
+    budget = _ANTHROPIC_BUDGET_TOKENS.get(effort)
+    if budget is not None:
+        settings["anthropic_thinking"] = {"type": "enabled", "budget_tokens": budget}
+    reasoning = _OPENAI_REASONING_EFFORT.get(effort)
+    if reasoning is not None:
+        settings["openai_reasoning_effort"] = reasoning
+    if not settings:
+        logger.warning("unknown effort tier %r; degrading to no override", effort)
+        return {}
+    return settings
