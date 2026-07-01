@@ -178,6 +178,24 @@ class AgentDefinition(BaseModel):
             raise ValueError("system_prompt (markdown body) must be non-empty")
         return v
 
+    @field_validator("a2a", "handoff")
+    @classmethod
+    def _normalize_empty_peer_list(cls, v: bool | tuple[str, ...]) -> bool | tuple[str, ...]:
+        """Treat an empty peer list (``a2a: []`` / ``handoff: []``) as ``False``.
+
+        An empty tuple would otherwise pass :meth:`AgentFactory._build_peers`'s
+        capability guard and construct a bare ``Messaging()`` / ``Handoff()`` —
+        which calfkit rejects (it needs at least one peer name or
+        ``discover=True``), crashing the agent worker at boot with an error that
+        names neither the agent nor the field. "No peers" is unambiguously
+        "capability off" (there is no useful meaning for the tool injected with
+        zero reachable peers), so canonicalize ``()`` → ``False`` here — keeping
+        the field a clean tri-state (``True`` / ``False`` / non-empty tuple).
+        """
+        if isinstance(v, tuple) and not v:
+            return False
+        return v
+
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, v: tuple[str, ...] | None) -> tuple[str, ...] | None:

@@ -160,6 +160,13 @@ class TestPeers:
         node = _factory().build_node(_definition(a2a=False, handoff=False))
         assert node._peers == ()
 
+    def test_empty_peer_lists_yield_no_peers_without_crashing(self) -> None:
+        """`a2a: []` / `handoff: []` normalize to False at the definition layer, so
+        the factory builds no peers rather than a bare Messaging()/Handoff() (which
+        calfkit rejects — the boot-crash this guards against)."""
+        node = _factory().build_node(_definition(a2a=[], handoff=[]))
+        assert node._peers == ()
+
     def test_a2a_list_restricts_to_named_peers(self) -> None:
         node = _factory().build_node(_definition(a2a=("scribe", "researcher")))
         assert Messaging("scribe", "researcher") in node._peers

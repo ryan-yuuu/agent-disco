@@ -191,6 +191,15 @@ class TestAgentDefinitionValidators:
     def test_handoff_accepts_peer_list_coerced_to_tuple(self) -> None:
         assert _make_definition(handoff=["scribe"]).handoff == ("scribe",)
 
+    def test_a2a_empty_list_normalizes_to_false(self) -> None:
+        """`a2a: []` ("no peers") is unambiguously "capability off": normalize the
+        empty tuple to False so it can't reach the factory and build a bare
+        Messaging() (which calfkit rejects, crashing agent boot)."""
+        assert _make_definition(a2a=[]).a2a is False
+
+    def test_handoff_empty_list_normalizes_to_false(self) -> None:
+        assert _make_definition(handoff=[]).handoff is False
+
     @pytest.mark.parametrize("bad_effort", ["ludicrous", "HIGH", "", "veryhigh"])
     def test_thinking_effort_rejects_unknown_values(self, bad_effort: str) -> None:
         with pytest.raises(ValidationError, match="thinking_effort"):

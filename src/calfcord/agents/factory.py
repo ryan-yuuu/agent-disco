@@ -201,11 +201,18 @@ def _build_peers(definition: AgentDefinition) -> list[Messaging | Handoff]:
 
     ``Messaging`` injects calfkit's built-in ``message_agent`` consult tool (C4);
     ``Handoff`` enables transferring the caller's turn to a peer (C7).
+
+    Truthiness (not ``is not False``) is the capability guard: an empty tuple is
+    already canonicalized to ``False`` by
+    :meth:`AgentDefinition._normalize_empty_peer_list`, but reading it as falsy
+    here also keeps a hand-built definition (e.g. ``model_construct``, which
+    skips validators) from constructing a peerless ``Messaging()``/``Handoff()``
+    that calfkit would reject.
     """
     peers: list[Messaging | Handoff] = []
-    if definition.a2a is not False:
+    if definition.a2a:
         peers.append(Messaging(discover=True) if definition.a2a is True else Messaging(*definition.a2a))
-    if definition.handoff is not False:
+    if definition.handoff:
         peers.append(Handoff(discover=True) if definition.handoff is True else Handoff(*definition.handoff))
     return peers
 
