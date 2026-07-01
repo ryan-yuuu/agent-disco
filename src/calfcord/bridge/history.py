@@ -107,11 +107,10 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_CACHE_TTL_SECONDS = 2.0
-"""Default TTL for the per-channel fetch cache. Tuned to absorb router
-fan-out bursts — a single ambient message fans out into N synthesized
-slash invocations, all hitting :meth:`ChannelHistoryFetcher.fetch`
-within a few hundred milliseconds with the same
-``(source_channel_id, before_message_id, limit)`` key. 2 seconds is
+"""Default TTL for the per-channel fetch cache. Tuned to coalesce bursts of
+fetches that hit :meth:`ChannelHistoryFetcher.fetch` with the same
+``(source_channel_id, before_message_id, limit)`` key within a few hundred
+milliseconds (e.g. overlapping turns in the same channel). 2 seconds is
 long enough to coalesce the burst without serving meaningfully stale
 data on the next user message."""
 
@@ -282,10 +281,9 @@ class ChannelHistoryFetcher:
         # ``(source_channel_id, before_message_id, limit)`` key share a
         # single Discord REST call. Without this, the TTL cache only
         # coalesces *sequential* bursts (first caller's result is cached
-        # by the time the second arrives) — but a router fan-out
-        # triggers N concurrent fetches simultaneously, and all N would
-        # otherwise race past the empty cache and each hit Discord
-        # independently. The single-flight map ensures one fetch
+        # by the time the second arrives) — but a simultaneous burst of
+        # same-key fetches would each race past the empty cache and hit
+        # Discord independently. The single-flight map ensures one fetch
         # serves all N callers.
         self._in_flight: dict[
             tuple[int, int, int], asyncio.Future[list[HistoryRecord]]

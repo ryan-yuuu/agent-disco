@@ -355,8 +355,8 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
     Like :func:`_run_lifecycle`, these drive the *install-scoped* Process Compose
     supervisor: its REST port is derived from ``$CALFCORD_HOME`` and the roster
-    ops talk to it (and, for ``start``/``ps``, to the broker-wide control-plane
-    probe). A dev run (no ``CALFCORD_HOME``) has no stable home for the supervisor,
+    ops talk to it (and, for ``start``/``ps``, to the broker-wide live-roster
+    (mesh) probe). A dev run (no ``CALFCORD_HOME``) has no stable home for the supervisor,
     so these verbs refuse to run there with the same actionable native-install
     message rather than driving a half-built invocation against the project tree.
 
@@ -405,7 +405,7 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
         return asyncio.run(roster.agent_restart(home, name=args.name))
 
     # ``start`` (and ``start --all``) additionally consult the broker-wide
-    # control-plane probe, so they need the broker URL. ``start --all`` targets
+    # live-roster (mesh) probe, so they need the broker URL. ``start --all`` targets
     # every DEFINED agent — the ids come from the agents dir here so roster.py
     # stays off the disk read.
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"

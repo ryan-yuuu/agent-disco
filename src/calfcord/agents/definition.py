@@ -25,9 +25,7 @@ frontmatter field.
 
 ``thinking_effort`` is the one frontmatter field that is operator-tunable
 at runtime — the ``/thinking-effort`` Discord slash command rewrites it
-via :mod:`calfcord.agents.md_writer`. Channel subscriptions
-and other strictly deployment-specific state still live outside the .md
-(see :mod:`calfcord.agents.state`).
+via :mod:`calfcord.agents.md_writer`.
 """
 
 from __future__ import annotations
@@ -144,11 +142,10 @@ class AgentDefinition(BaseModel):
     system_prompt: str
     source_path: Path | None = Field(default=None, exclude=True, repr=False)
     """Path to the ``.md`` file this definition was parsed from. Set by
-    :func:`parse_agent_md`; ``None`` for in-memory test constructions
-    and for the built-in router (which is constructed in code, not
-    parsed from disk). ``exclude=True`` prevents accidental round-trip
-    into a YAML dump; ``repr=False`` keeps logs tidy. Required for the
-    ``/thinking-effort`` slash command's rewrite."""
+    :func:`parse_agent_md`; ``None`` for in-memory test constructions.
+    ``exclude=True`` prevents accidental round-trip into a YAML dump;
+    ``repr=False`` keeps logs tidy. Required for the ``/thinking-effort``
+    slash command's rewrite."""
 
     @field_validator("agent_id")
     @classmethod

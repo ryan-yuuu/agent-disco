@@ -223,7 +223,7 @@ async def agent_start(
     surface and is unused today.
     """
     # Reserved-name chokepoint: the substrate (broker/bridge) and the singleton
-    # components (tools/router) are owned by `calfcord start` and their own
+    # tools component are owned by `calfcord start` and their own
     # component verbs — never the agent roster. The id pattern does NOT reject a
     # creatable `tools.md` (only `calfcord start`'s build_compose_project does), so
     # an `agent start tools` would otherwise drive `start_process('tools')` against
@@ -392,7 +392,7 @@ async def agent_start_all(
     symmetry with the rest of the lifecycle surface and is unused.
     """
     # Drop reserved names BEFORE the empty-check: main.py passes the raw `.md`
-    # stems from detect_agents, and a creatable `tools.md` / `router.md`
+    # stems from detect_agents, and a creatable `tools.md`
     # / `broker.md` / `bridge.md` is not rejected by the id pattern. Without this
     # filter the sweep would fall through to `start_process('tools')` against the
     # live singleton — breaking the "--all never touches another component type"
@@ -469,7 +469,7 @@ async def agent_stop_all(
 
     LOCAL-only and read-from-the-supervisor: the target set is exactly this host's
     Running agent processes (:func:`_running_agent_names` — the same physical filter
-    ``ps`` uses, so the substrate and the tools/router singletons are never
+    ``ps`` uses, so the substrate and the tools singleton are never
     swept). There is no over-the-wire control; ``--all`` acts on THIS host.
 
     Workspace check first (the shared not-running hint + ``1``). Nothing running

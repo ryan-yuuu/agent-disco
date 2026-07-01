@@ -71,7 +71,7 @@ def run_set(agents_dir: Path, name: str, updates: dict[str, str]) -> int:
     The agent must exist (else an ``error:`` line + return 1) and at least one
     update is required. Each field is its own validated-atomic write, so a later
     field's failure can't corrupt an earlier success: any ``ValueError``/``OSError``
-    (a bad choice, an out-of-range int, an unknown tool, an unwritable file) prints
+    (a bad choice, an invalid boolean, an unknown tool, an unwritable file) prints
     ``error: <field>: <e>``, names any fields already applied this call (they stay
     written), and returns 1. On full success it names the fields it wrote and tells
     the operator to restart. Returns 0.
@@ -172,7 +172,7 @@ def _apply_one(md_path: Path, key: str, raw: str) -> None:
         md_writer.update_system_prompt(md_path, raw)
         return
 
-    # Simple text/select/int/bool field — the one shared validated-atomic seam.
+    # Simple text/select/bool field — the one shared validated-atomic seam.
     write_simple_field(md_path, field, raw)
 
 

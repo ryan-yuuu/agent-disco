@@ -102,7 +102,7 @@ subsequent edits are debounced. Consumed by :mod:`calfcord.bridge.progress`."""
 # the live view this is the FULL trace — NO per-part truncation; the only bound
 # is Discord's message cap, beyond which steps_toggle attaches the whole render
 # as a steps.md file. One string per visual block (a prose block, or a
-# call+return pair); the block COUNT is reused by the outbox as the
+# call+return pair); the block COUNT is reused by the reply poster as the
 # ``⤵ N steps`` label, so a tool call and its result count as ONE step.
 
 _TREE_CALL_MARKER: Final[str] = "●"
@@ -280,7 +280,7 @@ def _render_tree_blocks(messages: Sequence[ModelMessage]) -> list[str]:
 
     The VERBOSE/full renderer behind the reply's ``⤵ steps`` expand view
     (:mod:`calfcord.bridge.steps_toggle`) and the source of the
-    outbox's step COUNT (``len(...)`` → the ``⤵ N steps`` label). It is NOT
+    reply poster's step COUNT (``len(...)`` → the ``⤵ N steps`` label). It is NOT
     used by the live progress message — that path renders one
     :class:`StepEvent` at a time via :func:`render_step_line`. Walks the delta
     in order, emitting one string per visual block:

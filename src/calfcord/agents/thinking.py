@@ -5,11 +5,12 @@ Two consumers share this mapper:
 * :class:`calfcord.agents.factory.AgentFactory` — bakes the
   declared ``thinking_effort`` from ``agents/<name>.md`` into the calfkit
   ``Agent`` constructor at agent boot (tier 2). This is the effort that
-  applies to ambient messages.
-* :class:`calfcord.bridge.ingress.BridgeIngress` — forwards
-  the same effort as a per-call override (tier 3) on slash invocations
-  and ``@<agent_id>`` mentions, so a runtime ``/thinking-effort`` change
-  takes effect on the next message without restarting the agent process.
+  governs runs the bridge doesn't intercept — native A2A peer consults and
+  handoffs.
+* :class:`calfcord.bridge.mention_handler.MentionHandler` — forwards
+  the same effort as a per-call override (tier 3) on ``@<agent_id>``
+  mentions, so a runtime ``/thinking-effort`` change takes effect on the
+  next message without restarting the agent process.
 
 The Anthropic ``budget_tokens`` ramp anchors its ``low`` / ``medium`` /
 ``high`` values (4000 / 10000 / 31999) to the same budgets Claude Code's
@@ -21,15 +22,15 @@ plan for sources. ``minimal`` uses Anthropic's documented floor of
 distinct values with ``xhigh`` and ``max`` saturating at ``high``. See
 the per-provider tables below for exact values.
 
-Ambient-message limitation (v1)
--------------------------------
-Per-call (tier 3) overrides only apply when the bridge can identify the
-target agent ahead of time. That's true for slash invocations and
-``@<agent_id>`` mentions (both produce ``WireMessage.slash_target``).
-Plain ambient channel messages flow without a per-call override and fall
-back to the tier-2 effort baked in at agent boot — which means an agent
-needs a restart to pick up a ``/thinking-effort`` change for its ambient
-path.
+Per-call override scope
+-----------------------
+Per-call (tier 3) overrides apply to every message the bridge answers.
+The bridge only answers ``@<agent_id>`` mentions (ambient, un-mentioned
+channel messages are no longer answered under the 0.12 caller surface), so
+it always knows the target agent ahead of time and always injects the
+override. Runs the bridge doesn't intercept — native A2A peer consults and
+handoffs — fall back to the tier-2 effort baked in at agent boot, so those
+pick up a ``/thinking-effort`` change only after the agent process restarts.
 """
 
 from __future__ import annotations

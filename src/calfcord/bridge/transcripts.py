@@ -14,7 +14,7 @@ asyncio event loop and is a hard singleton (the design doc spells out
 why: ``container_name`` pins it, and one gateway connection per shard
 funnels every event and button interaction to the one bridge). So this
 store holds exactly ONE long-lived :class:`aiosqlite.Connection` for its
-lifetime. The outbox consumer is the sole writer; the toggle callback
+lifetime. The reply poster is the sole writer; the toggle callback
 and the replay post-pass are readers — all in the same process. There is
 no cross-process or cross-thread contention to guard against.
 
@@ -90,10 +90,10 @@ class TranscriptRow:
 
     Fields mirror the ``transcripts`` table one-to-one:
 
-    * ``correlation_id`` — idempotency key for outbox retries (PK).
+    * ``correlation_id`` — idempotency key for reply retries (PK).
     * ``conversation_key`` — the replay read scope
       (``wire.source_channel_id``).
-    * ``agent_id`` — the outbox-resolved real emitter.
+    * ``agent_id`` — the reply-poster-resolved real emitter.
     * ``final_message_id`` — the posted reply's id; the replay join key
       and the toggle host message id (UNIQUE).
     * ``delta_json`` — ``ModelMessagesTypeAdapter.dump_json`` of the
@@ -136,9 +136,9 @@ class TranscriptStore:
 
     # A live, persistent store: transcripts, replay, and the expand toggle
     # are all active. The :class:`NullTranscriptStore` substitute reports
-    # ``False`` so the WRITER (the outbox) can gate the toggle-attach + the
-    # transcript write off when the real store failed to open. READERS
-    # (steps_toggle, ingress replay) do NOT check this flag — they call the
+    # ``False`` so the WRITER (the reply poster) can gate the toggle-attach +
+    # the transcript write off when the real store failed to open. READERS
+    # (steps_toggle, history replay) do NOT check this flag — they call the
     # read methods unconditionally and rely on the Null store's no-op
     # returns. A class attribute (not a property) since it is a fixed truth
     # for every real instance.
@@ -197,8 +197,8 @@ class TranscriptStore:
     async def write_turn(self, row: TranscriptRow) -> None:
         """Upsert a transcript row, keyed on ``correlation_id``.
 
-        Uses ``INSERT ... ON CONFLICT(correlation_id) DO UPDATE`` so an
-        outbox retry that re-posts under the **same** ``correlation_id``
+        Uses ``INSERT ... ON CONFLICT(correlation_id) DO UPDATE`` so a
+        reply retry that re-posts under the **same** ``correlation_id``
         overwrites the prior row in place (PK-idempotent for retries),
         rather than erroring or duplicating. The query is fully
         parameterized.
@@ -363,10 +363,10 @@ class NullTranscriptStore:
     **The contract is NOT "every caller gates on ``enabled``".** It is
     split by role:
 
-    * **Writers** (the outbox) gate the toggle-attach + the
+    * **Writers** (the reply poster) gate the toggle-attach + the
       :meth:`write_turn` call on :attr:`enabled` — so a disabled run never
       shows a dead toggle with no row behind it.
-    * **Readers** (steps_toggle's click callback, ingress's replay
+    * **Readers** (steps_toggle's click callback, history's replay
       hydration) do NOT check :attr:`enabled`. They call the read methods
       unconditionally and rely on this store's no-op returns —
       :meth:`get_by_final_message_id` ⇒ ``None`` and
@@ -420,7 +420,7 @@ class NullTranscriptStore:
 # Either the real store or its no-op substitute. Callers type their
 # transcript-store parameters/fields as this union rather than branching on
 # which concrete class they hold. The ``enabled`` flag is consulted only by
-# WRITERS (the outbox gates the toggle-attach + write on it); READERS
-# (steps_toggle, ingress replay) call the read methods unconditionally and
+# WRITERS (the reply poster gates the toggle-attach + write on it); READERS
+# (steps_toggle, history replay) call the read methods unconditionally and
 # lean on the Null store's no-op ``None`` / ``{}`` returns.
 TranscriptStoreLike = TranscriptStore | NullTranscriptStore

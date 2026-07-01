@@ -1,6 +1,6 @@
 """The on-demand step-transcript view button (Phase 3).
 
-On the terminal hop the outbox consumer (the SOLE transcript writer)
+On the terminal hop the reply poster (the SOLE transcript writer)
 attaches a single secondary button to the agent's final reply *when the
 turn used tools* (see
 ``docs/design/step-transcripts-and-live-streaming-plan.md`` §5, §7.5,
@@ -67,7 +67,7 @@ def _collapsed_label(step_count: int) -> str:
 
 
 def build_toggle_button(step_count: int) -> discord.ui.Button[Any]:
-    """Build the view-steps button the outbox attaches to a reply.
+    """Build the view-steps button the reply poster attaches to a reply.
 
     Args:
         step_count: Number of rendered step parts in the turn's transcript.
@@ -123,8 +123,8 @@ class StepsToggleView(discord.ui.View):
     One instance is registered on the gateway client via
     ``client.add_view`` in ``_on_ready``; that single registration handles
     every click carrying :data:`_TOGGLE_CUSTOM_ID`, on any reply message.
-    The throwaway buttons the outbox attaches to individual messages only
-    emit the component JSON.
+    The throwaway buttons the reply poster attaches to individual messages
+    only emit the component JSON.
 
     Holds a reference to the bridge-local transcript store so the callback
     can read the turn's persisted steps by the clicked message's id.
@@ -224,7 +224,7 @@ class StepsToggleView(discord.ui.View):
         # blows up on a corrupt blob, and _render_tree_blocks'
         # ToolCallPart.args_as_json_str blows up on malformed tool-call
         # args. Either would otherwise escape the callback AFTER the defer,
-        # hanging the ephemeral spinner. Mirror the outbox's
+        # hanging the ephemeral spinner. Mirror the reply poster's
         # _render_step_count guard: log + send an error followup instead.
         try:
             text, _count = render_steps(row.delta_json)

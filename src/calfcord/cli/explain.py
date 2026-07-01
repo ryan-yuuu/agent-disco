@@ -98,7 +98,7 @@ The roster — teammates that clock in and out
 Roster members join the *running* workspace on demand and leave when stopped:
 
   - agents   your AI teammates (calfkit-agent), one process per agent or many
-             per process; each subscribes to its channels plus a private inbox.
+             per process; each listens on its own private inbox.
   - tools    the tools host (calfkit-tools): filesystem, terminal, code
              execution, search, web, and todo.
   - mcp      MCP servers (calfkit-mcp), one process per server in mcp.json:

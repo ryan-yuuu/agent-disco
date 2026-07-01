@@ -7,8 +7,8 @@ prompts. Instead:
 * the **bridge** reads the template (:func:`load_memory_prompt`) and ships it
   in ``deps`` under :data:`MEMORY_PROMPT_DEPS_KEY` on every invocation (only
   when the deployment has at least one memory-enabled agent);
-* ``private_chat`` projects ``deps`` forward, so the template survives the
-  A2A hop without per-key plumbing;
+* native A2A (``message_agent`` / handoff) projects ``deps`` forward, so the
+  template survives the A2A hop without per-key plumbing;
 * each memory-enabled agent carries a dynamic-instructions hook
   (:func:`memory_instructions`, registered by the factory) that, at runtime,
   reads the template from ``deps``, localizes it to that agent's
@@ -42,8 +42,9 @@ _MEMORY_DIR_PLACEHOLDER = "{{MEMORY_DIR}}"
 
 MEMORY_PROMPT_DEPS_KEY = "memory_prompt"
 """``deps`` key under which the bridge ships the raw (un-localized) template
-and the agent hook reads it. ``private_chat`` forwards ``deps`` wholesale, so
-this key propagates through A2A chains with no per-key handling."""
+and the agent hook reads it. Native A2A (``message_agent`` / handoff) forwards
+``deps`` wholesale, so this key propagates through A2A chains with no per-key
+handling."""
 
 _cached_prompt: str | None = None
 
@@ -97,12 +98,12 @@ def memory_instructions(agent_id: str) -> Callable[[RunContext[dict]], str | Non
     The factory registers the returned callable on memory-enabled agent nodes
     via ``Agent.instructions``. calfkit invokes it per-run with a
     :class:`RunContext` whose ``.deps`` is the deps dict the invoker passed
-    (the bridge injects the template; ``private_chat`` forwards it). It returns
+    (the bridge injects the template; native A2A forwards it). It returns
     the localized memory block, or ``None`` when no template is present (a
     non-memory deployment, or an invocation path that didn't carry it), so the
     agent degrades gracefully instead of erroring. calfkit appends the result
-    to the agent's instructions alongside its system prompt and the per-call
-    peer roster.
+    to the agent's instructions alongside its system prompt and calfkit's
+    native AgentCard peer directory.
     """
 
     def _hook(ctx: RunContext[dict]) -> str | None:

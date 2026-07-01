@@ -18,7 +18,8 @@ directory of conversation starters and can drill into any thread to
 audit.
 
 When constructed with a ``category_name`` (sourced from
-``CALFKIT_A2A_CHANNEL_CATEGORY`` by the tools runner), the unified
+``CALFKIT_A2A_CHANNEL_CATEGORY`` by the bridge, whose gateway constructs the
+resolver), the unified
 channel is placed under that Discord category on first creation — and
 the category itself is created lazily on the first miss. The child
 channel inherits the category's permission overwrites, so locking down
@@ -27,10 +28,9 @@ rather than a per-channel chore. An existing channel with the
 configured name is reused regardless of its current category, so
 operator overrides and migrations are non-disruptive.
 
-The resolver intentionally does not validate agent identities: callers run
-in deployments that may not have the full roster on hand (e.g. the
-``calfkit-tools`` process, which can't read ``agents/*.md``). Caller code is
-expected to validate ids against the live roster before reaching here.
+The resolver intentionally does not validate agent identities: identity
+validation is the caller's job. The bridge is now its only caller — it
+validates ids against the live mesh roster before reaching here.
 """
 
 from __future__ import annotations
