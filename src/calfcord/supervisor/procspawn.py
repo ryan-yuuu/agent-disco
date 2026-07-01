@@ -1,0 +1,467 @@
+"""Detached roster-process primitives: spawn, identify, terminate (Phase 1).
+
+The roster (agents, tools, MCP servers) is moving OFF Process Compose: PC cannot
+hot-add a process to a live project — a ``POST /project`` bounces every PID on
+both pinned and latest builds (an inherent limitation confirmed by an empirical
+spike). The substrate (broker + bridge) stays on PC; each roster member is instead
+spawned directly as a **detached** process with **no auto-respawn** (a crash makes
+it go offline in the mesh-based status; an operator restarts it).
+
+This module is that mechanism — and *only* the mechanism. It is deliberately:
+
+* **Policy-free.** It launches, identifies, and stops one process given explicit
+  paths. It does not decide *which* processes exist, read the agents dir, resolve
+  ``$CALFCORD_HOME``, or know what a "slot" means beyond a filename stem. Phase 2
+  (which rewires ``roster.py`` / ``lifecycle.py`` onto these primitives) owns that
+  policy.
+* **Silent.** Nothing here prints. The lifecycle/roster callers already own the
+  print-based UX (the not-running hint, the per-agent lines); a primitive that
+  printed would double-speak. Outcomes are returned as values, never stdout.
+* **Injectable at the seams that matter.** Only :func:`terminate` waits on the
+  world, so only it takes an injected ``clock`` / ``sleep`` — the same testability
+  pattern :mod:`lifecycle` uses for its readiness gate — letting the kill/escalate
+  timing be driven deterministically with no real wall-clock elapsed.
+* **Dependency-free.** Stdlib only (no ``psutil``); Darwin + Linux supported.
+
+**The pid-reuse guard (why an identity record, not a bare pid).** A pidfile that
+stored only a pid is a footgun: pids recycle, so a stale pidfile could name a
+*different*, unrelated process that the OS has since assigned the same number —
+and ``terminate`` would then SIGKILL an innocent bystander. So every pidfile
+carries a :class:`PidRecord`: the pid **plus** a re-queryable OS **start-token**
+(Linux ``/proc/<pid>/stat`` field 22 — start time in clock ticks since boot;
+Darwin ``ps -o lstart`` — the process start timestamp). Ownership is confirmed by
+re-reading that token for the live pid and requiring an exact match, so a recycled
+pid (same number, later start time) can never be mistaken for ours. The record
+also carries the argv and a ``spawn_ts`` + ``argv_hash`` fallback identity, both
+for human inspection of the pidfile and as the recorded fallback on any exotic
+platform exposing no start-token (where the guard degrades to *refusing* ownership
+rather than risk signalling a stranger — see :func:`is_ours_and_alive`).
+
+**Why kill the process GROUP.** :func:`spawn_detached` launches with
+``start_new_session=True``, so the child is a session + process-group leader (its
+pgid equals its pid) and every worker it forks under the launcher shim inherits
+that group. :func:`terminate` therefore signals the whole group
+(:func:`os.killpg`) — the entire point of the new session — falling back to the
+bare pid only if the group signal fails. That tears down the shim's child workers
+too, rather than orphaning them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+
+from calfcord._atomic import atomic_write_text
+from calfcord.supervisor.compose import _log_location
+
+# A monotonic clock for :func:`terminate`'s bounded waits. Injected so a test
+# clock can advance in lockstep with the injected ``sleep`` (the lifecycle
+# pattern), making the graceful/escalate timing deterministic.
+Clock = Callable[[], float]
+
+# The inter-poll wait for :func:`terminate`. Awaitable so the roster's async
+# callers never block the event loop during the (up to ``term_timeout_s``)
+# graceful window; injected so tests drive the loop without real time.
+Sleep = Callable[[float], Awaitable[None]]
+
+# Pidfile on-disk schema version, so a future record shape can be recognised and
+# migrated rather than silently misread.
+_PIDFILE_SCHEMA_VERSION = 1
+
+# How often :func:`terminate` re-checks liveness while waiting for a signalled
+# process to die, and how long it waits for the reap after an (unignorable)
+# SIGKILL before returning best-effort.
+_REAP_POLL_INTERVAL_S = 0.05
+_KILL_REAP_TIMEOUT_S = 2.0
+
+# Bound on the Darwin ``ps`` start-token read, so a wedged ``ps`` can never hang
+# a caller. Generous — ``ps`` answers in milliseconds — but finite.
+_PS_TIMEOUT_S = 5.0
+
+
+@dataclass(frozen=True)
+class PidRecord:
+    """The identity of one spawned process, persisted to its pidfile.
+
+    ``pid`` + ``start_token`` are the reuse-proof identity (see the module
+    docstring); ``argv`` / ``spawn_ts`` / ``argv_hash`` are recorded for
+    inspection and as the degraded-platform fallback identity.
+    """
+
+    pid: int
+    argv: tuple[str, ...]
+    start_token: str
+    spawn_ts: float
+    argv_hash: str
+
+
+@dataclass(frozen=True)
+class SpawnedProcess:
+    """What :func:`spawn_detached` hands back: the pid, its record, and its paths."""
+
+    pid: int
+    record: PidRecord
+    pidfile: Path
+    log_path: Path
+
+
+class TerminateResult(Enum):
+    """The outcome of a :func:`terminate` call.
+
+    * ``TERMINATED`` — died on SIGTERM within the graceful window.
+    * ``KILLED`` — survived SIGTERM; SIGKILL was sent (reap is best-effort).
+    * ``ALREADY_DEAD`` — the pid was already gone before any signal.
+    * ``NOT_OURS`` — the pid is alive but its identity does not match; NOT signalled.
+    """
+
+    TERMINATED = "terminated"
+    KILLED = "killed"
+    ALREADY_DEAD = "already_dead"
+    NOT_OURS = "not_ours"
+
+
+# --- path conventions (pure) ------------------------------------------------
+
+
+def pidfile_for(home: str | os.PathLike[str], slot: str) -> Path:
+    """The pidfile path for ``slot`` under ``home``: ``<home>/state/run/<slot>.pid``."""
+    return Path(os.fspath(home)) / "state" / "run" / f"{slot}.pid"
+
+
+def log_path_for(home: str | os.PathLike[str], slot: str) -> Path:
+    """The log path for ``slot``: ``<home>/state/logs/<slot>.log``.
+
+    Delegates to :func:`compose._log_location` so a detached roster process writes
+    to the SAME file Process Compose used for the substrate — ``disco logs`` reads
+    one convention and the two can never drift.
+    """
+    return Path(_log_location(os.fspath(home), slot))
+
+
+# --- spawn ------------------------------------------------------------------
+
+
+def spawn_detached(
+    argv: Sequence[str],
+    *,
+    log_path: str | os.PathLike[str],
+    pidfile: str | os.PathLike[str],
+    env: Mapping[str, str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+) -> SpawnedProcess:
+    """Launch ``argv`` as a detached process and persist its identity pidfile.
+
+    The child is fully detached from the caller's terminal: ``start_new_session``
+    puts it in its own session (so a Ctrl-C to the CLI's process group never reaches
+    it and it outlives the CLI), stdin is ``/dev/null``, and stdout+stderr are
+    MERGED and **appended** to ``log_path`` (binary append, parent dirs created) so
+    successive runs accumulate rather than clobber. ``env`` (when given) REPLACES
+    the child environment wholesale — the mechanism passes it straight to
+    :class:`subprocess.Popen`; ``cwd`` sets the working directory.
+
+    The pidfile is written atomically (same-dir tmp + rename, via
+    :func:`calfcord._atomic.atomic_write_text`) **before returning**, carrying the
+    pid and a re-queryable start-token, so a caller that reads it back the instant
+    this returns can already prove ownership (and never mistake a recycled pid for
+    ours — see the module docstring).
+    """
+    argv = [os.fspath(a) for a in argv]
+    log_path = Path(log_path)
+    pidfile = Path(pidfile)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Binary append: never truncate an existing log, and let the child's own dup'd
+    # fd carry the writes after the parent closes its handle. Not a `with` block —
+    # the handle must stay open across the Popen (which dup's it) and is closed
+    # explicitly in the finally, so a context manager would not fit.
+    log_handle = open(log_path, "ab")  # noqa: SIM115
+    try:
+        # argv is caller-controlled but passed as a list (no shell), so there is no
+        # interpolation surface; the child is detached into its own session.
+        proc = subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            env=dict(env) if env is not None else None,
+            cwd=os.fspath(cwd) if cwd is not None else None,
+        )
+    finally:
+        # Popen dup'd the fd into the child; the parent's handle is now redundant.
+        log_handle.close()
+
+    record = _identity_for(proc.pid, argv)
+    atomic_write_text(pidfile, json.dumps(_record_to_dict(record)))
+    return SpawnedProcess(pid=proc.pid, record=record, pidfile=pidfile, log_path=log_path)
+
+
+def _identity_for(pid: int, argv: Sequence[str]) -> PidRecord:
+    """Build the :class:`PidRecord` for a just-spawned ``pid`` running ``argv``."""
+    start_token = _process_start_token(pid) or ""
+    argv_hash = hashlib.sha256("\x00".join(argv).encode("utf-8")).hexdigest()
+    return PidRecord(
+        pid=pid,
+        argv=tuple(argv),
+        start_token=start_token,
+        spawn_ts=time.time(),
+        argv_hash=argv_hash,
+    )
+
+
+def _record_to_dict(record: PidRecord) -> dict:
+    return {
+        "v": _PIDFILE_SCHEMA_VERSION,
+        "pid": record.pid,
+        "argv": list(record.argv),
+        "start_token": record.start_token,
+        "spawn_ts": record.spawn_ts,
+        "argv_hash": record.argv_hash,
+    }
+
+
+# --- read -------------------------------------------------------------------
+
+
+def read_pidfile(pidfile: str | os.PathLike[str]) -> PidRecord | None:
+    """Parse ``pidfile`` into a :class:`PidRecord`, or ``None`` — never raises.
+
+    A missing file, unreadable bytes, non-JSON content, or a payload lacking the
+    required ``pid``/``argv`` all yield ``None`` (there is simply no usable record),
+    so a torn or hand-mangled pidfile degrades to "no record" rather than crashing a
+    caller mid-cleanup.
+    """
+    try:
+        raw = Path(pidfile).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    try:
+        return PidRecord(
+            pid=int(data["pid"]),
+            argv=tuple(str(a) for a in data["argv"]),
+            start_token=str(data.get("start_token", "")),
+            spawn_ts=float(data.get("spawn_ts", 0.0)),
+            argv_hash=str(data.get("argv_hash", "")),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# --- identity / liveness ----------------------------------------------------
+
+
+def is_ours_and_alive(record: PidRecord) -> bool:
+    """Whether ``record``'s pid is alive AND is the process we spawned.
+
+    Two gates, both required. First liveness (``os.kill(pid, 0)`` semantics: a bare
+    signal-0 probe, treating ``EPERM`` as alive — the process exists, we simply may
+    not signal it). Then identity: the recorded start-token is re-read for the live
+    pid and must match EXACTLY, so a recycled pid (same number, a later start time)
+    is rejected. On any identity mismatch the answer is ``False`` (not ours).
+
+    A record with an empty ``start_token`` means no re-queryable OS identity was
+    captured at spawn (only possible on an exotic platform — both supported
+    platforms always capture one). Because this primitive's callers go on to *kill*
+    the pid, an unprovable claim is refused: the process may be a stranger that
+    recycled the pid, so we return ``False`` rather than risk signalling it.
+    """
+    if not _pid_alive(record.pid):
+        return False
+    if not record.start_token:
+        return False
+    current = _process_start_token(record.pid)
+    return current is not None and current == record.start_token
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` names a live process, via ``os.kill(pid, 0)`` semantics.
+
+    ``ESRCH`` (no such process) is dead; ``EPERM`` means the process exists but is
+    not ours to signal — still alive. Non-positive pids are rejected outright
+    because ``os.kill`` treats ``0`` / ``-1`` as broadcast/group targets, never a
+    single-process liveness probe.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _process_start_token(pid: int) -> str | None:
+    """The OS process start-token for ``pid``, or ``None`` if unavailable.
+
+    A stable, re-queryable value that changes when a pid is recycled: Linux reads
+    ``/proc/<pid>/stat`` field 22 (start time in clock ticks since boot); Darwin
+    shells out to ``ps -o lstart`` (the process start timestamp). Other platforms
+    return ``None`` (no cheap source), which forces :func:`is_ours_and_alive` down
+    its conservative refuse-ownership path.
+    """
+    if sys.platform == "darwin":
+        return _darwin_start_token(pid)
+    return _linux_start_token(pid)
+
+
+def _linux_start_token(pid: int) -> str | None:
+    """Field 22 (starttime) of ``/proc/<pid>/stat``, or ``None`` if unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+    # The comm field (2) is parenthesised and may itself contain spaces or ')', so
+    # split AFTER the final ')'. The tokens that follow begin at field 3 (state),
+    # making field 22 (starttime) index 19.
+    rparen = data.rfind(b")")
+    if rparen == -1:
+        return None
+    rest = data[rparen + 1 :].split()
+    if len(rest) < 20:
+        return None
+    return rest[19].decode("ascii", errors="replace")
+
+
+def _darwin_start_token(pid: int) -> str | None:
+    """The ``ps -o lstart`` start timestamp for ``pid``, or ``None`` if unreadable."""
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    token = completed.stdout.strip()
+    return token or None
+
+
+# --- terminate --------------------------------------------------------------
+
+
+async def terminate(
+    record: PidRecord,
+    *,
+    term_timeout_s: float = 10.0,
+    sleep: Sleep = asyncio.sleep,
+    clock: Clock = time.monotonic,
+) -> TerminateResult:
+    """Stop the process ``record`` names: SIGTERM the group, escalate to SIGKILL.
+
+    The sequence, matching the no-auto-respawn model (stop it; do not restart it):
+
+    1. Reap first (a prior kill may have left our own child a zombie whose pid still
+       answers ``os.kill(pid, 0)``), then check identity. If the pid is not alive →
+       ``ALREADY_DEAD``; if alive but not ours → ``NOT_OURS`` (and it is NEVER
+       signalled — we do not kill what we cannot prove is ours).
+    2. SIGTERM the **process group** (:func:`os.killpg` on the session-leader pid —
+       the reason for ``start_new_session`` — so the shim's child workers die too),
+       falling back to the bare pid if the group signal fails.
+    3. Poll for death up to ``term_timeout_s`` (bounded by the injected ``clock`` /
+       ``sleep``). Died → ``TERMINATED``.
+    4. Otherwise SIGKILL the group and briefly wait for the reap → ``KILLED`` (the
+       kill is unignorable; the reap wait is best-effort so a reparented/wedged
+       process never hangs the caller).
+    """
+    pid = record.pid
+    # A zombie of our own child still answers os.kill(pid, 0); reap it so liveness
+    # reads truthfully before we branch on it.
+    _reap(pid)
+
+    if not is_ours_and_alive(record):
+        return TerminateResult.NOT_OURS if _pid_alive(pid) else TerminateResult.ALREADY_DEAD
+
+    _signal_group_or_pid(pid, signal.SIGTERM)
+    if await _wait_until_dead(pid, timeout_s=term_timeout_s, clock=clock, sleep=sleep):
+        return TerminateResult.TERMINATED
+
+    _signal_group_or_pid(pid, signal.SIGKILL)
+    await _wait_until_dead(pid, timeout_s=_KILL_REAP_TIMEOUT_S, clock=clock, sleep=sleep)
+    return TerminateResult.KILLED
+
+
+async def _wait_until_dead(pid: int, *, timeout_s: float, clock: Clock, sleep: Sleep) -> bool:
+    """Poll until ``pid`` dies or ``timeout_s`` elapses; reaps a zombie child each pass."""
+    deadline = clock() + timeout_s
+    while True:
+        _reap(pid)
+        if not _pid_alive(pid):
+            return True
+        if clock() >= deadline:
+            return False
+        await sleep(_REAP_POLL_INTERVAL_S)
+
+
+def _signal_group_or_pid(pid: int, sig: int) -> None:
+    """Signal ``pid``'s process group, falling back to the bare pid.
+
+    ``killpg`` on the session-leader pid (== pgid) reaches the shim's child workers
+    too. If that fails for any reason (the group already gone, or the child somehow
+    reparented its group), fall back to signalling the pid directly. Every failure
+    is swallowed: a process that vanished between the liveness check and the signal
+    is exactly the success case, not an error.
+    """
+    with contextlib.suppress(OSError):
+        os.killpg(pid, sig)
+        return
+    with contextlib.suppress(OSError):
+        os.kill(pid, sig)
+
+
+def _reap(pid: int) -> None:
+    """Best-effort non-blocking reap of ``pid`` if it is our child.
+
+    Clears a zombie left by a kill so the pid stops answering ``os.kill(pid, 0)``.
+    ``ECHILD`` (the process is not our child — the common cross-invocation case) and
+    any other ``OSError`` are ignored: reaping is a courtesy, never load-bearing.
+    """
+    with contextlib.suppress(OSError):
+        os.waitpid(pid, os.WNOHANG)
+
+
+# --- cleanup ----------------------------------------------------------------
+
+
+def cleanup_stale(pidfile: str | os.PathLike[str]) -> bool:
+    """Remove ``pidfile`` iff it is stale; return whether it was removed.
+
+    Stale means: the file exists but its record is missing/corrupt, or names a
+    process that is dead or not ours (a recycled pid). A live-and-ours pidfile is
+    kept (returns ``False``); an absent file is a no-op (``False``). Removal races
+    (another cleaner won) collapse to ``False`` rather than raising.
+    """
+    pidfile = Path(pidfile)
+    if not pidfile.exists():
+        return False
+    record = read_pidfile(pidfile)
+    if record is not None and is_ours_and_alive(record):
+        return False
+    try:
+        pidfile.unlink()
+    except OSError:
+        return False
+    return True
