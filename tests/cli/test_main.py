@@ -136,9 +136,8 @@ def test_main_agent_requires_subcommand() -> None:
 
 
 def _use_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Point the resolver at temp agents/state dirs via the env overrides."""
+    """Point the resolver at a temp agents dir via the env override."""
     monkeypatch.setenv("CALFKIT_AGENTS_DIR", str(tmp_path / "agents"))
-    monkeypatch.setenv("CALFKIT_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("CALFCORD_HOME", raising=False)
 
 
@@ -215,19 +214,18 @@ def test_main_agent_set_missing_prompt_file_errors_cleanly(
     assert "error:" in capsys.readouterr().out
 
 
-def test_main_agent_rename_passes_state_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_main_agent_rename_dispatches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_dirs(monkeypatch, tmp_path)
     captured: dict[str, object] = {}
 
-    def _run_rename(agents_dir: Path, state_dir: Path, old: str, new: str) -> int:
-        captured.update(agents_dir=agents_dir, state_dir=state_dir, old=old, new=new)
+    def _run_rename(agents_dir: Path, old: str, new: str) -> int:
+        captured.update(agents_dir=agents_dir, old=old, new=new)
         return 0
 
     monkeypatch.setattr(agent_lifecycle, "run_rename", _run_rename)
     assert main(["agent", "rename", "scribe", "penny"]) == 0
     assert captured == {
         "agents_dir": tmp_path / "agents",
-        "state_dir": tmp_path / "state",
         "old": "scribe",
         "new": "penny",
     }
@@ -237,15 +235,13 @@ def test_main_agent_delete_passes_flags(monkeypatch: pytest.MonkeyPatch, tmp_pat
     _use_dirs(monkeypatch, tmp_path)
     captured: dict[str, object] = {}
 
-    def _run_delete(
-        prompter: object, agents_dir: Path, state_dir: Path, name: str, *, yes: bool, keep_state: bool
-    ) -> int:
-        captured.update(name=name, yes=yes, keep_state=keep_state)
+    def _run_delete(prompter: object, agents_dir: Path, name: str, *, yes: bool) -> int:
+        captured.update(name=name, yes=yes)
         return 0
 
     monkeypatch.setattr(agent_lifecycle, "run_delete", _run_delete)
-    assert main(["agent", "delete", "scribe", "--yes", "--keep-state"]) == 0
-    assert captured == {"name": "scribe", "yes": True, "keep_state": True}
+    assert main(["agent", "delete", "scribe", "--yes"]) == 0
+    assert captured == {"name": "scribe", "yes": True}
 
 
 # --- main(): interrupt + raw-mode trapping ---------------------------------

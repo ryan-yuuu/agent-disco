@@ -591,7 +591,7 @@ accepts is a value the agent will boot with.
 | `calfcord agent set <name> --… …` | The non-interactive, scriptable equivalent of `edit` — one or more `--flag value` updates. |
 | `calfcord agent tools [<name>]` | The tool-list checkbox of §3.3 (also reachable as the *Tools* row of `edit`). |
 | `calfcord agent rename <old> <new>` | Renames the `.md` and its `name:` field. (There is no per-agent slash command or channel-subscription state to move — see §5.) |
-| `calfcord agent delete <name> [--yes] [--keep-state]` | Removes the `.md`; confirms first, skip with `--yes`. |
+| `calfcord agent delete <name> [--yes]` | Removes the `.md`; confirms first, skip with `--yes`. |
 
 `calfcord agent create` does not prune the seeded starter — adding an
 agent never deletes another. (`calfcord init`'s first-run setup runs the

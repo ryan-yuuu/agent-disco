@@ -87,14 +87,13 @@ def _build_parser() -> argparse.ArgumentParser:
     set_p.add_argument("name", help="Agent name.")
     _add_set_flags(set_p)
 
-    rename_p = agent_sub.add_parser("rename", help="Rename an agent (file, slash command, and state).")
+    rename_p = agent_sub.add_parser("rename", help="Rename an agent (file and slash command).")
     rename_p.add_argument("old", help="Current agent name.")
     rename_p.add_argument("new", help="New agent name.")
 
     delete_p = agent_sub.add_parser("delete", help="Delete an agent.")
     delete_p.add_argument("name", help="Agent name.")
     delete_p.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
-    delete_p.add_argument("--keep-state", action="store_true", help="Keep the agent's channel-subscription state file.")
 
     tools_p = agent_sub.add_parser("tools", help="Interactively edit an agent's tool list.")
     tools_p.add_argument("name", nargs="?", help="Agent name (omit to pick interactively).")
@@ -291,22 +290,6 @@ def _require_home(command: str, *, detail: str = _SUPERVISOR_HOME_DETAIL) -> Pat
     return home
 
 
-def _resolve_state_dir(home: Path | None) -> Path:
-    """Per-agent state dir (channel-subscription JSON), needed by rename/delete.
-
-    Mirrors the runner's resolution so the CLI moves/removes the exact file the
-    agent reads: ``CALFKIT_STATE_DIR`` wins (the shim sets it to
-    ``$H/state/agents``); otherwise ``$H/state/agents`` on a native install, or
-    the dev ``./state/agents`` default.
-    """
-    override = os.environ.get("CALFKIT_STATE_DIR")
-    if override:
-        return Path(override)
-    if home is not None:
-        return home / "state" / "agents"
-    return Path("state") / "agents"
-
-
 def _add_set_flags(set_p: argparse.ArgumentParser) -> None:
     """Add one ``agent set`` flag per editable field, driven by the FIELDS registry.
 
@@ -460,15 +443,13 @@ def _run_agent(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             return 1
         return agent_lifecycle.run_set(agents_dir, args.name, updates)
     if cmd == "rename":
-        return agent_lifecycle.run_rename(agents_dir, _resolve_state_dir(home), args.old, args.new)
+        return agent_lifecycle.run_rename(agents_dir, args.old, args.new)
     if cmd == "delete":
         return agent_lifecycle.run_delete(
             make_prompter(),
             agents_dir,
-            _resolve_state_dir(home),
             args.name,
             yes=args.yes,
-            keep_state=args.keep_state,
         )
     # ``tools`` (and any unhandled verb — argparse ``required=True`` prevents the latter)
     return agent_tools.run(make_prompter(), agents_dir=agents_dir, name=args.name)

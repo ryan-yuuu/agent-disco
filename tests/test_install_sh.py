@@ -4,13 +4,13 @@
 pieces of its logic are easy to get subtly wrong and impossible to unit-test
 from Python directly, so we drive the *actual shell* here:
 
-* ``seed_agents`` — must give the native install a stable agents/state home and
+* ``seed_agents`` — must give the native install a stable agents home and
   drop in the starter agent on first install, **without** clobbering an
   operator who removed the starter or added their own agents.
 * the generated ``calfcord`` shim's ``_default_env`` block — must default
-  ``CALFKIT_AGENTS_DIR`` / ``CALFKIT_STATE_DIR`` under the install home and
-  ``CALFCORD_WORKSPACE_DIR`` to the *launch* directory, while letting an
-  operator override any of them via the shell env or ``config/.env``.
+  ``CALFKIT_AGENTS_DIR`` under the install home and ``CALFCORD_WORKSPACE_DIR``
+  to the *launch* directory, while letting an operator override either of them
+  via the shell env or ``config/.env``.
 
 The installer guards ``main "$@"`` so the file can be *sourced* (rather than
 executed, which would hit the network), letting these tests call individual
@@ -31,12 +31,11 @@ INSTALL_SH = Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
 
 _UNSET = "__UNSET__"
 
-# A stand-in for ``uv`` that ignores its args and reports the three dir env vars
+# A stand-in for ``uv`` that ignores its args and reports the two dir env vars
 # the shim is responsible for defaulting. ``${VAR-__UNSET__}`` (no colon)
 # distinguishes "shim did not export it" (unset) from "exported as empty".
 _FAKE_UV = """#!/usr/bin/env bash
 printf 'CALFKIT_AGENTS_DIR=%s\\n' "${CALFKIT_AGENTS_DIR-__UNSET__}"
-printf 'CALFKIT_STATE_DIR=%s\\n' "${CALFKIT_STATE_DIR-__UNSET__}"
 printf 'CALFCORD_WORKSPACE_DIR=%s\\n' "${CALFCORD_WORKSPACE_DIR-__UNSET__}"
 """
 
@@ -99,15 +98,14 @@ def _run_shim(home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str,
 # --------------------------------------------------------------- seed_agents ---
 
 
-def test_seed_agents_seeds_starter_and_state_dir(tmp_path: Path) -> None:
+def test_seed_agents_seeds_starter_and_agents_dir(tmp_path: Path) -> None:
     home = tmp_path / "home"
     dest = _make_source_dest(tmp_path)
     result = _source_and_run(f'seed_agents "{dest}"', home=home)
     assert result.returncode == 0, result.stderr
     assert (home / "agents" / "assistant.md").read_text().startswith("---")
-    # seed_agents pre-creates exactly the dir the runtime's CALFKIT_STATE_DIR
-    # points at (.../state/agents), not just the parent .../state.
-    assert (home / "state" / "agents").is_dir()
+    # seed_agents pre-creates the runtime's CALFKIT_AGENTS_DIR (.../agents).
+    assert (home / "agents").is_dir()
 
 
 def test_seed_agents_does_not_clobber_existing_agents(tmp_path: Path) -> None:
@@ -129,7 +127,6 @@ def test_seed_agents_is_noop_when_source_lacks_starter(tmp_path: Path) -> None:
     result = _source_and_run(f'seed_agents "{dest}"', home=home)
     assert result.returncode == 0, result.stderr
     assert (home / "agents").is_dir()
-    assert (home / "state" / "agents").is_dir()
     assert list((home / "agents").iterdir()) == []
 
 
@@ -144,7 +141,6 @@ def test_shim_defaults_to_home_dirs_and_launch_cwd(tmp_path: Path) -> None:
 
     seen = _run_shim(home, cwd=launch)
     assert seen["CALFKIT_AGENTS_DIR"] == str(home / "agents")
-    assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
     # Workspace follows the directory the command was launched from.
     assert os.path.realpath(seen["CALFCORD_WORKSPACE_DIR"]) == os.path.realpath(str(launch))
 
@@ -185,7 +181,7 @@ def test_shim_defers_to_nonempty_dotenv_agents_dir(tmp_path: Path) -> None:
 
     The shim must not export its own default over a real pinned value (it leaves
     it for ``uv run --env-file``), so the fake uv — which ignores --env-file —
-    sees it unset. The unrelated CALFKIT_STATE_DIR still gets the home default.
+    sees it unset.
     """
     home = tmp_path / "home"
     _install_shims(home)
@@ -194,7 +190,6 @@ def test_shim_defers_to_nonempty_dotenv_agents_dir(tmp_path: Path) -> None:
 
     seen = _run_shim(home, cwd=launch, env_file="CALFKIT_AGENTS_DIR=/from/dotenv\n")
     assert seen["CALFKIT_AGENTS_DIR"] == _UNSET
-    assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
 
 
 def test_shim_defers_to_preset_shell_env(tmp_path: Path) -> None:
@@ -205,8 +200,6 @@ def test_shim_defers_to_preset_shell_env(tmp_path: Path) -> None:
 
     seen = _run_shim(home, cwd=launch, extra_env={"CALFKIT_AGENTS_DIR": "/preset/agents"})
     assert seen["CALFKIT_AGENTS_DIR"] == "/preset/agents"
-    # The vars the operator did not preset still get their install-home default.
-    assert seen["CALFKIT_STATE_DIR"] == str(home / "state" / "agents")
 
 
 # --------------------------------------------------------- shim subcommands ---
