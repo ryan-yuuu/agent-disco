@@ -79,7 +79,7 @@ printf '%s' "$out" | grep -Fq \
   && pass "dispatch run bridge -> calfkit-bridge (regression)" || fail "dispatch run bridge: $out"
 
 # Lifecycle/process-supervisor verbs route to the calfcord-cli argparse entry
-# point (same family as init|agent|router|doctor), NOT the bare `uv run`
+# point (same family as init|agent|tools|mcp|doctor), NOT the bare `uv run`
 # passthrough — otherwise `calfcord start` would try to exec a nonexistent
 # `start` console script. `_healthcheck` is the process-compose readiness probe
 # command. Each must land as `... -- calfcord-cli <verb> ...`.
@@ -118,11 +118,11 @@ for sub in start stop restart; do
     && pass "dispatch tools $sub -> calfcord-cli" || fail "dispatch tools $sub: $out"
 done
 
-# `agent` / `router` are calfcord-cli verb groups too, so their new `restart`
-# subverb rides the same top-level alternation arm (the `--all` flag forwards
-# verbatim too). Pin that the roster `restart` (and `restart --all`) reach the
-# argparse entry point unchanged.
-for grp in agent router; do
+# `agent` is a calfcord-cli verb group too, so its `restart` subverb rides the
+# same top-level alternation arm (the `--all` flag forwards verbatim too). Pin
+# that the roster `restart` (and `restart --all`) reach the argparse entry point
+# unchanged. (The `router` group was removed in the calfkit-012 migration.)
+for grp in agent; do
   out="$("$B" "$C" "$grp" restart assistant 2>&1)"
   printf '%s' "$out" | grep -Fq \
     "STUB_UV run --frozen --no-sync --project $TD/current --env-file $TD/config/.env -- calfcord-cli $grp restart assistant" \
