@@ -67,7 +67,7 @@
             <a id="nextFileLink" class="nav" href="z_a93b92e9643e4830_deploy_filters_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.3">coverage.py v7.14.3</a>,
-            created at 2026-07-01 07:47 +0000
+            created at 2026-07-01 21:11 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -108,11 +108,11 @@
     <p class="pln"><span class="n"><a id="t24" href="#t24">24</a></span><span class="t"><span class="str">  reads the wire, not the bridge's memory.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t25" href="#t25">25</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t26" href="#t26">26</a></span><span class="t"><span class="str">* **A brand-new agent needs a workspace reload, never an ``update_project`` (&#167;13.1).**</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t27" href="#t27">27</a></span><span class="t"><span class="str">  An agent authored *after* ``calfcord start`` is not a declared (``disabled``)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t27" href="#t27">27</a></span><span class="t"><span class="str">  An agent authored *after* ``disco start`` is not a declared (``disabled``)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t28" href="#t28">28</a></span><span class="t"><span class="str">  slot, so ``POST /process/start/{name}`` errors. We do NOT recover by pushing an</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t29" href="#t29">29</a></span><span class="t"><span class="str">  updated project: on v1.110.0 an ``update_project`` that changes the process set</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t30" href="#t30">30</a></span><span class="t"><span class="str">  bounces broker+bridge. Instead we steer the operator to a clean reload</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t31" href="#t31">31</a></span><span class="t"><span class="str">  (``calfcord stop &amp;&amp; calfcord start``) and return non-zero.</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t31" href="#t31">31</a></span><span class="t"><span class="str">  (``disco stop &amp;&amp; disco start``) and return non-zero.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t32" href="#t32">32</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t33" href="#t33">33</a></span><span class="t"><span class="str">``agent_ps`` renders the &#167;3.4 union: the LOGICAL view (agents answering across the</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t34" href="#t34">34</a></span><span class="t"><span class="str">whole org, from the probe) unioned with the PHYSICAL view (this host's Running</span>&nbsp;</span><span class="r"></span></p>
@@ -260,9 +260,9 @@
     <p class="pln"><span class="n"><a id="t176" href="#t176">176</a></span><span class="t"><span class="str">       supervisor; on success print ``agent &lt;name> online`` and return ``0``.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t177" href="#t177">177</a></span><span class="t"><span class="str">    5. **Not-declared vs. genuine fault (&#167;13.1 / Fix #9)** &#8212; if the start raises,</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t178" href="#t178">178</a></span><span class="t"><span class="str">       branch on the STRUCTURAL HTTP status the client carries: a **4xx** is the</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t179" href="#t179">179</a></span><span class="t"><span class="str">       not-declared case (a brand-new agent authored after ``calfcord start`` is</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t179" href="#t179">179</a></span><span class="t"><span class="str">       not-declared case (a brand-new agent authored after ``disco start`` is</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t180" href="#t180">180</a></span><span class="t"><span class="str">       not a declared slot, so the PC server rejects it), so steer the operator to</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t181" href="#t181">181</a></span><span class="t"><span class="str">       a workspace reload (``calfcord stop &amp;&amp; calfcord start``) rather than an</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t181" href="#t181">181</a></span><span class="t"><span class="str">       a workspace reload (``disco stop &amp;&amp; disco start``) rather than an</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t182" href="#t182">182</a></span><span class="t"><span class="str">       in-place ``update_project`` (which would bounce broker+bridge on v1.110.0)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t183" href="#t183">183</a></span><span class="t"><span class="str">       and return ``1``. Anything else &#8212; a **5xx**, or a transport failure with no</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t184" href="#t184">184</a></span><span class="t"><span class="str">       status &#8212; is a genuine infra fault, NOT a brand-new agent; per the error</span>&nbsp;</span><span class="r"></span></p>
@@ -278,9 +278,9 @@
     <p class="pln"><span class="n"><a id="t194" href="#t194">194</a></span><span class="t"><span class="str">    surface and is unused today.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t195" href="#t195">195</a></span><span class="t"><span class="str">    """</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t196" href="#t196">196</a></span><span class="t">    <span class="com"># Reserved-name chokepoint: the substrate (broker/bridge) and the singleton</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t197" href="#t197">197</a></span><span class="t">    <span class="com"># tools component are owned by `calfcord start` and their own</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t197" href="#t197">197</a></span><span class="t">    <span class="com"># tools component are owned by `disco start` and their own</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t198" href="#t198">198</a></span><span class="t">    <span class="com"># component verbs &#8212; never the agent roster. The id pattern does NOT reject a</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t199" href="#t199">199</a></span><span class="t">    <span class="com"># creatable `tools.md` (only `calfcord start`'s build_compose_project does), so</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t199" href="#t199">199</a></span><span class="t">    <span class="com"># creatable `tools.md` (only `disco start`'s build_compose_project does), so</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t200" href="#t200">200</a></span><span class="t">    <span class="com"># an `agent start tools` would otherwise drive `start_process('tools')` against</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t201" href="#t201">201</a></span><span class="t">    <span class="com"># the live singleton. Refuse here, before any workspace check / probe / start,</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t202" href="#t202">202</a></span><span class="t">    <span class="com"># so this single seam closes the exposure for both `agent start &lt;reserved>` and</span>&nbsp;</span><span class="r"></span></p>
@@ -288,7 +288,7 @@
     <p class="run"><span class="n"><a id="t204" href="#t204">204</a></span><span class="t">    <span class="key">if</span> <span class="nam">name</span> <span class="key">in</span> <span class="nam">_NON_AGENT_PROCESSES</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t205" href="#t205">205</a></span><span class="t">        <span class="nam">print</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t206" href="#t206">206</a></span><span class="t">            <span class="fst">f"</span><span class="fst">error: </span><span class="op">{</span><span class="nam">name</span><span class="op">!</span><span class="nam">r</span><span class="op">}</span><span class="fst"> is a reserved component, not an agent; </span><span class="fst">"</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t207" href="#t207">207</a></span><span class="t">            <span class="fst">f"</span><span class="fst">manage it with `calfcord </span><span class="op">{</span><span class="nam">name</span><span class="op">}</span><span class="fst"> start` (or `calfcord start`).</span><span class="fst">"</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t207" href="#t207">207</a></span><span class="t">            <span class="fst">f"</span><span class="fst">manage it with `disco </span><span class="op">{</span><span class="nam">name</span><span class="op">}</span><span class="fst"> start` (or `disco start`).</span><span class="fst">"</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t208" href="#t208">208</a></span><span class="t">        <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t209" href="#t209">209</a></span><span class="t">        <span class="key">return</span> <span class="num">1</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t210" href="#t210">210</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
@@ -337,7 +337,7 @@
     <p class="run"><span class="n"><a id="t253" href="#t253">253</a></span><span class="t">    <span class="key">except</span> <span class="nam">ProcessComposeError</span> <span class="key">as</span> <span class="nam">exc</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t254" href="#t254">254</a></span><span class="t">        <span class="com"># The workspace check above already proved the REST server is up, so branch</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t255" href="#t255">255</a></span><span class="t">        <span class="com"># on the structural status (Fix #9): a 4xx is "no such declared process" &#8212;</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t256" href="#t256">256</a></span><span class="t">        <span class="com"># a brand-new agent authored after `calfcord start`. &#167;13.1: do NOT recover</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t256" href="#t256">256</a></span><span class="t">        <span class="com"># a brand-new agent authored after `disco start`. &#167;13.1: do NOT recover</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t257" href="#t257">257</a></span><span class="t">        <span class="com"># with `update_project` (it bounces the substrate); reload cleanly. A 5xx</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t258" href="#t258">258</a></span><span class="t">        <span class="com"># (or no status &#8212; a transport fault) is a genuine infra failure, not a</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t259" href="#t259">259</a></span><span class="t">        <span class="com"># brand-new agent, so it is re-raised loudly below rather than mistranslated</span>&nbsp;</span><span class="r"></span></p>
@@ -346,8 +346,8 @@
     <p class="run"><span class="n"><a id="t262" href="#t262">262</a></span><span class="t">        <span class="key">if</span> <span class="nam">status</span> <span class="key">is</span> <span class="key">not</span> <span class="key">None</span> <span class="key">and</span> <span class="num">400</span> <span class="op">&lt;=</span> <span class="nam">status</span> <span class="op">&lt;</span> <span class="num">500</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t263" href="#t263">263</a></span><span class="t">            <span class="nam">print</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t264" href="#t264">264</a></span><span class="t">                <span class="fst">f"</span><span class="fst">agent </span><span class="op">{</span><span class="nam">name</span><span class="op">}</span><span class="fst"> is not in the running workspace. Bringing a brand-new </span><span class="fst">"</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t265" href="#t265">265</a></span><span class="t">                <span class="str">"agent online needs a workspace reload: run `calfcord stop` then "</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t266" href="#t266">266</a></span><span class="t">                <span class="str">"`calfcord start` (an in-place update would bounce the broker and bridge)."</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t265" href="#t265">265</a></span><span class="t">                <span class="str">"agent online needs a workspace reload: run `disco stop` then "</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t266" href="#t266">266</a></span><span class="t">                <span class="str">"`disco start` (an in-place update would bounce the broker and bridge)."</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t267" href="#t267">267</a></span><span class="t">            <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t268" href="#t268">268</a></span><span class="t">            <span class="key">return</span> <span class="num">1</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t269" href="#t269">269</a></span><span class="t">        <span class="key">raise</span> <span class="nam">RuntimeError</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
@@ -728,7 +728,7 @@
             <a class="nav" href="z_a93b92e9643e4830_deploy_filters_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.3">coverage.py v7.14.3</a>,
-            created at 2026-07-01 07:47 +0000
+            created at 2026-07-01 21:11 +0000
         </p>
     </div>
 </footer>
