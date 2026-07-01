@@ -1,9 +1,10 @@
 """Unit tests for the agent-roster operations (design §3.4, §3.5, §13.1).
 
 These exercise ``agent_start`` / ``agent_stop`` / ``agent_restart`` / ``agent_ps``
-with **no real process-compose binary, no broker, and no network**: the control-
-plane probe and the REST client are both injected. A stub probe scripts the
-broker-wide live roster; a stub client scripts the supervisor REST surface
+with **no real process-compose binary, no broker, and no network**: the
+broker-wide live-roster probe (a read of calfkit's native mesh) and the REST
+client are both injected. A stub probe scripts the broker-wide live roster (agent
+NAMES, the presence the mesh carries); a stub client scripts the supervisor REST surface
 (``project_state`` for the workspace check, ``start_process`` /
 ``stop_process`` / ``restart_process`` for lifecycle, ``list_processes`` for the
 physical half of the ps union).
@@ -20,36 +21,22 @@ from __future__ import annotations
 
 import pytest
 
-from calfcord.agents.definition import AgentDefinition
 from calfcord.supervisor import roster
 from calfcord.supervisor.client import ProcessComposeError
 
 # --- fakes ------------------------------------------------------------------
 
 
-def _defn(name: str) -> AgentDefinition:
-    """A minimal valid AgentDefinition with ``agent_id == name``.
-
-    The probe returns AgentDefinitions; the roster ops key off ``.agent_id``, so
-    a stub roster entry only needs a valid id (the rest is required by the model).
-    """
-    return AgentDefinition(
-        agent_id=name,
-        display_name=name.title(),
-        description=f"{name} agent",
-        system_prompt="hi",
-    )
-
-
 class _StubProbe:
-    """A scriptable stand-in for ``probe_live_roster``.
+    """A scriptable stand-in for the broker-wide live-roster probe.
 
     Records the ``server_urls`` it was called with so a test can assert the probe
-    fired (duplicate guard / ps) or did NOT (workspace-down short-circuit), and
-    returns a fixed list of live AgentDefinitions.
+    fired (duplicate guard / ps) or did NOT (workspace-down short-circuit). The
+    calfkit 0.12 mesh carries agent NAMES (presence), not full definitions, so it
+    returns a fixed list of live agent names.
     """
 
-    def __init__(self, roster_result: list[AgentDefinition] | None = None) -> None:
+    def __init__(self, roster_result: list[str] | None = None) -> None:
         self._roster = list(roster_result or [])
         self.calls: list[str] = []
 
@@ -147,7 +134,7 @@ async def test_agent_start_refuses_duplicate_when_probe_shows_live(tmp_path, cap
     0, and crucially do NOT call ``start_process`` (no second instance).
     """
     client = _StubClient()
-    probe = _StubProbe([_defn("assistant")])
+    probe = _StubProbe(["assistant"])
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -180,7 +167,7 @@ async def test_agent_start_local_running_restarts_not_duplicate_refusal(tmp_path
     client = _StubClient(list_processes_result=[{"name": "assistant", "status": "Running"}])
     # The probe would also report it live; the local-running branch must win BEFORE
     # the guard, so the probe is never consulted.
-    probe = _StubProbe([_defn("assistant")])
+    probe = _StubProbe(["assistant"])
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -210,7 +197,7 @@ async def test_agent_start_remote_running_keeps_duplicate_refusal(tmp_path, caps
     client = _StubClient(
         list_processes_result=[]  # not running on THIS host
     )
-    probe = _StubProbe([_defn("assistant")])  # answering on another host
+    probe = _StubProbe(["assistant"])  # answering on another host
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -254,7 +241,7 @@ async def test_agent_start_happy_path_starts_when_roster_empty(tmp_path, capsys)
 async def test_agent_start_ignores_other_live_agents(tmp_path):
     """A different agent being live must not block starting this one."""
     client = _StubClient()
-    probe = _StubProbe([_defn("scheduler")])  # someone else is live
+    probe = _StubProbe(["scheduler"])  # someone else is live
 
     rc = await roster.agent_start(
         _home(tmp_path),
@@ -522,7 +509,7 @@ async def test_agent_start_all_mixes_running_stopped_and_remote(tmp_path, capsys
     one sweep; every id gets a per-item line; an all-success sweep returns 0.
     """
     client = _StubClient(list_processes_result=[{"name": "local_up", "status": "Running"}])
-    probe = _StubProbe([_defn("remote")])  # answering elsewhere, not here
+    probe = _StubProbe(["remote"])  # answering elsewhere, not here
 
     rc = await roster.agent_start_all(
         _home(tmp_path),
@@ -722,7 +709,7 @@ async def test_agent_start_all_probes_org_once_and_threads_live(tmp_path, capsys
     while the local `stopped` starts — all off ONE probe call.
     """
     client = _StubClient(list_processes_result=[])
-    probe = _StubProbe([_defn("remote")])  # answering on another host
+    probe = _StubProbe(["remote"])  # answering on another host
 
     rc = await roster.agent_start_all(
         _home(tmp_path),
@@ -981,7 +968,7 @@ async def test_agent_ps_union_three_cases(tmp_path, capsys):
             _pc_proc("dormant", "Completed"),
         ]
     )
-    probe = _StubProbe([_defn("assistant"), _defn("remote")])
+    probe = _StubProbe(["assistant", "remote"])
 
     rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
@@ -1036,7 +1023,7 @@ async def test_agent_ps_tolerates_data_wrapped_and_nondict_rows(tmp_path, capsys
             ]
         }
     )
-    probe = _StubProbe([_defn("assistant")])
+    probe = _StubProbe(["assistant"])
 
     rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=client, probe=probe)
 
@@ -1070,23 +1057,24 @@ def test_agent_start_defaults_to_per_home_process_compose_client(tmp_path):
 
 
 async def test_default_probe_delegates_to_probe_live_roster(monkeypatch):
-    """The default probe adapts ``probe_live_roster`` to the injectable shape.
+    """The default probe adapts ``_probe_live_roster`` to the injectable shape.
 
     With no ``probe`` injected, the resolver returns a closure that calls
-    :func:`control_plane.probe.probe_live_roster` with the given ``server_urls``.
-    Monkeypatching that function lets the closure body run with no real broker,
-    pinning the production delegation (the seam tests otherwise bypass).
+    :func:`_probe_live_roster` (the calfkit 0.12 native-mesh read) with the given
+    ``server_urls``. Monkeypatching that function lets the closure body run with
+    no real broker, pinning the production delegation (the seam tests otherwise
+    bypass). The mesh carries NAMES, so the default probe returns agent names.
     """
     seen: dict[str, str] = {}
 
     async def _fake_probe_live_roster(server_urls: str):
         seen["server_urls"] = server_urls
-        return [_defn("assistant")]
+        return ["assistant"]
 
-    monkeypatch.setattr(roster, "probe_live_roster", _fake_probe_live_roster)
+    monkeypatch.setattr(roster, "_probe_live_roster", _fake_probe_live_roster)
 
     default_probe = roster._resolve_probe(None)
     result = await default_probe(_SERVERS)
 
     assert seen["server_urls"] == _SERVERS
-    assert [d.agent_id for d in result] == ["assistant"]
+    assert result == ["assistant"]

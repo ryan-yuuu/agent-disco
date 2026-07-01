@@ -1,4 +1,5 @@
 """Tests for ``calfcord doctor`` (src/calfcord/cli/doctor.py)."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -157,13 +158,13 @@ def test_broker_unreachable_fails(monkeypatch, tmp_path, capsys):
 @pytest.mark.parametrize(
     "handler,rc,needle",
     [
-        (_resp_401, 1, "rejected"),      # token not accepted -> hard fail
-        (_resp_403, 1, "rejected"),      # forbidden is also "won't boot" -> hard fail
+        (_resp_401, 1, "rejected"),  # token not accepted -> hard fail
+        (_resp_403, 1, "rejected"),  # forbidden is also "won't boot" -> hard fail
         (_resp_429, 0, "rate-limited"),  # rate limited -> warn, never fail
-        (_resp_500, 0, "⚠"),             # unexpected 5xx -> warn
-        (_resp_non_json, 0, "⚠"),        # 200 + non-JSON body must not crash -> warn
-        (_resp_non_dict, 0, "⚠"),        # 200 + non-dict JSON -> warn
-        (_raise_net, 0, "⚠"),            # transport error -> warn
+        (_resp_500, 0, "⚠"),  # unexpected 5xx -> warn
+        (_resp_non_json, 0, "⚠"),  # 200 + non-JSON body must not crash -> warn
+        (_resp_non_dict, 0, "⚠"),  # 200 + non-dict JSON -> warn
+        (_raise_net, 0, "⚠"),  # transport error -> warn
     ],
 )
 def test_token_check_classifies_response(monkeypatch, tmp_path, capsys, handler, rc, needle):
@@ -265,11 +266,15 @@ def test_token_never_leaks_across_paths(monkeypatch, tmp_path, capsys):
 # =================================================================== runtime section
 #
 # When the daemon is up (detected via the bridge heartbeat) doctor adds a RUNTIME
-# section on top of the 5 STATIC checks: daemon-alive (heartbeat freshness), a deep
-# control-plane probe (publish ping + collect responses → confirm the org answers
-# and list registered agents), and drift (agents running per Process Compose vs.
-# registered per the probe). Every world-touching dependency is injected so no real
-# broker / supervisor / heartbeat file is needed (§4.4 / §12.1 / §13.3).
+# section on top of the 5 STATIC checks. The daemon-alive check (heartbeat
+# freshness) always runs; the deep-probe (confirm the org answers and list
+# registered agents) and drift (agents running per Process Compose vs. registered
+# per the probe) checks run ONLY when a probe is injected. The calfkit 0.12
+# migration removed the default control-plane probe (roster liveness rides the
+# native mesh now), so production leaves the probe unset and the runtime section
+# emits a single informational "roster" line instead; the tests below inject a
+# probe to exercise the deep-probe + drift path. Every world-touching dependency is
+# injected so no real broker / supervisor / heartbeat file is needed (§4.4 / §12.1 / §13.3).
 
 _NOW = datetime(2026, 6, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -585,9 +590,10 @@ def test_runtime_token_never_leaks(monkeypatch, tmp_path, capsys):
 # --------------------------------------------------------- production seam defaults
 #
 # The tests above inject every runtime seam; these two exercise the production
-# *defaults* (the real heartbeat reader, the probe adapter, the per-home PC client)
+# *defaults* (the real heartbeat reader plus the now / server_urls resolution)
 # without a real broker — so a wiring regression in the default-resolution path is
-# caught, not silently un-covered.
+# caught, not silently un-covered. The deep probe is no longer defaulted (calfkit
+# 0.12), so the default runtime section stops at the daemon-alive + roster-hint lines.
 
 
 def test_default_read_beat_resolves_from_disk_daemon_down(monkeypatch, tmp_path, capsys):
@@ -607,32 +613,20 @@ def test_default_read_beat_resolves_from_disk_daemon_down(monkeypatch, tmp_path,
     assert "calfcord start" in out  # closed-workspace next-step hint
 
 
-def test_default_probe_and_pc_client_run_against_disk_beat(monkeypatch, tmp_path, capsys):
-    # A real fresh on-disk beat + the default seams: doctor must build the default
-    # probe adapter and the per-home ProcessComposeClient and run the deep probe.
-    # We stub only the two boundaries that would otherwise hit a broker/supervisor:
-    # `probe_live_roster` (the probe adapter wraps it) and the PC client's
-    # `list_processes` — proving the default wiring is exercised end-to-end.
+def test_default_seams_report_roster_hint_from_disk_beat(monkeypatch, tmp_path, capsys):
+    # A real fresh on-disk beat + the default seams: with `probe_fn` left at its
+    # production default (None — the deep control-plane probe was removed in the
+    # calfkit 0.12 migration, roster liveness rides the native mesh now), doctor
+    # still defaults `now` / `server_urls` / `read_beat_fn`, reads the real beat,
+    # and — because no probe is wired — emits the single informational "roster"
+    # line pointing at `calfcord status` instead of running the deep probe / drift.
     from calfcord.health.heartbeat import write_beat
 
     env_path, agents_dir, home = _runtime_setup(monkeypatch, tmp_path)
     write_beat(home, "bridge", status="healthy", identity="DiskBot", now=_NOW)
 
-    async def fake_probe_live_roster(urls, **kwargs):
-        return [_agent("scribe")]
-
+    # Freeze the default freshness clock so the just-written beat reads as fresh.
     monkeypatch.setattr(doctor, "datetime", _FrozenDatetime)
-    monkeypatch.setattr(
-        "calfcord.control_plane.probe.probe_live_roster", fake_probe_live_roster
-    )
-
-    async def fake_list_processes(self):
-        return [{"name": "scribe", "status": "Running"}]
-
-    monkeypatch.setattr(
-        "calfcord.supervisor.client.ProcessComposeClient.list_processes",
-        fake_list_processes,
-    )
 
     rc = doctor.run(
         env_path=env_path,
@@ -644,8 +638,8 @@ def test_default_probe_and_pc_client_run_against_disk_beat(monkeypatch, tmp_path
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "scribe" in out  # the default probe adapter returned the live roster
     assert "DiskBot" in out  # the real on-disk beat was read by the default reader
+    assert "calfcord status" in out  # the roster hint replaces the deleted deep probe
 
 
 class _FrozenDatetime(datetime):

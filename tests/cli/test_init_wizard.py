@@ -129,12 +129,12 @@ class _DiscordStub:
     ) -> None:
         self._identity = identity if identity is not None else BotIdentity(id="botid", username="MyBot")
         self._guilds = (
-            guilds
-            if guilds is not None
-            else [Guild(id="g1", name="My Server", owner=True, base_permissions=0)]
+            guilds if guilds is not None else [Guild(id="g1", name="My Server", owner=True, base_permissions=0)]
         )
-        self._channels = channels if channels is not None else ChannelListing(
-            postable=[PostableChannel(id="c1", name="general")], unpostable=[]
+        self._channels = (
+            channels
+            if channels is not None
+            else ChannelListing(postable=[PostableChannel(id="c1", name="general")], unpostable=[])
         )
         self._join_result = join_result if join_result is not None else self._guilds
         self.verify_calls = 0
@@ -367,13 +367,9 @@ def test_invite_url_and_intents_reminder_and_ctrlc_banner_printed_before_wait(
 def test_guild_and_channel_persisted_from_pick_lists(tmp_path: Path) -> None:
     discord = _DiscordStub(
         guilds=[Guild(id="g7", name="Server7", owner=True, base_permissions=0)],
-        channels=ChannelListing(
-            postable=[PostableChannel(id="c9", name="lobby")], unpostable=[]
-        ),
+        channels=ChannelListing(postable=[PostableChannel(id="c9", name="lobby")], unpostable=[]),
     )
-    assert _run(
-        _prompter(guild="g7", channel="c9"), tmp_path, home=tmp_path, discord=discord
-    ) == 0
+    assert _run(_prompter(guild="g7", channel="c9"), tmp_path, home=tmp_path, discord=discord) == 0
     env = read_env(tmp_path / ".env")
     assert env["DISCORD_BOT_TOKEN"] == "tok-abc"
     assert env["DISCORD_GUILD_ID"] == "g7"
@@ -424,9 +420,7 @@ def test_join_timeout_surfaces_common_causes_and_no_server_hint(
     assert rc == 0
 
 
-def test_zero_postable_channels_surfaced_explicitly(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_zero_postable_channels_surfaced_explicitly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A guild with channels the bot can SEE but not POST in is explained, not hidden."""
     discord = _DiscordStub(
         channels=ChannelListing(
@@ -446,9 +440,7 @@ def test_zero_postable_channels_surfaced_explicitly(
     assert rc == 0
 
 
-def test_transient_token_verify_error_continues(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_transient_token_verify_error_continues(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A transient Discord error verifying the token must not block setup — the
     token is accepted (the bridge re-validates at boot) and the flow continues."""
     discord = _DiscordStub()
@@ -466,9 +458,7 @@ def test_transient_token_verify_error_continues(
 def test_poll_transient_error_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A non-timeout poll error (rate-limited / unreachable) surfaces and degrades
     the Discord step rather than aborting the wizard."""
-    discord = _DiscordStub(
-        join_result=discord_discovery.DiscordUnavailableError("could not reach Discord")
-    )
+    discord = _DiscordStub(join_result=discord_discovery.DiscordUnavailableError("could not reach Discord"))
     p = FakePrompter(
         selects=["native"],  # no guild/channel pick after the poll error
         texts=["scribe", "d", "12345"],
@@ -498,9 +488,7 @@ def test_zero_guilds_surfaced(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 
 def test_channel_list_error_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """An error listing channels surfaces and degrades (the channel is unset)."""
-    discord = _DiscordStub(
-        channels=discord_discovery.DiscordUnavailableError("could not reach Discord (/channels)")
-    )
+    discord = _DiscordStub(channels=discord_discovery.DiscordUnavailableError("could not reach Discord (/channels)"))
     p = FakePrompter(
         selects=["g1", "native"],  # guild pick, then broker (channel list failed)
         texts=["scribe", "d", "12345"],
@@ -528,9 +516,7 @@ def test_no_text_channels_at_all_surfaced(tmp_path: Path, capsys: pytest.Capture
     assert "no text channels the bot can post in" in out
 
 
-def test_unpostable_channels_noted_alongside_postable(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_unpostable_channels_noted_alongside_postable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """When some channels are postable and some aren't, the gap is noted (not hidden)."""
     discord = _DiscordStub(
         channels=ChannelListing(
@@ -590,15 +576,11 @@ def test_broker_native_sets_local_url(tmp_path: Path) -> None:
 
 
 def test_broker_url_sets_given_url(tmp_path: Path) -> None:
-    assert _run(
-        _prompter(broker="url", broker_url="my-broker:9092"), tmp_path, home=tmp_path
-    ) == 0
+    assert _run(_prompter(broker="url", broker_url="my-broker:9092"), tmp_path, home=tmp_path) == 0
     assert read_env(tmp_path / ".env")["CALF_HOST_URL"] == "my-broker:9092"
 
 
-def test_broker_url_empty_on_fresh_install_warns(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_broker_url_empty_on_fresh_install_warns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A fresh install ending with no broker can't start, so the URL branch warns
     when nothing is typed and nothing is already on disk."""
     rc = _run(_prompter(broker="url", broker_url=""), tmp_path, home=tmp_path)
@@ -608,9 +590,7 @@ def test_broker_url_empty_on_fresh_install_warns(
     assert init._BROKER_VAR not in read_env(tmp_path / ".env")
 
 
-def test_non_numeric_application_id_warns_without_blocking(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_non_numeric_application_id_warns_without_blocking(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A non-numeric DISCORD_APPLICATION_ID is flagged but still written + used for
     the invite URL (the typo is surfaced, not blocking)."""
     rc = _run(_prompter(app_id="not-a-number"), tmp_path, home=tmp_path)
@@ -697,9 +677,7 @@ def test_live_finish_broker_url_defaults_to_localhost_when_env_unset(tmp_path: P
     assert finish.reply_calls[0]["server_urls"] == "localhost"
 
 
-def test_live_finish_first_reply_success_celebrates(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_live_finish_first_reply_success_celebrates(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     finish = _FinishStub(reply=True)
     assert _run(_prompter(), tmp_path, home=tmp_path, finish=finish) == 0
     out = capsys.readouterr().out
@@ -837,10 +815,13 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When the orchestration coroutines are NOT injected, the finish resolves the
-    real ``lifecycle.start`` / ``roster.agent_start`` / ``wait_for_first_reply``
+    real ``lifecycle.start`` / ``roster.agent_start`` / ``_wait_for_agent_online``
     (the production wiring). We monkeypatch those module attributes to fast
-    no-ops so the resolution path runs without launching a supervisor or broker."""
-    from calfcord.control_plane import first_reply as first_reply_mod
+    no-ops so the resolution path runs without launching a supervisor or broker.
+
+    calfkit 0.12 replaced the deleted control-plane first-reply watcher with the
+    local ``init._wait_for_agent_online`` mesh presence-poll, so the default
+    first-reply seam now resolves to that module function."""
     from calfcord.supervisor import lifecycle, roster
 
     async def _ok_start(home, **_):
@@ -854,7 +835,7 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
 
     monkeypatch.setattr(lifecycle, "start", _ok_start)
     monkeypatch.setattr(roster, "agent_start", _ok_agent)
-    monkeypatch.setattr(first_reply_mod, "wait_for_first_reply", _ok_reply)
+    monkeypatch.setattr(init, "_wait_for_agent_online", _ok_reply)
 
     # Inject only the pc-binary probe (so the native gate passes); leave the
     # start/agent/reply seams as None so the lazy production resolution runs.
@@ -887,9 +868,7 @@ def test_default_pc_binary_delegates_to_supervisor_resolver(monkeypatch: pytest.
 # --------------------------------------------------------------------------- #
 
 
-def test_dev_mode_degrades_to_manual_next_steps(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_dev_mode_degrades_to_manual_next_steps(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """With ``home=None`` (dev run, no install/shim) the wizard cannot orchestrate
     the supervisor, so it configures everything then prints the honest manual
     next-steps instead of starting the substrate (§12.6)."""
@@ -907,9 +886,7 @@ def test_dev_mode_degrades_to_manual_next_steps(
     assert "calfcord agent start scribe" in out
 
 
-def test_missing_process_compose_binary_degrades(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_missing_process_compose_binary_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A native install missing the process-compose binary also degrades to the
     manual next-steps rather than crashing (§12.6 honest-failure-path)."""
     finish = _FinishStub(pc_binary=RuntimeError("process-compose binary not found"))
@@ -921,9 +898,7 @@ def test_missing_process_compose_binary_degrades(
     assert "calfcord start" in out
 
 
-def test_dev_mode_states_reboot_non_survival(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_dev_mode_states_reboot_non_survival(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The session-scoped (not reboot-surviving) nature is stated honestly (§12.6)."""
     rc = _run(_prompter(), tmp_path, home=tmp_path, finish=_FinishStub())
     out = capsys.readouterr().out
@@ -949,9 +924,7 @@ def test_checkpoint_persisted_after_native_run(tmp_path: Path) -> None:
     assert cp.channel_id == "c1"
 
 
-def test_resume_welcome_back_when_agent_already_done(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_resume_welcome_back_when_agent_already_done(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A checkpoint with the agent done greets 'Welcome back' on the next run."""
     agents_dir = tmp_path / "agents"
     # Seed an existing, parseable agent + a checkpoint marking it done.
@@ -994,9 +967,7 @@ def test_resume_threads_checkpoint_agent_name_into_create_default(
     assert captured["name_default"] == "scribe"
 
 
-def test_fresh_run_passes_no_name_default_to_create(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fresh_run_passes_no_name_default_to_create(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh (non-resume) run must NOT pin a name default — ``create_agent``'s own
     lone-existing / starter default logic owns the fresh case (nit #18b)."""
     captured: dict[str, str | None] = {}
@@ -1011,9 +982,7 @@ def test_fresh_run_passes_no_name_default_to_create(
     assert captured["name_default"] is None
 
 
-def test_resume_greeting_reflects_advisory_rewalk(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_resume_greeting_reflects_advisory_rewalk(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The resume greeting must not claim the agent step is finished while it then
     unconditionally re-walks the create flow (nit #18a). It keeps the test-asserted
     'Welcome back' substring but softens the wording to reflect the advisory
@@ -1029,9 +998,7 @@ def test_resume_greeting_reflects_advisory_rewalk(
     assert "are done; let's finish setup" not in out
 
 
-def test_resume_reverifies_agent_artifact_not_just_flag(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_resume_reverifies_agent_artifact_not_just_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Advisory contract (§12.7): a checkpoint says the agent is done, but the
     real ``.md`` is gone — the wizard RE-WALKS the agent step (re-verify the
     artifact), it does not trust the stale flag and skip into Discord."""
