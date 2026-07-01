@@ -46,11 +46,14 @@ class DiscordReceiver:
 
     @staticmethod
     def _build_intents() -> discord.Intents:
-        # message_content + members are privileged and must be enabled
-        # in the Developer Portal under Bot → Privileged Gateway Intents.
+        # message_content is privileged and must be enabled in the Developer
+        # Portal under Bot → Privileged Gateway Intents. ``members`` is
+        # deliberately NOT requested: nothing here consumes member events/cache,
+        # and requesting it would hard-fail boot with PrivilegedIntentsRequired
+        # if the portal toggle is off. The docs still ask users to enable the
+        # portal toggle as future-proofing (an unrequested intent is inert).
         intents = discord.Intents.default()
         intents.message_content = True
-        intents.members = True
         return intents
 
     def on_message(self, handler: MessageHandler) -> MessageHandler:

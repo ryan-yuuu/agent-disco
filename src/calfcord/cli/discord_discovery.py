@@ -92,12 +92,13 @@ INVITE_PERMISSIONS = (
     | _SEND_MESSAGES_IN_THREADS
 )  # == 309774601216
 
-# Shown verbatim at the invite step. The two privileged intents are the single most-missed setup
-# step (see docs/discord-setup.md); naming them inline turns a silent "bot online but never replies"
-# into a checklist the user can act on before the bridge ever fails with PrivilegedIntentsRequired.
+# Shown verbatim at the invite step. Message Content is the single most-missed setup step (see
+# docs/discord-setup.md): naming it inline turns a silent "bot online but never replies" into a
+# checklist before the bridge ever fails with PrivilegedIntentsRequired. Server Members is not
+# requested by the bridge today, but enabling it now future-proofs the setup.
 INTENTS_REMINDER = (
-    "Before inviting, enable both Privileged Gateway Intents on the Bot tab: "
-    "Message Content Intent and Server Members Intent — then click Save Changes."
+    "Before inviting, on the Bot tab enable the Message Content Intent (required — the bridge "
+    "won't start without it) and, recommended, the Server Members Intent — then click Save Changes."
 )
 
 

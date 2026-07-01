@@ -28,10 +28,10 @@ Still on the **Bot** tab, under **Privileged Gateway Intents**, switch on
 **both** and click **Save Changes**:
 
 - ✅ Message Content Intent
-- ✅ Server Members Intent
+- ✅ Server Members Intent *(not enforced yet — enabling it now future-proofs your setup)*
 
-> ⚠️ **Most-missed step.** Skip it and the bridge won't start — it exits with
-> `PrivilegedIntentsRequired`.
+> ⚠️ **Most-missed step.** Skip **Message Content** and the bridge won't start —
+> it exits with `PrivilegedIntentsRequired`. (Server Members isn't required yet.)
 
 ## 3. Invite the bot
 
@@ -83,7 +83,7 @@ ID**, and set the key in `~/.calfcord/config/.env`:
 
 | Symptom | Fix |
 |---|---|
-| Bridge exits with `PrivilegedIntentsRequired` | Do step 2 — enable both intents. |
+| Bridge exits with `PrivilegedIntentsRequired` | Enable the **Message Content** intent (step 2). |
 | Bot is online but never replies | Confirm Message Content intent (step 2); check it can **View Channel** + **Send Messages** in that channel. |
 | Agent can't post / `Forbidden` on a webhook | Bot needs **Manage Webhooks** in that channel. |
 | `/task` does nothing | The invite grants **Create Public Threads** server-wide, but a channel-level permission override can still deny it in a specific channel — check that channel's permission overrides. |

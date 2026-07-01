@@ -389,7 +389,11 @@ class _GatewayClient(discord.Client):
     def __init__(self, gateway: DiscordIngressGateway) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
-        intents.members = True
+        # ``members`` is deliberately NOT requested: nothing here consumes member
+        # events/cache (author identity arrives in MESSAGE_CREATE). Requesting it
+        # would hard-fail boot with PrivilegedIntentsRequired if the portal toggle
+        # is off, for no benefit. The docs still ask users to enable the portal
+        # toggle as future-proofing (an enabled-but-unrequested intent is inert).
         super().__init__(intents=intents)
         self._gateway = gateway
 

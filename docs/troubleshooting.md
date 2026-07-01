@@ -80,11 +80,12 @@ healthy beat only once it is **connected to Discord** (`on_ready`), so the gate
 times out whenever the bridge can connect a process but never completes the
 Discord handshake.
 
-**Most common cause — privileged intents are off.** If the bridge can reach
-Discord but the gateway never finishes coming up, the usual culprit is that the
-bot's **privileged gateway intents are disabled**. In the Discord Developer
-Portal → your app → **Bot**, enable **Message Content Intent** and **Server
-Members Intent**, then re-run `disco start`.
+**Most common cause — the Message Content intent is off.** If the bridge can
+reach Discord but the gateway never finishes coming up, the usual culprit is
+that the bot's **Message Content Intent** is disabled. In the Discord Developer
+Portal → your app → **Bot**, enable **Message Content Intent** (the bridge
+requires it; **Server Members Intent** is recommended but not required yet),
+then re-run `disco start`.
 
 **Other causes to rule out, in order:**
 

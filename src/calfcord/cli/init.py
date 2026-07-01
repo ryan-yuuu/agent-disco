@@ -380,7 +380,7 @@ def _run_discord(
         # is unset, but the rest of init still completes and a re-run finishes it.
         print("  the bot did not join a server in time. Common causes:")
         print("    - did you click Authorize on the invite link?")
-        print("    - are the Message Content and Server Members intents enabled?")
+        print("    - is the Message Content intent enabled (required; Server Members is recommended)?")
         print("    - do you have Manage Server on the server you tried to add it to?")
         print("  No server yet? Create one in Discord (the + button), then re-run `disco init`.")
         return checkpoint

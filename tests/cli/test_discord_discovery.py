@@ -177,10 +177,14 @@ def test_invite_url_accepts_int_app_id():
     assert "client_id=123456789" in dd.invite_url(123456789)
 
 
-def test_intents_reminder_names_both_privileged_intents():
+def test_intents_reminder_frames_message_content_required_and_members_recommended():
     reminder = dd.INTENTS_REMINDER.lower()
+    # Message Content is the boot-fatal one; the reminder must flag it as required.
     assert "message content" in reminder
+    assert "required" in reminder
+    # Server Members is still surfaced, but only as a recommendation (not boot-fatal).
     assert "server members" in reminder
+    assert "recommended" in reminder
 
 
 # ============================================================= (c) poll_until_joined
