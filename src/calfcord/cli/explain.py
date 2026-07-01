@@ -100,7 +100,7 @@ Roster members join the *running* workspace on demand and leave when stopped:
   - agents   your AI teammates (calfkit-agent), one process per agent or many
              per process; each subscribes to its channels plus a private inbox.
   - tools    the tools host (calfkit-tools): filesystem, terminal, code
-             execution, search, web, todo, and the agent-to-agent private_chat tool.
+             execution, search, web, and todo.
   - mcp      MCP servers (calfkit-mcp), one process per server in mcp.json:
              each hosts one Model Context Protocol server and advertises its
              tools on the bus. The only processes holding MCP credentials —
@@ -115,7 +115,7 @@ Every box above is one of calfkit's independently deployable process types:
 
   - calfkit-bridge   the Discord gateway (substrate).
   - calfkit-agent    one or more agents (roster).
-  - calfkit-tools    the tools + private_chat host (roster).
+  - calfkit-tools    the tools host (roster).
   - calfkit-mcp      one MCP server's toolbox (roster), one per server.
 
 They share nothing but the Kafka wire, the `.env` config, and the `agents/*.md`

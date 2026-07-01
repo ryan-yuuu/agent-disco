@@ -9,14 +9,13 @@ by name so it does not have to satisfy ``parse_agent_md``'s
 ``stem == name`` check (it would otherwise abort the whole load).
 
 The loader also resolves the ``tools: omitted → all`` default at parse
-time so downstream consumers (factory, phonebook, peer_roster) see a
-concrete tuple of tool names rather than the ``None`` sentinel. See
+time so downstream consumers (the agent factory) see a concrete tuple of
+tool names rather than the ``None`` sentinel. See
 :attr:`AgentDefinition.tools` for the explicit / implicit semantics.
 
-Cross-agent uniqueness of ``display_name`` is the
-:class:`AgentRegistry`'s concern, not the loader's. The filesystem itself
-prevents duplicate ``agent_id`` (one ``.md`` file per name); the slash
-command is always ``/<agent_id>``.
+Cross-agent uniqueness of ``display_name`` is a bridge-side concern, not the
+loader's. The filesystem itself prevents duplicate ``agent_id`` (one ``.md``
+file per name); the slash command is always ``/<agent_id>``.
 """
 
 from __future__ import annotations
@@ -136,10 +135,7 @@ def load_agent_targets(targets: list[Path]) -> list[AgentDefinition]:
 
     duplicates = {aid: paths for aid, paths in provenance.items() if len(paths) > 1}
     if duplicates:
-        lines = "\n".join(
-            f"  - {aid}: {', '.join(str(p) for p in paths)}"
-            for aid, paths in sorted(duplicates.items())
-        )
+        lines = "\n".join(f"  - {aid}: {', '.join(str(p) for p in paths)}" for aid, paths in sorted(duplicates.items()))
         raise ValueError(f"duplicate agent_id across --target paths:\n{lines}")
 
     definitions.sort(key=lambda d: d.agent_id)

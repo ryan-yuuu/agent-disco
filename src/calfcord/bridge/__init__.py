@@ -1,13 +1,9 @@
-"""Discord ↔ calfkit bridge.
+"""Discord ↔ calfkit bridge (the pure ``Client`` caller surface).
 
-.. note::
-   This package is mid-migration to the calfkit 0.12 caller surface (the pure
-   ``Client`` bridge). The eager re-exports of the embedded-Worker era
-   (``gateway``/``ingress``/``outbox``/``pending_wires``/``registry``) are being
-   removed as those modules are rewritten or deleted; the final convenience
-   surface is rebuilt once the gateway rewrite lands. Until then, import the
-   bridge submodules directly (``from calfcord.bridge.history import …``) so the
-   package stays importable while the embedded-Worker modules are inconsistent.
+The package keeps only a tiny convenience re-export — the wire DTOs. Import the
+bridge submodules directly (``from calfcord.bridge.gateway import main``,
+``from calfcord.bridge.history import …``) rather than widening this surface: the
+bridge is composed of focused modules, not one façade.
 """
 
 from calfcord.bridge.wire import WireAuthor, WireMessage

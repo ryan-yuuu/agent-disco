@@ -1,7 +1,7 @@
 """Roster operations: a teammate clocking in/out of the running office (§3.4-§3.5).
 
-These are the imperative glue above two seams — the broker-wide control-plane
-probe (:func:`calfcord.control_plane.probe.probe_live_roster`) and the Process
+These are the imperative glue above two seams — the broker-wide live-roster probe
+(a read of calfkit's native mesh, :func:`_probe_live_roster`) and the Process
 Compose REST client (:class:`calfcord.supervisor.client.ProcessComposeClient`) —
 that bring a *defined* agent online, take it offline, reload it, and report what
 is running. They are deliberately *pure-ish orchestration*: every world-touching
@@ -42,11 +42,13 @@ CLI entry point.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable, Callable
 
-from calfcord.agents.definition import AgentDefinition
-from calfcord.control_plane.probe import probe_live_roster
+from calfkit.client import Client
+from calfkit.exceptions import MeshUnavailableError
+
 from calfcord.supervisor._workspace import (
     WORKSPACE_NOT_RUNNING_HINT,
     iter_process_dicts,
@@ -57,9 +59,17 @@ from calfcord.supervisor.client import ProcessComposeClient, ProcessComposeError
 from calfcord.supervisor.compose import _RESERVED_PROCESS_NAMES as _NON_AGENT_PROCESSES
 
 # A broker-wide live-roster probe: hand it ``server_urls`` and it returns the
-# AgentDefinitions of every agent answering across the org. Injected so tests
-# script the roster without a real broker; production wraps ``probe_live_roster``.
-Probe = Callable[[str], Awaitable[list[AgentDefinition]]]
+# NAMES of every agent currently online across the org. Injected so tests script
+# the roster without a real broker; production wraps :func:`_probe_live_roster`
+# (a read of calfkit's native mesh).
+Probe = Callable[[str], Awaitable[list[str]]]
+
+# Overall wall-clock bound on a single mesh probe (broker connect + view
+# catch-up + read). The old control-plane probe used a ~2s discovery-reply
+# window; the mesh read adds a connect + broker-start leg, so this bounds the
+# TOTAL and errs slightly higher. A probe that exceeds it degrades exactly like
+# a broker-down probe (the callers warn and proceed / show physical-only).
+_DEFAULT_PROBE_TIMEOUT_S = 5.0
 
 # A wall clock, accepted for symmetry with ``lifecycle.status`` and future
 # freshness reconciliation. Unused today; kept so callers need not special-case
@@ -83,18 +93,56 @@ _PC_RUNNING = "Running"
 _resolve_client = resolve_client
 
 
-def _resolve_probe(probe: Probe | None) -> Probe:
-    """Resolve the live-roster probe, defaulting to the real control-plane probe.
+async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PROBE_TIMEOUT_S) -> list[str]:
+    """Read the online agent names from calfkit's native mesh (``calf.agents``).
 
-    The default adapts :func:`probe_live_roster` (``(server_urls, *, timeout_s)``)
+    Replaces the deleted control-plane discovery probe. Opens a short-lived
+    observer :class:`~calfkit.client.Client`, forces the broker up — opening (and
+    immediately closing) an ``events()`` stream starts the broker and its
+    ``__aexit__`` leaves it running — then reads ``client.mesh.get_agents()``, the
+    same online-only, heartbeat-staleness-filtered view the bridge roster reads,
+    and returns the online agent names sorted.
+
+    The mesh carries presence, not full definitions, so this returns NAMES only —
+    all the duplicate guard and the ps board consume. ``timeout_s`` bounds the
+    whole probe (connect + broker start + view catch-up + read).
+
+    A :class:`~calfkit.exceptions.MeshUnavailableError` means the broker is
+    reachable but the ``calf.agents`` plane can't be read yet — most commonly
+    because no agent has ever come online (the compacted topic isn't created until
+    one does). That is "no online agents to report", not a fault, so it maps to an
+    empty roster. A broker that is actually down raises out of the ``events()``
+    start (or trips ``timeout_s``) and PROPAGATES, so the callers' "broker
+    unreachable" degradation stays accurate.
+
+    NOTE the behavior change from the deleted probe: liveness is now passive mesh
+    heartbeat-staleness, not an active discovery ping/response round-trip.
+    """
+    client = Client.connect(server_urls)
+    try:
+        async with asyncio.timeout(timeout_s):
+            async with client.events(terminal_only=True):
+                pass
+            agents = await client.mesh.get_agents()
+            return sorted(info.name for info in agents.values())
+    except MeshUnavailableError:
+        return []
+    finally:
+        await client.aclose()
+
+
+def _resolve_probe(probe: Probe | None) -> Probe:
+    """Resolve the live-roster probe, defaulting to the native-mesh probe.
+
+    The default adapts :func:`_probe_live_roster` (``(server_urls, *, timeout_s)``)
     to the injectable ``(server_urls) -> ...`` shape, so tests can stub a plain
     async callable.
     """
     if probe is not None:
         return probe
 
-    async def _default_probe(server_urls: str) -> list[AgentDefinition]:
-        return await probe_live_roster(server_urls)
+    async def _default_probe(server_urls: str) -> list[str]:
+        return await _probe_live_roster(server_urls)
 
     return _default_probe
 
@@ -111,7 +159,7 @@ async def agent_start(
     server_urls: str,
     client: ProcessComposeClient | None = None,
     probe: Probe | None = None,
-    live: list[AgentDefinition] | None = None,
+    live: list[str] | None = None,
     now: Clock | None = None,
 ) -> int:
     """Bring agent ``name`` online: a teammate clocking into the live org (§3.5).
@@ -202,12 +250,9 @@ async def agent_start(
             # duplicates, so warn and proceed with the local start rather than
             # blocking it — a same-host duplicate is impossible (one declared
             # process per name).
-            print(
-                "warning: could not verify org-wide duplicates "
-                "(broker unreachable); proceeding."
-            )
+            print("warning: could not verify org-wide duplicates (broker unreachable); proceeding.")
             live = []
-    if any(defn.agent_id == name for defn in live):
+    if name in live:
         print(f"agent {name} is already running in the organization")
         return 0
 
@@ -230,8 +275,7 @@ async def agent_start(
             )
             return 1
         raise RuntimeError(
-            f"agent_start: starting agent {name!r} failed against the local "
-            f"supervisor (not a not-declared 4xx): {exc}"
+            f"agent_start: starting agent {name!r} failed against the local supervisor (not a not-declared 4xx): {exc}"
         ) from exc
 
     print(f"agent {name} online")
@@ -354,17 +398,14 @@ async def agent_start_all(
     # none of them re-probe.
     probe = _resolve_probe(probe)
     try:
-        live: list[AgentDefinition] = await probe(server_urls)
+        live: list[str] = await probe(server_urls)
         probe_unavailable = False
     except Exception:
         # One aggregate broker-down warning for the whole action (not one per id),
         # then proceed with an empty roster — the guard is best-effort (§3.5) and a
         # same-host duplicate is impossible. The summary reflects that the org-wide
         # check was skipped fleet-wide so the operator gets a single signal.
-        print(
-            "warning: could not verify org-wide duplicates "
-            "(broker unreachable); proceeding for all agents."
-        )
+        print("warning: could not verify org-wide duplicates (broker unreachable); proceeding for all agents.")
         live = []
         probe_unavailable = True
 
@@ -502,8 +543,8 @@ async def agent_ps(
 
     Otherwise it unions two views:
 
-    * **LOGICAL** (global): every agent answering the discovery probe across the
-      whole org — true liveness, host-agnostic.
+    * **LOGICAL** (global): every agent online on the mesh across the whole org —
+      true liveness, host-agnostic.
     * **PHYSICAL** (host-local): this host's Process Compose roster processes (the
       non-substrate ones) that are ``Running``.
 
@@ -529,7 +570,7 @@ async def agent_ps(
 
     probe = _resolve_probe(probe)
     try:
-        logical = {defn.agent_id for defn in await probe(server_urls)}
+        logical = set(await probe(server_urls))
     except Exception:
         # The probe talks to the broker; a broker hiccup must not crash read-only
         # `ps`. Degrade to the physical (host-local) view with a note instead of
