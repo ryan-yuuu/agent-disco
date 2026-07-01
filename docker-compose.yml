@@ -85,13 +85,17 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # The Discord gateway: normalizes inbound Discord events and posts
-  # agent replies back as persona webhooks.
+  # The Discord gateway: a pure calfkit ``Client`` (no embedded Worker and
+  # no control-plane consumers). It normalizes inbound Discord events, calls
+  # agents by name, and posts replies back as persona webhooks. It also hosts
+  # the agent-to-agent (A2A) audit channel — the ``A2AChannelResolver`` moved
+  # here from the tools process, since native A2A is bridge-side now.
   #
-  # No ``agents/*.md`` mount: after the control-plane split the bridge
-  # bootstraps its registry by projecting from ``agent.state`` events.
-  # Mounting the definitions here would be a misleading signal that the
-  # bridge consults disk — it does not.
+  # No ``agents/*.md`` mount: the bridge learns the live roster from calfkit's
+  # agent mesh (``client.mesh.get_agents()`` over ``calf.agents``), never from
+  # disk and no longer from an ``agent.state`` projection. Mounting the
+  # definitions here would be a misleading signal that the bridge consults
+  # disk — it does not.
   bridge:
     <<: *calfcord-base
     container_name: calfcord-bridge
@@ -100,14 +104,19 @@ services:
       # Override .env so this service always dials the in-network
       # broker regardless of what the host-side .env says.
       CALF_HOST_URL: tansu:9092
+      # The A2A audit channel: agent-to-agent exchanges rendered into a
+      # private Discord channel. Bridge-hosted since the calfkit-012
+      # migration (it moved off the tools service). Set
+      # CALFKIT_A2A_CHANNEL_CATEGORY too to file the channel under a category.
+      CALFKIT_A2A_CHANNEL_NAME: private-a2a
     volumes:
-      # Bridge-local SQLite transcript store (DISCORD_TRANSCRIPT_DB_PATH,
-      # default state/transcripts.sqlite3): step transcripts + tool-call
-      # replay. Persistent so transcripts survive restarts/redeploys; the
-      # bridge is the sole reader/writer. WAL mode writes -wal/-shm sidecar
-      # files alongside the DB, so the directory (not a single file) is
-      # mounted. Distinct sub-path from the agent's state/agents/*.json, so
-      # both services can share ./state without conflict.
+      # Bridge-local SQLite store (DISCORD_TRANSCRIPT_DB_PATH, default
+      # state/transcripts.sqlite3): step transcripts + tool-call replay, plus
+      # the per-agent thinking-effort overrides (the agent_overrides table
+      # written by /thinking-effort) that replaced the deleted control plane.
+      # Persistent so it survives restarts/redeploys; the bridge is the sole
+      # reader/writer. WAL mode writes -wal/-shm sidecar files alongside the
+      # DB, so the directory (not a single file) is mounted.
       - ./state:/app/state
 
   # One or more LLM-backed agent nodes. Defaults to "all agents in one
@@ -131,15 +140,19 @@ services:
     environment:
       CALF_HOST_URL: tansu:9092
     volumes:
-      # Read-write: the agent's control-plane sink rewrites its own
-      # frontmatter via md_writer.update_thinking_effort when the
-      # bridge publishes a SetThinkingEffortOp. The agent process is
-      # the sole writer of agents/<id>.md; the bridge has
-      # no mount here for that reason.
+      # The agent reads every agents/*.md here at startup (re-parsed on
+      # boot; the dev overlay restarts the container on edits). The old
+      # read-write justification — the agent rewriting its own frontmatter
+      # on a bridge SetThinkingEffortOp — is gone: the control plane was
+      # removed, and thinking-effort is now a bridge-side persisted
+      # override. Nothing in this container writes here at runtime.
       - ./agents:/app/agents
-      # Per-agent runtime state (channel subscriptions, .json files
-      # under state/agents/). Read-write so the agent service can
-      # persist updates.
+      # Shared ./state dir (the same tree the bridge uses for its SQLite
+      # store). Name-addressing removed per-agent channel subscriptions, so
+      # the agent no longer writes state/agents/*.json and keeps no on-disk
+      # runtime state; the mount is retained for parity with the bridge.
+      # Memory, if enabled, is workspace-relative and lives in the tools
+      # process, not here.
       - ./state:/app/state
       # Codex subscription OAuth tokens. Shared with the host CLI
       # (``uv run calfkit-auth codex ...``) so token rotation that
@@ -151,9 +164,11 @@ services:
       # primes all services' caches at once.
       - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
 
-  # The A2A + builtin-tool runner. This is the service that runs the
-  # shell / fs / grep / glob / web tools — it has the trusted shared
-  # workspace bind-mounted at /workspace.
+  # The builtin-tool runner: a plain calfkit Worker hosting the
+  # shell / fs / grep / glob / web tool nodes, with the trusted shared
+  # workspace bind-mounted at /workspace. Pure compute on the Kafka wire —
+  # since the calfkit-012 migration it opens no Discord connection and hosts
+  # no A2A (native A2A and its audit channel are bridge-side now).
   tools:
     <<: *calfcord-base
     container_name: calfcord-tools
@@ -161,7 +176,11 @@ services:
     environment:
       CALF_HOST_URL: tansu:9092
       CALFCORD_WORKSPACE_DIR: /workspace
-      CALFKIT_A2A_CHANNEL_NAME: private-a2a
+      # Defense-in-depth: the tools process needs no Discord credentials, so
+      # blank the token inherited from the shared env_file (.env) rather than
+      # ship it to a host that never opens a Discord connection. A leaked
+      # tools host then cannot leak the bot token.
+      DISCORD_BOT_TOKEN: ""
     volumes:
       # Trusted shared workspace: a DEDICATED ``./workspace`` dir,
       # read-write — NOT the whole project root. The builtin
@@ -176,6 +195,29 @@ services:
       # checkout or $HOME), drop a compose.override.yml next to this file
       # with a ``volumes:`` override.
       - ./workspace:/workspace
+
+  # MCP servers are per-server processes — one ``calfkit-mcp <server>`` per
+  # entry in mcp.json (the same per-server model as the supervisor's
+  # ``mcp-<server>`` slots), so a broken or slow server can't take its
+  # siblings down. None are started by default: each needs a real server
+  # name plus that server's secrets, so add one service per server by hand,
+  # mirroring the ``agent`` service above.
+  #
+  # This is the ONLY process type that reads mcp.json and holds MCP
+  # credentials — the secrets stay on the MCP host. Agents resolve their
+  # ``mcp/<server>`` selectors from the broker's capability view, so agent
+  # hosts need neither mcp.json nor the tokens. Example, for a server named
+  # ``github`` (uncomment and adjust; add one block per server):
+  #
+  # mcp-github:
+  #   <<: *calfcord-base
+  #   command: calfkit-mcp github
+  #   environment:
+  #     CALF_HOST_URL: tansu:9092
+  #   volumes:
+  #     # mcp.json (transport + $VAR credential refs expanded from .env).
+  #     # WORKDIR is /app, so calfkit-mcp finds it via the ./mcp.json fallback.
+  #     - ./mcp.json:/app/mcp.json:ro
 
 # No named broker volume: Tansu uses ephemeral memory storage, so there is no
 # Kafka data to persist. calfcord re-creates its topics on startup (opt-in
