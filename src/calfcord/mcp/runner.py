@@ -1,6 +1,6 @@
 """CLI entry point for an ``mcp-<server>`` deployment: ``calfkit-mcp <server>``.
 
-Hosts exactly **one** :class:`~calfkit.mcp.mcp_toolbox.MCPToolbox` from
+Hosts exactly **one** :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode` from
 ``mcp.json`` on its own calfkit :class:`Worker`. One process per server is
 deliberate: calfkit fails a toolbox's hosting worker at boot when the MCP
 server is unreachable, and server entries are operator-supplied
