@@ -30,21 +30,31 @@ _OWNER_USER_ID = 9999
 
 
 class _FakeOverrides:
-    """A stand-in for :class:`EffortOverrides` recording ``set()`` writes.
+    """A stand-in for :class:`EffortOverrides` recording ``set()`` / ``clear()``.
 
-    ``set`` is the only method the slash callback touches. When ``fail`` is set it
-    raises, standing in for a store write error so the callback's guarded
-    "couldn't save" path is observable.
+    Tracks the persisted ``{agent → tier}`` state plus the two call lists, so a
+    test can assert which method the slash callback invoked and the resulting row.
+    When ``fail`` is set both writes raise, standing in for a store write error so
+    the callback's guarded "couldn't save" path is observable.
     """
 
     def __init__(self, *, fail: bool = False) -> None:
         self.sets: list[tuple[str, str]] = []
+        self.clears: list[str] = []
+        self.state: dict[str, str] = {}
         self._fail = fail
 
     async def set(self, agent_id: str, effort: str) -> None:
         if self._fail:
             raise RuntimeError("store write failed")
         self.sets.append((agent_id, effort))
+        self.state[agent_id] = effort
+
+    async def clear(self, agent_id: str) -> None:
+        if self._fail:
+            raise RuntimeError("store write failed")
+        self.clears.append(agent_id)
+        self.state.pop(agent_id, None)
 
 
 def _fake_discord_client() -> MagicMock:
@@ -157,18 +167,23 @@ class TestThinkingEffortWrite:
         await manager._on_thinking_effort(interaction, "  Scribe  ", "high")
 
         assert overrides.sets == [("scribe", "high")]
+        assert overrides.clears == []  # a real tier writes through set(), never clear()
         msg = interaction.response.send_message.call_args[0][0]
         assert "set" in msg.lower()
         assert "scribe" in msg and "high" in msg
 
-    async def test_effort_none_clears_and_replies_cleared(self) -> None:
+    async def test_effort_none_clears_row_and_replies_cleared(self) -> None:
         manager, overrides = _make_manager()
+        # Seed an existing override so we can prove ``none`` removes the row.
+        overrides.state["scribe"] = "high"
         interaction = _interaction()
         await manager._on_thinking_effort(interaction, "scribe", "none")
 
-        # ``none`` is a valid tier: it is still written through (clearing the
-        # override), and the reply says so.
-        assert overrides.sets == [("scribe", "none")]
+        # ``none`` means "no override": it clears the row rather than persisting a
+        # ``none`` tier, so the persisted state agrees with the "Cleared" reply.
+        assert overrides.clears == ["scribe"]
+        assert overrides.sets == []
+        assert "scribe" not in overrides.state
         msg = interaction.response.send_message.call_args[0][0]
         assert "cleared" in msg.lower()
 

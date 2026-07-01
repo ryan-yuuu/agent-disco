@@ -142,9 +142,14 @@ class SlashCommandManager:
             await reply("Please specify an agent name.")
             return
 
-        typed_effort = cast(ThinkingEffort, effort)
         try:
-            await self._overrides.set(normalized, typed_effort)
+            # ``none`` means "no override": clear the row (and map entry) so the
+            # persisted state and ``all_agent_overrides()`` agree with the
+            # "Cleared" message below, rather than persisting a ``none`` tier.
+            if effort == "none":
+                await self._overrides.clear(normalized)
+            else:
+                await self._overrides.set(normalized, cast(ThinkingEffort, effort))
         except Exception:
             logger.exception("failed to persist thinking-effort override agent=%s", normalized)
             await reply(f"Couldn't save the override for `{normalized}`. Check the bridge logs.")
