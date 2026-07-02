@@ -18,6 +18,7 @@ provider SDK / network / key.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -97,6 +98,21 @@ class FakePrompter:
         if not self._checkboxes:
             return [c.value for c in choices if c.checked]
         return self._checkboxes.popleft()
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ() -> object:
+    """Isolate ``os.environ`` per test.
+
+    The live finish re-syncs the process environment to the ``.env`` it just wrote
+    (so the detached workspace children inherit the collected values), which
+    mutates the real ``os.environ``. Snapshot and restore around every test so
+    that write never leaks into another test.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 @pytest.fixture(autouse=True)
@@ -323,6 +339,46 @@ def test_native_happy_path_creates_agent_and_persists_default_provider(tmp_path:
     assert agent.provider == "anthropic"
     assert agent.model == "claude-haiku-4-5"
     assert read_env(tmp_path / ".env")["CALFKIT_AGENT_DEFAULT_PROVIDER"] == "anthropic"
+
+
+def test_first_run_orients_agent_create_before_name_prompt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A fresh init explains the agent-create step and the pre-filled-prompt mechanic
+    before the first name prompt — a bare ``? Agent name:`` is otherwise unexplained."""
+    assert _run(_prompter(name="scribe", description="Takes notes"), tmp_path, home=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "create your agent" in out
+    assert "press Enter to accept it" in out
+
+
+def test_live_finish_syncs_collected_discord_settings_into_environment(tmp_path: Path) -> None:
+    """The workspace (broker + bridge, and the roster agents) is launched as
+    detached children that inherit THIS process's environment. ``disco init`` was
+    started with the seed's empty ``DISCORD_*`` placeholders in its env, and
+    pydantic-settings ranks inherited env vars above the ``.env`` file — so unless
+    the wizard re-syncs its environment to the values it just wrote, the bridge
+    child reads the stale empties and crashes on ``DiscordSettings``. Capture the
+    environment at the instant the workspace starts and assert the collected
+    Discord identifiers are live there."""
+    seen: dict[str, str | None] = {}
+
+    class _CapturingFinish(_FinishStub):
+        async def start(self, home: Path, **kwargs: object) -> int:
+            seen["guild"] = os.environ.get("DISCORD_GUILD_ID")
+            seen["app"] = os.environ.get("DISCORD_APPLICATION_ID")
+            return await super().start(home, **kwargs)
+
+    rc = _run(
+        _prompter(guild="g1", app_id="778899"),
+        tmp_path,
+        home=tmp_path,
+        finish=_CapturingFinish(),
+    )
+
+    assert rc == 0
+    assert seen["guild"] == "g1"
+    assert seen["app"] == "778899"
 
 
 def test_agent_write_failure_aborts_before_discord(
@@ -1099,6 +1155,9 @@ def test_resume_welcome_back_when_agent_already_done(tmp_path: Path, capsys: pyt
     assert _run(p2, tmp_path, agents_dir=agents_dir, home=tmp_path) == 0
     out = capsys.readouterr().out
     assert "Welcome back" in out
+    # The first-run orientation is mutually exclusive with the resume greeting:
+    # a resume shows "Welcome back", never the fresh "create your agent" intro.
+    assert "create your agent" not in out
 
 
 def test_resume_threads_checkpoint_agent_name_into_create_default(

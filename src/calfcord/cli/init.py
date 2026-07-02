@@ -258,6 +258,17 @@ def run(
             f"Welcome back — picking up where you left off (agent {checkpoint.agent_name}). "
             "Press enter to keep each saved answer."
         )
+    else:
+        # First-run orientation: the very next thing is the agent-create flow, so
+        # say plainly what is being built and how the pre-filled prompts behave. A
+        # bare "? Agent name:" gives no hint that the shown value is an editable
+        # suggestion or why it is being asked — spell out the Enter-to-accept /
+        # type-to-change mechanic once, up front, for the whole wizard.
+        print("Now we'll create your agent — its name, description, model, and tools.")
+        print(
+            "Each prompt shows a suggested value: press Enter to accept it, or type a "
+            "new one and press Enter."
+        )
     print()
 
     # --- Phase 1: agent identity + provider + model + tools + write --------
@@ -315,6 +326,20 @@ def run(
     # default the runners (main.py ``_run_lifecycle``) resolve from the env, so
     # all three agree on the broker the install actually talks to.
     effective_server_urls = _envfile.read_env(env_path).get(_BROKER_VAR) or "localhost"
+
+    # Re-sync THIS process's environment to the .env we just wrote before the
+    # finish spawns the workspace. The broker/bridge/agents launch as detached
+    # children that inherit this env, but disco init was started (via the shim's
+    # `uv run --env-file config/.env`) when that file still held the seed's empty
+    # DISCORD_* placeholders — so our os.environ carries those empties. `uv
+    # run --env-file` can't override an already-set var, and pydantic-settings
+    # ranks env vars above the .env file, so without this the bridge would read
+    # the stale empties and die on DiscordSettings even though the real values are
+    # now on disk. The values the operator just entered are authoritative for the
+    # workspace we're about to launch, so push them into the environment children
+    # inherit. (Empty entries like a never-set DISCORD_OWNER_USER_ID are harmless:
+    # DiscordSettings treats an empty value as unset — see its env_ignore_empty.)
+    os.environ.update(_envfile.read_env(env_path))
 
     # --- Phase 4: live finish (or honest degrade) --------------------------
     return _run_finish(
