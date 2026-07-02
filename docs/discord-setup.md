@@ -19,8 +19,11 @@ Grab two values to hand to `disco init` when it asks (it writes them to
 2. On **General Information**, copy the **Application ID** — this is
    `DISCORD_APPLICATION_ID`.
 3. Open the **Bot** tab → **Reset Token** → **Copy** — this is
-   `DISCORD_BOT_TOKEN`. Treat it like a password; `init` verifies it on the spot
-   when you paste it.
+   `DISCORD_BOT_TOKEN`. (There's no separate "create bot" step — every new app
+   already has a bot user, so this tab is where it lives.) Discord shows the
+   token **only once**, so copy it right away; if you lose it, just **Reset
+   Token** again. Treat it like a password; `init` verifies it on the spot when
+   you paste it.
 
 ## 2. Enable two intents
 
@@ -35,12 +38,10 @@ Still on the **Bot** tab, under **Privileged Gateway Intents**, switch on
 
 ## 3. Invite the bot
 
-Replace `YOUR_APP_ID` with your Application ID, open the link in a browser,
-pick your server, and click **Authorize**:
-
-```
-https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=309774601216
-```
+You don't build the invite link yourself — `disco init` does. When you reach the
+invite step, the wizard prints a ready-made link and tries to open it in your
+browser. Your only job here: **pick your server and click Authorize.** If no
+browser tab appears, copy the link the wizard printed and open it yourself.
 
 The link grants the channel permissions Agent Disco needs to operate: View
 Channel, Send Messages, Embed Links, Read Message History, Manage Webhooks,

@@ -416,8 +416,9 @@ def _run_discord(
     app_id = _capture_app_id(prompter, env_path, current)
     invite = discord_discovery.invite_url(app_id)
     print()
-    print("Invite the bot to your server:")
+    print("Invite the bot to your server — opening this link in your browser:")
     print(f"    {invite}")
+    print("  (No browser tab? Copy the link above and open it yourself.)")
     print(f"  {discord_discovery.INTENTS_REMINDER}")
     print("  (Ctrl-C is safe & resumable — re-run `disco init` to pick up where you left off.)")
     # Pop the link in a browser AFTER printing it — best-effort only, and a

@@ -74,9 +74,11 @@ _OVERWRITE_MEMBER = 1
 # categories, threads, forums, etc. are not where a default agent should be seated.
 _TEXT_CHANNEL = 0
 
-# The invite bitmask granted by the canonical invite link (kept in lock-step with
-# docs/discord-setup.md's `permissions=...`). Built as an OR of named bits so the value is
-# self-documenting and reviewable: everything the persona-reply path needs (_POST_REQUIRED) plus
+# The invite bitmask granted by the canonical invite link. This is the single source of truth for
+# the link's permissions — docs/discord-setup.md describes them by name (View Channel, Send
+# Messages, …) rather than repeating the integer, so the two can't silently drift. Built as an OR of
+# named bits so the value is self-documenting and reviewable: everything the persona-reply path
+# needs (_POST_REQUIRED) plus
 # Embed Links (rich agent replies) and the two thread bits the bridge's /task + A2A thread creation
 # requires (bridge/egress.py raises Forbidden without Create Public Threads). Notably it does NOT
 # grant Manage Threads (bit 34) — nothing uses it, and it is one bit below Create Public Threads
