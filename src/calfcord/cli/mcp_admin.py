@@ -153,10 +153,9 @@ def run_add(
         interactive and prompter.confirm(f"Start {name} now?", default=True)
     )
     if not wants_start:
-        print(
-            f"next: `disco mcp start {name}` (a server new to this workspace "
-            "needs `disco stop && disco start` first to declare its slot)"
-        )
+        # No reload needed: MCP servers spawn as detached roster processes, so a
+        # freshly-added server starts directly into a running workspace.
+        print(f"next: `disco mcp start {name}`")
         return 0
     if home is None:
         print(
@@ -308,12 +307,10 @@ def _running_servers(home: Path | None) -> set[str] | None:
         client = resolve_client(None, str(home))
         if not await workspace_is_up(client):
             return None
-        try:
-            return await mcp_roster.running_servers(client)
-        except RuntimeError:
-            # The workspace probe and this read race a dying supervisor; a
-            # drop in the window degrades to stateless, same as "closed".
-            return None
+        # Phase 2: running servers are read from the pidfile namespace (state/run),
+        # not the supervisor REST — the workspace-up gate above still confirms the
+        # substrate is open before we report a running state at all.
+        return mcp_roster.running_servers(str(home))
 
     return asyncio.run(_read())
 
@@ -338,7 +335,8 @@ def run_remove(
         print(f"error: {exc}")
         return 1
     print(
-        f"removed MCP server {server!r}. If it is running, `disco mcp stop {server}` "
-        "stops it; the slot disappears on the next workspace reload."
+        f"removed MCP server {server!r} from mcp.json. If it is running, "
+        f"`disco mcp stop {server}` stops it — nothing else to do (the server "
+        "runs as its own detached process; there is no workspace slot to reload)."
     )
     return 0

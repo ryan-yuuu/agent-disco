@@ -11,6 +11,7 @@ each branch. No wall-clock waits: ``sleep`` advances a fake monotonic clock.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from calfcord.supervisor import lifecycle
+from calfcord.supervisor import _workspace, lifecycle, procspawn
 
 # --- fakes ------------------------------------------------------------------
 
@@ -131,6 +132,56 @@ async def _reachable_broker() -> bool:
 
 def _home(tmp_path: Path) -> str:
     return str(tmp_path)
+
+
+class _StubProbe:
+    """A scriptable mesh probe for status (returns agent NAMES or raises)."""
+
+    def __init__(self, names: list[str] | None = None, *, raises: Exception | None = None) -> None:
+        self._names = list(names or [])
+        self._raises = raises
+        self.calls: list[str] = []
+
+    async def __call__(self, server_urls: str) -> list[str]:
+        self.calls.append(server_urls)
+        if self._raises is not None:
+            raise self._raises
+        return list(self._names)
+
+
+def _write_self_pidfile(home, slot: str) -> Path:
+    """Write a pidfile naming THIS (alive, ours) process for ``slot`` — safe to scan,
+    NEVER pass to a terminate path (it would signal the test runner)."""
+    record = procspawn._identity_for(os.getpid(), ("self",))
+    pidfile = procspawn.pidfile_for(home, slot)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(json.dumps(procspawn._record_to_dict(record)), encoding="utf-8")
+    return pidfile
+
+
+def _write_stale_pidfile(home, slot: str) -> Path:
+    """Write a pidfile naming a reaped (dead) pid for ``slot``."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    pidfile = procspawn.pidfile_for(home, slot)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(
+        json.dumps({"v": 1, "pid": proc.pid, "argv": ["gone"], "start_token": "x", "spawn_ts": 0.0, "argv_hash": "x"}),
+        encoding="utf-8",
+    )
+    return pidfile
+
+
+def _write_not_ours_pidfile(home, slot: str) -> Path:
+    """Write a pidfile naming an alive-but-NOT-ours pid (init, pid 1) — a recycled-pid
+    stale file. Safe: terminate refuses to signal a pid it cannot prove is ours."""
+    pidfile = procspawn.pidfile_for(home, slot)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(
+        json.dumps({"v": 1, "pid": 1, "argv": ["init"], "start_token": "bogus", "spawn_ts": 0.0, "argv_hash": "x"}),
+        encoding="utf-8",
+    )
+    return pidfile
 
 
 def _make_fake_binary(path: Path) -> str:
@@ -361,10 +412,10 @@ async def test_supervisor_belongs_to_home_returns_none_when_info_unavailable() -
 # --- start: happy path ------------------------------------------------------
 
 
-async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) -> None:
-    """``start`` threads the caller-enumerated mcp.json server names through to
-    the compose generator, so each server gets its disabled ``mcp-<server>``
-    roster slot in the written project."""
+async def test_start_manifest_is_substrate_only(tmp_path, capsys, fake_pc_bin) -> None:
+    """Phase 2: even when ``start`` is handed agent_ids + mcp_servers (kept on the
+    signature for the empty-org signpost and backward-compatible call sites), the
+    written project declares ONLY the substrate — the roster is spawned off PC."""
     import yaml as _yaml
 
     home = _home(tmp_path)
@@ -393,9 +444,7 @@ async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) ->
 
     assert code == 0
     project = _yaml.safe_load((tmp_path / "state" / "process-compose.yaml").read_text())
-    proc = project["processes"]["mcp-github"]
-    assert proc["command"] == "/h/shims/disco run mcp github"
-    assert proc["disabled"] is True
+    assert set(project["processes"]) == {"broker", "bridge"}
 
 
 
@@ -692,7 +741,6 @@ async def test_start_external_broker_manifest_omits_broker_slot(
     procs = project["processes"]
     assert "broker" not in procs
     assert "depends_on" not in procs["bridge"]
-    assert "depends_on" not in procs["assistant"]
 
 
 # --- start: readiness timeout -> teardown -> non-zero -----------------------
@@ -1135,13 +1183,61 @@ async def test_stop_issues_down_via_blocking_seam(tmp_path, fake_pc_bin) -> None
     assert int(argv[argv.index("-p") + 1]) == lifecycle.pc_port_for(home)
 
 
+async def test_stop_sweeps_live_roster_and_reports_count(tmp_path, fake_pc_bin, capsys) -> None:
+    """`disco stop` closes the roster too: a live detached process is terminated and
+    its pidfile cleared, and the count is reported honestly."""
+    home = _home(tmp_path)
+    spawn_blocking = _RecordingSpawn()
+    spawned = _workspace.spawn_slot(home, "assistant", [sys.executable, "-c", "import time; time.sleep(30)"])
+    assert _workspace.slot_is_live(home, "assistant")
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+    assert code == 0
+    assert not procspawn.pidfile_for(home, "assistant").exists()
+    assert len(spawn_blocking.calls) == 1  # substrate down still issued
+    assert "1 roster process(es) stopped" in capsys.readouterr().out
+    # No orphan left behind.
+    assert not _workspace.slot_is_live(home, "assistant")
+    _ = spawned
+
+
+async def test_stop_sweeps_stale_and_not_ours_pidfiles_silently(tmp_path, fake_pc_bin, capsys) -> None:
+    """Stale (dead pid) and not-ours (recycled pid) pidfiles are swept without a
+    signal and NOT counted as stopped processes."""
+    home = _home(tmp_path)
+    _write_stale_pidfile(home, "ghost")
+    _write_not_ours_pidfile(home, "stranger")
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+    assert code == 0
+    assert not procspawn.pidfile_for(home, "ghost").exists()
+    assert not procspawn.pidfile_for(home, "stranger").exists()
+    out = capsys.readouterr().out
+    assert "workspace closed." in out  # no "(N roster process(es) stopped)"
+
+
+async def test_stop_sweeps_orphaned_roster_when_substrate_down(tmp_path, capsys) -> None:
+    """Even with the substrate already down, `disco stop` still reaps an orphaned
+    live roster process (a crashed supervisor scenario)."""
+    home = _home(tmp_path)
+    _workspace.spawn_slot(home, "assistant", [sys.executable, "-c", "import time; time.sleep(30)"])
+    client = _StubClient(project_state_results=[RuntimeError("not up")])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+    assert code == 0
+    assert not _workspace.slot_is_live(home, "assistant")
+    assert "1 roster process(es) stopped" in capsys.readouterr().out
+
+
 # --- status -----------------------------------------------------------------
 
 
 async def test_status_not_running(tmp_path, capsys) -> None:
     home = _home(tmp_path)
     client = _StubClient(project_state_results=[RuntimeError("not up")])
-    code = await lifecycle.status(home, client=client)
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
     assert code == 0
     out = capsys.readouterr().out.lower()
     assert "not running" in out
@@ -1150,52 +1246,120 @@ async def test_status_not_running(tmp_path, capsys) -> None:
 
 async def test_status_running_renders_board(tmp_path, capsys) -> None:
     home = _home(tmp_path)
+    # Substrate rows come from PC; the agent's row comes from a live pidfile
+    # reconciled with the mesh probe.
+    _write_self_pidfile(home, "assistant")
     processes = [
         {"name": "broker", "status": "Running", "is_ready": "Ready"},
         {"name": "bridge", "status": "Running", "is_ready": "Ready"},
-        {"name": "assistant", "status": "Running", "is_ready": "-"},
     ]
     client = _StubClient(
         project_state_results=[{"running": True}],
         list_processes_result={"data": processes},
     )
-    code = await lifecycle.status(home, client=client)
+    code = await lifecycle.status(
+        home, server_urls="localhost:9092", client=client, probe=_StubProbe(["assistant"])
+    )
     assert code == 0
     out = capsys.readouterr().out
     for name in ("broker", "bridge", "assistant"):
         assert name in out
+    assert "running" in out
     # Reboot non-survival surfaced honestly somewhere (§12.6): the daemon is
     # session-scoped, so status must say so.
     assert "reboot" in out.lower()
 
 
-async def test_status_running_empty_roster(tmp_path, capsys) -> None:
+async def test_status_reconciliation_matrix(tmp_path, capsys) -> None:
+    """The three agent states + the pidfile-only tools/mcp rows."""
     home = _home(tmp_path)
-    # Only the substrate is up; the roster board must say "(none running)".
-    processes = [{"name": "broker", "status": "Running", "is_ready": "Ready"}]
+    _write_self_pidfile(home, "here_and_answering")  # pidfile + mesh -> running
+    _write_self_pidfile(home, "here_only")  # pidfile only -> not registered
+    _write_self_pidfile(home, "tools")  # non-agent -> running
+    _write_self_pidfile(home, "mcp-github")  # non-agent -> running
     client = _StubClient(
         project_state_results=[{"running": True}],
-        list_processes_result=processes,  # bare list (no "data" wrapper)
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
     )
-    code = await lifecycle.status(home, client=client)
+    probe = _StubProbe(["here_and_answering", "remote_only"])  # remote_only: mesh only
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=probe)
     assert code == 0
-    out = capsys.readouterr().out.lower()
-    assert "none running" in out
+    out = capsys.readouterr().out
+    assert "here_and_answering" in out and "running" in out
+    assert "started, not registered (see disco logs)" in out  # here_only
+    assert "running (another host)" in out  # remote_only
+    assert "tools" in out and "mcp-github" in out  # non-agent rows shown
+
+
+async def test_status_broker_unreachable_shows_pidfiles_only(tmp_path, capsys) -> None:
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    probe = _StubProbe(raises=RuntimeError("broker down"))
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=probe)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "assistant" in out
+    assert "broker unreachable" in out
+    # No mesh -> the local pidfile is "started, not registered".
+    assert "started, not registered" in out
+
+
+async def test_status_renders_dead_slots_instead_of_hiding_them(tmp_path, capsys) -> None:
+    """A slot that crashed (pidfile present, process gone) must show as
+    `not running (exited — see <log>)` — never silently vanish from the board.
+    (`disco stop`'s sweep is the acknowledge-and-clear point for the files.)"""
+    home = _home(tmp_path)
+    _write_stale_pidfile(home, "assistant")
+    _write_stale_pidfile(home, "mcp-github")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "assistant" in out
+    assert "mcp-github" in out
+    assert out.count("not running (exited") == 2
+    assert str(procspawn.log_path_for(home, "assistant")) in out
+
+
+async def test_status_dead_slot_also_running_elsewhere_reports_both_truths(tmp_path, capsys) -> None:
+    """Crashed here but answering from another host: both facts are rendered."""
+    home = _home(tmp_path)
+    _write_stale_pidfile(home, "assistant")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    code = await lifecycle.status(
+        home, server_urls="localhost:9092", client=client, probe=_StubProbe(["assistant"])
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "running (another host)" in out
+    assert "exited here" in out
 
 
 async def test_status_empty_roster_signposts_start_and_create(tmp_path, capsys) -> None:
     """An empty roster is a teaching moment: the board must point at BOTH
-    ``disco agent start`` (bring a defined agent online) and ``disco agent create``
-    (add one), so a fresh org with no agents is never a dead end."""
+    ``disco agent start`` and ``disco agent create``, so a fresh org is never a
+    dead end."""
     home = _home(tmp_path)
-    processes = [{"name": "broker", "status": "Running", "is_ready": "Ready"}]
     client = _StubClient(
         project_state_results=[{"running": True}],
-        list_processes_result=processes,
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
     )
-    code = await lifecycle.status(home, client=client)
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
     assert code == 0
     out = capsys.readouterr().out
+    assert "none running" in out
     assert "disco agent start <name>" in out
     assert "disco agent create <name>" in out
 

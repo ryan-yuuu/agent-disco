@@ -112,7 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Roster lifecycle (design §2 / §3.4-§3.5): a teammate clocking in/out of the
     # *running* office. These are thin veneers over
     # :mod:`calfcord.supervisor.roster`; the duplicate guard, the workspace check,
-    # and the §13.1 not-a-declared-slot steer live there. ``start``/``stop``/
+    # and the non-agent-slot chokepoint live there. ``start``/``stop``/
     # ``restart`` take EITHER a positional name OR ``--all`` (exactly one — the
     # mutual-exclusion is enforced in the dispatcher, not by argparse, so it can
     # carry a clear domain message). ``--all`` is LOCAL-only: it sweeps THIS host's
@@ -579,10 +579,11 @@ def _run_lifecycle(command: str) -> int:
     half-built supervisor against the project-local dev tree.
 
     ``server_urls`` comes from ``CALF_HOST_URL`` (defaulting to ``localhost``,
-    the same default the runners and the broker healthcheck use); the roster is
-    the install's defined agents (:func:`detect_agents`, the seam ``agent list``
-    consumes) so the generated project declares one disabled slot per ``.md``.
-    The lifecycle coroutine's POSIX exit code is propagated unchanged.
+    the same default the runners and the broker healthcheck use). The generated
+    project is SUBSTRATE-ONLY (broker + bridge; the roster is spawned off Process
+    Compose per slot) — the defined-agent ids are still passed so ``start``'s
+    success banner can steer an empty org to ``agent create`` instead of ``agent
+    start``. The lifecycle coroutine's POSIX exit code is propagated unchanged.
     """
     home = _require_home(command, detail="the supervisor has a stable home and shim.")
     if home is None:
@@ -591,17 +592,24 @@ def _run_lifecycle(command: str) -> int:
     if command == "stop":
         return asyncio.run(lifecycle.stop(home))
     if command == "status":
-        return asyncio.run(lifecycle.status(home))
+        # status reconciles the roster's local pidfiles against the broker-wide mesh
+        # presence, so it needs the broker URL (the same CALF_HOST_URL default the
+        # runners / roster probe use).
+        server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+        return asyncio.run(lifecycle.status(home, server_urls=server_urls))
 
     # ``start`` additionally needs the shim launcher every supervised process
-    # execs under, the broker URL, and the roster to declare.
+    # execs under, the broker URL, and the defined-agent ids (for the empty-org
+    # signpost in its success banner — the substrate-only project declares no
+    # roster slots).
     _, agents_dir = init.resolve_paths(home)
     launcher = str(home / "shims" / "disco")
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
-    # MCP servers are roster slots too: enumerate mcp.json (no-secrets reader)
-    # so the generated project declares one disabled mcp-<server> slot each. An
-    # invalid mcp.json fails the whole start actionably rather than rendering a
-    # project that silently lacks the servers.
+    # MCP servers are detached roster slots spawned off Process Compose, so the
+    # generated project declares nothing for them — but an invalid mcp.json still
+    # fails the whole start actionably here, before the workspace opens, rather
+    # than surfacing later as N doomed `disco mcp start` attempts. (`mcp_servers`
+    # is threaded for signature compatibility; Phase 3 may drop the param.)
     mcp_servers = configured_mcp_servers_or_none()
     if mcp_servers is None:
         return 1
@@ -623,9 +631,9 @@ def _run_component(name: str, verb: str) -> int:
     surface and a thin veneer over the generic
     :func:`calfcord.supervisor.component.component_start` /
     :func:`~calfcord.supervisor.component.component_stop`. The slot ``name`` is the
-    component's declared Process Compose process (see
-    :func:`calfcord.supervisor.compose.build_compose_project`); ``verb`` selects
-    start vs stop.
+    component's pidfile slot under ``state/run/<name>.pid`` — like the rest of the
+    roster it is a detached process spawned off Process Compose (see
+    :mod:`calfcord.supervisor.procspawn`); ``verb`` selects start vs stop.
 
     Like every other lifecycle surface (substrate, agent roster), this
     drives the *install-scoped* supervisor whose REST port is derived from
@@ -662,7 +670,9 @@ def _run_logs(component: str | None, *, follow: bool) -> int:
     with the same actionable native-install message every supervisor-scoped verb
     uses rather than tailing a nonexistent project-local log dir. The agents dir is
     resolved from the same seam ``start``/``agent list`` use so the tail's known-name
-    set equals the roster the supervisor declares. Synchronous (no broker, no REST):
+    set equals the install's defined roster (each detached slot logs to the same
+    ``state/logs/<slot>.log`` convention the substrate uses). Synchronous (no
+    broker, no REST):
     :func:`logs.tail` reads files straight off disk, and its ``-f`` follow loop exits
     cleanly on Ctrl-C (``main`` maps the interrupt to 130).
     """
@@ -846,7 +856,19 @@ def main(argv: list[str] | None = None) -> int:
     except EOFError:
         print("error: this command needs an interactive terminal (stdin reached EOF).")
         return 1
-    except OSError:
+    except OSError as exc:
+        # A spawn failure (the install's launcher shim missing or not executable)
+        # arrives here as FileNotFoundError/PermissionError carrying the path. It
+        # must surface as what it is — on a non-TTY stdin it would otherwise be
+        # misdiagnosed by the raw-mode branch below as "needs an interactive
+        # terminal", which is a lie about a broken install.
+        if isinstance(exc, (FileNotFoundError, PermissionError)) and exc.filename:
+            print(
+                f"error: could not launch {exc.filename}: {exc.strerror} "
+                "(is the install's launcher shim present and executable? "
+                "Re-run the installer if not.)"
+            )
+            return 1
         # InquirerPy/prompt_toolkit raises OSError (EINVAL) when it can't put a
         # non-TTY stdin (piped / CI) into raw mode. Surface that cleanly, but only
         # when stdin genuinely isn't a TTY — re-raise anything else rather than

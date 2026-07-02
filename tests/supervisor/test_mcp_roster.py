@@ -1,241 +1,324 @@
-"""Unit tests for the per-server MCP roster lifecycle (``disco mcp ...``).
+"""Unit tests for the per-server MCP roster lifecycle (``disco mcp ...``, Phase 2).
 
-Each ``mcp.json`` server is its own Process Compose slot ``mcp-<server>`` —
-per-server isolation, so the verbs here are the agent-roster shape (a slot
-may be NOT declared when the server was added after ``disco start``)
-minus the agent-only pieces (no broker-wide duplicate guard: two hosts
-hosting the same toolbox id is a legitimate competing-consumer setup, not
-the agent split-brain).
+Each ``mcp.json`` server is its own roster slot ``mcp-<server>``. Since Phase 2 the
+roster lives OFF Process Compose: the verbs SPAWN a detached process per slot instead
+of a ``POST /process/start`` — the agent-roster shape minus the agent-only broker-wide
+duplicate guard (two hosts hosting the same toolbox id is a legitimate
+competing-consumer setup, not the agent split-brain).
 
 Contracts pinned:
 
-* workspace check first (not-running hint, exit 1, no doomed REST call);
-* ``start`` of a Running slot is a restart in place (behavior #2) — this is
-  also the "re-pick up an edited mcp.json entry" command;
-* a 4xx on start/restart is the not-declared case (server added after
-  ``disco start``) → the workspace-reload hint, exit 1 — while 5xx /
-  transport faults propagate loudly;
-* ``--all`` sweeps: start over the *configured* names (mcp.json), stop and
-  restart over the *running* ``mcp-`` slots on this host;
-* server names are validated against the selector grammar before any REST
-  call (a bad name could never match a declared slot).
+* workspace check first (not-running hint, exit 1, no spawn);
+* ``start`` of a live slot is a restart in place (behavior #2) — also the "re-pick up
+  an edited mcp.json entry" command;
+* a server added to mcp.json after ``disco start`` simply spawns (no reload — the
+  Phase 2 win);
+* ``--all`` sweeps: start over the *configured* names (mcp.json), stop and restart
+  over the *running* ``mcp-`` slots on this host;
+* server names are validated against the selector grammar before any spawn.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from calfcord.supervisor import mcp_roster
-from calfcord.supervisor.client import ProcessComposeError
+from calfcord.supervisor import _workspace, mcp_roster
+from calfcord.supervisor.procspawn import TerminateResult
 
 
 class _StubClient:
-    """Scriptable ProcessComposeClient stand-in (same shape as test_component's).
+    """A scriptable stand-in for ProcessComposeClient — only the workspace check."""
 
-    ``fail_start`` maps a process name to the ``ProcessComposeError`` its
-    ``start_process`` should raise, so tests can exercise the 4xx
-    not-declared branch and the 5xx propagation branch.
-    """
-
-    def __init__(
-        self,
-        *,
-        workspace_up: bool = True,
-        running: set[str] | None = None,
-        dormant: dict[str, str] | None = None,
-        fail_start: dict[str, ProcessComposeError] | None = None,
-        fail_restart: dict[str, ProcessComposeError] | None = None,
-    ) -> None:
+    def __init__(self, *, workspace_up: bool = True) -> None:
         self._workspace_up = workspace_up
-        self._running = running or set()
-        self._dormant = dormant or {}
-        self._fail_start = fail_start or {}
-        self._fail_restart = fail_restart or {}
-        self.start_calls: list[str] = []
-        self.stop_calls: list[str] = []
-        self.restart_calls: list[str] = []
 
     async def project_state(self):
         if not self._workspace_up:
             raise RuntimeError("project_state: connection refused")
         return {"status": "ok"}
 
-    async def list_processes(self):
-        rows = [{"name": name, "status": "Running"} for name in sorted(self._running)]
-        rows += [
-            {"name": name, "status": status}
-            for name, status in sorted(self._dormant.items())
-        ]
-        return rows
 
-    async def start_process(self, name: str):
-        if name in self._fail_start:
-            raise self._fail_start[name]
-        self.start_calls.append(name)
-        return {}
+class _FakeSlots:
+    """In-memory stand-in for the ``_workspace`` roster-slot primitives.
 
-    async def stop_process(self, name: str):
-        self.stop_calls.append(name)
-        return {}
+    ``live`` holds full slot names (e.g. ``mcp-github``). Records spawn/terminate.
+    """
 
-    async def restart_process(self, name: str):
-        if name in self._fail_restart:
-            raise self._fail_restart[name]
-        self.restart_calls.append(name)
-        return {}
+    def __init__(
+        self,
+        live: list[str] | None = None,
+        *,
+        spawn_error: dict[str, Exception] | None = None,
+        launch_dead: set[str] | None = None,
+        gate_ok: bool = True,
+    ) -> None:
+        self.live: set[str] = set(live or [])
+        self.spawned: list[tuple[str, list[str]]] = []
+        self.terminated: list[str] = []
+        self._spawn_error = spawn_error or {}
+        self._launch_dead = launch_dead or set()
+        self._gate_ok = gate_ok
+        self.gate_calls: list[str | None] = []
+
+    def install(self, monkeypatch) -> None:
+        async def launch_slot(home, slot, argv, **_kwargs):
+            if slot in self._spawn_error:
+                raise self._spawn_error[slot]
+            if slot in self._launch_dead:
+                return False
+            self.spawned.append((slot, list(argv)))
+            self.live.add(slot)
+            return True
+
+        async def terminate_slot(home, slot):
+            self.terminated.append(slot)
+            was_live = slot in self.live
+            self.live.discard(slot)
+            return TerminateResult.TERMINATED if was_live else None
+
+        def live_slots(home):
+            return set(self.live)
+
+        def slot_is_live(home, slot):
+            return slot in self.live
+
+        async def broker_gate(server_urls=None, probe=None):
+            self.gate_calls.append(server_urls)
+            return self._gate_ok
+
+        monkeypatch.setattr(_workspace, "launch_slot", launch_slot)
+        monkeypatch.setattr(_workspace, "terminate_slot", terminate_slot)
+        monkeypatch.setattr(_workspace, "live_slots", live_slots)
+        monkeypatch.setattr(_workspace, "slot_is_live", slot_is_live)
+        monkeypatch.setattr(_workspace, "broker_gate", broker_gate)
 
 
 def _home(tmp_path) -> str:
     return str(tmp_path)
 
 
+def _argv(tmp_path, server: str) -> list[str]:
+    return [_workspace.launcher_for(str(tmp_path)), "run", "mcp", server]
+
+
 # --- mcp_start ---------------------------------------------------------------
 
 
-async def test_start_when_not_running_starts_slot(tmp_path, capsys):
-    client = _StubClient()
-    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=client)
+async def test_start_when_not_running_spawns_slot(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=_StubClient())
     assert rc == 0
-    assert client.start_calls == ["mcp-github"]
-    assert client.restart_calls == []
+    assert slots.spawned == [("mcp-github", _argv(tmp_path, "github"))]
+    assert slots.terminated == []
     out = capsys.readouterr().out
-    assert "github" in out and "online" in out
+    # "started" is the honest claim; presence is the watchers' job, never "online".
+    assert "github started" in out
+    assert "online" not in out
 
 
-async def test_start_when_running_restarts_in_place(tmp_path, capsys):
-    """Behavior #2 — and the documented way to re-apply an edited mcp.json
-    entry to a live server."""
-    client = _StubClient(running={"mcp-github"})
-    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=client)
+async def test_start_when_running_restarts_in_place(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=_StubClient())
     assert rc == 0
-    assert client.start_calls == []
-    assert client.restart_calls == ["mcp-github"]
+    assert slots.terminated == ["mcp-github"]
+    assert slots.spawned == [("mcp-github", _argv(tmp_path, "github"))]
     assert "restarted" in capsys.readouterr().out
 
 
-async def test_start_workspace_down_prints_hint(tmp_path, capsys):
-    client = _StubClient(workspace_up=False)
-    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=client)
+async def test_start_workspace_down_prints_hint(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=_StubClient(workspace_up=False))
     assert rc == 1
-    assert client.start_calls == []
+    assert slots.spawned == []
     assert "disco start" in capsys.readouterr().out
 
 
-async def test_start_not_declared_4xx_prints_reload_hint(tmp_path, capsys):
-    """A server added to mcp.json after ``disco start`` has no declared
-    slot; PC answers 4xx. Steer to the workspace reload, exit 1."""
-    err = ProcessComposeError("no such process", status_code=404)
-    client = _StubClient(fail_start={"mcp-github": err})
-    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=client)
+async def test_start_invalid_server_name_refused_before_spawn(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_start(_home(tmp_path), server="Bad-Name", client=_StubClient(workspace_up=False))
     assert rc == 1
-    out = capsys.readouterr().out
-    assert "disco stop" in out and "disco start" in out
-
-
-async def test_start_5xx_propagates_loudly(tmp_path):
-    err = ProcessComposeError("boom", status_code=500)
-    client = _StubClient(fail_start={"mcp-github": err})
-    try:
-        await mcp_roster.mcp_start(_home(tmp_path), server="github", client=client)
-    except RuntimeError as exc:
-        assert "github" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
-
-
-async def test_start_invalid_server_name_refused_before_rest(tmp_path, capsys):
-    client = _StubClient(workspace_up=False)  # would hint if reached
-    rc = await mcp_roster.mcp_start(_home(tmp_path), server="Bad-Name", client=client)
-    assert rc == 1
+    assert slots.spawned == []
     assert "Bad-Name" in capsys.readouterr().out
 
 
 # --- mcp_stop / mcp_restart ---------------------------------------------------
 
 
-async def test_stop_stops_slot(tmp_path, capsys):
-    client = _StubClient(running={"mcp-github"})
-    rc = await mcp_roster.mcp_stop(_home(tmp_path), server="github", client=client)
+async def test_stop_stops_slot(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_stop(_home(tmp_path), server="github", client=_StubClient())
     assert rc == 0
-    assert client.stop_calls == ["mcp-github"]
-    assert "stopped" in capsys.readouterr().out
+    assert slots.terminated == ["mcp-github"]
+    assert "github stopped" in capsys.readouterr().out
 
 
-async def test_restart_restarts_slot(tmp_path, capsys):
-    client = _StubClient()
-    rc = await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=client)
+async def test_stop_not_running_here(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_stop(_home(tmp_path), server="github", client=_StubClient())
     assert rc == 0
-    assert client.restart_calls == ["mcp-github"]
+    assert "not running here" in capsys.readouterr().out
+
+
+async def test_restart_restarts_slot(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=_StubClient())
+    assert rc == 0
+    assert slots.spawned == [("mcp-github", _argv(tmp_path, "github"))]
     assert "restarted" in capsys.readouterr().out
-
-
-async def test_restart_not_declared_4xx_prints_reload_hint(tmp_path, capsys):
-    err = ProcessComposeError("no such process", status_code=404)
-    client = _StubClient(fail_restart={"mcp-github": err})
-    rc = await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=client)
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "disco stop" in out and "disco start" in out
 
 
 # --- sweeps -------------------------------------------------------------------
 
 
-async def test_start_all_starts_each_configured_server(tmp_path, capsys):
-    client = _StubClient(running={"mcp-alpha"})
-    rc = await mcp_roster.mcp_start_all(
-        _home(tmp_path), servers=["alpha", "beta"], client=client
-    )
+async def test_start_all_starts_each_configured_server(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["mcp-alpha"])
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_start_all(_home(tmp_path), servers=["alpha", "beta"], client=_StubClient())
     assert rc == 0
-    # alpha was running -> restarted (edited-entry pickup); beta started.
-    assert client.restart_calls == ["mcp-alpha"]
-    assert client.start_calls == ["mcp-beta"]
+    # alpha was running -> restarted (edited-entry pickup); beta spawned.
+    assert "mcp-alpha" in slots.terminated
+    assert ("mcp-beta", _argv(tmp_path, "beta")) in slots.spawned
 
 
-async def test_start_all_with_no_servers_says_so(tmp_path, capsys):
-    client = _StubClient()
-    rc = await mcp_roster.mcp_start_all(_home(tmp_path), servers=[], client=client)
+async def test_start_all_with_no_servers_says_so(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_start_all(_home(tmp_path), servers=[], client=_StubClient())
     assert rc == 0
-    assert client.start_calls == []
+    assert slots.spawned == []
     assert "disco mcp add" in capsys.readouterr().out
 
 
-async def test_start_all_aggregates_failures(tmp_path, capsys):
-    err = ProcessComposeError("no such process", status_code=404)
-    client = _StubClient(fail_start={"mcp-beta": err})
-    rc = await mcp_roster.mcp_start_all(
-        _home(tmp_path), servers=["alpha", "beta"], client=client
-    )
+async def test_stop_all_stops_only_running_mcp_slots(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["mcp-alpha", "mcp-beta", "assistant", "tools"])
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=_StubClient())
+    assert rc == 0
+    assert sorted(slots.terminated) == ["mcp-alpha", "mcp-beta"]
+
+
+async def test_stop_all_none_running_is_benign(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["assistant"])
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=_StubClient())
+    assert rc == 0
+    assert slots.terminated == []
+    assert "no MCP servers running" in capsys.readouterr().out
+
+
+async def test_restart_all_restarts_only_running_mcp_slots(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["mcp-alpha", "assistant"])
+    slots.install(monkeypatch)
+    rc = await mcp_roster.mcp_restart_all(_home(tmp_path), client=_StubClient())
+    assert rc == 0
+    assert slots.terminated == ["mcp-alpha"]
+    assert ("mcp-alpha", _argv(tmp_path, "alpha")) in slots.spawned
+
+
+# --- crash-on-boot / broker gate / concurrency ---------------------------------
+
+
+async def test_mcp_start_reports_crash_on_boot_honestly(tmp_path, capsys, monkeypatch):
+    from calfcord.supervisor.procspawn import log_path_for
+
+    slots = _FakeSlots(launch_dead={"mcp-github"})
+    slots.install(monkeypatch)
+
+    rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=_StubClient())
     assert rc == 1
-    assert client.start_calls == ["mcp-alpha"]  # alpha still started
+    out = capsys.readouterr().out
+    assert "exited" in out
+    assert str(log_path_for(_home(tmp_path), "mcp-github")) in out
+    assert "started" not in out
 
 
-async def test_stop_all_stops_only_running_mcp_slots(tmp_path, capsys):
-    client = _StubClient(
-        running={"mcp-alpha", "mcp-beta", "assistant", "tools"},
-        dormant={"mcp-gamma": "Completed"},
-    )
-    rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=client)
+async def test_mcp_restart_reports_crash_on_boot_honestly(tmp_path, capsys, monkeypatch):
+    from calfcord.supervisor.procspawn import log_path_for
+
+    slots = _FakeSlots(["mcp-github"], launch_dead={"mcp-github"})
+    slots.install(monkeypatch)
+
+    rc = await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=_StubClient())
+    assert rc == 1
+    assert str(log_path_for(_home(tmp_path), "mcp-github")) in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c, h: mcp_roster.mcp_start(h, server="x", client=c),
+        lambda c, h: mcp_roster.mcp_restart(h, server="x", client=c),
+        lambda c, h: mcp_roster.mcp_start_all(h, servers=["x"], client=c),
+        lambda c, h: mcp_roster.mcp_restart_all(h, client=c),
+    ],
+    ids=["start", "restart", "start_all", "restart_all"],
+)
+async def test_mcp_spawn_verbs_blocked_when_broker_unreachable(tmp_path, capsys, monkeypatch, call):
+    slots = _FakeSlots(["mcp-x"], gate_ok=False)
+    slots.install(monkeypatch)
+
+    rc = await call(_StubClient(), _home(tmp_path))
+    assert rc == 1
+    assert slots.spawned == []
+    assert "broker not reachable" in capsys.readouterr().out
+
+
+async def test_mcp_start_all_gates_the_broker_once(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+
+    rc = await mcp_roster.mcp_start_all(_home(tmp_path), servers=["alpha", "beta"], client=_StubClient())
     assert rc == 0
-    assert sorted(client.stop_calls) == ["mcp-alpha", "mcp-beta"]
+    assert len(slots.gate_calls) == 1
 
 
-async def test_stop_all_none_running_is_benign(tmp_path, capsys):
-    client = _StubClient(running={"assistant"})
-    rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=client)
+async def test_mcp_start_concurrent_holder_reports_busy(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+
+    with _workspace.slot_mutation(_home(tmp_path), "mcp-github"):
+        rc = await mcp_roster.mcp_start(_home(tmp_path), server="github", client=_StubClient())
     assert rc == 0
-    assert client.stop_calls == []
+    assert slots.spawned == []
+    assert "already" in capsys.readouterr().out
 
 
-async def test_restart_all_restarts_only_running_mcp_slots(tmp_path, capsys):
-    client = _StubClient(running={"mcp-alpha", "router"})
-    rc = await mcp_roster.mcp_restart_all(_home(tmp_path), client=client)
+async def test_mcp_stop_respects_a_concurrent_slot_holder(tmp_path, capsys, monkeypatch):
+    """A stop racing a start's confirm window must not unlink the fresh pidfile:
+    the slot lock refuses, the stop skips honestly, and nothing is terminated."""
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+
+    with _workspace.slot_mutation(_home(tmp_path), "mcp-github"):
+        rc = await mcp_roster.mcp_stop(_home(tmp_path), server="github", client=_StubClient())
+
     assert rc == 0
-    assert client.restart_calls == ["mcp-alpha"]
+    assert slots.terminated == []
+    assert "another disco command" in capsys.readouterr().out
+
+
+async def test_mcp_stop_all_busy_slot_is_reported_and_benign(tmp_path, capsys, monkeypatch):
+    """A busy slot in the stop sweep is skipped with an honest line and does not
+    fail the sweep — matching the restart sweep's benign busy handling."""
+    slots = _FakeSlots(["mcp-alpha", "mcp-beta"])
+    slots.install(monkeypatch)
+
+    with _workspace.slot_mutation(_home(tmp_path), "mcp-alpha"):
+        rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=_StubClient())
+
+    assert rc == 0
+    assert slots.terminated == ["mcp-beta"]
+    assert "another disco command" in capsys.readouterr().out
 
 
 # ----------------------------------------------------- workspace-down uniformity
-
 
 
 @pytest.mark.parametrize(
@@ -249,47 +332,18 @@ async def test_restart_all_restarts_only_running_mcp_slots(tmp_path, capsys):
     ],
     ids=["stop", "restart", "start_all", "stop_all", "restart_all"],
 )
-async def test_workspace_down_hints_and_exits_1(tmp_path, capsys, call):
-    """Every verb (not just start) checks the workspace before any REST call
-    and prints the one shared not-running hint."""
-    client = _StubClient(workspace_up=False)
-    rc = await call(client, _home(tmp_path))
+async def test_workspace_down_hints_and_exits_1(tmp_path, capsys, monkeypatch, call):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+    rc = await call(_StubClient(workspace_up=False), _home(tmp_path))
     assert rc == 1
     assert "disco start" in capsys.readouterr().out
-    assert client.start_calls == client.stop_calls == client.restart_calls == []
+    assert slots.spawned == [] and slots.terminated == []
 
 
-async def test_restart_5xx_propagates_loudly(tmp_path):
-    """mcp_restart mirrors mcp_start's not-declared-vs-genuine-fault split:
-    a 5xx is infra, never mistranslated into the reload hint."""
-    err = ProcessComposeError("boom", status_code=500)
-    client = _StubClient(fail_restart={"mcp-github": err})
-    with pytest.raises(RuntimeError, match="github"):
-        await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=client)
-
-
-async def test_running_servers_returns_bare_names(tmp_path):
-    """The public read strips the slot prefix so callers (mcp list) never
-    learn the mcp- convention."""
-    client = _StubClient(running={"mcp-github", "mcp-docs", "assistant"})
-    assert await mcp_roster.running_servers(client) == {"github", "docs"}
-
-
-async def test_start_all_reads_process_list_once(tmp_path):
-    """The sweep reads the supervisor's process list once for N servers (no
-    N+1 REST chatter) — pinned by counting list_processes calls."""
-    client = _StubClient(running={"mcp-alpha"})
-    calls = {"n": 0}
-    original = client.list_processes
-
-    async def _counting():
-        calls["n"] += 1
-        return await original()
-
-    client.list_processes = _counting
-    rc = await mcp_roster.mcp_start_all(
-        _home(tmp_path), servers=["alpha", "beta", "gamma"], client=client
-    )
-    assert rc == 0
-    assert calls["n"] == 1
-
+def test_running_servers_returns_bare_names(tmp_path, monkeypatch):
+    """The public read strips the slot prefix so callers (mcp list) never learn the
+    mcp- convention; it reads the pidfile namespace, no REST client."""
+    slots = _FakeSlots(["mcp-github", "mcp-docs", "assistant"])
+    slots.install(monkeypatch)
+    assert mcp_roster.running_servers(_home(tmp_path)) == {"github", "docs"}

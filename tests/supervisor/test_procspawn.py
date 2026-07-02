@@ -117,6 +117,47 @@ def test_spawn_detached_honors_env(tmp_path: Path) -> None:
     assert "sentinel-value" in procspawn.log_path_for(tmp_path, "job").read_text()
 
 
+def test_spawn_detached_rotates_an_oversized_log(tmp_path: Path) -> None:
+    """A log at/over the threshold is shifted to ``.log.1`` before the new spawn
+    writes, so a crash-looped or chatty slot cannot grow one file forever."""
+    log = procspawn.log_path_for(tmp_path, "job")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(b"old" + b"x" * procspawn._LOG_ROTATE_AT_BYTES)
+    spawned = _spawn_py("print('fresh-line')", tmp_path)
+    _wait(spawned.pid)
+    rotated = log.with_name("job.log.1")
+    assert rotated.exists()
+    assert rotated.read_bytes().startswith(b"old")
+    body = log.read_text()
+    assert "fresh-line" in body
+    assert "old" not in body  # the new log starts fresh
+
+
+def test_spawn_detached_rotation_shifts_backups_and_drops_the_oldest(tmp_path: Path) -> None:
+    log = procspawn.log_path_for(tmp_path, "job")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(b"gen0" + b"x" * procspawn._LOG_ROTATE_AT_BYTES)
+    for i in range(1, procspawn._LOG_ROTATE_BACKUPS + 1):
+        log.with_name(f"job.log.{i}").write_text(f"gen{i}")
+    spawned = _spawn_py("print('ok')", tmp_path)
+    _wait(spawned.pid)
+    # Every backup shifted one slot down; the oldest (gen5) fell off the end.
+    assert log.with_name("job.log.1").read_bytes().startswith(b"gen0")
+    for i in range(2, procspawn._LOG_ROTATE_BACKUPS + 1):
+        assert log.with_name(f"job.log.{i}").read_text() == f"gen{i - 1}"
+    assert not log.with_name(f"job.log.{procspawn._LOG_ROTATE_BACKUPS + 1}").exists()
+
+
+def test_spawn_detached_does_not_rotate_a_small_log(tmp_path: Path) -> None:
+    log = procspawn.log_path_for(tmp_path, "job")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("prior-line\n")
+    spawned = _spawn_py("print('new-line')", tmp_path)
+    _wait(spawned.pid)
+    assert not log.with_name("job.log.1").exists()
+    assert "prior-line" in log.read_text()  # still appended, not rotated
+
+
 def test_spawn_detached_honors_cwd(tmp_path: Path) -> None:
     workdir = tmp_path / "elsewhere"
     workdir.mkdir()
@@ -327,6 +368,30 @@ async def test_terminate_not_ours_does_not_signal(tmp_path: Path) -> None:
         clock=time.monotonic,
     )
     assert outcome is procspawn.TerminateResult.NOT_OURS
+
+
+# --- reap ---------------------------------------------------------------------
+
+
+def test_reap_clears_an_exited_child_so_liveness_reads_dead(tmp_path: Path) -> None:
+    """An exited-but-unreaped direct child is a zombie: it still answers
+    ``os.kill(pid, 0)`` (and on Linux keeps its ``/proc`` start-token), so a
+    liveness poll that never reaps would read it alive forever — the
+    ``launch_slot`` confirm-window bug. ``reap`` is the public fix: once the
+    child has exited and been reaped, ``_pid_alive`` reads False."""
+    spawned = _spawn_py("pass", tmp_path)
+    deadline = time.monotonic() + 10.0
+    while procspawn._pid_alive(spawned.pid):
+        assert time.monotonic() < deadline, "child never read dead despite reaping"
+        procspawn.reap(spawned.pid)
+        time.sleep(0.01)
+    assert procspawn._pid_alive(spawned.pid) is False
+
+
+def test_reap_tolerates_a_pid_that_is_not_our_child() -> None:
+    """Reaping is a courtesy, never load-bearing: a pid we did not spawn (ECHILD)
+    must be a silent no-op, not a raise."""
+    procspawn.reap(1)  # init/launchd is definitely not our child
 
 
 # --- cleanup_stale ----------------------------------------------------------

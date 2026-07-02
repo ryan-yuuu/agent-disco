@@ -297,6 +297,40 @@ def test_main_maps_oserror_to_clean_exit_when_stdin_not_a_tty(
     assert "interactive terminal" in capsys.readouterr().out
 
 
+def test_main_reports_a_missing_launcher_as_a_launch_failure_not_a_tty_problem(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A FileNotFoundError from spawning the shim must surface as what it is — a
+    missing/non-executable launcher, naming the path — even on a non-TTY stdin
+    (it must NOT be misdiagnosed as 'needs an interactive terminal')."""
+
+    def _raise(parser: object, args: object) -> int:
+        raise FileNotFoundError(2, "No such file or directory", "/opt/disco/shims/disco")
+
+    monkeypatch.setattr(main_mod, "_dispatch", _raise)
+    monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: False)
+
+    assert main(["agent", "start", "scribe"]) == 1
+    out = capsys.readouterr().out
+    assert "/opt/disco/shims/disco" in out
+    assert "interactive terminal" not in out
+
+
+def test_main_reports_a_non_executable_launcher_with_its_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _raise(parser: object, args: object) -> int:
+        raise PermissionError(13, "Permission denied", "/opt/disco/shims/disco")
+
+    monkeypatch.setattr(main_mod, "_dispatch", _raise)
+    monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: False)
+
+    assert main(["agent", "start", "scribe"]) == 1
+    out = capsys.readouterr().out
+    assert "/opt/disco/shims/disco" in out
+    assert "interactive terminal" not in out
+
+
 def test_main_reraises_oserror_on_a_real_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     """An ``OSError`` with stdin a real TTY is a genuine bug — it must propagate,
     not be masked behind the friendly non-TTY message."""

@@ -41,6 +41,7 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from pathlib import Path
 
 from calfcord.health.check import BrokerProbe, default_broker_probe
+from calfcord.supervisor import _workspace, procspawn
 from calfcord.supervisor._workspace import (
     iter_process_dicts,
     resolve_client,
@@ -52,6 +53,7 @@ from calfcord.supervisor.compose import (
     broker_is_compose_managed,
     render_compose,
 )
+from calfcord.supervisor.procspawn import TerminateResult
 
 # A process launcher: hand it an argv and it starts the process. Production wires
 # this to a detached ``subprocess.Popen`` (the ``up`` must outlive ``start``); a
@@ -520,11 +522,15 @@ async def start(
                 return 1
 
         port = pc_port_for(home)
+        # Phase 2: the manifest is SUBSTRATE-ONLY. The roster (agents, ``tools``,
+        # ``mcp-<server>``) is spawned off Process Compose, so ``agent_ids`` /
+        # ``mcp_servers`` are no longer threaded into the compose render — they are
+        # kept on the signature only for the empty-org signpost below and for
+        # backward-compatible call sites (``init`` / ``agent_create``); Phase 3 may
+        # drop ``mcp_servers`` entirely.
         yaml_text = render_compose(
-            agent_ids=list(agent_ids),
             home=home,
             launcher=launcher,
-            mcp_servers=list(mcp_servers),
             broker_managed=broker_managed,
         )
         yaml_path = _write_compose(home, yaml_text)
@@ -620,46 +626,100 @@ async def start(
     return 0
 
 
+async def _sweep_roster_pidfiles(home: str) -> int:
+    """Terminate every live roster process and clear stale pidfiles; return the count
+    of processes we actually stopped.
+
+    ``disco stop`` closes the WHOLE workspace, roster included — but the roster lives
+    off Process Compose (Phase 2), so a ``down`` of the substrate leaves the detached
+    agent/tools/mcp processes running. This sweeps ``state/run/*.pid``: a live-and-ours
+    slot is terminated (SIGTERM→SIGKILL via :func:`_workspace.terminate_slot`, which
+    also clears its pidfile), and a stale/torn/not-ours pidfile is swept without a
+    signal. Run BEFORE the substrate ``down`` so agents can still publish their
+    departure while the broker is up.
+    """
+    terminated = 0
+    for slot, _pidfile in list(_workspace.iter_slot_pidfiles(home)):
+        result = await _workspace.terminate_slot(home, slot)
+        if result in (TerminateResult.TERMINATED, TerminateResult.KILLED):
+            terminated += 1
+    return terminated
+
+
 async def stop(
     home: str | os.PathLike[str],
     *,
     client: ProcessComposeClient | None = None,
     spawn_blocking: Spawn | None = None,
 ) -> int:
-    """Close the workspace; idempotent — a no-op if nothing is running (§12.4).
+    """Close the WHOLE workspace — substrate AND roster; idempotent (§12.4).
 
-    ``down`` is issued through the **blocking** seam so ``stop`` returns (and
-    prints "workspace closed") only after the supervisor has actually stopped — a
-    fire-and-forget detached ``down`` would let a racing ``start`` collide with a
-    supervisor still shutting down (§13.3).
+    Two teardowns under one lock: the roster is swept first
+    (:func:`_sweep_roster_pidfiles` — terminate every live detached agent/tools/mcp
+    process while the broker is still up so departures publish, and clear stale
+    pidfiles), then the substrate is brought down. ``down`` is issued through the
+    **blocking** seam so ``stop`` returns only after the supervisor has actually
+    stopped — a fire-and-forget detached ``down`` would let a racing ``start`` collide
+    with a supervisor still shutting down (§13.3).
+
+    A no-op reports honestly: with the substrate down AND nothing swept, "nothing to
+    stop"; otherwise "workspace closed", noting how many roster processes were stopped.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)
     spawn_blocking = spawn_blocking or _default_spawn_blocking
 
     with lifecycle_lock(home):
-        if not await _supervisor_is_up(client):
-            print("nothing to stop (workspace not running).")
-            return 0
+        pc_up = await _supervisor_is_up(client)
+        # Sweep the roster first (broker still up → clean departures), then the
+        # substrate. The sweep also runs when the substrate is already down, so an
+        # orphaned roster (a crashed supervisor) is still cleaned up by `disco stop`.
+        terminated = await _sweep_roster_pidfiles(home)
+        if pc_up:
+            binary = resolve_pc_binary()
+            spawn_blocking([binary, "down", "-p", str(pc_port_for(home))])
 
-        binary = resolve_pc_binary()
-        spawn_blocking([binary, "down", "-p", str(pc_port_for(home))])
-
-    print("workspace closed.")
+    if not pc_up and terminated == 0:
+        print("nothing to stop (workspace not running).")
+        return 0
+    if terminated:
+        print(f"workspace closed ({terminated} roster process(es) stopped).")
+    else:
+        print("workspace closed.")
     return 0
 
 
 async def status(
     home: str | os.PathLike[str],
     *,
+    server_urls: str,
     client: ProcessComposeClient | None = None,
+    probe: Callable[[str], Awaitable[list[str]]] | None = None,
     clock: Clock | None = None,
 ) -> int:
     """Render a glanceable org board, or a "not running" hint (§12.6).
 
-    ``clock`` is accepted for symmetry with ``start`` (and future freshness
-    reconciliation against heartbeats); it is unused today but keeps the seam
-    stable so a caller need not special-case ``status``.
+    The **substrate** rows come from Process Compose (broker + bridge). The
+    **roster** rows are the Phase-2 reconciliation of two truths: this host's live
+    pidfiles (``state/run/*.pid``) and the broker-wide mesh presence (the same probe
+    ``agent_ps`` uses). For an AGENT slot the cross-product yields three states —
+
+    * pidfile-alive **and** mesh-registered → ``running``;
+    * pidfile-alive **only** → ``started, not registered (see disco logs)`` (up here
+      but not answering — just starting, or wedged);
+    * mesh-registered **only** (no local pidfile) → ``running (another host)``.
+
+    A slot whose pidfile names a DEAD process (a crash or clean exit — no
+    auto-respawn off PC) is rendered honestly as ``not running (exited — see
+    <log>)`` rather than omitted; ``disco stop``'s sweep is the acknowledge-and-
+    clear point that removes those files. The ``tools`` singleton and
+    ``mcp-<server>`` slots carry no mesh presence, so their pidfile is the whole
+    truth: live renders ``running``, dead renders the exited row. A
+    broker-unreachable probe degrades to the pidfile-only view with a note
+    (read-only status must never crash).
+
+    ``probe`` / ``client`` are injected for testing; ``clock`` is accepted for
+    symmetry with ``start`` and is unused today.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)
@@ -668,23 +728,88 @@ async def status(
         print("workspace not running (start it with: disco start)")
         return 0
 
-    processes = _process_rows(await client.list_processes())
-    substrate = [p for p in processes if p["name"] in _SUBSTRATE]
-    roster = [p for p in processes if p["name"] not in _SUBSTRATE]
+    substrate = [p for p in _process_rows(await client.list_processes()) if p["name"] in _SUBSTRATE]
+
+    live = _workspace.live_slots(home)
+    dead = _workspace.dead_slots(home)
+    agent_slots = {slot for slot in live if _workspace.is_agent_slot(slot)}
+    other_slots = sorted(live - agent_slots)  # tools + mcp-<server>
+
+    if probe is None:
+        from calfcord.supervisor.roster import _resolve_probe
+
+        probe = _resolve_probe(None)
+    broker_unreachable = False
+    try:
+        logical = set(await probe(server_urls))
+    except Exception:
+        logical = set()
+        broker_unreachable = True
 
     print("workspace is open.")
     print("substrate:")
     for row in substrate:
         print(_format_row(row))
     print("roster:")
-    if roster:
-        for row in roster:
-            print(_format_row(row))
-    else:
-        print("  (none running -> disco agent start <name>, or disco agent create <name> to add one)")
+    _render_roster_board(
+        home=home,
+        agent_slots=agent_slots,
+        other_slots=other_slots,
+        dead_slots=dead,
+        logical=logical,
+    )
+    if broker_unreachable:
+        print("note: broker unreachable; roster shown from local pidfiles only.")
     # Reboot non-survival, stated honestly (§12.6): the daemon is session-scoped.
     print("note: the workspace does not survive a reboot; re-run `disco start`.")
     return 0
+
+
+def _render_roster_board(
+    *,
+    home: str,
+    agent_slots: set[str],
+    other_slots: list[str],
+    dead_slots: set[str],
+    logical: set[str],
+) -> None:
+    """Print the reconciled roster rows (see :func:`status`).
+
+    Agents reconcile pidfile-presence against mesh-presence into the three §3.4
+    states; ``tools`` / ``mcp-<server>`` slots have no mesh presence, so a live
+    pidfile renders ``running``. Dead-but-pidfile-present slots render the honest
+    ``not running (exited — see <log>)`` row instead of vanishing (crashes are the
+    board's whole job to surface under no-auto-respawn). An entirely empty roster
+    prints the create/start signpost so the board is never a confusing blank.
+    """
+    dead_agents = {slot for slot in dead_slots if _workspace.is_agent_slot(slot)}
+    dead_others = sorted(dead_slots - dead_agents)
+    agent_names = sorted(agent_slots | logical | dead_agents)
+    if not agent_names and not other_slots and not dead_others:
+        print("  (none running -> disco agent start <name>, or disco agent create <name> to add one)")
+        return
+
+    for name in agent_names:
+        here = name in agent_slots
+        answering = name in logical
+        log_path = procspawn.log_path_for(home, name)
+        if here and answering:
+            state = "running"
+        elif here:
+            state = "started, not registered (see disco logs)"
+        elif answering and name in dead_agents:
+            # Both truths: the org still answers for the name elsewhere, but the
+            # local instance died and its pidfile is awaiting the stop-sweep.
+            state = f"running (another host); exited here — see {log_path}"
+        elif answering:
+            state = "running (another host)"
+        else:
+            state = f"not running (exited — see {log_path})"
+        print(f"  {name:<16} {state}")
+    for slot in other_slots:
+        print(f"  {slot:<16} running")
+    for slot in dead_others:
+        print(f"  {slot:<16} not running (exited — see {procspawn.log_path_for(home, slot)})")
 
 
 def _process_rows(payload: object) -> list[dict]:

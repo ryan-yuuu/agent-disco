@@ -37,6 +37,16 @@ for human inspection of the pidfile and as the recorded fallback on any exotic
 platform exposing no start-token (where the guard degrades to *refusing* ownership
 rather than risk signalling a stranger — see :func:`is_ours_and_alive`).
 
+**Log rotation happens only AT SPAWN.** Process Compose rotated every process log
+in-flight (10 MB / 7 days / 5 backups); a detached slot has no supervisor watching
+its file, so the ONLY rotation point left is the moment a slot is (re)spawned:
+:func:`spawn_detached` shifts an at-threshold ``<slot>.log`` to ``.log.1`` …
+``.log.5`` (oldest dropped) before opening the fresh append handle. **Known
+limitation:** a long-running chatty slot still grows its *current* file without
+bound between restarts — in-run rotation is deliberately NOT provided here (it
+would need a size-watching thread or a logging pipe per slot) and is flagged for
+the Phase-3 ADR.
+
 **Why kill the process GROUP.** :func:`spawn_detached` launches with
 ``start_new_session=True``, so the child is a session + process-group leader (its
 pgid equals its pid) and every worker it forks under the launcher shim inherits
@@ -88,6 +98,13 @@ _KILL_REAP_TIMEOUT_S = 2.0
 # Bound on the Darwin ``ps`` start-token read, so a wedged ``ps`` can never hang
 # a caller. Generous — ``ps`` answers in milliseconds — but finite.
 _PS_TIMEOUT_S = 5.0
+
+# Rotate-at-spawn policy, mirroring the Process Compose rotation the roster lost
+# when it moved off PC (10 MB, 5 backups; no compression — the files are small
+# and plain text keeps `disco logs`-adjacent tooling trivial). See the module
+# docstring for the honest limitation: rotation happens ONLY at spawn.
+_LOG_ROTATE_AT_BYTES = 10 * 1024 * 1024
+_LOG_ROTATE_BACKUPS = 5
 
 
 @dataclass(frozen=True)
@@ -180,6 +197,7 @@ def spawn_detached(
     log_path = Path(log_path)
     pidfile = Path(pidfile)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_log_at_spawn(log_path)
 
     # Binary append: never truncate an existing log, and let the child's own dup'd
     # fd carry the writes after the parent closes its handle. Not a `with` block —
@@ -205,6 +223,29 @@ def spawn_detached(
     record = _identity_for(proc.pid, argv)
     atomic_write_text(pidfile, json.dumps(_record_to_dict(record)))
     return SpawnedProcess(pid=proc.pid, record=record, pidfile=pidfile, log_path=log_path)
+
+
+def _rotate_log_at_spawn(log_path: Path) -> None:
+    """Shift an at-threshold ``<slot>.log`` into the ``.log.1``…``.log.N`` chain.
+
+    Rotation is best-effort and total: any filesystem hiccup (a vanished file, a
+    permission oddity) leaves the log where it is and lets the spawn proceed —
+    losing rotation is strictly better than failing a start over housekeeping.
+    The oldest backup is dropped first so the keep-count is a hard cap; in-run
+    growth is NOT bounded here (see the module docstring).
+    """
+    try:
+        if log_path.stat().st_size < _LOG_ROTATE_AT_BYTES:
+            return
+    except OSError:
+        return
+    with contextlib.suppress(OSError):
+        log_path.with_name(f"{log_path.name}.{_LOG_ROTATE_BACKUPS}").unlink(missing_ok=True)
+        for i in range(_LOG_ROTATE_BACKUPS - 1, 0, -1):
+            backup = log_path.with_name(f"{log_path.name}.{i}")
+            if backup.exists():
+                backup.rename(log_path.with_name(f"{log_path.name}.{i + 1}"))
+        log_path.rename(log_path.with_name(f"{log_path.name}.1"))
 
 
 def _identity_for(pid: int, argv: Sequence[str]) -> PidRecord:
@@ -390,7 +431,7 @@ async def terminate(
     pid = record.pid
     # A zombie of our own child still answers os.kill(pid, 0); reap it so liveness
     # reads truthfully before we branch on it.
-    _reap(pid)
+    reap(pid)
 
     if not is_ours_and_alive(record):
         return TerminateResult.NOT_OURS if _pid_alive(pid) else TerminateResult.ALREADY_DEAD
@@ -408,7 +449,7 @@ async def _wait_until_dead(pid: int, *, timeout_s: float, clock: Clock, sleep: S
     """Poll until ``pid`` dies or ``timeout_s`` elapses; reaps a zombie child each pass."""
     deadline = clock() + timeout_s
     while True:
-        _reap(pid)
+        reap(pid)
         if not _pid_alive(pid):
             return True
         if clock() >= deadline:
@@ -432,12 +473,17 @@ def _signal_group_or_pid(pid: int, sig: int) -> None:
         os.kill(pid, sig)
 
 
-def _reap(pid: int) -> None:
+def reap(pid: int) -> None:
     """Best-effort non-blocking reap of ``pid`` if it is our child.
 
-    Clears a zombie left by a kill so the pid stops answering ``os.kill(pid, 0)``.
-    ``ECHILD`` (the process is not our child — the common cross-invocation case) and
-    any other ``OSError`` are ignored: reaping is a courtesy, never load-bearing.
+    Clears a zombie left by an exited-but-unwaited direct child so the pid stops
+    answering ``os.kill(pid, 0)`` (a zombie also keeps its Linux ``/proc``
+    start-token, so without a reap even the identity gate reads it as ours-and-
+    alive). :func:`terminate` reaps before judging liveness, and any caller that
+    polls liveness on a child IT spawned (``_workspace.launch_slot``'s confirm
+    window) must do the same — nothing else waits on a detached child. ``ECHILD``
+    (the process is not our child — the common cross-invocation case) and any
+    other ``OSError`` are ignored: reaping is a courtesy, never load-bearing.
     """
     with contextlib.suppress(OSError):
         os.waitpid(pid, os.WNOHANG)
