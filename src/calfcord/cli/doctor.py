@@ -222,10 +222,14 @@ def _check_daemon_alive(beat: Heartbeat, *, now: datetime) -> Result:
     if is_fresh(beat, now=now):
         who = f" (bot: {beat.identity})" if beat.identity else ""
         return Result("daemon", "ok", f"bridge alive{who}")
+    # `stop && start` is the right remedy (the bridge is substrate), but `stop`
+    # also sweeps the roster and `start` reopens only the substrate — so the
+    # remedy names the roster re-start too, or it would strand the agents.
     return Result(
         "daemon",
         "fail",
-        "bridge heartbeat is stale (wedged/zombie) — restart: `disco stop && disco start`",
+        "bridge heartbeat is stale (wedged/zombie) — restart: `disco stop && disco start`, "
+        "then `disco agent start --all`",
     )
 
 

@@ -143,36 +143,48 @@ online), `disco agent ps` shows what is *running* now (vs. `agent list`, which
 shows what is *defined* on disk), and `disco logs [component] [-f]` tails the
 unified or per-component logs.
 
-### Process Compose supervises one host
+### The substrate runs under Process Compose; the roster is directly supervised
 
-On a single host the substrate and roster are managed by
+On a single host the **substrate** (broker + bridge) is managed by
 **[Process Compose](https://f1bonacc1.github.io/process-compose)**, a
 cross-platform single-binary supervisor that Agent Disco bootstraps the same way it
 bootstraps the Tansu broker (a pinned binary under `$CALFCORD_HOME/bin`, kept out
-of the agent Python path). The supervisor configuration is **derived state**:
-Agent Disco generates `$CALFCORD_HOME/state/process-compose.yaml` from your
-`agents/*.md` and config — you never hand-edit it. The CLI verbs are a thin
-veneer over the supervisor's REST API.
-
-This is where the layer split becomes mechanical. In the generated config the
-substrate (broker, bridge) is declared `autostart`, while every defined agent,
-plus the tools host and any MCP servers, is declared but **disabled** — present
-but not started until you run its `start`. The supervisor absorbs the lifecycle
-work Agent Disco would otherwise hand-roll:
+of the agent Python path). Its configuration is **derived state**: Agent Disco
+generates a **substrate-only** `$CALFCORD_HOME/state/process-compose.yaml` (broker
++ bridge) from your config — you never hand-edit it — and the CLI verbs are a thin
+veneer over the supervisor's REST API. Process Compose absorbs the substrate
+lifecycle work Agent Disco would otherwise hand-roll:
 
 - **Dependency ordering and health gates** — `depends_on` keeps the bridge from
-  starting until the broker is healthy, and keeps roster members waiting on the
-  substrate. Both the dependency gates and the `start` readiness poll are driven
-  by the *same* signal: an exec readiness probe that runs
-  `disco _healthcheck <component>` against the per-component heartbeat files
-  under `$CALFCORD_HOME/state/health/`.
-- **Autorestart** — the broker and bridge exit 0 on a clean return, so they use
-  `restart: always`; the whole roster (agents, tools, MCP servers) runs
-  on the [`run_worker_until_signal`](../src/calfcord/_worker_runtime.py) helper
-  that forces a non-zero exit on a clean, signal-less return, so it uses
-  `restart: on_failure`. An intentional `stop` does not trigger a restart.
-- **Per-process log capture** — each component's stdout/stderr lands at
+  starting until the broker is healthy, and the `start` readiness poll waits on the
+  bridge's own exec readiness probe (`disco _healthcheck <component>` against the
+  per-component heartbeat files under `$CALFCORD_HOME/state/health/`).
+- **Autorestart** — the broker and bridge exit 0 on a clean return, so they run
+  under `restart: always`. An intentional `stop` does not trigger a restart.
+- **Per-process log capture** — each substrate component's stdout/stderr lands at
   `$CALFCORD_HOME/state/logs/<component>.log` (what `disco logs` tails).
+
+The **roster** (every agent, the `tools` host, and each `mcp-<server>`) does
+**not** live in that manifest — Process Compose cannot hot-add a process to a
+running project without bouncing the others. Each roster member is instead spawned
+**directly as a detached process** when you run its `start`:
+
+- **Pidfile + log per slot.** A slot gets a reuse-proof identity pidfile at
+  `$CALFCORD_HOME/state/run/<slot>.pid` and a log at
+  `$CALFCORD_HOME/state/logs/<slot>.log` (rotated at spawn). Because a new slot is
+  just a new process, a brand-new agent — or a server added to `mcp.json` — starts
+  immediately into a running workspace, with **no workspace reload**.
+- **No auto-respawn.** A crashed or exited roster process is **not** restarted:
+  `disco status` renders it honestly as `not running (exited — see <log>)` and you
+  bring it back with its `start` verb. For **agents** the live **mesh** is the truth
+  source for liveness — `status` reconciles each local pidfile against broker-wide
+  mesh presence — while `tools` / `mcp-<server>` slots carry no mesh presence, so
+  their pidfile is the whole truth.
+- **`disco stop` closes the whole workspace.** It first sweeps and terminates every
+  roster process (clearing their pidfiles) while the broker is still up so agents
+  publish a clean departure, then brings the substrate down. `disco start` reopens
+  **only** the substrate, so after a stop/start cycle bring the roster back with
+  `disco agent start <name|--all>`, `disco tools start`, and `disco mcp start --all`.
 
 ### The same commands graduate to distributed
 
@@ -203,16 +215,17 @@ Pick by intent — operating an install, hacking on the source, or containerizin
 The end-user path. The native installer (`curl … | bash`) drops a `disco`
 shim under `~/.calfcord/`; `disco init` walks you through first-run config and
 ends with your first agent online. From then on you operate the
-[substrate and roster](#runtime-model-substrate--roster) through the shim, and
-**Process Compose supervises everything on the host** — health-gated startup,
-dependency ordering, autorestart, and per-component logs, no terminal-juggling:
+[substrate and roster](#runtime-model-substrate--roster) through the shim: **the
+substrate runs under Process Compose** (health-gated startup, dependency ordering,
+autorestart) and **the roster is directly supervised off it** (a detached process
+per slot, no auto-respawn) — either way, no terminal-juggling:
 
 ```bash
 disco start                  # substrate (broker + bridge), detached, health-gated
 disco agent start assistant  # roster: clock a teammate in → replies in Discord
 disco status                 # org board: substrate + roster health
-disco logs -f                # follow the unified supervisor log
-disco stop                   # close the office (stops the supervised substrate)
+disco logs -f                # follow all components, merged
+disco stop                   # close the office (roster + substrate)
 ```
 
 On a native install the agent and state directories are pinned under the install

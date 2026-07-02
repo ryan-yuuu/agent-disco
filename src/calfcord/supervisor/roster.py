@@ -169,8 +169,10 @@ def _non_agent_error(name: str, verb: str) -> str | None:
     slots all live in the same pidfile namespace, so an agent verb pointed at one
     would kill/replace a process it does not own (e.g. ``agent restart tools``
     used to plant a bogus ``run agent tools`` into the singleton's pidfile). Each
-    message names the verb that actually manages the slot; ``mcp-`` is therefore
-    a RESERVED prefix for agent names (the create-time guard is Phase-3 scope).
+    message names the verb that actually manages the slot. These names (and the
+    ``mcp-`` prefix) are also rejected at create/parse time
+    (:func:`calfcord.agents.identifier.reserved_agent_id_error`); this runtime
+    chokepoint stays as defense-in-depth for pre-guard ``.md`` files.
     """
     if name == "tools":
         return (
@@ -444,10 +446,11 @@ async def agent_start_all(
     single action.
     """
     # Drop non-agent names BEFORE the empty-check: main.py passes the raw `.md`
-    # stems, and a creatable `tools.md` / `broker.md` / `mcp-x.md` is not rejected
-    # by the id pattern (the create-time guard is Phase-3 scope). The classifier is
-    # the same one the sweeps/status use, so "which id is an agent" is defined once.
-    # An all-reserved input collapses to the empty set → the clean no-op.
+    # stems, and while the create/parse-time guard now rejects reserved names, a
+    # pre-guard `tools.md` / `broker.md` / `mcp-x.md` may still sit on disk (the
+    # stems are globbed, never parsed). The classifier is the same one the
+    # sweeps/status use, so "which id is an agent" is defined once. An
+    # all-reserved input collapses to the empty set → the clean no-op.
     agent_ids = [n for n in agent_ids if _workspace.is_agent_slot(n)]
 
     home = os.fspath(home)

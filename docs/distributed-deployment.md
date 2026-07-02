@@ -79,6 +79,12 @@ address every host can reach. On each host:
    per-host config beyond `CALF_HOST_URL`: an agent's `.md` is identical
    wherever it runs.
 
+> **Codex-backed agents carry their own auth.** An agent with
+> `provider: openai-codex` reads its ChatGPT-subscription credentials from the
+> host it runs on, so an agent moved to its own host needs its own
+> `calfkit-auth codex login` there first — the credential file does not travel
+> with the `.md`. See [`codex-auth.md`](./codex-auth.md).
+
 That is the graduation. `disco status` on any host shows the org board
 (the substrate health plus the live roster, reconstructed broker-wide),
 so you see every agent regardless of which host it clocked in from.
@@ -392,8 +398,7 @@ disco self set-broker laptop:9092
 disco start                                  # this host can be the substrate, or just dial the shared broker
 disco mcp add github \
   --command "npx -y @modelcontextprotocol/server-github" --env GITHUB_TOKEN
-disco stop && disco start                 # declare the new mcp-github slot (added after start)
-disco mcp start github                       # toolbox connects + advertises on the bus
+disco mcp start github                       # spawns as its own detached process — connects + advertises on the bus
 ```
 
 Set `GITHUB_TOKEN` in *this* host's `config/.env` only. The toolbox advertises
@@ -614,6 +619,13 @@ This is almost never what you want — and for the stateful tools
 is actively wrong: their per-agent session state is in-memory on whichever
 replica served the last call, so splitting them across hosts fragments an
 agent's session (see [`security.md`](./security.md) § 1.1).
+
+> **Agent memory scatters the same way.** A `memory: true` agent keeps its notes
+> as files under `memory/<name>/` in the tools host's workspace, written through
+> the ordinary `read_file` / `write_file` / `patch` tools. Run the same file tool
+> on two hosts and each memory write round-robins onto whichever host's filesystem
+> served that call — so an agent's memory ends up split across machines. Pin the
+> file tools to one host (below).
 
 To pin `terminal` to the remote host:
 

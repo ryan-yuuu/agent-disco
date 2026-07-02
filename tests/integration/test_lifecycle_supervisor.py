@@ -159,7 +159,6 @@ async def test_lifecycle_against_real_process_compose(
             home,
             server_urls="localhost:9092",
             launcher="unused-by-stub",
-            agent_ids=[],
             ready_timeout_s=_READY_TIMEOUT_S,
         )
         assert rc == 0, "start should return 0 once the bridge readiness gate passes"
@@ -203,7 +202,6 @@ async def test_lifecycle_against_real_process_compose(
             home,
             server_urls="localhost:9092",
             launcher="unused-by-stub",
-            agent_ids=[],
             ready_timeout_s=_READY_TIMEOUT_S,
         )
         assert rc2 == 0
@@ -222,7 +220,6 @@ async def test_lifecycle_against_real_process_compose(
                 home,
                 server_urls="localhost:9092",
                 launcher="unused-by-stub",
-                agent_ids=[],
                 ready_timeout_s=_READY_TIMEOUT_S,
             )
         # The supervisor is untouched by the blocked attempt.

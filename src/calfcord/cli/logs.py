@@ -174,7 +174,7 @@ def tail(
       actionable ``error:`` rather than raising — a missing workspace or a typo is
       operator input, not an infrastructure bug.
     * **0** — otherwise, including the benign "this slot has no log yet" case (a
-      declared component that never clocked in), which is informational, not an
+      known component that never clocked in), which is informational, not an
       error.
     """
     log_dir = home / "state" / "logs"

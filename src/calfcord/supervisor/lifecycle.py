@@ -37,7 +37,7 @@ import hashlib
 import os
 import shutil
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 from calfcord.health.check import BrokerProbe, default_broker_probe
@@ -417,13 +417,29 @@ def _default_spawn_blocking(argv: Sequence[str]) -> None:
 _resolve_client = resolve_client
 
 
+def _agents_defined(home: str) -> bool:
+    """Whether any agent ``.md`` is defined for this install (banner signpost only).
+
+    Phase 3 dropped ``start``'s vestigial ``agent_ids`` param (the manifest is
+    substrate-only), so the success banners' create-vs-start steer reads the
+    agents dir directly: ``$CALFKIT_AGENTS_DIR`` when set (the same override the
+    shim, the runners, and ``init.resolve_paths`` honour) else ``<home>/agents``.
+    ``detect_agents`` is the CLI's one definition of "which ``.md`` files are live
+    agents" — reused rather than re-declared so the skip rules cannot drift;
+    imported lazily because its module pulls the agents package (heavy), which
+    the supervisor must not pay at import time.
+    """
+    from calfcord.cli._agents import detect_agents
+
+    agents_dir = os.environ.get("CALFKIT_AGENTS_DIR") or os.path.join(home, "agents")
+    return bool(detect_agents(Path(agents_dir)))
+
+
 async def start(
     home: str | os.PathLike[str],
     *,
     server_urls: str,
     launcher: str,
-    agent_ids: Iterable[str],
-    mcp_servers: Iterable[str] = (),
     ready_timeout_s: float = _DEFAULT_READY_TIMEOUT_SECONDS,
     client: ProcessComposeClient | None = None,
     spawn: Spawn | None = None,
@@ -463,10 +479,10 @@ async def start(
     spawn_blocking = spawn_blocking or _default_spawn_blocking
     clock = clock or time.monotonic
     sleep = sleep or asyncio.sleep
-    # Materialize the roster once (it may be a one-shot iterable) so the success
-    # banners can tell an empty org from a defined one — an org with zero agents
-    # is steered to `agent create`, not the pointless `agent start`.
-    agent_ids = list(agent_ids)
+    # Read the defined roster once so the success banners can tell an empty org
+    # from a defined one — an org with zero agents is steered to `agent create`,
+    # not the pointless `agent start`.
+    agents_defined = _agents_defined(home)
 
     with lifecycle_lock(home):
         # Idempotency (§12.4): if the office is already open, do NOT launch a
@@ -486,7 +502,7 @@ async def start(
                     "`disco start`."
                 )
                 return 1
-            if agent_ids:
+            if agents_defined:
                 print(
                     "workspace already open (broker + bridge). "
                     "Next: disco agent start <name>"
@@ -522,12 +538,9 @@ async def start(
                 return 1
 
         port = pc_port_for(home)
-        # Phase 2: the manifest is SUBSTRATE-ONLY. The roster (agents, ``tools``,
-        # ``mcp-<server>``) is spawned off Process Compose, so ``agent_ids`` /
-        # ``mcp_servers`` are no longer threaded into the compose render — they are
-        # kept on the signature only for the empty-org signpost below and for
-        # backward-compatible call sites (``init`` / ``agent_create``); Phase 3 may
-        # drop ``mcp_servers`` entirely.
+        # The manifest is SUBSTRATE-ONLY: the roster (agents, ``tools``,
+        # ``mcp-<server>``) spawns off Process Compose per slot, so nothing
+        # roster-shaped is threaded into the compose render.
         yaml_text = render_compose(
             home=home,
             launcher=launcher,
@@ -613,7 +626,7 @@ async def start(
                 )
             return 1
 
-    if agent_ids:
+    if agents_defined:
         print(
             "workspace open (broker + bridge). No agents running yet "
             "-> disco agent start <name>"

@@ -134,6 +134,24 @@ def _home(tmp_path: Path) -> str:
     return str(tmp_path)
 
 
+def _define_agent(tmp_path: Path, name: str = "assistant") -> None:
+    """Drop an ``agents/<name>.md`` under the test home.
+
+    Phase 3 dropped ``start``'s ``agent_ids`` param: the success banners' create-
+    vs-start signpost now reads the home's agents dir directly (a glob — the file
+    is never parsed), so tests that want the "agent start" steer define one.
+    """
+    agents = tmp_path / "agents"
+    agents.mkdir(exist_ok=True)
+    (agents / f"{name}.md").write_text(f"---\nname: {name}\n---\nbody\n")
+
+
+@pytest.fixture(autouse=True)
+def _no_agents_dir_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The signpost honours $CALFKIT_AGENTS_DIR; keep the host env out of tests."""
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+
 class _StubProbe:
     """A scriptable mesh probe for status (returns agent NAMES or raises)."""
 
@@ -327,7 +345,6 @@ async def test_start_idempotent_when_already_running(tmp_path, capsys) -> None:
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -364,7 +381,6 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -413,11 +429,12 @@ async def test_supervisor_belongs_to_home_returns_none_when_info_unavailable() -
 
 
 async def test_start_manifest_is_substrate_only(tmp_path, capsys, fake_pc_bin) -> None:
-    """Phase 2: even when ``start`` is handed agent_ids + mcp_servers (kept on the
-    signature for the empty-org signpost and backward-compatible call sites), the
-    written project declares ONLY the substrate — the roster is spawned off PC."""
+    """Even with agents DEFINED for the install, the written project declares
+    ONLY the substrate — the roster (agents, ``tools``, ``mcp-<server>``) is
+    spawned off Process Compose."""
     import yaml as _yaml
 
+    _define_agent(tmp_path)
     home = _home(tmp_path)
     spawn = _RecordingSpawn()
     clock = _FakeClock()
@@ -433,8 +450,6 @@ async def test_start_manifest_is_substrate_only(tmp_path, capsys, fake_pc_bin) -
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
-        mcp_servers=["github"],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -449,6 +464,7 @@ async def test_start_manifest_is_substrate_only(tmp_path, capsys, fake_pc_bin) -
 
 
 async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
+    _define_agent(tmp_path)  # a defined roster steers the banner to `agent start`
     home = _home(tmp_path)
     spawn = _RecordingSpawn()
     clock = _FakeClock()
@@ -466,7 +482,6 @@ async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant", "scribe"],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -512,7 +527,8 @@ async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
 
 
 async def test_start_zero_agents_signposts_create_not_start(tmp_path, capsys, fake_pc_bin) -> None:
-    """When no agents are DEFINED yet, the fresh-start success must point at
+    """When no agents are DEFINED yet (the home's agents dir is empty — ``start``
+    reads it directly for the signpost), the fresh-start success must point at
     ``disco agent create`` (there is nothing to ``agent start``) rather than the
     unconditional ``agent start`` steer — the empty-roster teaching moment."""
     home = _home(tmp_path)
@@ -527,7 +543,6 @@ async def test_start_zero_agents_signposts_create_not_start(tmp_path, capsys, fa
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -555,7 +570,6 @@ async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys)
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -569,6 +583,39 @@ async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys)
     assert "agent start" not in out
 
 
+async def test_start_signpost_honours_agents_dir_env_override(
+    tmp_path, capsys, fake_pc_bin, monkeypatch
+) -> None:
+    """The signpost's agents-dir read honours ``$CALFKIT_AGENTS_DIR`` — the same
+    override the shim, the runners, and ``init.resolve_paths`` honour — so an
+    install with a pinned agents dir is not misread as an empty org."""
+    override = tmp_path / "elsewhere"
+    override.mkdir()
+    (override / "scribe.md").write_text("---\nname: scribe\n---\nbody\n")
+    monkeypatch.setenv("CALFKIT_AGENTS_DIR", str(override))
+
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Ready"}],
+    )
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "disco agent start <name>" in out
+    assert "agent create" not in out
+
+
 async def test_start_log_dir_is_created(tmp_path, fake_pc_bin) -> None:
     home = _home(tmp_path)
     clock = _FakeClock()
@@ -580,7 +627,6 @@ async def test_start_log_dir_is_created(tmp_path, fake_pc_bin) -> None:
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -608,7 +654,6 @@ async def test_start_waits_for_rest_server_then_primes(tmp_path, fake_pc_bin) ->
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -644,7 +689,6 @@ async def test_start_fails_fast_when_external_broker_unreachable(
         home,
         server_urls="broker.example.com:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -691,7 +735,6 @@ async def test_start_skips_broker_probe_for_compose_managed_loopback_broker(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -729,7 +772,6 @@ async def test_start_external_broker_manifest_omits_broker_slot(
         home,
         server_urls="broker.example.com:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -764,7 +806,6 @@ async def test_start_readiness_timeout_tears_down_and_returns_nonzero(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         spawn_blocking=spawn_blocking,
@@ -811,7 +852,6 @@ async def test_start_running_but_not_ready_bridge_times_out_and_tears_down(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -938,7 +978,6 @@ async def test_start_readiness_timeout_diagnoses_privileged_intents(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         spawn_blocking=_RecordingSpawn(),
@@ -971,7 +1010,6 @@ async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         spawn_blocking=_RecordingSpawn(),
@@ -1012,7 +1050,6 @@ async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         spawn_blocking=spawn_blocking,
@@ -1055,7 +1092,6 @@ async def test_start_server_up_timeout_returns_nonzero_without_priming(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -1084,7 +1120,6 @@ async def test_start_readiness_tolerates_transient_bridge_error(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,

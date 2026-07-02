@@ -514,26 +514,22 @@ def test_main_lifecycle_help_exits_zero(verb: str) -> None:
 
 def test_main_start_dispatches_with_resolved_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # ``start`` must resolve home from CALFCORD_HOME, build the launcher as the
-    # install's shim, read server_urls from CALF_HOST_URL, and enumerate the
-    # agents dir for the roster — then asyncio.run lifecycle.start and propagate
-    # its exit code.
+    # install's shim, and read server_urls from CALF_HOST_URL — then asyncio.run
+    # lifecycle.start and propagate its exit code. (The defined roster is read by
+    # lifecycle.start itself for its banner signpost; nothing is threaded here.)
     home = tmp_path / "home"
-    agents = home / "agents"
-    agents.mkdir(parents=True)
-    (agents / "assistant.md").write_text("---\nname: assistant\nmodel: gpt-5-nano\n---\nYou are assistant.\n")
-    (agents / "scribe.md").write_text("---\nname: scribe\nmodel: gpt-5-nano\n---\nYou are scribe.\n")
+    (home / "agents").mkdir(parents=True)
     monkeypatch.setenv("CALFCORD_HOME", str(home))
     monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
     monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
 
     captured: dict[str, object] = {}
 
-    async def _start(home_arg, *, server_urls, launcher, agent_ids, **kwargs):
+    async def _start(home_arg, *, server_urls, launcher, **kwargs):
         captured.update(
             home=home_arg,
             server_urls=server_urls,
             launcher=launcher,
-            agent_ids=list(agent_ids),
         )
         return 0
 
@@ -542,8 +538,6 @@ def test_main_start_dispatches_with_resolved_args(monkeypatch: pytest.MonkeyPatc
     assert captured["home"] == home
     assert captured["server_urls"] == "broker.example:9092"
     assert captured["launcher"] == str(home / "shims" / "disco")
-    # Roster is the sorted .md stems (the same seam `agent list` uses).
-    assert captured["agent_ids"] == ["assistant", "scribe"]
 
 
 def test_main_start_propagates_nonzero_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1631,30 +1625,28 @@ def test_main_mcp_without_home_errors_native_install(
     assert "CALFCORD_HOME" in capsys.readouterr().out
 
 
-def test_main_start_passes_mcp_servers_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # `disco start` enumerates mcp.json alongside the agents dir so the
-    # generated project declares one disabled slot per server.
+def test_main_start_fails_fast_on_broken_mcp_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # The substrate-only project declares nothing for MCP servers, but `disco
+    # start` deliberately KEEPS mcp.json validation as a fail-fast: an invalid
+    # config fails the workspace open actionably here, before it would surface
+    # later as N doomed `disco mcp start` attempts. The workspace must not open.
     home = tmp_path / "home"
-    agents = home / "agents"
-    agents.mkdir(parents=True)
-    (agents / "assistant.md").write_text("---\nname: assistant\nmodel: gpt-5-nano\n---\nYou are assistant.\n")
+    (home / "agents").mkdir(parents=True)
     config = home / "config"
     config.mkdir()
-    (config / "mcp.json").write_text('{"mcpServers": {"github": {"command": "x"}}}')
+    (config / "mcp.json").write_text("{not json")
     monkeypatch.setenv("CALFCORD_HOME", str(home))
     monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
     monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
 
-    captured: dict[str, object] = {}
-
-    async def _start(home_arg, *, server_urls, launcher, agent_ids, mcp_servers=(), **kwargs):
-        captured.update(agent_ids=list(agent_ids), mcp_servers=list(mcp_servers))
-        return 0
+    async def _start(*args, **kwargs):
+        raise AssertionError("lifecycle.start must not run on a broken mcp.json")
 
     monkeypatch.setattr(lifecycle, "start", _start)
-    assert main(["start"]) == 0
-    assert captured["agent_ids"] == ["assistant"]
-    assert captured["mcp_servers"] == ["github"]
+    assert main(["start"]) == 1
+    assert "error" in capsys.readouterr().out.lower()
 
 
 def test_main_mcp_add_dispatches_with_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

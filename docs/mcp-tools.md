@@ -16,7 +16,7 @@ the MCP processes sit in the topology, see
 > Terminology used throughout: an **MCP server** is the external program or
 > endpoint you point Agent Disco at (the thing in `mcp.json`); a **toolbox** is
 > the calfkit node Agent Disco runs to host it; a **slot** is that toolbox's
-> Process Compose process (`mcp-<server>`).
+> detached process (`mcp-<server>`), directly supervised off Process Compose.
 
 ## The shape of it
 
@@ -98,17 +98,10 @@ disco mcp list           # transport summary + best-effort running state
 disco logs mcp-github -f # follow the toolbox's own log
 ```
 
-> **New-server caveat.** A server added to `mcp.json` *after* `disco start`
-> has no declared supervisor slot yet — exactly like a brand-new agent `.md`.
-> `disco mcp start <server>` will print a hint to that effect; reload the
-> workspace once so the generated supervisor config picks up the new slot:
->
-> ```bash
-> disco stop && disco start
-> disco mcp start github
-> ```
->
-> An already-declared server needs no reload. See
+> **Added a server after `disco start`?** No reload needed. Each server runs as
+> its own detached process, so `disco mcp start github` brings it online
+> immediately as long as the workspace is open — exactly like clocking in a
+> brand-new agent. (If the workspace isn't open, run `disco start` first.) See
 > [Lifecycle and reload](#lifecycle-and-reload).
 
 ### 3. Grant the tools to an agent
@@ -263,7 +256,7 @@ turn**. The consequences:
 
 Clean shutdown of a toolbox tombstones its record (the tools disappear from the
 view); a *crash* leaves the last-known record in place, so agents keep the
-tools they had until the slot recovers.
+tools they had until you restart the slot.
 
 ## Lifecycle and reload
 
@@ -288,13 +281,13 @@ A few semantics to keep straight:
   server in `mcp.json` and (re)starts each — the way to pick up newly added
   entries across the board. `stop --all` / `restart --all` instead operate on
   the *running* `mcp-` slots (they act on what exists, not what is configured).
-- **A server added after `disco start` needs a one-time workspace reload.**
-  The supervisor config is derived from `mcp.json` at `start`, so a server you
-  added afterward has no declared slot. `disco mcp start <server>` detects
-  this (a `4xx` from the supervisor) and prints the reload hint:
-  `disco stop && disco start`. After that one reload, the slot exists and
-  the ordinary verbs apply. Removing a server is the mirror image — the slot
-  disappears on the next reload.
+- **A server added after `disco start` starts immediately — no reload.** Each
+  server runs as its own detached process spawned when you start it, so a server
+  you just added to `mcp.json` comes online with `disco mcp start <server>` (or
+  `disco mcp start --all`) the moment the workspace is open — the same as clocking
+  in a brand-new agent. Removing a server is the mirror image: `disco mcp stop
+  <server>` ends its process if it's running, and there's no leftover slot to
+  reload away.
 
 ## Distributed deployments
 
@@ -309,8 +302,7 @@ host and the agents elsewhere:
 ```bash
 # On the MCP host — where mcp.json and its secrets live:
 disco mcp add github --command "npx -y @modelcontextprotocol/server-github" --env GITHUB_TOKEN
-disco stop && disco start     # declare the new mcp-github slot
-disco mcp start github
+disco mcp start github        # spawns as its own detached process — no reload
 
 # On an agent host — no mcp.json, no GITHUB_TOKEN, just the selector in the .md:
 disco agent restart scribe       # scribe's tools: includes mcp/github
@@ -343,13 +335,10 @@ add the services to your compose file by hand.
 disco logs mcp-<server>
 ```
 
-A toolbox whose server is unreachable fails its worker at boot by design, so
-the supervisor will keep retrying it; the log names the cause.
-
-**`disco mcp start <server>` prints a workspace-reload hint.** The server
-isn't a declared slot yet (you added it after `disco start`). Run
-`disco stop && disco start` once, then start it. See
-[Lifecycle and reload](#lifecycle-and-reload).
+A toolbox whose server is unreachable fails its worker at boot by design; the
+slot then exits (there is no auto-respawn — it shows as `not running (exited …)`
+in `disco status`). The log names the cause; fix it and run `disco mcp start
+<server>` again.
 
 **An agent isn't seeing the tools.** Walk the chain:
 

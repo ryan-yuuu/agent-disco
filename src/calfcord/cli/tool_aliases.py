@@ -39,10 +39,12 @@ def _write_aliases(env_path: Path, aliases: Mapping[str, str]) -> None:
 
 
 def _print_restart_hint() -> None:
+    # No `disco stop && disco start` alternative here: `start` reopens only the
+    # substrate, so a stop/start cycle would leave the tools host and agents
+    # DOWN — the per-role restarts are the one honest way to apply an alias.
     print(
         "restart the tools host and agents to apply: "
-        "`disco tools restart` and `disco agent restart --all` "
-        "(or `disco stop && disco start`)."
+        "`disco tools restart` and `disco agent restart --all`."
     )
 
 

@@ -38,6 +38,15 @@ class TestAgentDefinitionValidators:
         with pytest.raises(ValidationError, match="name"):
             _make_definition(agent_id=bad_id)
 
+    @pytest.mark.parametrize("reserved", ["broker", "bridge", "tools", "mcp-github"])
+    def test_reserved_agent_id_rejected(self, reserved: str) -> None:
+        """Agents share the workspace slot namespace with the substrate, the
+        ``tools`` singleton, and the ``mcp-<server>`` slots, so a reserved name
+        must fail at validation (the chokepoint every read/write path runs
+        through) — not first at ``disco agent start``."""
+        with pytest.raises(ValidationError, match="reserved"):
+            _make_definition(agent_id=reserved)
+
     def test_stale_slash_frontmatter_rejected(self) -> None:
         """The ``slash`` field was removed; stale ``slash:`` frontmatter must fail loudly.
 
@@ -280,6 +289,16 @@ class TestParseAgentMd:
         self._write_md(path, memory="true")
         d = parse_agent_md(path)
         assert d.memory is True
+
+    @pytest.mark.parametrize("reserved", ["tools", "broker", "bridge", "mcp-github"])
+    def test_reserved_name_md_rejected_at_parse(self, tmp_path: Path, reserved: str) -> None:
+        """A hand-written ``agents/tools.md`` (etc.) must fail at parse time with
+        a message naming the reserved slot it collides with, so the operator
+        learns at load — not from a later roster verb refusing the name."""
+        path = tmp_path / f"{reserved}.md"
+        self._write_md(path)
+        with pytest.raises(ValueError, match="reserved"):
+            parse_agent_md(path)
 
     def test_filename_must_match_name(self, tmp_path: Path) -> None:
         path = tmp_path / "scheduler.md"

@@ -1205,25 +1205,11 @@ def test_empty_token_on_rerun_keeps_existing_secret(tmp_path: Path) -> None:
     assert read_env(env_path)["DISCORD_BOT_TOKEN"] == "tok-original"
 
 
-def test_live_finish_passes_configured_mcp_servers(tmp_path: Path, monkeypatch) -> None:
-    """The live finish enumerates mcp.json (the same no-secrets seam
-    ``disco start`` uses) so the workspace declares the mcp-<server>
-    slots from the first boot."""
-    config = tmp_path / "config"
-    config.mkdir()
-    (config / "mcp.json").write_text('{"mcpServers": {"github": {"command": "x"}}}')
-    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
-    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
-    finish = _FinishStub(reply=True)
-    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
-    assert rc == 0
-    assert finish.start_calls[0]["mcp_servers"] == ["github"]
-
-
-def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, capsys) -> None:
-    """Onboarding must reach a live org even when mcp.json is broken: warn and
-    start with no MCP slots (the strict readers — `disco start`, `mcp
-    start` — surface the config error for fixing)."""
+def test_live_finish_ignores_broken_mcp_config(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Onboarding must reach a live org even when mcp.json is broken: the live
+    finish opens a substrate-only workspace and never consults mcp.json (the
+    strict readers — `disco start`, `mcp start` — surface the config error
+    for fixing afterwards)."""
     config = tmp_path / "config"
     config.mkdir()
     (config / "mcp.json").write_text("{not json")
@@ -1232,8 +1218,8 @@ def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, ca
     finish = _FinishStub(reply=True)
     rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
     assert rc == 0
-    assert finish.start_calls[0]["mcp_servers"] == []
-    assert "mcp.json" in capsys.readouterr().out
+    assert len(finish.start_calls) == 1
+    assert "mcp_servers" not in finish.start_calls[0]
 
 
 # --- _wait_for_agent_online body (the mesh presence-poll; previously monkeypatched away) ---

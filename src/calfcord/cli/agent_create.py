@@ -5,7 +5,7 @@ sequence lives, so the two surfaces that need it — the standalone ``agent
 create`` command *and* ``init``'s first-run setup — can never drift on
 *how* an agent is brought into being. :func:`create_agent` is the extracted
 flow; :func:`run` is the thin ``agent create`` wrapper around it (no seed prune,
-offers the optional ``$EDITOR`` prompt step, prints the restart guidance).
+offers the optional ``$EDITOR`` prompt step, then offers to start the agent).
 
 Two design rules keep the two callers honest:
 
@@ -37,6 +37,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from calfcord.agents.identifier import reserved_agent_id_error
 from calfcord.cli._agents import (
     DEFAULT_DESCRIPTION,
     STARTER_AGENT_NAME,
@@ -106,6 +107,10 @@ def _resolve_name(
       a blank answer re-prompts (:func:`_resolve_required_name`), so an
       enter-through can never quietly edit an existing agent, and naming an
       existing agent is gated by an explicit "update it?" confirm.
+
+    Both policies refuse a RESERVED workspace-slot name (``tools``/``broker``/
+    ``bridge``/``mcp-*``) at the prompt — with the reason — rather than letting
+    the operator walk the whole wizard just to fail at the validate-before-write.
     """
     if require_name:
         return _resolve_required_name(prompter, agents_dir=agents_dir, seed=name_default or "")
@@ -113,9 +118,16 @@ def _resolve_name(
     if name_default is None:
         existing = detect_agents(agents_dir)
         name_default = existing[0] if len(existing) == 1 else STARTER_AGENT_NAME
-    typed_name = prompter.text("Agent name:", default=name_default)
-    name = slug_stem(typed_name) if typed_name.strip() else name_default
-    return name, existing_agent(agents_dir, name)
+    while True:
+        typed_name = prompter.text("Agent name:", default=name_default)
+        name = slug_stem(typed_name) if typed_name.strip() else name_default
+        reserved = reserved_agent_id_error(name)
+        if reserved is not None:
+            # Loop rather than error out: init's first-run must keep moving, and
+            # the message says exactly why the name is off-limits.
+            print(f"  {reserved}")
+            continue
+        return name, existing_agent(agents_dir, name)
 
 
 def _resolve_required_name(
@@ -139,6 +151,13 @@ def _resolve_required_name(
             seed = ""
             continue
         name = slug_stem(typed)
+        reserved = reserved_agent_id_error(name)
+        if reserved is not None:
+            # A reserved workspace-slot name (tools/broker/bridge/mcp-*): say why
+            # and re-ask, clearing the pre-fill so the bad name isn't offered back.
+            print(f"  {reserved}")
+            seed = ""
+            continue
         prior = existing_agent(agents_dir, name)
         if prior is not None and not prompter.confirm(
             f"agent {name!r} already exists — update it?", default=False
@@ -265,7 +284,6 @@ def run(
     server_urls: str = _ENV_DEFAULT,
     # --- injected world-touching seams (default to the real thing) ----------
     start_fn: Callable[..., Awaitable[int]] | None = None,
-    stop_fn: Callable[..., Awaitable[int]] | None = None,
     agent_start_fn: Callable[..., Awaitable[int]] | None = None,
     presence_fn: Callable[..., Awaitable[bool]] | None = None,
     workspace_running_fn: Callable[[Path], Awaitable[bool]] | None = None,
@@ -282,11 +300,11 @@ def run(
 
     On success it names the created agent then hands off to :func:`_finish_create`
     (Change A): on a native install it offers ``Start <name> now?`` and, on yes,
-    brings the agent online for REAL — opening or reloading the workspace as the
-    agent's brand-new-slot status requires, then confirming presence on the mesh —
-    instead of printing a ``disco agent start`` steer that fails first try. On a
-    dev run (no ``$CALFCORD_HOME``) or a missing supervisor binary it degrades to
-    honest manual next-steps.
+    brings the agent online for REAL — opening the workspace first only if it
+    isn't running (the roster spawns off Process Compose, so a live workspace
+    needs no touch), then confirming presence on the mesh — instead of printing
+    a ``disco agent start`` steer. On a dev run (no ``$CALFCORD_HOME``) or a
+    missing supervisor binary it degrades to honest manual next-steps.
 
     ``home`` / ``server_urls`` default to a sentinel that resolves them from the
     environment (``$CALFCORD_HOME`` / ``$CALF_HOST_URL``) so ``main.py`` need not
@@ -329,9 +347,7 @@ def run(
         name=created.name,
         home=home,
         server_urls=server_urls,
-        agents_dir=agents_dir,
         start_fn=start_fn,
-        stop_fn=stop_fn,
         agent_start_fn=agent_start_fn,
         presence_fn=presence_fn,
         workspace_running_fn=workspace_running_fn,
@@ -345,9 +361,7 @@ def _finish_create(
     name: str,
     home: Path | None,
     server_urls: str,
-    agents_dir: Path,
     start_fn: Callable[..., Awaitable[int]] | None,
-    stop_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]] | None,
     presence_fn: Callable[..., Awaitable[bool]] | None,
     workspace_running_fn: Callable[[Path], Awaitable[bool]] | None,
@@ -373,7 +387,6 @@ def _finish_create(
 
     if (
         start_fn is None
-        or stop_fn is None
         or agent_start_fn is None
         or presence_fn is None
         or workspace_running_fn is None
@@ -386,7 +399,6 @@ def _finish_create(
         from calfcord.supervisor import lifecycle, roster
 
         start_fn = start_fn or lifecycle.start
-        stop_fn = stop_fn or lifecycle.stop
         agent_start_fn = agent_start_fn or roster.agent_start
         presence_fn = presence_fn or _wait_for_agent_online
         workspace_running_fn = workspace_running_fn or _default_workspace_running
@@ -397,9 +409,7 @@ def _finish_create(
             name=name,
             home=home,
             server_urls=server_urls,
-            agents_dir=agents_dir,
             start_fn=start_fn,
-            stop_fn=stop_fn,
             agent_start_fn=agent_start_fn,
             presence_fn=presence_fn,
             workspace_running_fn=workspace_running_fn,
@@ -413,24 +423,20 @@ async def _start_now(
     name: str,
     home: Path,
     server_urls: str,
-    agents_dir: Path,
     start_fn: Callable[..., Awaitable[int]],
-    stop_fn: Callable[..., Awaitable[int]],
     agent_start_fn: Callable[..., Awaitable[int]],
     presence_fn: Callable[..., Awaitable[bool]],
     workspace_running_fn: Callable[[Path], Awaitable[bool]],
 ) -> int:
-    """The native live finish: confirm, (re)open the workspace, start, watch presence.
+    """The native live finish: confirm, open the workspace if closed, start, watch.
 
     Branches on the REAL workspace state (a local supervisor-REST probe):
 
-    * **not running** → ``lifecycle.start`` opens it (rendering the compose with
-      the just-created agent as a declared slot) then ``roster.agent_start``;
-    * **running** → the brand-new agent isn't a declared slot in the already-
-      rendered workspace, so it needs the one-time reload; we state the cost (the
-      restart drops the in-memory broker's in-flight work) and confirm ``[y/N]``
-      before ``lifecycle.stop`` → ``lifecycle.start`` → ``roster.agent_start``. A
-      decline prints the manual reload sequence.
+    * **not running** → ``lifecycle.start`` opens the substrate (broker + bridge),
+      then ``roster.agent_start`` spawns the agent;
+    * **running** → nothing to reopen: the roster lives off Process Compose, so a
+      brand-new agent spawns straight into the live workspace via
+      ``roster.agent_start`` — no reload, no in-flight work lost.
 
     After a successful start it reuses the presence watcher and only claims the
     agent is online once it is SEEN on the mesh; a timeout (or a broker blip
@@ -444,21 +450,14 @@ async def _start_now(
         _print_manual_next_steps(name, running=running)
         return 0
 
-    if running:
-        if not prompter.confirm(
-            "Bringing a brand-new agent online restarts the workspace — the "
-            "in-memory broker loses any in-flight work. Restart the workspace now?",
-            default=False,
-        ):
-            _print_manual_next_steps(name, running=True)
-            return 0
-        rc = await stop_fn(home)
+    if not running:
+        # Mirror main.py's `_run_lifecycle` wiring (DRY): the shim launcher every
+        # supervised process execs under, and the broker URL. The rendered project
+        # is substrate-only, so nothing about the new agent is threaded in.
+        launcher = str(home / "shims" / "disco")
+        rc = await start_fn(home, server_urls=server_urls, launcher=launcher)
         if rc != 0:
             return rc
-
-    rc = await _open_workspace(start_fn, home=home, server_urls=server_urls, agents_dir=agents_dir)
-    if rc != 0:
-        return rc
 
     rc = await agent_start_fn(home, name=name, server_urls=server_urls)
     if rc != 0:
@@ -482,39 +481,6 @@ async def _start_now(
     return 0
 
 
-async def _open_workspace(
-    start_fn: Callable[..., Awaitable[int]],
-    *,
-    home: Path,
-    server_urls: str,
-    agents_dir: Path,
-) -> int:
-    """Open (or reopen) the workspace with the current agent set declared.
-
-    Mirrors ``init``'s live finish and ``main``'s ``_run_lifecycle`` wiring (DRY):
-    the shim launcher every supervised process execs under, the broker URL, the
-    DEFINED roster (so the just-created ``.md`` is a declared slot the following
-    ``agent_start`` can actually start), and the mcp.json servers. A broken
-    mcp.json is a WARNING, not fatal — bringing the agent online is the goal and
-    MCP slots are optional; the strict readers surface the error for fixing after.
-    """
-    from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
-
-    try:
-        mcp_servers = list_server_names(resolve_config_path())
-    except McpConfigError as exc:
-        print(f"  warning: skipping MCP servers ({exc})")
-        mcp_servers = []
-    launcher = str(home / "shims" / "disco")
-    return await start_fn(
-        home,
-        server_urls=server_urls,
-        launcher=launcher,
-        agent_ids=detect_agents(agents_dir),
-        mcp_servers=mcp_servers,
-    )
-
-
 async def _default_workspace_running(home: Path) -> bool:
     """Whether this home's supervisor REST surface is answering (the workspace is up).
 
@@ -531,17 +497,15 @@ async def _default_workspace_running(home: Path) -> bool:
 def _print_manual_next_steps(name: str, *, running: bool | None) -> None:
     """Print the honest manual bring-online sequence.
 
-    A brand-new agent needs the workspace to (re)render with its ``.md`` declared,
-    so the steps depend on whether the workspace is already running: a running
-    workspace needs the one-time reload (``disco stop`` first, which drops in-flight
-    broker work); otherwise a plain ``disco start`` suffices. ``running=None`` (a
-    dev run / missing supervisor, where the create finish couldn't probe) takes the
-    plain-start form — the same honest steps ``init`` degrades to.
+    The roster spawns off Process Compose, so a brand-new agent never needs a
+    workspace reload: a RUNNING workspace only needs ``disco agent start``; a
+    closed one needs ``disco start`` first. ``running=None`` (a dev run / missing
+    supervisor, where the create finish couldn't probe) takes the two-step form —
+    the same honest steps ``init`` degrades to.
     """
     print(f"Bring {name} online:")
-    if running:
-        print("    disco stop")
-    print("    disco start")
+    if not running:
+        print("    disco start")
     print(f"    disco agent start {name}")
 
 

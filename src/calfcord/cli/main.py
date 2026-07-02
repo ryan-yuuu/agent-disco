@@ -135,10 +135,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     agent_sub.add_parser("ps", help="Show RUNNING agents (vs. `agent list`, which shows DEFINED agents).")
 
-    # ``tools`` is a SINGLETON roster component: one declared Process Compose slot,
-    # clocking in/out of the running office. It has NO config
-    # surface here, so it is a ``start|stop|restart`` group whose whole veneer is
-    # the dispatch to the generic ``component_start/stop`` with the slot name.
+    # ``tools`` is a SINGLETON roster component: one detached process per host
+    # (pidfile slot ``state/run/tools.pid``), clocking in/out of the running
+    # office. It has NO config surface here, so it is a ``start|stop|restart``
+    # group whose whole veneer is the dispatch to the generic
+    # ``component_start/stop`` with the slot name.
     # ``required=True`` makes a bare ``disco tools`` print help + exit non-zero
     # rather than silently no-op, so the group can grow further verbs later.
     # ``--all`` is a forward-compatible SYNONYM for the bare verb here: a singleton
@@ -236,7 +237,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # there. They take no flags today — the lifecycle entry points are nullary
     # beyond the resolved install paths.
     sub.add_parser("start", help="Open the workspace: broker + bridge, detached, health-gated.")
-    sub.add_parser("stop", help="Close the workspace (stops the supervised substrate).")
+    sub.add_parser("stop", help="Close the whole workspace (substrate and every roster process).")
     sub.add_parser("status", help="Show the org board: substrate + roster health.")
 
     # Graduation-tier surfaces (design §2 / §11). ``explain`` is a verb group (like
@@ -581,9 +582,9 @@ def _run_lifecycle(command: str) -> int:
     ``server_urls`` comes from ``CALF_HOST_URL`` (defaulting to ``localhost``,
     the same default the runners and the broker healthcheck use). The generated
     project is SUBSTRATE-ONLY (broker + bridge; the roster is spawned off Process
-    Compose per slot) — the defined-agent ids are still passed so ``start``'s
-    success banner can steer an empty org to ``agent create`` instead of ``agent
-    start``. The lifecycle coroutine's POSIX exit code is propagated unchanged.
+    Compose per slot); ``start`` reads the defined roster itself for its success
+    banner's empty-org signpost. The lifecycle coroutine's POSIX exit code is
+    propagated unchanged.
     """
     home = _require_home(command, detail="the supervisor has a stable home and shim.")
     if home is None:
@@ -599,29 +600,16 @@ def _run_lifecycle(command: str) -> int:
         return asyncio.run(lifecycle.status(home, server_urls=server_urls))
 
     # ``start`` additionally needs the shim launcher every supervised process
-    # execs under, the broker URL, and the defined-agent ids (for the empty-org
-    # signpost in its success banner — the substrate-only project declares no
-    # roster slots).
-    _, agents_dir = init.resolve_paths(home)
+    # execs under and the broker URL.
     launcher = str(home / "shims" / "disco")
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
-    # MCP servers are detached roster slots spawned off Process Compose, so the
-    # generated project declares nothing for them — but an invalid mcp.json still
-    # fails the whole start actionably here, before the workspace opens, rather
-    # than surfacing later as N doomed `disco mcp start` attempts. (`mcp_servers`
-    # is threaded for signature compatibility; Phase 3 may drop the param.)
-    mcp_servers = configured_mcp_servers_or_none()
-    if mcp_servers is None:
+    # mcp.json fail-fast (a deliberate keep): the substrate-only project declares
+    # nothing for MCP servers, but an invalid mcp.json should still fail the
+    # workspace open actionably HERE — before the operator discovers it later as
+    # N doomed `disco mcp start` attempts. Pure validation; nothing is threaded on.
+    if configured_mcp_servers_or_none() is None:
         return 1
-    return asyncio.run(
-        lifecycle.start(
-            home,
-            server_urls=server_urls,
-            launcher=launcher,
-            agent_ids=detect_agents(agents_dir),
-            mcp_servers=mcp_servers,
-        )
-    )
+    return asyncio.run(lifecycle.start(home, server_urls=server_urls, launcher=launcher))
 
 
 def _run_component(name: str, verb: str) -> int:

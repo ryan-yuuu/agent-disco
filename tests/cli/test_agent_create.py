@@ -135,8 +135,8 @@ def test_run_creates_agent_md(tmp_path: Path) -> None:
 
 def test_run_prints_created_and_next_step(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Success names the agent, then (on a dev run with no supervisor home) degrades to
-    the honest manual bring-online sequence — a brand-new agent needs the workspace to
-    (re)render with its ``.md`` declared, so ``disco start`` + ``disco agent start``."""
+    the honest manual bring-online sequence: open the workspace if it isn't running,
+    then start the agent — ``disco start`` + ``disco agent start``."""
     agents_dir = tmp_path / "agents"
     prompter = _prompter(name="scribe")
     assert agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None) == 0
@@ -463,6 +463,43 @@ def test_run_positional_name_pre_answers_the_prompt(tmp_path: Path) -> None:
     assert (agents_dir / "scribe.md").is_file()
 
 
+@pytest.mark.parametrize("reserved", ["tools", "broker", "bridge", "mcp-github"])
+def test_run_reserved_name_reprompts_with_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], reserved: str
+) -> None:
+    """A reserved workspace-slot name (`tools`/`broker`/`bridge`/`mcp-*`) is
+    rejected AT THE NAME PROMPT with the reason, and the flow re-asks — the
+    operator never walks the whole wizard just to fail at the write."""
+    agents_dir = tmp_path / "agents"
+    prompter = FakePrompter(texts=[reserved, "scribe", "d"], confirms=[False])
+    rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=tmp_path / ".env", name=None, home=None)
+    assert rc == 0
+    assert not (agents_dir / f"{reserved}.md").exists()
+    assert (agents_dir / "scribe.md").is_file()
+    assert "reserved" in capsys.readouterr().out
+
+
+def test_create_agent_init_path_rejects_reserved_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``init``'s create path (require_name=False) also refuses a reserved typed
+    name and re-prompts, so a first-run can't author an unstartable agent."""
+    agents_dir = tmp_path / "agents"
+    prompter = FakePrompter(texts=["tools", "scribe", "d"], confirms=[False])
+    created = agent_create.create_agent(
+        prompter,
+        agents_dir=agents_dir,
+        env_path=tmp_path / ".env",
+        name_default=None,
+        prune_seed=True,
+        offer_prompt=False,
+        require_name=False,
+    )
+    assert created.name == "scribe"
+    assert not (agents_dir / "tools.md").exists()
+    assert "reserved" in capsys.readouterr().out
+
+
 def test_create_agent_init_path_keeps_starter_default(tmp_path: Path) -> None:
     """``init``'s path (``require_name=False``, ``name_default=None``) is UNCHANGED:
     a blank name enter-through still defaults to the seeded 'assistant'."""
@@ -483,9 +520,10 @@ def test_create_agent_init_path_keeps_starter_default(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Change A — standalone create ends LIVE: offer to start the agent, opening or
-# reloading the workspace as its brand-new-slot status requires, then confirming
-# presence on the mesh. All world-touching calls are injected seams.
+# Change A — standalone create ends LIVE: offer to start the agent, opening the
+# workspace only if it isn't running (the roster spawns off Process Compose, so
+# a live workspace needs no reload), then confirming presence on the mesh. All
+# world-touching calls are injected seams.
 # ---------------------------------------------------------------------------
 
 
@@ -502,13 +540,11 @@ class _FinishRecorder:
         *,
         running: bool = False,
         start_rc: int = 0,
-        stop_rc: int = 0,
         agent_rc: int = 0,
         present: bool = True,
     ) -> None:
         self._running = running
         self._start_rc = start_rc
-        self._stop_rc = stop_rc
         self._agent_rc = agent_rc
         self._present = present
         self.calls: list[str] = []
@@ -524,10 +560,6 @@ class _FinishRecorder:
         self.calls.append("start")
         self.start_kwargs.append({"home": home, **kwargs})
         return self._start_rc
-
-    async def stop(self, home, **kwargs) -> int:
-        self.calls.append("stop")
-        return self._stop_rc
 
     async def agent_start(self, home, **kwargs) -> int:
         self.calls.append("agent_start")
@@ -559,7 +591,6 @@ def _run_live(
         home=tmp_path,
         server_urls="localhost:9092",
         start_fn=finish.start,
-        stop_fn=finish.stop,
         agent_start_fn=finish.agent_start,
         presence_fn=finish.presence,
         workspace_running_fn=finish.workspace_running,
@@ -598,41 +629,28 @@ def test_run_start_now_yes_presence_timeout_degrades(
     assert "disco doctor" in out
 
 
-def test_run_start_now_yes_workspace_running_reload_confirmed(
+def test_run_start_now_yes_workspace_running_spawns_directly(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Start-now yes with the workspace UP: the brand-new agent needs the one-time
-    reload — confirmed, it stops then restarts the workspace before agent_start."""
+    """Start-now yes with the workspace UP: the roster spawns off Process Compose,
+    so the brand-new agent starts DIRECTLY — no reload consent, no stop/start,
+    no in-flight work lost."""
     finish = _FinishRecorder(running=True, present=True)
-    # confirms: [edit-prompt=No, Start now?=Yes, reload?=Yes]
-    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True, True])
+    # confirms: [edit-prompt=No, Start now?=Yes] — a reload consent prompt here
+    # would dequeue-empty and raise, pinning that the obsolete prompt is gone.
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
     rc = _run_live(prompter, tmp_path, finish, name="scribe")
     assert rc == 0
-    assert finish.calls == ["workspace_running", "stop", "start", "agent_start", "presence"]
+    assert finish.calls == ["workspace_running", "agent_start", "presence"]
+    assert finish.agent_kwargs[0]["name"] == "scribe"
 
 
-def test_run_start_now_yes_workspace_running_reload_declined(
+def test_run_start_now_no_running_prints_agent_start_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Declining the reload does NOT touch the running workspace; it prints the
-    manual reload sequence (disco stop / start / agent start) and stops."""
-    finish = _FinishRecorder(running=True)
-    # confirms: [edit-prompt=No, Start now?=Yes, reload?=No]
-    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True, False])
-    rc = _run_live(prompter, tmp_path, finish, name="scribe")
-    assert rc == 0
-    # Probed state, then bailed — no stop/start/agent_start.
-    assert finish.calls == ["workspace_running"]
-    out = capsys.readouterr().out
-    assert "disco stop" in out
-    assert "disco agent start scribe" in out
-
-
-def test_run_start_now_no_running_prints_reload_manual(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Declining 'Start now?' with the workspace UP prints the reload manual (stop
-    first), and orchestrates nothing."""
+    """Declining 'Start now?' with the workspace UP prints ONLY the agent-start
+    step (no stop, no start — a live workspace needs no reload), and
+    orchestrates nothing."""
     finish = _FinishRecorder(running=True)
     # confirms: [edit-prompt=No, Start now?=No]
     prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, False])
@@ -640,7 +658,8 @@ def test_run_start_now_no_running_prints_reload_manual(
     assert rc == 0
     assert finish.calls == ["workspace_running"]
     out = capsys.readouterr().out
-    assert "disco stop" in out
+    assert "disco stop" not in out
+    assert "disco start" not in out
     assert "disco agent start scribe" in out
 
 
