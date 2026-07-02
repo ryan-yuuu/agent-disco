@@ -14,8 +14,10 @@ Server** on).
 Grab two values to hand to `disco init` when it asks (it writes them to
 `.env` for you):
 
-1. Open the [Developer Portal](https://discord.com/developers/applications) →
-   **New Application** → name it → **Create**.
+1. Create the app:
+   - Open the [Developer Portal](https://discord.com/developers/applications).
+   - Click **New Application**.
+   - Name it, then click **Create**.
 2. On **General Information**, copy the **Application ID** — this is
    `DISCORD_APPLICATION_ID`.
 3. Get the bot token — this is `DISCORD_BOT_TOKEN`:
