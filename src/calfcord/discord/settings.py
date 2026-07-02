@@ -42,6 +42,14 @@ class DiscordSettings(BaseSettings):
         env_prefix="DISCORD_",
         extra="ignore",
         case_sensitive=False,
+        # The install seeds config/.env from .env.example, which ships every
+        # DISCORD_* as an empty placeholder (DISCORD_GUILD_ID=). An empty-string
+        # env var is not the same as an absent one — pydantic would read "" and
+        # fail to coerce it to int, so even the int|None optionals (and a not-yet
+        # filled required field) would blow the bridge up at startup. Treat an
+        # empty value as unset so it falls through to the field default / the
+        # next source, exactly as a missing var would.
+        env_ignore_empty=True,
     )
 
     bot_token: SecretStr = Field(
