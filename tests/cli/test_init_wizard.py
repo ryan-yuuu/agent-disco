@@ -581,10 +581,10 @@ def test_join_timeout_surfaces_common_causes_and_no_server_hint(
     discord = _DiscordStub(
         join_result=discord_discovery.DiscordJoinTimeoutError("bot did not join a server within 300s")
     )
-    # The wizard cannot pick a guild/channel after a join timeout; it degrades
+    # The wizard cannot pick a guild after a join timeout; it degrades
     # the Discord step but still runs the (Discord-independent) live finish.
     p = FakePrompter(
-        selects=["native"],  # no guild/channel pick after the timeout
+        selects=["native"],  # no guild pick after the timeout
         texts=["scribe", "d", "12345"],
         secrets=["tok-abc"],
         confirms=[True],  # the in-flow say-hello prompt
@@ -598,23 +598,21 @@ def test_join_timeout_surfaces_common_causes_and_no_server_hint(
 
 
 def test_zero_postable_channels_surfaced_explicitly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A guild with channels the bot can SEE but not POST in is explained, not hidden."""
+    """A guild where the bot can't post in any channel is warned about, not hidden —
+    yet the wizard still completes the Discord step (the preflight is advisory)."""
     discord = _DiscordStub(
         channels=ChannelListing(
             postable=[],
             unpostable=[PostableChannel(id="c1", name="general")],
         )
     )
-    p = FakePrompter(
-        selects=["g1", "native"],  # guild pick, then broker (no channel pick possible)
-        texts=["scribe", "d", "12345"],
-        secrets=["tok-abc"],
-        confirms=[True],  # the in-flow say-hello prompt (live finish still runs)
-    )
-    rc = _run(p, tmp_path, home=tmp_path, discord=discord)
+    rc = _run(_prompter(), tmp_path, home=tmp_path, discord=discord)
     out = capsys.readouterr().out
-    assert "can't post" in out.lower() or "cannot post" in out.lower() or "no channel" in out.lower()
     assert rc == 0
+    assert "can't post in" in out.lower()
+    # Advisory, not a gate: guild bound and the Discord step marked done regardless.
+    cp = setup_state.load(setup_state.checkpoint_path(tmp_path))
+    assert cp is not None and cp.discord_done is True and cp.guild_id == "g1"
 
 
 def test_transient_token_verify_error_continues(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -637,7 +635,7 @@ def test_poll_transient_error_degrades(tmp_path: Path, capsys: pytest.CaptureFix
     the Discord step rather than aborting the wizard."""
     discord = _DiscordStub(join_result=discord_discovery.DiscordUnavailableError("could not reach Discord"))
     p = FakePrompter(
-        selects=["native"],  # no guild/channel pick after the poll error
+        selects=["native"],  # no guild pick after the poll error
         texts=["scribe", "d", "12345"],
         secrets=["tok-abc"],
         confirms=[True],
@@ -664,33 +662,38 @@ def test_zero_guilds_surfaced(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 
 
 def test_channel_list_error_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """An error listing channels surfaces and degrades (the channel is unset)."""
+    """A listing error surfaces as an honest 'couldn't check' note (postability unknown)
+    and the wizard still completes the Discord step (report-only)."""
     discord = _DiscordStub(channels=discord_discovery.DiscordUnavailableError("could not reach Discord (/channels)"))
-    p = FakePrompter(
-        selects=["g1", "native"],  # guild pick, then broker (channel list failed)
-        texts=["scribe", "d", "12345"],
-        secrets=["tok-abc"],
-        confirms=[True],
-    )
-    rc = _run(p, tmp_path, home=tmp_path, discord=discord)
+    rc = _run(_prompter(), tmp_path, home=tmp_path, discord=discord)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "could not list channels" in out
+    assert "couldn't check postability" in out
+    cp = setup_state.load(setup_state.checkpoint_path(tmp_path))
+    assert cp is not None and cp.discord_done is True and cp.guild_id == "g1"
+
+
+def test_channel_list_auth_error_warns_token_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A token rejected while checking postability must NOT print the false reassurance
+    that the bot will listen — it warns the token was rejected (the bridge won't start)."""
+    discord = _DiscordStub(channels=discord_discovery.DiscordAuthError("token rejected by Discord (401)"))
+    rc = _run(_prompter(), tmp_path, home=tmp_path, discord=discord)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "token was rejected" in out
+    assert "listen in every channel" not in out  # the old self-contradicting note is gone
 
 
 def test_no_text_channels_at_all_surfaced(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A guild with neither postable nor unpostable text channels is explained."""
+    """A guild with neither postable nor unpostable text channels is explained, and the
+    Discord step still completes (advisory only)."""
     discord = _DiscordStub(channels=ChannelListing(postable=[], unpostable=[]))
-    p = FakePrompter(
-        selects=["g1", "native"],
-        texts=["scribe", "d", "12345"],
-        secrets=["tok-abc"],
-        confirms=[True],
-    )
-    rc = _run(p, tmp_path, home=tmp_path, discord=discord)
+    rc = _run(_prompter(), tmp_path, home=tmp_path, discord=discord)
     out = capsys.readouterr().out
     assert rc == 0
     assert "no text channels the bot can post in" in out
+    cp = setup_state.load(setup_state.checkpoint_path(tmp_path))
+    assert cp is not None and cp.discord_done is True and cp.guild_id == "g1"
 
 
 def test_unpostable_channels_noted_alongside_postable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -703,8 +706,23 @@ def test_unpostable_channels_noted_alongside_postable(tmp_path: Path, capsys: py
     )
     assert _run(_prompter(guild="g1"), tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
-    assert "can see but can't post in" in out
+    assert "can't post in" in out
     assert "#locked" in out
+
+
+def test_zero_postable_downgrades_online_celebration(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """When the preflight proved the bot can post nowhere, an agent that registers on
+    the mesh must NOT get the 🎉 'organization is live' celebration — that would be a
+    green light that lies. It downgrades to an honest 'online but can't post' note."""
+    discord = _DiscordStub(
+        channels=ChannelListing(postable=[], unpostable=[PostableChannel(id="c1", name="general")])
+    )
+    finish = _FinishStub(reply=True)  # agent detected online on the mesh
+    rc = _run(_prompter(), tmp_path, home=tmp_path, discord=discord, finish=finish)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "🎉" not in out
+    assert "can't post in any Discord channel" in out
 
 
 def test_owner_guild_labelled_in_pick_list(tmp_path: Path) -> None:
@@ -730,7 +748,7 @@ def test_no_token_skips_discovery(tmp_path: Path, capsys: pytest.CaptureFixture[
     """With no token at all, Discord discovery is skipped (the rest still lands)."""
     discord = _DiscordStub()
     p = FakePrompter(
-        selects=["native"],  # no guild/channel pick (discovery skipped)
+        selects=["native"],  # no guild pick (discovery skipped)
         texts=["scribe", "d"],  # name, description (no app-id prompt without a token)
         secrets=[""],  # no token
         confirms=[True],

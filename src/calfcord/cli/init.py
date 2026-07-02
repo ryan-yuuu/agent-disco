@@ -19,8 +19,8 @@ reusable:
   default.
 * **Discord** — :func:`_run_discord` composes :mod:`calfcord.cli.discord_discovery`
   (verify-token-on-paste, the invite link + intents reminder, block-and-poll
-  until the bot joins, then guild / *postable*-channel pick-lists) in place of
-  the old "paste a numeric ID" prompts (§4.5).
+  until the bot joins, then a guild pick-list plus a report-only postability
+  preflight) in place of the old "paste a numeric ID" prompts (§4.5).
 * **Live finish** — :func:`_run_finish` composes
   :func:`calfcord.supervisor.lifecycle.start` (substrate, health-gated) →
   :func:`calfcord.supervisor.roster.agent_start` (the agent clocks in) → an
@@ -47,9 +47,10 @@ Two invariants the design pins:
 
 * **Idempotent and non-destructive to secrets.** Re-running treats an empty
   answer as "keep what's there" for every ``.env`` secret, and defaults a re-run
-  to the saved (working) guild/channel binding rather than clobbering it (§12.7).
+  to the saved (working) guild binding rather than clobbering it (§12.7).
 * **No green light that lies.** The finish only celebrates once the agent is
-  *seen online* on the mesh; a clean timeout downgrades to an honest "try it
+  *seen online* on the mesh AND the postability preflight didn't already find the
+  bot can't post in any channel; a clean timeout downgrades to an honest "try it
   yourself / run doctor" hint, and a substrate that never reaches ready stops the
   flow instead of clocking an agent into a workspace that isn't up (§12.6).
 """
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from datetime import datetime
 
-    from calfcord.cli.discord_discovery import BotIdentity, ChannelListing, Guild
+    from calfcord.cli.discord_discovery import BotIdentity, ChannelListing, Guild, PostableChannel
 
 _DEFAULT_PROVIDER_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 _BROKER_VAR = "CALF_HOST_URL"
@@ -299,7 +300,7 @@ def run(
     print()
 
     # --- Phase 2: Discord (verify → invite → poll → pick guild) ------------
-    checkpoint = _run_discord(
+    checkpoint, postable = _run_discord(
         prompter,
         env_path=env_path,
         checkpoint=checkpoint,
@@ -348,6 +349,7 @@ def run(
         home=home,
         env_path=env_path,
         server_urls=effective_server_urls,
+        postable=postable,
         start_fn=start_fn,
         agent_start_fn=agent_start_fn,
         first_reply_fn=first_reply_fn,
@@ -386,7 +388,7 @@ def _run_discord(
     list_guilds_fn: Callable[..., list[Guild]],
     list_channels_fn: Callable[..., ChannelListing],
     open_url_fn: Callable[[str], None] = _try_open_browser,
-) -> setup_state.SetupCheckpoint:
+) -> tuple[setup_state.SetupCheckpoint, bool | None]:
     """The Discord sub-flow: validate-on-paste → invite → poll → pick (§4.5/§12.6).
 
     Composes :mod:`discord_discovery` to replace the old numeric-ID prompts. The
@@ -396,10 +398,12 @@ def _run_discord(
     ``DISCORD_GUILD_ID``. There is no channel to pick — the bridge listens to
     every channel it can see — so the wizard only *reports* postability as a guard.
 
-    Returns the checkpoint advanced with ``discord_done`` and the chosen non-secret
-    guild ID. The whole sub-flow is non-fatal: a join timeout surfaces the §12.6
-    actionable hint and returns what progress it could make rather than aborting
-    the wizard.
+    Returns ``(checkpoint, postable)``: the checkpoint advanced with ``discord_done``
+    and the chosen non-secret guild ID, plus a tri-state postability signal for the
+    live finish — ``True`` (bot can post somewhere), ``False`` (bot can post nowhere),
+    or ``None`` (not determined: no guild bound, or the listing failed). The whole
+    sub-flow is non-fatal: a join timeout surfaces the §12.6 actionable hint and
+    returns what progress it could make rather than aborting the wizard.
     """
     current = _envfile.read_env(env_path)
     print("Discord setup (the wizard discovers your server — no IDs to paste).")
@@ -410,7 +414,7 @@ def _run_discord(
         # will fail-fast later; we surface it but keep going so the rest of the
         # config still lands and a re-run can finish Discord.
         print("  no Discord token set — skipping discovery; re-run init to finish Discord.")
-        return checkpoint
+        return checkpoint, None
 
     # Invite step: print the ready-made link + the privileged-intents reminder +
     # the resumability banner BEFORE the wait (§12.6 — Ctrl-C is safe here).
@@ -440,24 +444,22 @@ def _run_discord(
         print("    - is the Message Content intent enabled (required; Server Members is recommended)?")
         print("    - do you have Manage Server on the server you tried to add it to?")
         print("  No server yet? Create one in Discord (the + button), then re-run `disco init`.")
-        return checkpoint
+        return checkpoint, None
     except discord_discovery.DiscordDiscoveryError as e:
         # Rate-limited / unreachable on the one-shot poll: surface and degrade.
         print(f"  could not confirm the bot joined ({e}); re-run init to finish Discord.")
-        return checkpoint
+        return checkpoint, None
 
     guild_id = _pick_guild(prompter, guilds, default=checkpoint.guild_id)
     if guild_id is None:
-        return checkpoint
+        return checkpoint, None
     _envfile.upsert(env_path, {"DISCORD_GUILD_ID": guild_id})
 
-    # Report whether the bot can actually post — the "green light that lies" guard.
-    # There is no channel to pick or persist (the bridge listens to every channel
-    # it can see), so this is advisory only: a zero-postable server or a list error
-    # is surfaced but never blocks completion.
-    _report_postability(list_channels_fn, token, guild_id)
+    # Advisory postability preflight (§12.6) — report-only, never blocks completion;
+    # its result only lets the live finish avoid celebrating a bot that can't reply.
+    postable = _report_postability(list_channels_fn, token, guild_id)
 
-    return checkpoint.model_copy(update={"discord_done": True, "guild_id": guild_id})
+    return checkpoint.model_copy(update={"discord_done": True, "guild_id": guild_id}), postable
 
 
 def _capture_token(
@@ -538,41 +540,60 @@ def _pick_guild(prompter: Prompter, guilds: list[Guild], *, default: str | None)
     )
 
 
+def _channel_names(channels: list[PostableChannel]) -> str:
+    """Render channels as ``#general, #dev`` for the postability report lines."""
+    return ", ".join(f"#{c.name}" for c in channels)
+
+
 def _report_postability(
     list_channels_fn: Callable[..., ChannelListing],
     token: str,
     guild_id: str,
-) -> None:
+) -> bool | None:
     """Report whether the bot can post in the bound guild — the postability preflight.
 
     Not a picker and not persisted: the bridge listens to every channel it can see,
-    so there is no default channel to choose. This still runs the same effective-
-    permission computation the old picker did, purely to SURFACE a green light that
-    lies (§12.6) — a bot that is present but can never reply, for want of Send
-    Messages or Manage Webhooks. Postable channels are confirmed, channels the bot
-    can see but not post in are noted, and zero-postable is called out. Every branch
-    is advisory: a list error degrades to a note and nothing here blocks completion.
+    so there is no default channel to choose. The effective-permission computation
+    runs purely to SURFACE a green light that lies (§12.6) — a bot that is present
+    but can never reply, for want of View Channel, Send Messages, or Manage Webhooks.
+    Postable channels are confirmed, channels it can't post in are noted, and a
+    can't-post-anywhere server is called out with a ``warning:``.
+
+    Returns a tri-state the live finish uses to avoid celebrating a mute bot:
+    ``True`` (a postable channel exists), ``False`` (none — the bot can post nowhere),
+    or ``None`` (postability couldn't be determined because the listing failed). Every
+    branch is advisory — nothing here blocks the wizard's completion.
     """
     try:
         listing = list_channels_fn(token, guild_id)
+    except discord_discovery.DiscordAuthError:
+        # The token was rejected (revoked/reset between the join-poll and now). Don't
+        # falsely promise the bot will listen anywhere — the bridge won't even start.
+        print("  warning: the bot token was rejected by Discord — the bridge won't start.")
+        print("  Re-run `disco init` and paste a fresh bot token.")
+        return None
     except discord_discovery.DiscordDiscoveryError as e:
-        print(f"  could not list channels ({e}); the bot will still listen in every channel it can see.")
-        return
+        # Rate-limited / unreachable: we genuinely don't know postability, so say so
+        # rather than claiming either outcome.
+        print(f"  couldn't check postability ({e}) — if the bot never replies, verify it has")
+        print("  View Channel + Send Messages + Manage Webhooks on a channel.")
+        return None
 
-    if not listing.postable:
+    if listing.postable:
+        print(f"  the bot can post in {len(listing.postable)} channel(s): {_channel_names(listing.postable)}")
         if listing.unpostable:
-            names = ", ".join(f"#{c.name}" for c in listing.unpostable)
-            print(f"  the bot can see {names} but can't post there (needs Send Messages + Manage Webhooks).")
-            print("  Grant those permissions on a channel (or the bot's role) so it can reply.")
-        else:
-            print("  this server has no text channels the bot can post in — add one (or grant permissions).")
-        return
+            print(f"  (note: the bot can't post in: {_channel_names(listing.unpostable)})")
+        return True
 
-    names = ", ".join(f"#{c.name}" for c in listing.postable)
-    print(f"  the bot can post in {len(listing.postable)} channel(s): {names}")
     if listing.unpostable:
-        gap = ", ".join(f"#{c.name}" for c in listing.unpostable)
-        print(f"  (note: the bot can see but can't post in: {gap})")
+        print(
+            f"  warning: the bot can't post in {_channel_names(listing.unpostable)} "
+            "(needs View Channel + Send Messages + Manage Webhooks)."
+        )
+        print("  Grant those permissions on a channel (or the bot's role) so it can reply.")
+    else:
+        print("  warning: this server has no text channels the bot can post in — add one (or grant permissions).")
+    return False
 
 
 def _run_broker(prompter: Prompter, *, env_path: Path) -> None:
@@ -612,6 +633,7 @@ def _run_finish(
     home: Path | None,
     env_path: Path,
     server_urls: str,
+    postable: bool | None = None,
     start_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]] | None,
     first_reply_fn: Callable[..., Awaitable[bool]] | None,
@@ -634,8 +656,9 @@ def _run_finish(
       ``disco logs`` / ``disco doctor`` (don't misattribute the cause) and stop
       (don't clock the agent into a workspace that isn't up);
     * agent start failed → stop before the presence watch;
-    * agent seen online → 🎉; timed out → the bounded "org is live — try it
-      yourself / run ``disco doctor``" downgrade.
+    * agent seen online → 🎉 (unless the ``postable`` preflight already proved the
+      bot can post nowhere, which downgrades to an honest "online but can't post");
+      timed out → the bounded "org is live — try it yourself / run ``disco doctor``".
     """
     pc_binary_fn = pc_binary_fn or _default_pc_binary
 
@@ -661,6 +684,7 @@ def _run_finish(
             name=name,
             home=home,
             server_urls=server_urls,
+            postable=postable,
             start_fn=start_fn,
             agent_start_fn=agent_start_fn,
             first_reply_fn=first_reply_fn,
@@ -674,12 +698,18 @@ async def _finish_live(
     name: str,
     home: Path,
     server_urls: str,
+    postable: bool | None,
     start_fn: Callable[..., Awaitable[int]],
     agent_start_fn: Callable[..., Awaitable[int]],
     first_reply_fn: Callable[..., Awaitable[bool]],
 ) -> int:
     """Run the native live finish; returns 0 on a live org, non-zero on a failure
-    *before* the org could be reached (substrate / agent start)."""
+    *before* the org could be reached (substrate / agent start).
+
+    ``postable`` is the Phase-2 preflight verdict (``False`` == the bot can post in
+    no channel): even when the agent is seen online, a ``False`` here downgrades the
+    🎉 to an honest "online but can't post yet" so onboarding never ends on a green
+    light that lies (§12.6)."""
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
     # supervised process execs under, and the broker URL. The project is
@@ -750,7 +780,14 @@ async def _finish_live(
         detected = await watch_task
     except Exception:
         detected = False
-    if detected:
+    if detected and postable is False:
+        # Online on the mesh, but the preflight proved the bot can post in no channel:
+        # don't celebrate a bot that will never reply in Discord (§12.6). ``None``
+        # (postability unknown) still celebrates — we can't assert a failure we didn't
+        # observe.
+        print(f"{name} is online, but it can't post in any Discord channel yet.")
+        print(f"  Grant it View Channel + Send Messages + Manage Webhooks, then say `@{name} hello`.")
+    elif detected:
         print(f"🎉 {name} is online — your organization is live!")
     else:
         # Bounded fallback (§12.6): never promise more than we detected.

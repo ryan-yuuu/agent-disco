@@ -64,3 +64,16 @@ def test_populated_discord_env_vars_are_read(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.application_id == 123
     assert settings.guild_id == 42
     assert settings.owner_user_id == 7
+
+
+def test_legacy_default_channel_id_is_ignored_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pre-upgrade ``.env`` still carrying a *populated* ``DISCORD_DEFAULT_CHANNEL_ID``
+    must load cleanly. The field was removed, but ``extra="ignore"`` absorbs the stale
+    key so an upgraded install's bridge never crashes on the leftover value."""
+    _require(monkeypatch)
+    monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", "123456789")
+
+    settings = DiscordSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.application_id == 123
+    assert not hasattr(settings, "default_channel_id")

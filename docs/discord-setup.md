@@ -3,8 +3,8 @@
 One-time, about 5 minutes. You'll create a Discord app, grab two values
 (the bot token and application ID), enable two intents, and invite the bot to
 your server. `disco init` takes it from there — it verifies the token, waits
-for the invite, and **discovers your server and channel for you**, so these two
-values are the only Discord IDs you ever paste.
+for the invite, and **discovers your server for you**, so these two values are
+the only Discord IDs you ever paste.
 
 **Before you start:** you need a Discord server you own (or have **Manage
 Server** on).
@@ -59,7 +59,7 @@ it **only to servers you trust** — agents can run code on the host (see
 
 Discord setup is done — back in `disco init`, the wizard detects the moment
 the bot joins, picks up your server, confirms the bot can actually post, brings
-your agent online, and waits until it sees the first reply. When it finishes,
+your agent online, and waits until the agent shows up online. When it finishes,
 confirm in any channel the bot can see:
 
 ```

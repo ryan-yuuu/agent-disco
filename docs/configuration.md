@@ -19,8 +19,8 @@ starting point.
 
 These come from the [Discord setup walkthrough](./discord-setup.md) (~5 min). You
 only need the **token + application id** by hand — `disco init` discovers your
-server for you (and checks the bot can actually post there), so the ID variables
-below are normally written for you, not copied from Discord.
+server for you (and checks the bot can actually post there), so `DISCORD_GUILD_ID`
+below is normally written for you, not copied from Discord.
 
 | Variable | Required | Description |
 |---|---|---|
