@@ -102,7 +102,7 @@ persistence across restarts, configure the broker with a libsql/SQLite or
 postgres store via the `STORAGE_ENGINE` env var; see
 [Tansu's docs](https://docs.tansu.io/).
 
-**Bring your own / a shared broker.** Choose "I have a broker URL" in
+**Bring your own / a shared broker.** Choose "I have a broker URL (advanced)" in
 `disco init`, or point an existing install at one later:
 
 ```bash

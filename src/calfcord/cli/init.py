@@ -606,10 +606,10 @@ def _run_broker(prompter: Prompter, *, env_path: Path) -> None:
     """
     current = _envfile.read_env(env_path)
     choice = prompter.select(
-        "Kafka broker?",
+        "Start the agent mesh",
         [
-            Choice("native", "Start a local Tansu broker (recommended — init starts it for you)"),
-            Choice("url", "I have a broker URL"),
+            Choice("native", "Start a local mesh (recommended)"),
+            Choice("url", "I have a broker URL (advanced)"),
         ],
         default="native",
     )
