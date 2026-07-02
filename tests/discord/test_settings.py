@@ -22,18 +22,16 @@ def _require(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_empty_optional_discord_env_vars_fall_back_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The seeded placeholders ``DISCORD_GUILD_ID=`` / ``DISCORD_DEFAULT_CHANNEL_ID=``
-    / ``DISCORD_OWNER_USER_ID=`` are empty strings; each optional int field must
-    treat that as unset and use its ``None`` default, not fail to coerce ``""``."""
+    """The seeded placeholders ``DISCORD_GUILD_ID=`` / ``DISCORD_OWNER_USER_ID=``
+    are empty strings; each optional int field must treat that as unset and use
+    its ``None`` default, not fail to coerce ``""``."""
     _require(monkeypatch)
     monkeypatch.setenv("DISCORD_GUILD_ID", "")
-    monkeypatch.setenv("DISCORD_DEFAULT_CHANNEL_ID", "")
     monkeypatch.setenv("DISCORD_OWNER_USER_ID", "")
 
     settings = DiscordSettings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.guild_id is None
-    assert settings.default_channel_id is None
     assert settings.owner_user_id is None
 
 

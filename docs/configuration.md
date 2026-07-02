@@ -19,8 +19,8 @@ starting point.
 
 These come from the [Discord setup walkthrough](./discord-setup.md) (~5 min). You
 only need the **token + application id** by hand — `disco init` discovers your
-server and default channel for you (it lists what the bot can see and you pick),
-so the ID variables below are normally written for you, not copied from Discord.
+server for you (and checks the bot can actually post there), so the ID variables
+below are normally written for you, not copied from Discord.
 
 | Variable | Required | Description |
 |---|---|---|
@@ -28,7 +28,10 @@ so the ID variables below are normally written for you, not copied from Discord.
 | `DISCORD_APPLICATION_ID` | **yes** (all deployments) | Numeric application ID from *General Information*. |
 | `DISCORD_GUILD_ID` | recommended | Server ID for guild-scoped slash-command sync (instant; blank = global sync, ~1 h propagation). `disco init` auto-discovers it — set it by hand only when not using the wizard. |
 | `DISCORD_OWNER_USER_ID` | optional | Your numeric user ID. Tags inbound messages from the owner and unlocks owner-only commands (`/clear`, `/thinking-effort`). |
-| `DISCORD_DEFAULT_CHANNEL_ID` | optional (legacy) | Auto-discovered by `disco init` and written to `.env`, but **no longer consumed**: per-agent channel subscriptions were removed in the calfkit 0.12 migration, so an agent answers `@mention`s in any channel the bot can see. |
+
+There is no channel binding to configure: an agent answers `@mention`s in **any
+channel the bot can see**. Scope it, if you need to, with Discord's own channel
+permissions (deny the bot *View Channel* where it shouldn't listen).
 
 ## Models / providers
 

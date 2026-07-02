@@ -58,9 +58,9 @@ it **only to servers you trust** — agents can run code on the host (see
 ## 4. The wizard takes it from here
 
 Discord setup is done — back in `disco init`, the wizard detects the moment
-the bot joins, picks up your server and channel, brings your agent online, and
-waits until it sees the first reply. When it finishes, confirm in a channel the
-bot can see:
+the bot joins, picks up your server, confirms the bot can actually post, brings
+your agent online, and waits until it sees the first reply. When it finishes,
+confirm in any channel the bot can see:
 
 ```
 @assistant hello
@@ -73,9 +73,9 @@ default starter agent — use whatever name you gave yours in `init`.)
 
 ## Advanced: override what `init` auto-discovers
 
-`disco init` discovers your server and channel automatically, so you don't
-need these. They're here for cases where you want to set a value explicitly —
-e.g. pin slash-command sync to one guild, or unlock owner-only commands. Turn on
+`disco init` discovers your server automatically, so you don't need these.
+They're here for cases where you want to set a value explicitly — e.g. pin
+slash-command sync to one guild, or unlock owner-only commands. Turn on
 **Developer Mode** (Discord → User Settings → Advanced), right-click to **Copy
 ID**, and set the key in `~/.calfcord/config/.env`:
 
@@ -83,7 +83,6 @@ ID**, and set the key in `~/.calfcord/config/.env`:
 |---|---|---|
 | `DISCORD_GUILD_ID` | your server | Slash commands appear instantly (otherwise ~1 h). |
 | `DISCORD_OWNER_USER_ID` | yourself | Unlocks owner-only commands (`/clear`, `/thinking-effort`). |
-| `DISCORD_DEFAULT_CHANNEL_ID` | a channel | Seeds the first agent's channel on boot. |
 
 ## Troubleshooting
 

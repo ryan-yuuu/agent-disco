@@ -278,7 +278,6 @@ def _prompter(
     discord_token: str = "tok-abc",
     app_id: str = "12345",
     guild: str = "g1",
-    channel: str = "c1",
     broker: str = "native",
     broker_url: str = "broker:9092",
     say_hello: bool = True,
@@ -292,16 +291,18 @@ def _prompter(
     Consumed prompts (provider sub-flow stubbed out):
       text(name), text(description), checkbox(tools),
       secret(discord token),
-      select(guild), select(channel),
+      select(guild),
       select(broker) [+ text(broker_url) on the ``url`` branch],
       confirm(say-hello-now).
     ``app_id`` is a text prompt for the application id (needed for the invite URL).
+    There is no channel prompt: channel selection was removed — the bot listens
+    to every channel, so the wizard only reports postability after the guild pick.
     """
     texts = [name, description, app_id]
     if broker == "url":
         texts.append(broker_url)
     texts += extra_texts or []
-    selects = [guild, channel, broker]
+    selects = [guild, broker]
     selects += extra_selects or []
     secrets = [discord_token]
     secrets += extra_secrets or []
@@ -400,7 +401,7 @@ def test_agent_write_failure_aborts_before_discord(
 
 
 # --------------------------------------------------------------------------- #
-# Discord sub-flow: token echo, invite + intents, poll, pick guild/channel
+# Discord sub-flow: token echo, invite + intents, poll, pick guild, report postability
 # --------------------------------------------------------------------------- #
 
 
@@ -521,16 +522,35 @@ def test_try_open_browser_swallows_webbrowser_errors(monkeypatch: pytest.MonkeyP
     init._try_open_browser("https://example.test")  # must not raise
 
 
-def test_guild_and_channel_persisted_from_pick_lists(tmp_path: Path) -> None:
+def test_guild_persisted_from_pick_list(tmp_path: Path) -> None:
     discord = _DiscordStub(
         guilds=[Guild(id="g7", name="Server7", owner=True, base_permissions=0)],
         channels=ChannelListing(postable=[PostableChannel(id="c9", name="lobby")], unpostable=[]),
     )
-    assert _run(_prompter(guild="g7", channel="c9"), tmp_path, home=tmp_path, discord=discord) == 0
+    assert _run(_prompter(guild="g7"), tmp_path, home=tmp_path, discord=discord) == 0
     env = read_env(tmp_path / ".env")
     assert env["DISCORD_BOT_TOKEN"] == "tok-abc"
     assert env["DISCORD_GUILD_ID"] == "g7"
-    assert env["DISCORD_DEFAULT_CHANNEL_ID"] == "c9"
+    # Channel selection was removed: the bot listens to every channel it can see,
+    # so no default channel is ever persisted.
+    assert "DISCORD_DEFAULT_CHANNEL_ID" not in env
+
+
+def test_postable_channels_reported_after_guild_pick(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The postability preflight reports the channels the bot can post in (report-only,
+    no prompt): the "green light that lies" guard survives channel-selection removal."""
+    discord = _DiscordStub(
+        channels=ChannelListing(
+            postable=[PostableChannel(id="c1", name="general"), PostableChannel(id="c2", name="dev")],
+            unpostable=[],
+        )
+    )
+    assert _run(_prompter(guild="g1"), tmp_path, home=tmp_path, discord=discord) == 0
+    out = capsys.readouterr().out
+    assert "can post in 2 channel" in out
+    assert "#general" in out and "#dev" in out
 
 
 def test_bad_token_reprompts_for_a_new_token(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -681,7 +701,7 @@ def test_unpostable_channels_noted_alongside_postable(tmp_path: Path, capsys: py
             unpostable=[PostableChannel(id="c2", name="locked")],
         )
     )
-    assert _run(_prompter(guild="g1", channel="c1"), tmp_path, home=tmp_path, discord=discord) == 0
+    assert _run(_prompter(guild="g1"), tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
     assert "can see but can't post in" in out
     assert "#locked" in out
@@ -690,7 +710,7 @@ def test_unpostable_channels_noted_alongside_postable(tmp_path: Path, capsys: py
 def test_owner_guild_labelled_in_pick_list(tmp_path: Path) -> None:
     """An owned guild is labelled '(owner)' in the pick-list (cosmetic but real)."""
     discord = _DiscordStub(guilds=[Guild(id="g1", name="Mine", owner=True, base_permissions=0)])
-    p = _prompter(guild="g1", channel="c1")
+    p = _prompter(guild="g1")
     assert _run(p, tmp_path, home=tmp_path, discord=discord) == 0
     # The guild select (the first select) offered the owner-labelled choice.
     guild_labels = [c.label for c in p.select_choices_log[0]]
@@ -1130,8 +1150,8 @@ def test_dev_mode_states_reboot_non_survival(tmp_path: Path, capsys: pytest.Capt
 
 
 def test_checkpoint_persisted_after_native_run(tmp_path: Path) -> None:
-    """A completed run leaves a checkpoint recording the steps + non-secret IDs."""
-    assert _run(_prompter(name="scribe", guild="g1", channel="c1"), tmp_path, home=tmp_path) == 0
+    """A completed run leaves a checkpoint recording the steps + non-secret guild ID."""
+    assert _run(_prompter(name="scribe", guild="g1"), tmp_path, home=tmp_path) == 0
     cp = setup_state.load(setup_state.checkpoint_path(tmp_path))
     assert cp is not None
     assert cp.provider_done is True
@@ -1139,7 +1159,6 @@ def test_checkpoint_persisted_after_native_run(tmp_path: Path) -> None:
     assert cp.discord_done is True
     assert cp.broker_done is True
     assert cp.guild_id == "g1"
-    assert cp.channel_id == "c1"
 
 
 def test_resume_welcome_back_when_agent_already_done(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1258,18 +1277,19 @@ def test_resume_with_corrupt_agent_md_does_not_greet_welcome_back(
     assert "Welcome back" not in out  # stale flag + unparseable artifact → fresh
 
 
-def test_resume_defaults_to_kept_guild_channel_binding(tmp_path: Path) -> None:
-    """A re-run must not clobber a working guild/channel — it defaults to keep (§12.7)."""
-    # First full run binds g1/c1.
-    assert _run(_prompter(name="scribe", guild="g1", channel="c1"), tmp_path, home=tmp_path) == 0
+def test_resume_defaults_to_kept_guild_binding(tmp_path: Path) -> None:
+    """A re-run must not clobber a working guild — it defaults to keep (§12.7)."""
+    # First full run binds g1.
+    assert _run(_prompter(name="scribe", guild="g1"), tmp_path, home=tmp_path) == 0
     env_first = read_env(tmp_path / ".env")
     assert env_first["DISCORD_GUILD_ID"] == "g1"
 
-    # Second run keeps the binding (the select defaults to the saved guild/channel).
-    assert _run(_prompter(name="scribe", guild="g1", channel="c1"), tmp_path, home=tmp_path) == 0
+    # Second run keeps the binding (the select defaults to the saved guild).
+    assert _run(_prompter(name="scribe", guild="g1"), tmp_path, home=tmp_path) == 0
     env_second = read_env(tmp_path / ".env")
     assert env_second["DISCORD_GUILD_ID"] == "g1"
-    assert env_second["DISCORD_DEFAULT_CHANNEL_ID"] == "c1"
+    # Channel selection was removed — nothing more to keep.
+    assert "DISCORD_DEFAULT_CHANNEL_ID" not in env_second
 
 
 # --------------------------------------------------------------------------- #

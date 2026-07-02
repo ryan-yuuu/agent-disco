@@ -298,7 +298,7 @@ def run(
     setup_state.save(checkpoint_file, checkpoint, now=now)
     print()
 
-    # --- Phase 2: Discord (verify → invite → poll → pick guild/channel) ----
+    # --- Phase 2: Discord (verify → invite → poll → pick guild) ------------
     checkpoint = _run_discord(
         prompter,
         env_path=env_path,
@@ -392,16 +392,17 @@ def _run_discord(
     Composes :mod:`discord_discovery` to replace the old numeric-ID prompts. The
     bot token is captured (keep-existing-on-empty), verified the instant it is
     pasted (echoing the bot's identity), then the operator invites the bot, the
-    wizard block-and-polls until it joins, and guild / *postable*-channel
-    pick-lists persist ``DISCORD_GUILD_ID`` / ``DISCORD_DEFAULT_CHANNEL_ID``.
+    wizard block-and-polls until it joins, and a guild pick-list persists
+    ``DISCORD_GUILD_ID``. There is no channel to pick — the bridge listens to
+    every channel it can see — so the wizard only *reports* postability as a guard.
 
-    Returns the checkpoint advanced with ``discord_done`` and the chosen
-    non-secret guild/channel IDs. The whole sub-flow is non-fatal: a join timeout
-    or zero postable channels surfaces the §12.6 actionable hint and returns what
-    progress it could make rather than aborting the wizard.
+    Returns the checkpoint advanced with ``discord_done`` and the chosen non-secret
+    guild ID. The whole sub-flow is non-fatal: a join timeout surfaces the §12.6
+    actionable hint and returns what progress it could make rather than aborting
+    the wizard.
     """
     current = _envfile.read_env(env_path)
-    print("Discord setup (the wizard discovers your server and channel — no IDs to paste).")
+    print("Discord setup (the wizard discovers your server — no IDs to paste).")
 
     token = _capture_token(prompter, env_path, current, verify_identity_fn)
     if not token:
@@ -450,14 +451,13 @@ def _run_discord(
         return checkpoint
     _envfile.upsert(env_path, {"DISCORD_GUILD_ID": guild_id})
 
-    channel_id = _pick_channel(prompter, list_channels_fn, token, guild_id, default=checkpoint.channel_id)
-    if channel_id is None:
-        # Guild bound but no postable channel chosen (zero postable / surfaced
-        # gap). Record the guild progress; the channel can be picked on a re-run.
-        return checkpoint.model_copy(update={"guild_id": guild_id})
-    _envfile.upsert(env_path, {"DISCORD_DEFAULT_CHANNEL_ID": channel_id})
+    # Report whether the bot can actually post — the "green light that lies" guard.
+    # There is no channel to pick or persist (the bridge listens to every channel
+    # it can see), so this is advisory only: a zero-postable server or a list error
+    # is surfaced but never blocks completion.
+    _report_postability(list_channels_fn, token, guild_id)
 
-    return checkpoint.model_copy(update={"discord_done": True, "guild_id": guild_id, "channel_id": channel_id})
+    return checkpoint.model_copy(update={"discord_done": True, "guild_id": guild_id})
 
 
 def _capture_token(
@@ -538,46 +538,41 @@ def _pick_guild(prompter: Prompter, guilds: list[Guild], *, default: str | None)
     )
 
 
-def _pick_channel(
-    prompter: Prompter,
+def _report_postability(
     list_channels_fn: Callable[..., ChannelListing],
     token: str,
     guild_id: str,
-    *,
-    default: str | None,
-) -> str | None:
-    """Present a *postable*-channel pick-list; return the chosen id or ``None``.
+) -> None:
+    """Report whether the bot can post in the bound guild — the postability preflight.
 
-    Postability (Send Messages + Manage Webhooks), not mere visibility, is the
-    filter — a green light that lies (a channel the agent can never reply in) is
-    the worst onboarding outcome (§12.6). Channels the bot can see but not post in
-    are surfaced separately so the gap is explained, and zero-postable is called
-    out explicitly. ``default`` keeps a previously-saved channel on a re-run.
+    Not a picker and not persisted: the bridge listens to every channel it can see,
+    so there is no default channel to choose. This still runs the same effective-
+    permission computation the old picker did, purely to SURFACE a green light that
+    lies (§12.6) — a bot that is present but can never reply, for want of Send
+    Messages or Manage Webhooks. Postable channels are confirmed, channels the bot
+    can see but not post in are noted, and zero-postable is called out. Every branch
+    is advisory: a list error degrades to a note and nothing here blocks completion.
     """
     try:
         listing = list_channels_fn(token, guild_id)
     except discord_discovery.DiscordDiscoveryError as e:
-        print(f"  could not list channels ({e}); re-run init to pick a channel.")
-        return None
+        print(f"  could not list channels ({e}); the bot will still listen in every channel it can see.")
+        return
 
     if not listing.postable:
         if listing.unpostable:
             names = ", ".join(f"#{c.name}" for c in listing.unpostable)
             print(f"  the bot can see {names} but can't post there (needs Send Messages + Manage Webhooks).")
-            print("  Grant those permissions on a channel (or the bot's role), then re-run `disco init`.")
+            print("  Grant those permissions on a channel (or the bot's role) so it can reply.")
         else:
-            print("  this server has no text channels the bot can post in — re-run init after adding one.")
-        return None
+            print("  this server has no text channels the bot can post in — add one (or grant permissions).")
+        return
 
+    names = ", ".join(f"#{c.name}" for c in listing.postable)
+    print(f"  the bot can post in {len(listing.postable)} channel(s): {names}")
     if listing.unpostable:
-        names = ", ".join(f"#{c.name}" for c in listing.unpostable)
-        print(f"  (note: the bot can see but can't post in: {names})")
-    choices = [Choice(c.id, f"#{c.name}") for c in listing.postable]
-    return prompter.select(
-        "Which channel should the agent post in by default?",
-        choices,
-        default=default if any(c.id == default for c in listing.postable) else listing.postable[0].id,
-    )
+        gap = ", ".join(f"#{c.name}" for c in listing.unpostable)
+        print(f"  (note: the bot can see but can't post in: {gap})")
 
 
 def _run_broker(prompter: Prompter, *, env_path: Path) -> None:
