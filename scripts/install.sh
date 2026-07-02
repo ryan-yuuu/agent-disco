@@ -21,6 +21,8 @@
 #   CALFCORD_REF    branch or commit SHA  (default: main)
 #   CALFCORD_REPO   owner/repo            (default: ryan-yuuu/agent-disco)
 #   GITHUB_TOKEN    optional, for API rate limits / private mirrors
+#   CALFCORD_VERBOSE  set to restore the step-by-step progress narration
+#                     (default: quiet — only the final ACTIVATE hint prints)
 #
 set -Eeuo pipefail
 
@@ -62,7 +64,13 @@ if [ -t 2 ]; then
 else
   C_I=''; C_W=''; C_E=''; C_0=''
 fi
-log()  { printf '%sdisco%s %s\n' "$C_I" "$C_0" "$*" >&2; }
+# Step-by-step progress is muted by default so a clean install ends on the single
+# ACTIVATE hint; export CALFCORD_VERBOSE=1 to restore the full trace when debugging
+# a failed install. It must return 0 even when muted: under `set -e` plus the ERR
+# trap below, a non-zero return from a silenced call would abort the install.
+log()  { [ -n "${CALFCORD_VERBOSE:-}" ] || return 0; printf '%sdisco%s %s\n' "$C_I" "$C_0" "$*" >&2; }
+# note() always prints — it carries the one message the operator must act on.
+note() { printf '%sdisco%s %s\n' "$C_I" "$C_0" "$*" >&2; }
 warn() { printf '%sdisco%s %s\n' "$C_W" "$C_0" "$*" >&2; }
 die()  { printf '%sdisco error%s %s\n' "$C_E" "$C_0" "$*" >&2; exit 1; }
 trap 'die "install failed: $BASH_COMMAND"' ERR
@@ -748,7 +756,7 @@ main() {
   ensure_path
   log "done."
   if [ "$PATH_WIRED" -eq 1 ]; then
-    log "  ACTIVATE: run  source $CALFCORD_HOME/env   now, or open a new terminal — then 'disco' is on your PATH"
+    note "  ACTIVATE: run  source $CALFCORD_HOME/env   now, or open a new terminal — then 'disco' is on your PATH"
   fi
   log "  version:  disco self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: disco self set-broker <url>)"
