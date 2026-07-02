@@ -33,6 +33,19 @@ Composition:
     a leading synthetic user message as ``input_text``.
 """
 
+import os
+
+# The OpenHands SDK prints a multi-line startup banner to stderr the moment
+# ``openhands.sdk`` is imported (``openhands.sdk.__init__`` calls
+# ``_print_banner``). ``model_client`` below imports ``openhands.sdk.llm.auth``
+# at module load, so that banner would fire on any process that touches the
+# Codex provider — the ``disco init`` wizard and the agent runner alike, dirtying
+# their output. Suppress it before that first import runs. ``setdefault`` (not a
+# hard assignment) leaves an operator override intact: exporting
+# ``OPENHANDS_SUPPRESS_BANNER=0`` still shows the banner.
+os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+
+# NB: these imports intentionally follow the banner-suppress line above.
 from calfcord.providers.codex.factory_hook import (
     CodexNotLoggedInError,
     build_codex_subscription_client,
