@@ -65,7 +65,6 @@ def test_save_then_load_round_trips_all_fields(tmp_path: Path) -> None:
         discord_done=True,
         broker_done=True,
         guild_id="123",
-        channel_id="456",
     )
 
     setup_state.save(path, cp, now=_now)
@@ -277,4 +276,3 @@ def test_default_checkpoint_has_no_completed_steps(tmp_path: Path) -> None:
     assert cp.discord_done is False
     assert cp.broker_done is False
     assert cp.guild_id is None
-    assert cp.channel_id is None

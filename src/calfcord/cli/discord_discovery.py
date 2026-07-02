@@ -3,15 +3,15 @@
 This module is a *library* — it has no CLI subcommand of its own. The init wizard composes it to
 replace the old "paste a numeric ID" prompts with discovery: validate the bot token the instant it
 is pasted, hand the user a ready-made invite link, wait until the bot actually appears in a server,
-then offer pick-lists of the user's guilds and *postable* channels.
+then offer a pick-list of the user's guilds and *report* which of its channels the bot can post in.
 
 Why "postable", not "visible": a bot can *see* a channel (View Channel) yet be unable to say
 anything in it (no Send Messages, or no Manage Webhooks — which the persona webhooks require). A
-pick-list filtered by visibility would happily seat the default agent in a channel where it can
-never reply, producing the worst onboarding outcome: a green light that lies. So the channel filter
-computes the bot's *effective* permission for each channel using Discord's documented overwrite
-algorithm and keeps only channels where it can both send and manage webhooks. Channels the bot can
-see but not post in are surfaced separately so the wizard can explain the gap instead of hiding it.
+report keyed to mere visibility would show a green light that lies (the bot present but unable to
+reply), so the channel check computes the bot's *effective* permission for each channel using
+Discord's documented overwrite algorithm and counts only channels where it can both send and manage
+webhooks as postable. Channels it can't post in are surfaced separately so the wizard can explain
+the gap instead of hiding it.
 
 Secrets: the bot token is handled exactly as ``doctor`` handles it — it rides only in the
 ``Authorization`` header and is NEVER placed in a return value, a message, or an exception. The
@@ -70,8 +70,8 @@ _POST_REQUIRED = _VIEW_CHANNEL | _SEND_MESSAGES | _MANAGE_WEBHOOKS
 _OVERWRITE_ROLE = 0
 _OVERWRITE_MEMBER = 1
 
-# Channel types we treat as message targets. Only standard guild text (0) is offered; voice,
-# categories, threads, forums, etc. are not where a default agent should be seated.
+# Channel types we treat as message targets. Only standard guild text (0) is checked; voice,
+# categories, threads, forums, etc. are not @mention-reply targets.
 _TEXT_CHANNEL = 0
 
 # The invite bitmask granted by the canonical invite link. This is the single source of truth for
@@ -155,7 +155,7 @@ class Guild:
 
 @dataclass(frozen=True)
 class PostableChannel:
-    """A pick-list-ready text channel (id + display name). The id is what the wizard persists."""
+    """A text channel (id + display name) classified by the postability preflight."""
 
     id: str
     name: str

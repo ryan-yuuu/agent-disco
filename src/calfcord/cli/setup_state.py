@@ -29,7 +29,7 @@ The write is **atomic** (the shared :func:`calfcord._atomic.atomic_write_text`
 — same-dir temp file + :func:`os.replace`) so a concurrent reader never sees a
 half-written file, and ``chmod 0600`` to match the sibling state writers — the
 file holds no secrets (only step markers and the
-non-secret guild/channel IDs the operator already picked from a menu), but the
+non-secret guild ID the operator already picked from a menu), but the
 install's ``state/`` dir is uniformly owner-only and a stray temp file or
 world-readable artifact in there is needless surface.
 
@@ -55,21 +55,21 @@ _SECRET_FILE_MODE = 0o600
 
 # Bump on a breaking change to the checkpoint shape (field rename/removal or a
 # changed meaning). Any on-disk version != this reads back as ``None`` (fresh).
-SETUP_SCHEMA_VERSION = 1
+SETUP_SCHEMA_VERSION = 2
 
 
 class SetupCheckpoint(BaseModel):
-    """Which ``init`` steps are done, plus the non-secret IDs already picked.
+    """Which ``init`` steps are done, plus the non-secret guild ID already picked.
 
     Every field defaults to "not done" so a freshly-constructed checkpoint is
     indistinguishable from "no checkpoint" — both mean "start from the top".
     The wizard advances this and re-saves after each completed phase.
 
     No field holds a secret: the Discord token and provider key live only in
-    ``.env`` (via :mod:`calfcord.cli._envfile`). ``guild_id`` / ``channel_id``
-    are the non-secret identifiers the operator chose from the discovery
-    pick-lists, kept here so a re-run can default to the working binding rather
-    than re-prompting (don't clobber a working guild/channel, §12.7).
+    ``.env`` (via :mod:`calfcord.cli._envfile`). ``guild_id`` is the non-secret
+    identifier the operator chose from the discovery pick-list, kept here so a
+    re-run can default to the working guild rather than re-prompting (don't
+    clobber a working guild, §12.7).
     """
 
     schema_version: int = SETUP_SCHEMA_VERSION
@@ -78,7 +78,6 @@ class SetupCheckpoint(BaseModel):
     discord_done: bool = False
     broker_done: bool = False
     guild_id: str | None = None
-    channel_id: str | None = None
 
 
 def checkpoint_path(home: Path | None) -> Path:
