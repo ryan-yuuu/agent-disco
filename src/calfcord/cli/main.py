@@ -122,7 +122,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for _verb, _help in (
         ("start", "Bring an agent online: a teammate clocks into the live org."),
         ("stop", "Take an agent offline: a teammate clocks out."),
-        ("restart", "Reload a running agent after editing its .md."),
+        ("restart", "Restart a running agent after editing its .md."),
     ):
         _p = agent_sub.add_parser(_verb, help=_help)
         _p.add_argument("name", nargs="?", help="Agent name (or pass --all).")
@@ -151,7 +151,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for _verb, _help in (
         ("start", "Bring the tools host online."),
         ("stop", "Take the tools host offline."),
-        ("restart", "Reload the running tools host."),
+        ("restart", "Restart the running tools host."),
     ):
         _cp = tools_sub.add_parser(_verb, help=_help)
         _cp.add_argument(
@@ -185,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for _verb, _help in (
         ("start", "Bring an MCP server online (a running one is restarted in place)."),
         ("stop", "Take an MCP server offline."),
-        ("restart", "Reload an MCP server after an mcp.json edit."),
+        ("restart", "Restart an MCP server after an mcp.json edit."),
     ):
         _mp = mcp_sub.add_parser(_verb, help=_help)
         _mp.add_argument("server", nargs="?", help="Server name (an mcpServers key in mcp.json).")

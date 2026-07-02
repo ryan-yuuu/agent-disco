@@ -4,8 +4,8 @@
 
 Only the **substrate** (broker + bridge) stays on Process Compose. The **roster**
 — every agent, the `tools` singleton, and each `mcp-<server>` — is now a
-directly-supervised **detached** process: a double-fork-style spawn into its own
-session (`src/calfcord/supervisor/procspawn.py`), an identity-checked pidfile
+directly-supervised **detached** process: an own-session detached spawn (fork +
+`setsid`, `src/calfcord/supervisor/procspawn.py`), an identity-checked pidfile
 under `state/run/<slot>.pid`, and a per-slot log under `state/logs/` rotated at
 spawn. `compose.py` renders the substrate only; `roster.py` /
 `_workspace.py` own the spawn/scan/terminate glue.
@@ -46,7 +46,7 @@ direction, but not available today (see
 
 ## Consequences
 
-- **No auto-respawn** for roster processes — PC's `restart: always` is gone for
+- **No auto-respawn** for roster processes — PC's `restart: on_failure` is gone for
   them. A crash reads as offline/exited in `disco status`; the operator restarts.
 - **Rotate-at-spawn only** — a long-lived, chatty slot grows its current log
   unbounded between restarts; there is no in-run rotation.

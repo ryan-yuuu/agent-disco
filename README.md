@@ -60,8 +60,7 @@ A reply should appear. Your first agent is up and running! 🎉
 
 Your **workspace** — a local message bus and the Discord bridge — now runs in
 the background. Your agent is a **teammate** that clocked in. From here you can
-add more teammates, turn on the receptionist that routes messages without
-`@mentioned`, or split the team remotely across machines — all *without restarting the
+add more teammates or split the team remotely across machines — all *without restarting the
 workspace*. The same config and the same commands work whether your org runs on
 one laptop or twenty hosts.
 

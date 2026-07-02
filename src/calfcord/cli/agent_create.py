@@ -301,7 +301,7 @@ def run(
     On success it names the created agent then hands off to :func:`_finish_create`
     (Change A): on a native install it offers ``Start <name> now?`` and, on yes,
     brings the agent online for REAL — opening the workspace first only if it
-    isn't running (the roster spawns off Process Compose, so a live workspace
+    isn't running (the roster runs detached, outside Process Compose, so a live workspace
     needs no touch), then confirming presence on the mesh — instead of printing
     a ``disco agent start`` steer. On a dev run (no ``$CALFCORD_HOME``) or a
     missing supervisor binary it degrades to honest manual next-steps.

@@ -439,7 +439,7 @@ survive a round-trip through the CLI editors on a live agent file.
 
 ### 7.1 Logs
 
-The agent runner logs to stdout, which the supervisor captures to
+The agent runner logs to stdout, captured directly to its slot log at
 `$CALFCORD_HOME/state/logs/<name>.log`. Tail one agent (or follow with
 `-f`):
 
