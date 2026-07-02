@@ -234,8 +234,10 @@ disco stop && disco start && disco agent start --all
 ```
 
 Upgrading from an older calfcord (one whose supervisor still ran the agents
-itself)? The agent commands will refuse with "this workspace was started by an
-older calfcord" until you run exactly that stop/start cycle.
+itself)? The commands that *spawn* processes (`agent start`/`restart`, `tools
+start`/`restart`, `mcp start`/`restart`) will refuse with "this workspace was
+started by an older calfcord" until you run exactly that stop/start cycle —
+`stop` and `status` keep working so you can wind the old workspace down.
 
 ## Uninstall
 

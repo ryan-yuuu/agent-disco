@@ -19,6 +19,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from calfcord.supervisor import compose, procspawn
 
 # --- helpers ----------------------------------------------------------------
@@ -104,6 +106,20 @@ def test_spawn_detached_creates_parent_dirs(tmp_path: Path) -> None:
     _wait(spawned.pid)
     assert procspawn.pidfile_for(tmp_path, "job").exists()
     assert procspawn.log_path_for(tmp_path, "job").exists()
+
+
+def test_spawn_detached_env_replaces_not_merges(tmp_path: Path, monkeypatch) -> None:
+    """A given ``env`` REPLACES the child environment wholesale (the documented
+    Popen pass-through): a var exported in the parent must NOT leak through."""
+    monkeypatch.setenv("CALF_PROCSPAWN_LEAK", "should-not-appear")
+    minimal_env = {"PATH": os.environ.get("PATH", "")}
+    spawned = _spawn_py(
+        "import os; print('LEAK=' + os.environ.get('CALF_PROCSPAWN_LEAK', '<absent>'))",
+        tmp_path,
+        env=minimal_env,
+    )
+    _wait(spawned.pid)
+    assert "LEAK=<absent>" in procspawn.log_path_for(tmp_path, "job").read_text()
 
 
 def test_spawn_detached_honors_env(tmp_path: Path) -> None:
@@ -488,3 +504,340 @@ def test_log_path_for_matches_compose_log_location(tmp_path: Path) -> None:
     assert str(procspawn.log_path_for(tmp_path, "alice")) == compose._log_location(
         str(tmp_path), "alice"
     )
+
+
+# --- slot-name guard (path traversal) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "../../x", "a/b", "..", ".hidden", "a/../b", "state/../../etc", f"a{os.sep}b"],
+)
+def test_require_safe_slot_rejects_traversal_shapes(bad: str) -> None:
+    with pytest.raises(ValueError):
+        procspawn.require_safe_slot(bad)
+
+
+@pytest.mark.parametrize("good", ["alice", "mcp-github", "tools", "process-compose", "a_b.c"])
+def test_require_safe_slot_accepts_ordinary_slot_names(good: str) -> None:
+    assert procspawn.require_safe_slot(good) == good
+
+
+@pytest.mark.parametrize("bad", ["../../x", "a/b", "", ".."])
+def test_pidfile_for_rejects_unsafe_slot_names(tmp_path: Path, bad: str) -> None:
+    with pytest.raises(ValueError):
+        procspawn.pidfile_for(tmp_path, bad)
+
+
+@pytest.mark.parametrize("bad", ["../../x", "a/b", "", ".."])
+def test_log_path_for_rejects_unsafe_slot_names(tmp_path: Path, bad: str) -> None:
+    with pytest.raises(ValueError):
+        procspawn.log_path_for(tmp_path, bad)
+
+
+# --- tri-state identity -------------------------------------------------------
+
+
+def test_identity_ours_for_matching_live_record(tmp_path: Path) -> None:
+    spawned = _spawn_py("import time; time.sleep(5)", tmp_path)
+    try:
+        assert procspawn.identity(spawned.record) is procspawn.Identity.OURS
+    finally:
+        os.killpg(spawned.pid, signal.SIGKILL)
+        _wait(spawned.pid)
+
+
+def test_identity_not_ours_on_token_mismatch() -> None:
+    record = procspawn.PidRecord(
+        pid=os.getpid(),
+        argv=("whatever",),
+        start_token="not-the-real-token",
+        spawn_ts=0.0,
+        argv_hash="deadbeef",
+    )
+    assert procspawn.identity(record) is procspawn.Identity.NOT_OURS
+
+
+def test_identity_not_ours_when_dead(tmp_path: Path) -> None:
+    spawned = _spawn_py("import sys; sys.exit(0)", tmp_path)
+    _wait(spawned.pid)
+    assert procspawn.identity(spawned.record) is procspawn.Identity.NOT_OURS
+
+
+def test_identity_not_ours_without_a_recorded_token() -> None:
+    # The documented degraded-platform behavior: an empty recorded token means
+    # ownership can never be proven, so it is REFUSED (never signalled) — kept
+    # distinct from INDETERMINATE (a transient read failure on a provable record).
+    record = procspawn.PidRecord(
+        pid=os.getpid(),
+        argv=("whatever",),
+        start_token="",
+        spawn_ts=0.0,
+        argv_hash="deadbeef",
+    )
+    assert procspawn.identity(record) is procspawn.Identity.NOT_OURS
+
+
+def test_identity_indeterminate_when_token_read_fails_on_a_live_pid(monkeypatch) -> None:
+    """A transient identity-read failure (e.g. a wedged darwin ``ps``) on a LIVE
+    pid must read INDETERMINATE — not NOT_OURS, which would let cleanup unlink
+    the pidfile of a live process we own (invisible slot → double-spawn)."""
+    token = procspawn._process_start_token(os.getpid())
+    assert token
+    record = procspawn.PidRecord(
+        pid=os.getpid(),
+        argv=("whatever",),
+        start_token=token,
+        spawn_ts=0.0,
+        argv_hash="deadbeef",
+    )
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    assert procspawn.identity(record) is procspawn.Identity.INDETERMINATE
+    # is_ours_and_alive stays conservative: an unverifiable claim is not "ours".
+    assert procspawn.is_ours_and_alive(record) is False
+
+
+async def test_terminate_indeterminate_never_signals(monkeypatch) -> None:
+    token = procspawn._process_start_token(os.getpid())
+    assert token
+    record = procspawn.PidRecord(
+        pid=os.getpid(),
+        argv=("whatever",),
+        start_token=token,
+        spawn_ts=0.0,
+        argv_hash="deadbeef",
+    )
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    signalled: list = []
+    monkeypatch.setattr(
+        procspawn, "_signal_group_or_pid", lambda pid, sig: signalled.append((pid, sig))
+    )
+    outcome = await procspawn.terminate(
+        record,
+        term_timeout_s=1.0,
+        sleep=_advancing_sleep(_FakeClock(), []),
+        clock=time.monotonic,
+    )
+    assert outcome is procspawn.TerminateResult.INDETERMINATE
+    assert signalled == []
+
+
+def test_cleanup_stale_keeps_an_indeterminate_pidfile(tmp_path: Path, monkeypatch) -> None:
+    """Identity unknown → never unlink: a live OWNED process must not be made
+    invisible (the next start would double-spawn beside it)."""
+    token = procspawn._process_start_token(os.getpid())
+    assert token
+    pidfile = procspawn.pidfile_for(tmp_path, "job")
+    _write_pidfile_json(
+        pidfile,
+        {
+            "v": 1,
+            "pid": os.getpid(),
+            "argv": ["whatever"],
+            "start_token": token,
+            "spawn_ts": 0.0,
+            "argv_hash": "deadbeef",
+        },
+    )
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    assert procspawn.cleanup_stale(pidfile) is False
+    assert pidfile.exists()
+
+
+# --- KILL_UNCONFIRMED ----------------------------------------------------------
+
+
+async def test_terminate_kill_unconfirmed_when_the_process_survives_sigkill(
+    monkeypatch,
+) -> None:
+    """If the post-SIGKILL reap window closes with the pid still alive (a wedged,
+    unkillable process — e.g. stuck in uninterruptible sleep), terminate must say
+    so rather than overclaim KILLED."""
+    token = procspawn._process_start_token(os.getpid())
+    assert token
+    record = procspawn.PidRecord(
+        pid=os.getpid(),
+        argv=("whatever",),
+        start_token=token,
+        spawn_ts=0.0,
+        argv_hash="deadbeef",
+    )
+    # Signals are swallowed (this test process must survive); the pid therefore
+    # never dies and both bounded waits expire on the fake clock.
+    monkeypatch.setattr(procspawn, "_signal_group_or_pid", lambda pid, sig: None)
+    clock = _FakeClock()
+
+    async def _sleep(seconds: float) -> None:
+        clock.t += seconds
+
+    outcome = await procspawn.terminate(
+        record, term_timeout_s=1.0, sleep=_sleep, clock=clock
+    )
+    assert outcome is procspawn.TerminateResult.KILL_UNCONFIRMED
+
+
+def test_process_was_stopped_membership() -> None:
+    # The one definition of "the process actually died at our hand".
+    assert procspawn.TerminateResult.TERMINATED.process_was_stopped is True
+    assert procspawn.TerminateResult.KILLED.process_was_stopped is True
+    assert procspawn.TerminateResult.ALREADY_DEAD.process_was_stopped is False
+    assert procspawn.TerminateResult.NOT_OURS.process_was_stopped is False
+    assert procspawn.TerminateResult.INDETERMINATE.process_was_stopped is False
+    assert procspawn.TerminateResult.KILL_UNCONFIRMED.process_was_stopped is False
+
+
+# --- spawn: pidfile-write failure must not orphan the child --------------------
+
+
+def test_spawn_detached_kills_the_child_when_the_pidfile_write_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No pidfile means nothing can ever find or stop the child again, so a failed
+    pidfile write must reap the just-spawned process before re-raising."""
+    # state/run is a FILE, so the pidfile's parent dir cannot be created.
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "run").write_text("in the way")
+    pids: list[int] = []
+    real_identity_for = procspawn._identity_for
+
+    def _recording_identity_for(pid: int, argv):
+        pids.append(pid)
+        return real_identity_for(pid, argv)
+
+    monkeypatch.setattr(procspawn, "_identity_for", _recording_identity_for)
+    with pytest.raises(RuntimeError, match="pidfile"):
+        procspawn.spawn_detached(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            log_path=procspawn.log_path_for(tmp_path, "job"),
+            pidfile=tmp_path / "state" / "run" / "job.pid",
+        )
+    assert pids, "the child was never spawned — the failure fired too early"
+    deadline = time.monotonic() + 5.0
+    while procspawn._pid_alive(pids[0]):
+        assert time.monotonic() < deadline, "orphaned child survived the failed spawn"
+        procspawn.reap(pids[0])
+        time.sleep(0.01)
+
+
+# --- spawn: a token-less capture must not leak an untrackable child ------------
+
+
+def test_spawn_detached_kills_the_child_when_no_identity_token_is_captured(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An empty captured start-token can never prove ownership later —
+    :func:`identity` permanently refuses token-less records (NOT_OURS), so every
+    stop/status/sweep path would treat the live child as a stranger: sweep its
+    pidfile, never signal it — an invisible, CLI-unstoppable orphan. Same remedy
+    as a failed pidfile write: kill + reap + raise, leaving no pidfile behind."""
+    pids: list[int] = []
+    real_identity_for = procspawn._identity_for
+
+    def _recording_identity_for(pid: int, argv):
+        pids.append(pid)
+        return real_identity_for(pid, argv)
+
+    monkeypatch.setattr(procspawn, "_identity_for", _recording_identity_for)
+    # The injected capture failure: the darwin ``ps`` flake (token read returns
+    # None for the just-spawned pid), flowing through the REAL _identity_for.
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    pidfile = procspawn.pidfile_for(tmp_path, "job")
+    try:
+        with pytest.raises(RuntimeError, match="identity token"):
+            procspawn.spawn_detached(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                log_path=procspawn.log_path_for(tmp_path, "job"),
+                pidfile=pidfile,
+            )
+        assert pids, "the child was never spawned — the failure fired too early"
+        assert not pidfile.exists()  # no token-less record left behind
+        deadline = time.monotonic() + 5.0
+        while procspawn._pid_alive(pids[0]):
+            assert time.monotonic() < deadline, "token-less child survived the failed spawn"
+            procspawn.reap(pids[0])
+            time.sleep(0.01)
+    finally:
+        # Red-phase hygiene: if the contract is not (yet) honoured, do not leak
+        # the 30s sleeper into the host.
+        if pids and procspawn._pid_alive(pids[0]):
+            with contextlib.suppress(OSError):
+                os.killpg(pids[0], signal.SIGKILL)
+            _wait(pids[0])
+
+
+# --- read_pidfile: schema version gate -----------------------------------------
+
+
+def test_read_pidfile_rejects_an_unknown_schema_version(tmp_path: Path) -> None:
+    # A future (or corrupted) schema version must read as "no usable record"
+    # rather than being silently misparsed under today's field meanings.
+    pidfile = tmp_path / "future.pid"
+    _write_pidfile_json(
+        pidfile,
+        {
+            "v": 999,
+            "pid": os.getpid(),
+            "argv": ["x"],
+            "start_token": "t",
+            "spawn_ts": 0.0,
+            "argv_hash": "h",
+        },
+    )
+    assert procspawn.read_pidfile(pidfile) is None
+
+
+def test_read_pidfile_accepts_the_current_schema_version(tmp_path: Path) -> None:
+    pidfile = tmp_path / "current.pid"
+    _write_pidfile_json(
+        pidfile,
+        {
+            "v": procspawn._PIDFILE_SCHEMA_VERSION,
+            "pid": 12345,
+            "argv": ["x"],
+            "start_token": "t",
+            "spawn_ts": 0.0,
+            "argv_hash": "h",
+        },
+    )
+    record = procspawn.read_pidfile(pidfile)
+    assert record is not None
+    assert record.pid == 12345
+
+
+# --- group kill: a forked grandchild dies with the leader ----------------------
+
+
+async def test_terminate_kills_the_whole_group_including_a_forked_child(
+    tmp_path: Path,
+) -> None:
+    """The entire point of start_new_session + killpg: a worker the leader forked
+    (here: a backgrounded ``sleep`` under a shell leader) must die with the group,
+    not be orphaned to keep running after terminate returns."""
+    spawned = procspawn.spawn_detached(
+        ["/bin/sh", "-c", 'sleep 30 & echo "GRANDCHILD:$!"; wait'],
+        log_path=procspawn.log_path_for(tmp_path, "job"),
+        pidfile=procspawn.pidfile_for(tmp_path, "job"),
+    )
+    _await_log_marker(tmp_path, "job", "GRANDCHILD:")
+    log_body = procspawn.log_path_for(tmp_path, "job").read_text()
+    grandchild = int(log_body.split("GRANDCHILD:")[1].split()[0])
+    # Pre-condition: the leader's group really has a second, live member.
+    assert procspawn._pid_alive(grandchild)
+    assert os.getpgid(grandchild) == spawned.pid
+
+    outcome = await procspawn.terminate(
+        spawned.record,
+        term_timeout_s=5.0,
+        sleep=_advancing_sleep(_FakeClock(), []),
+        clock=time.monotonic,
+    )
+    assert outcome in (
+        procspawn.TerminateResult.TERMINATED,
+        procspawn.TerminateResult.KILLED,
+    )
+    # The grandchild is NOT our direct child (it reparents to init on the shell's
+    # death), so poll rather than reap: init clears it once the group signal lands.
+    deadline = time.monotonic() + 5.0
+    while procspawn._pid_alive(grandchild):
+        assert time.monotonic() < deadline, "forked grandchild survived the group kill"
+        time.sleep(0.01)

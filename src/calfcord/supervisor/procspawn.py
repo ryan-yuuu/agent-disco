@@ -1,19 +1,21 @@
-"""Detached roster-process primitives: spawn, identify, terminate (Phase 1).
+"""Detached roster-process primitives: spawn, identify, terminate.
 
-The roster (agents, tools, MCP servers) is moving OFF Process Compose: PC cannot
+The roster (agents, tools, MCP servers) runs OFF Process Compose: PC cannot
 hot-add a process to a live project — a ``POST /project`` bounces every PID on
 both pinned and latest builds (an inherent limitation confirmed by an empirical
 spike). The substrate (broker + bridge) stays on PC; each roster member is instead
 spawned directly as a **detached** process with **no auto-respawn** (a crash makes
-it go offline in the mesh-based status; an operator restarts it).
+it go offline in the mesh-based status; an operator restarts it). The decision
+record is ``docs/adr/0014-roster-detached-off-process-compose.md``.
 
 This module is that mechanism — and *only* the mechanism. It is deliberately:
 
 * **Policy-free.** It launches, identifies, and stops one process given explicit
   paths. It does not decide *which* processes exist, read the agents dir, resolve
-  ``$CALFCORD_HOME``, or know what a "slot" means beyond a filename stem. Phase 2
-  (which rewires ``roster.py`` / ``lifecycle.py`` onto these primitives) owns that
-  policy.
+  ``$CALFCORD_HOME``, or know what a "slot" means beyond a filename stem. That
+  policy lives above: :mod:`calfcord.supervisor._workspace` (the slot scan +
+  spawn/terminate glue) and :mod:`calfcord.supervisor._slot_ops` (the locked verb
+  choreography).
 * **Silent.** Nothing here prints. The lifecycle/roster callers already own the
   print-based UX (the not-running hint, the per-agent lines); a primitive that
   printed would double-speak. Outcomes are returned as values, never stdout.
@@ -32,10 +34,14 @@ carries a :class:`PidRecord`: the pid **plus** a re-queryable OS **start-token**
 Darwin ``ps -o lstart`` — the process start timestamp). Ownership is confirmed by
 re-reading that token for the live pid and requiring an exact match, so a recycled
 pid (same number, later start time) can never be mistaken for ours. The record
-also carries the argv and a ``spawn_ts`` + ``argv_hash`` fallback identity, both
-for human inspection of the pidfile and as the recorded fallback on any exotic
-platform exposing no start-token (where the guard degrades to *refusing* ownership
-rather than risk signalling a stranger — see :func:`is_ours_and_alive`).
+also carries the argv and a ``spawn_ts`` + ``argv_hash``, for human inspection of
+the pidfile. A token-less record can never prove ownership, so :func:`identity`
+permanently *refuses* it rather than risk signalling a stranger — which is why
+:func:`spawn_detached` treats a failed token capture (a platform with no cheap
+source, or a transient read failure — darwin's ``ps`` can fail even for a live
+pid) as a failed spawn: the child is killed and the spawn raises, because a live
+process no stop/status/sweep path could ever verify would be an untrackable
+orphan.
 
 **Log rotation happens only AT SPAWN.** Process Compose rotated every process log
 in-flight (10 MB / 7 days / 5 backups); a detached slot has no supervisor watching
@@ -44,8 +50,8 @@ its file, so the ONLY rotation point left is the moment a slot is (re)spawned:
 ``.log.5`` (oldest dropped) before opening the fresh append handle. **Known
 limitation:** a long-running chatty slot still grows its *current* file without
 bound between restarts — in-run rotation is deliberately NOT provided here (it
-would need a size-watching thread or a logging pipe per slot) and is flagged for
-the Phase-3 ADR.
+would need a size-watching thread or a logging pipe per slot); the trade-off is
+recorded in ``docs/adr/0014-roster-detached-off-process-compose.md``.
 
 **Why kill the process GROUP.** :func:`spawn_detached` launches with
 ``start_new_session=True``, so the child is a session + process-group leader (its
@@ -133,26 +139,83 @@ class SpawnedProcess:
     log_path: Path
 
 
+class Identity(Enum):
+    """The tri-state verdict on "is the live process at ``record.pid`` ours?".
+
+    * ``OURS`` — alive AND the re-read start-token matches the record exactly.
+    * ``NOT_OURS`` — provably not our live process: the pid is dead, the token
+      mismatches (a recycled pid), or the record carries no token at all (an
+      unprovable claim is refused — see :func:`identity`).
+    * ``INDETERMINATE`` — the pid is alive and the record carries a token, but the
+      current token could not be read (e.g. a transient darwin ``ps`` failure).
+      Callers must treat this as "unknown": never signal the pid AND never remove
+      its pidfile — either action on a live OWNED process would be destructive
+      (an innocent kill, or an invisible slot that double-spawns on next start).
+    """
+
+    OURS = "ours"
+    NOT_OURS = "not_ours"
+    INDETERMINATE = "indeterminate"
+
+
 class TerminateResult(Enum):
     """The outcome of a :func:`terminate` call.
 
     * ``TERMINATED`` — died on SIGTERM within the graceful window.
-    * ``KILLED`` — survived SIGTERM; SIGKILL was sent (reap is best-effort).
+    * ``KILLED`` — survived SIGTERM; SIGKILL was sent AND the pid was observed
+      dead within the bounded reap window.
+    * ``KILL_UNCONFIRMED`` — SIGKILL was sent but the pid was STILL alive when the
+      reap window closed (a wedged/unkillable process); callers must not claim it
+      stopped, and must keep its pidfile.
     * ``ALREADY_DEAD`` — the pid was already gone before any signal.
     * ``NOT_OURS`` — the pid is alive but its identity does not match; NOT signalled.
+    * ``INDETERMINATE`` — the pid is alive but its identity could not be READ
+      (:data:`Identity.INDETERMINATE`); NOT signalled — we do not kill what we
+      cannot verify.
     """
 
     TERMINATED = "terminated"
     KILLED = "killed"
+    KILL_UNCONFIRMED = "kill_unconfirmed"
     ALREADY_DEAD = "already_dead"
     NOT_OURS = "not_ours"
+    INDETERMINATE = "indeterminate"
+
+    @property
+    def process_was_stopped(self) -> bool:
+        """Whether the process actually died at our hand — the ONE membership
+        definition the verb/sweep callers share, so "stopped" cannot drift."""
+        return self in (TerminateResult.TERMINATED, TerminateResult.KILLED)
 
 
 # --- path conventions (pure) ------------------------------------------------
 
 
+def require_safe_slot(slot: str) -> str:
+    """Validate ``slot`` as a bare filename stem; return it, or raise ``ValueError``.
+
+    The slot is interpolated into pidfile/lock/log paths under ``state/``, so a
+    traversal-shaped name (``../../x``) would make the path helpers construct —
+    and the verbs create/unlink/rename — files OUTSIDE the state tree. This is
+    the narrowest waist every path construction goes through: reject empty names,
+    dot-leading names, ``..`` sequences, and any path separator.
+    """
+    if (
+        not slot
+        or slot.startswith(".")
+        or ".." in slot
+        or "/" in slot
+        or "\\" in slot
+        or os.sep in slot
+        or (os.altsep is not None and os.altsep in slot)
+    ):
+        raise ValueError(f"unsafe slot name {slot!r}: must be a bare filename stem")
+    return slot
+
+
 def pidfile_for(home: str | os.PathLike[str], slot: str) -> Path:
     """The pidfile path for ``slot`` under ``home``: ``<home>/state/run/<slot>.pid``."""
+    require_safe_slot(slot)
     return Path(os.fspath(home)) / "state" / "run" / f"{slot}.pid"
 
 
@@ -163,6 +226,7 @@ def log_path_for(home: str | os.PathLike[str], slot: str) -> Path:
     to the SAME file Process Compose used for the substrate — ``disco logs`` reads
     one convention and the two can never drift.
     """
+    require_safe_slot(slot)
     return Path(_log_location(os.fspath(home), slot))
 
 
@@ -221,8 +285,41 @@ def spawn_detached(
         log_handle.close()
 
     record = _identity_for(proc.pid, argv)
-    atomic_write_text(pidfile, json.dumps(_record_to_dict(record)))
+    if not record.start_token:
+        # An empty captured token can never prove ownership later — identity()
+        # permanently refuses token-less records — so every stop/status/sweep
+        # path would treat the live child as a stranger: sweep its pidfile and
+        # never signal it, an invisible CLI-unstoppable orphan. Same remedy as
+        # the failed pidfile write below: kill rather than leak.
+        _kill_child_to_avoid_orphan(proc.pid)
+        raise RuntimeError(
+            f"could not capture the process identity token for pid {proc.pid} "
+            "(start-token read failed at spawn); the child was killed rather "
+            "than leak an untrackable process — retry the start"
+        )
+    try:
+        atomic_write_text(pidfile, json.dumps(_record_to_dict(record)))
+    except OSError as exc:
+        # Without a pidfile NOTHING can ever find or stop this child again (every
+        # stop/status/sweep path reads state/run), so a failed write must not
+        # leave a live orphan behind either.
+        _kill_child_to_avoid_orphan(proc.pid)
+        raise RuntimeError(
+            f"failed to write pidfile {pidfile} ({exc}); "
+            f"the spawned process (pid {proc.pid}) was killed to avoid an orphan"
+        ) from exc
     return SpawnedProcess(pid=proc.pid, record=record, pidfile=pidfile, log_path=log_path)
+
+
+def _kill_child_to_avoid_orphan(pid: int) -> None:
+    """SIGKILL the just-spawned group and reap the direct child.
+
+    The shared abort for a spawn whose identity can never be tracked (no
+    captured start-token, or no pidfile written): a live child nothing can ever
+    find or stop again must not outlive the failed spawn."""
+    _signal_group_or_pid(pid, signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        os.waitpid(pid, 0)
 
 
 def _rotate_log_at_spawn(log_path: Path) -> None:
@@ -278,10 +375,10 @@ def _record_to_dict(record: PidRecord) -> dict:
 def read_pidfile(pidfile: str | os.PathLike[str]) -> PidRecord | None:
     """Parse ``pidfile`` into a :class:`PidRecord`, or ``None`` — never raises.
 
-    A missing file, unreadable bytes, non-JSON content, or a payload lacking the
-    required ``pid``/``argv`` all yield ``None`` (there is simply no usable record),
-    so a torn or hand-mangled pidfile degrades to "no record" rather than crashing a
-    caller mid-cleanup.
+    A missing file, unreadable bytes, non-JSON content, an unknown schema version
+    (``v``), or a payload lacking the required ``pid``/``argv`` all yield ``None``
+    (there is simply no usable record), so a torn or hand-mangled pidfile degrades
+    to "no record" rather than crashing a caller mid-cleanup.
     """
     try:
         raw = Path(pidfile).read_text(encoding="utf-8")
@@ -292,6 +389,10 @@ def read_pidfile(pidfile: str | os.PathLike[str]) -> PidRecord | None:
     except (ValueError, TypeError):
         return None
     if not isinstance(data, Mapping):
+        return None
+    if data.get("v") != _PIDFILE_SCHEMA_VERSION:
+        # A future record shape must be recognised and refused, not silently
+        # misread under today's field meanings (the ``v`` field's whole job).
         return None
     try:
         return PidRecord(
@@ -308,27 +409,44 @@ def read_pidfile(pidfile: str | os.PathLike[str]) -> PidRecord | None:
 # --- identity / liveness ----------------------------------------------------
 
 
-def is_ours_and_alive(record: PidRecord) -> bool:
-    """Whether ``record``'s pid is alive AND is the process we spawned.
+def identity(record: PidRecord) -> Identity:
+    """The tri-state ownership verdict for ``record`` (see :class:`Identity`).
 
-    Two gates, both required. First liveness (``os.kill(pid, 0)`` semantics: a bare
-    signal-0 probe, treating ``EPERM`` as alive — the process exists, we simply may
-    not signal it). Then identity: the recorded start-token is re-read for the live
-    pid and must match EXACTLY, so a recycled pid (same number, a later start time)
-    is rejected. On any identity mismatch the answer is ``False`` (not ours).
+    Two gates. First liveness (``os.kill(pid, 0)`` semantics: a bare signal-0
+    probe, treating ``EPERM`` as alive — the process exists, we simply may not
+    signal it); a dead pid is provably not our live process → ``NOT_OURS``. Then
+    identity: the recorded start-token is re-read for the live pid and must match
+    EXACTLY, so a recycled pid (same number, a later start time) reads
+    ``NOT_OURS``. A read that FAILS on a live pid (a wedged/transient ``ps`` on
+    darwin, a ``/proc`` race on Linux) is ``INDETERMINATE`` — distinct from a
+    mismatch, because the process may well be ours and only the *evidence* is
+    momentarily unavailable.
 
     A record with an empty ``start_token`` means no re-queryable OS identity was
-    captured at spawn (only possible on an exotic platform — both supported
-    platforms always capture one). Because this primitive's callers go on to *kill*
-    the pid, an unprovable claim is refused: the process may be a stranger that
-    recycled the pid, so we return ``False`` rather than risk signalling it.
+    captured at spawn (a platform exposing no cheap start-token source). Because
+    this primitive's callers go on to *kill* the pid, that unprovable claim is
+    permanently refused (``NOT_OURS``), never parked as indeterminate: no later
+    re-read can ever prove it.
     """
     if not _pid_alive(record.pid):
-        return False
+        return Identity.NOT_OURS
     if not record.start_token:
-        return False
+        return Identity.NOT_OURS
     current = _process_start_token(record.pid)
-    return current is not None and current == record.start_token
+    if current is None:
+        return Identity.INDETERMINATE
+    return Identity.OURS if current == record.start_token else Identity.NOT_OURS
+
+
+def is_ours_and_alive(record: PidRecord) -> bool:
+    """Whether ``record``'s pid is alive AND provably the process we spawned.
+
+    The strict boolean projection of :func:`identity`: only ``OURS`` reads
+    ``True``. ``INDETERMINATE`` reads ``False`` here (an unverifiable claim is
+    never acted on as ours), so callers that must *preserve* an indeterminate
+    slot rather than treat it as absent should consult :func:`identity` directly.
+    """
+    return identity(record) is Identity.OURS
 
 
 def _pid_alive(pid: int) -> bool:
@@ -417,32 +535,39 @@ async def terminate(
 
     1. Reap first (a prior kill may have left our own child a zombie whose pid still
        answers ``os.kill(pid, 0)``), then check identity. If the pid is not alive →
-       ``ALREADY_DEAD``; if alive but not ours → ``NOT_OURS`` (and it is NEVER
-       signalled — we do not kill what we cannot prove is ours).
+       ``ALREADY_DEAD``; if alive but provably not ours → ``NOT_OURS``; if alive
+       but the identity could not be READ → ``INDETERMINATE``. Neither of the last
+       two is EVER signalled — we do not kill what we cannot prove is ours.
     2. SIGTERM the **process group** (:func:`os.killpg` on the session-leader pid —
        the reason for ``start_new_session`` — so the shim's child workers die too),
        falling back to the bare pid if the group signal fails.
     3. Poll for death up to ``term_timeout_s`` (bounded by the injected ``clock`` /
        ``sleep``). Died → ``TERMINATED``.
-    4. Otherwise SIGKILL the group and briefly wait for the reap → ``KILLED`` (the
-       kill is unignorable; the reap wait is best-effort so a reparented/wedged
-       process never hangs the caller).
+    4. Otherwise SIGKILL the group and wait (bounded) for the reap: observed dead →
+       ``KILLED``; still alive when the window closes → ``KILL_UNCONFIRMED`` (a
+       wedged/unkillable process — callers must not claim it stopped).
     """
     pid = record.pid
     # A zombie of our own child still answers os.kill(pid, 0); reap it so liveness
     # reads truthfully before we branch on it.
     reap(pid)
 
-    if not is_ours_and_alive(record):
-        return TerminateResult.NOT_OURS if _pid_alive(pid) else TerminateResult.ALREADY_DEAD
+    if not _pid_alive(pid):
+        return TerminateResult.ALREADY_DEAD
+    verdict = identity(record)
+    if verdict is Identity.INDETERMINATE:
+        return TerminateResult.INDETERMINATE
+    if verdict is not Identity.OURS:
+        return TerminateResult.NOT_OURS
 
     _signal_group_or_pid(pid, signal.SIGTERM)
     if await _wait_until_dead(pid, timeout_s=term_timeout_s, clock=clock, sleep=sleep):
         return TerminateResult.TERMINATED
 
     _signal_group_or_pid(pid, signal.SIGKILL)
-    await _wait_until_dead(pid, timeout_s=_KILL_REAP_TIMEOUT_S, clock=clock, sleep=sleep)
-    return TerminateResult.KILLED
+    if await _wait_until_dead(pid, timeout_s=_KILL_REAP_TIMEOUT_S, clock=clock, sleep=sleep):
+        return TerminateResult.KILLED
+    return TerminateResult.KILL_UNCONFIRMED
 
 
 async def _wait_until_dead(pid: int, *, timeout_s: float, clock: Clock, sleep: Sleep) -> bool:
@@ -493,18 +618,22 @@ def reap(pid: int) -> None:
 
 
 def cleanup_stale(pidfile: str | os.PathLike[str]) -> bool:
-    """Remove ``pidfile`` iff it is stale; return whether it was removed.
+    """Remove ``pidfile`` iff it is PROVABLY stale; return whether it was removed.
 
     Stale means: the file exists but its record is missing/corrupt, or names a
-    process that is dead or not ours (a recycled pid). A live-and-ours pidfile is
-    kept (returns ``False``); an absent file is a no-op (``False``). Removal races
-    (another cleaner won) collapse to ``False`` rather than raising.
+    process that is dead or provably not ours (a recycled pid). A live-and-ours
+    pidfile is kept (``False``); an absent file is a no-op (``False``). An
+    ``INDETERMINATE`` identity (a live pid whose token read failed) is also KEPT:
+    unlinking it could make a live OWNED process invisible, and the next start
+    would double-spawn beside it — the unknown case must degrade to "leave it
+    alone", never to "sweep it". Removal races (another cleaner won) collapse to
+    ``False`` rather than raising.
     """
     pidfile = Path(pidfile)
     if not pidfile.exists():
         return False
     record = read_pidfile(pidfile)
-    if record is not None and is_ours_and_alive(record):
+    if record is not None and identity(record) in (Identity.OURS, Identity.INDETERMINATE):
         return False
     try:
         pidfile.unlink()

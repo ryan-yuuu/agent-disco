@@ -54,8 +54,9 @@ from collections.abc import Awaitable, Callable
 
 from calfkit.client import Client
 
+from calfcord.agents.identifier import AGENT_ID_PATTERN
 from calfcord.health.check import BrokerProbe
-from calfcord.supervisor import _slot_ops, _workspace
+from calfcord.supervisor import _slot_ops, _workspace, procspawn
 from calfcord.supervisor._workspace import (
     WORKSPACE_NOT_RUNNING_HINT,
     resolve_client,
@@ -64,6 +65,7 @@ from calfcord.supervisor._workspace import (
 from calfcord.supervisor.client import ProcessComposeClient
 from calfcord.supervisor.compose import _RESERVED_PROCESS_NAMES as _NON_AGENT_PROCESSES
 from calfcord.supervisor.compose import MCP_SLOT_PREFIX
+from calfcord.supervisor.procspawn import TerminateResult
 
 # A broker-wide live-roster probe: hand it ``server_urls`` and it returns the
 # NAMES of every agent currently online across the org. Injected so tests script
@@ -132,20 +134,24 @@ async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PR
         await client.aclose()
 
 
-def _resolve_probe(probe: Probe | None) -> Probe:
-    """Resolve the live-roster probe, defaulting to the native-mesh probe.
+# The probe resolver is the one shared :func:`_workspace.resolve_probe` (its
+# default lazily wraps this module's :func:`_probe_live_roster`), aliased for the
+# call sites + the test that pins the default wiring — homing it on the shared
+# seam lets ``lifecycle.status`` consume it without reaching into this module.
+_resolve_probe = _workspace.resolve_probe
 
-    The default adapts :func:`_probe_live_roster` (``(server_urls, *, timeout_s)``)
-    to the injectable ``(server_urls) -> ...`` shape, so tests can stub a plain
-    async callable.
+
+def _invalid_name_error(name: str) -> str | None:
+    """The refusal for a NAME that is not a well-formed agent id, or ``None``.
+
+    The verb-level mirror of ``mcp_roster``'s ``is_valid_server_name`` gate: a
+    malformed name (path separators, dots, uppercase, overlong) must never reach
+    the pidfile/lock/log path construction — :data:`AGENT_ID_PATTERN` is the one
+    canonical agent-id shape, and everything it admits is a safe filename stem.
     """
-    if probe is not None:
-        return probe
-
-    async def _default_probe(server_urls: str) -> list[str]:
-        return await _probe_live_roster(server_urls)
-
-    return _default_probe
+    if AGENT_ID_PATTERN.fullmatch(name) is None:
+        return f"error: invalid agent name {name!r}; agent names match [a-z0-9_-]{{1,32}}."
+    return None
 
 
 # The one shared broker-gate refusal (:data:`_workspace.BROKER_UNREACHABLE_HINT`),
@@ -239,7 +245,7 @@ async def agent_start(
     and neither re-probes nor re-gates — so N agents cost ONE probe and ONE
     aggregate warning, not N.
     """
-    error = _non_agent_error(name, "start")
+    error = _invalid_name_error(name) or _non_agent_error(name, "start")
     if error is not None:
         print(error)
         return 1
@@ -308,7 +314,7 @@ async def agent_stop(
     started, already gone, or a stale/recycled pidfile) reports ``not running
     here``.
     """
-    error = _non_agent_error(name, "stop")
+    error = _invalid_name_error(name) or _non_agent_error(name, "stop")
     if error is not None:
         print(error)
         return 1
@@ -327,6 +333,7 @@ async def agent_restart(
     home: str | os.PathLike[str],
     *,
     name: str,
+    server_urls: str | None = None,
     launcher: str | None = None,
     client: ProcessComposeClient | None = None,
     probe: Probe | None = None,
@@ -339,7 +346,8 @@ async def agent_restart(
     is spawned. Restart of a not-running agent simply brings it up — the expected
     effect. Non-agent chokepoint first (an ``agent restart tools`` must not replace
     the singleton with a bogus ``run agent tools`` process), then the workspace
-    check, the legacy-workspace guard, and the broker gate (the effective
+    check, the legacy-workspace guard, and the broker gate (``server_urls`` when
+    given — the same threading as :func:`agent_start` — else the effective
     ``CALF_HOST_URL``; killing a healthy agent to spawn a doomed one during a
     broker bounce would be worse than refusing).
 
@@ -351,7 +359,7 @@ async def agent_restart(
     survive its confirmation window — a crash-on-boot reports the log path and
     returns ``1``; otherwise ``agent <name> restarted``, return ``0``.
     """
-    error = _non_agent_error(name, "restart")
+    error = _invalid_name_error(name) or _non_agent_error(name, "restart")
     if error is not None:
         print(error)
         return 1
@@ -368,7 +376,7 @@ async def agent_restart(
         print(_workspace.LEGACY_WORKSPACE_HINT)
         return 1
 
-    if not await _workspace.broker_gate(None, broker_probe):
+    if not await _workspace.broker_gate(server_urls, broker_probe):
         print(_BROKER_UNREACHABLE_HINT)
         return 1
 
@@ -377,7 +385,7 @@ async def agent_restart(
     if not _workspace.slot_is_live(home, name):
         probe = _resolve_probe(probe)
         try:
-            live = await probe(os.getenv("CALF_HOST_URL") or "localhost")
+            live = await probe(server_urls or os.getenv("CALF_HOST_URL") or "localhost")
         except Exception:
             print("warning: could not verify org-wide duplicates (broker unreachable); proceeding.")
             live = []
@@ -409,8 +417,9 @@ async def agent_start_all(
     Workspace check first (the shared not-running hint + ``1``). An empty defined set
     is a clean no-op (``no agents defined``, ``0``). Otherwise it is **best-effort**:
     a per-item failure is reported and the sweep continues, then a one-line summary
-    closes it. Returns ``1`` if any id HARD-failed (a raised fault), else ``0``; the
-    restart and duplicate-refuse outcomes are successes, not failures.
+    closes it. Returns ``1`` if ANY id failed — a raised fault OR a non-zero per-id
+    exit (e.g. a crash-on-boot) — else ``0``; the restart and duplicate-refuse
+    outcomes are successes, not failures.
 
     The §3.5 duplicate guard reads the same broker-wide roster for EVERY id, so it is
     probed ONCE up front and threaded into each per-id ``agent_start`` (via its
@@ -497,13 +506,18 @@ async def agent_stop_all(
     ``mcp-<server>`` slots are never swept). There is no over-the-wire control;
     ``--all`` acts on THIS host.
 
-    Workspace check first (the shared not-running hint + ``1``). Nothing running
-    locally is a clean no-op (``no agents running locally``, ``0``). Otherwise
-    **best-effort**: each stop runs under its slot-mutation locks (never unlinking
-    a pidfile out from under a concurrent start's confirmation window); a BUSY
-    slot is reported and skipped — benign, like the other sweeps — while a real
-    per-item failure is reported and counted. A one-line summary closes the
-    sweep. Returns ``1`` if any stop failed, else ``0``.
+    Workspace check first (the shared not-running hint + ``1``); an unreadable
+    ``state/run`` is reported as the scan failure it is (``1``) — never misread
+    as "no agents running". Nothing running locally is a clean no-op (``no
+    agents running locally``, ``0``). Otherwise **best-effort**: each stop runs
+    under its slot-mutation locks (never unlinking a pidfile out from under a
+    concurrent start's confirmation window); a BUSY slot is reported and skipped
+    — benign, like the other sweeps — while a real per-item failure (a raised
+    fault, or a survivor that shrugged off SIGKILL) is reported and counted. A
+    contended LIFECYCLE lock (a ``disco start``/``stop`` in flight) aborts the
+    whole sweep with one honest error (``1``) — it would refuse every item
+    identically. A one-line summary closes a completed sweep. Returns ``1`` if
+    any stop failed, else ``0``.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)
@@ -512,7 +526,11 @@ async def agent_stop_all(
         print(_NOT_RUNNING_HINT)
         return 1
 
-    targets = sorted(_workspace.live_agent_slots(home))
+    try:
+        targets = sorted(_workspace.live_agent_slots(home))
+    except _workspace.SlotScanError as exc:
+        print(f"error: {exc}")
+        return 1
     if not targets:
         print("no agents running locally")
         return 0
@@ -521,14 +539,31 @@ async def agent_stop_all(
     for name in targets:
         try:
             with _workspace.slot_mutation(home, name):
-                await _workspace.terminate_slot(home, name)
+                result = await _workspace.terminate_slot(home, name)
         except _workspace.SlotBusyError:
             # Benign, like every busy outcome: another command is mid-mutation on
             # this slot; skipping beats yanking its fresh pidfile mid-confirm.
             print(f"agent {name} is being started/stopped by another disco command; skipped.")
             continue
+        except _workspace.WorkspaceBusyError as exc:
+            # The lifecycle lock is workspace-wide: every remaining item would
+            # hit the same refusal, so report it ONCE and stop the sweep (the
+            # mcp sweeps' honest-single-error behavior).
+            print(f"error: {exc}")
+            return 1
         except Exception as exc:
             print(f"agent {name}: failed to stop ({exc})")
+            failures += 1
+            continue
+        if result is TerminateResult.KILL_UNCONFIRMED:
+            print(
+                f"error: agent {name} did not die after SIGKILL — still running "
+                f"(see {procspawn.log_path_for(home, name)})"
+            )
+            failures += 1
+            continue
+        if result is TerminateResult.INDETERMINATE:
+            # terminate_slot already printed the cannot-verify warning.
             failures += 1
             continue
         print(f"agent {name} stopped")
@@ -540,6 +575,7 @@ async def agent_stop_all(
 async def agent_restart_all(
     home: str | os.PathLike[str],
     *,
+    server_urls: str | None = None,
     launcher: str | None = None,
     client: ProcessComposeClient | None = None,
     broker_probe: BrokerProbe | None = None,
@@ -575,11 +611,16 @@ async def agent_restart_all(
         print(_workspace.LEGACY_WORKSPACE_HINT)
         return 1
 
-    if not await _workspace.broker_gate(None, broker_probe):
+    if not await _workspace.broker_gate(server_urls, broker_probe):
         print(_BROKER_UNREACHABLE_HINT)
         return 1
 
-    targets = sorted(_workspace.live_agent_slots(home))
+    try:
+        targets = sorted(_workspace.live_agent_slots(home))
+    except _workspace.SlotScanError as exc:
+        # An unreadable state/run is a scan failure, never "no agents running".
+        print(f"error: {exc}")
+        return 1
     if not targets:
         print("no agents running locally")
         return 0
@@ -588,7 +629,11 @@ async def agent_restart_all(
     for name in targets:
         try:
             with _workspace.slot_mutation(home, name):
-                await _workspace.terminate_slot(home, name)
+                result = await _workspace.terminate_slot(home, name)
+                if _slot_ops._terminate_left_slot_running(home, name, result):
+                    _slot_ops.report_wedged_survivor(home, name, label=_label(name))
+                    failures += 1
+                    continue
                 if not await _workspace.launch_slot(home, name, _agent_argv(launcher, name)):
                     _slot_ops.report_boot_crash(home, name, label=_label(name))
                     failures += 1
@@ -598,6 +643,11 @@ async def agent_restart_all(
             # other sweeps: another command already owns this slot's mutation.
             print(f"agent {name} is being started/stopped by another disco command; skipped.")
             continue
+        except _workspace.WorkspaceBusyError as exc:
+            # Workspace-wide: every remaining item would refuse identically, so
+            # one honest error closes the sweep (mcp-sweep parity).
+            print(f"error: {exc}")
+            return 1
         except Exception as exc:
             print(f"agent {name}: failed to restart ({exc})")
             failures += 1
@@ -643,9 +693,18 @@ async def agent_ps(
 
     if not await _workspace_is_up(client):
         print(_NOT_RUNNING_HINT)
+        # The supervisor being down does NOT mean this host is idle: detached
+        # roster processes survive it. Say so instead of implying "nothing here".
+        _workspace.note_local_survivors(home)
         return 0
 
-    physical = _workspace.live_agent_slots(home)
+    try:
+        physical = _workspace.live_agent_slots(home)
+    except _workspace.SlotScanError as exc:
+        # Unreadable state/run must not crash read-only ps NOR read as "no local
+        # agents": degrade to the logical view with the scan failure surfaced.
+        print(f"warning: {exc}")
+        physical = set()
 
     probe = _resolve_probe(probe)
     try:

@@ -26,7 +26,7 @@ import os
 
 from calfcord.health.check import BrokerProbe
 from calfcord.mcp.selector import is_valid_server_name
-from calfcord.supervisor import _slot_ops, _workspace
+from calfcord.supervisor import _slot_ops, _workspace, procspawn
 from calfcord.supervisor._workspace import (
     BROKER_UNREACHABLE_HINT,
     WORKSPACE_NOT_RUNNING_HINT,
@@ -36,6 +36,7 @@ from calfcord.supervisor._workspace import (
 from calfcord.supervisor.client import ProcessComposeClient
 from calfcord.supervisor.compose import MCP_SLOT_PREFIX
 from calfcord.supervisor.compose import mcp_slot_name as slot_name
+from calfcord.supervisor.procspawn import TerminateResult
 
 _NOT_RUNNING_HINT = WORKSPACE_NOT_RUNNING_HINT
 
@@ -290,7 +291,12 @@ async def _sweep_running(
             print(_BROKER_UNREACHABLE_HINT)
             return 1
 
-    running = sorted(_live_mcp_slots(home))
+    try:
+        running = sorted(_live_mcp_slots(home))
+    except _workspace.SlotScanError as exc:
+        # An unreadable state/run is a scan failure — never "no servers running".
+        print(f"error: {exc}")
+        return 1
     if not running:
         print("no MCP servers running on this host")
         return 0
@@ -300,7 +306,7 @@ async def _sweep_running(
         if verb == "stop":
             try:
                 with _workspace.slot_mutation(home, slot):
-                    await _workspace.terminate_slot(home, slot)
+                    result = await _workspace.terminate_slot(home, slot)
             except _workspace.SlotBusyError:
                 print(f"mcp server {server} is being started/stopped by another disco command; skipped.")
                 continue
@@ -308,7 +314,21 @@ async def _sweep_running(
                 print(f"error: {exc}")
                 worst = 1
                 continue
-            print(f"mcp server {server} stopped")
+            if result is TerminateResult.KILL_UNCONFIRMED:
+                print(
+                    f"error: mcp server {server} did not die after SIGKILL — still "
+                    f"running (see {procspawn.log_path_for(home, slot)})"
+                )
+                worst = 1
+                continue
+            if result is TerminateResult.INDETERMINATE:
+                # terminate_slot already printed the cannot-verify warning.
+                worst = 1
+                continue
+            if result is not None and result.process_was_stopped:
+                print(f"mcp server {server} stopped")
+            else:
+                print(f"mcp server {server} is not running here")
             continue
         worst = max(worst, await _start_or_restart(home, launcher, server))
     return worst

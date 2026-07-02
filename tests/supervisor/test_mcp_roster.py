@@ -23,7 +23,7 @@ from __future__ import annotations
 import pytest
 
 from calfcord.supervisor import _workspace, mcp_roster
-from calfcord.supervisor.procspawn import TerminateResult
+from calfcord.supervisor.procspawn import Identity, TerminateResult
 
 
 class _StubClient:
@@ -88,6 +88,11 @@ class _FakeSlots:
         def slot_is_live(home, slot):
             return slot in self.live
 
+        def slot_identity(home, slot):
+            # The tri-state twin of slot_is_live: a scripted-live slot is OURS,
+            # anything else has no record (the fake models no flaky reads).
+            return Identity.OURS if slot in self.live else None
+
         async def broker_gate(server_urls=None, probe=None):
             self.gate_calls.append(server_urls)
             return self._gate_ok
@@ -96,6 +101,7 @@ class _FakeSlots:
         monkeypatch.setattr(_workspace, "terminate_slot", terminate_slot)
         monkeypatch.setattr(_workspace, "live_slots", live_slots)
         monkeypatch.setattr(_workspace, "slot_is_live", slot_is_live)
+        monkeypatch.setattr(_workspace, "slot_identity", slot_identity)
         monkeypatch.setattr(_workspace, "broker_gate", broker_gate)
 
 
@@ -469,3 +475,46 @@ def test_running_servers_returns_bare_names(tmp_path, monkeypatch):
     slots = _FakeSlots(["mcp-github", "mcp-docs", "assistant"])
     slots.install(monkeypatch)
     assert mcp_roster.running_servers(_home(tmp_path)) == {"github", "docs"}
+
+
+# --- KILL_UNCONFIRMED / scan-error honesty in the running-slot sweeps -----------
+
+
+async def test_mcp_stop_all_counts_a_kill_unconfirmed_survivor(tmp_path, capsys, monkeypatch):
+    """The stop sweep must not print `stopped` for a process that shrugged off
+    SIGKILL — the enum is the one truth of "actually died"."""
+    slots = _FakeSlots(["mcp-github", "mcp-notion"])
+    slots.install(monkeypatch)
+
+    async def scripted(home, slot):
+        if slot == "mcp-github":
+            return TerminateResult.KILL_UNCONFIRMED
+        slots.live.discard(slot)
+        return TerminateResult.TERMINATED
+
+    monkeypatch.setattr(_workspace, "terminate_slot", scripted)
+
+    rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=_StubClient())
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "mcp server notion stopped" in out
+    assert "did not die after SIGKILL" in out
+    assert "mcp server github stopped" not in out
+
+
+async def test_mcp_stop_all_scan_error_is_reported_not_none_running(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+
+    def raising(home):
+        raise _workspace.SlotScanError(tmp_path / "state" / "run", OSError("Permission denied"))
+
+    monkeypatch.setattr(_workspace, "live_slots", raising)
+
+    rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=_StubClient())
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "roster state unknown" in out
+    assert "no MCP servers running" not in out

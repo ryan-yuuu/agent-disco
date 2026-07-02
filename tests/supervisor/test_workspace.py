@@ -11,8 +11,10 @@ seam directly so the shared behavior is not only ever exercised second-hand.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -438,6 +440,191 @@ def test_slot_mutation_released_after_exit(tmp_path) -> None:
         pass
     with _workspace.slot_mutation(tmp_path, "assistant"):
         pass  # re-acquirable — the locks were released
+
+
+# --- slot-name guard at the mutation chokepoint --------------------------------
+
+
+def test_slot_mutation_rejects_a_traversal_slot_name(tmp_path) -> None:
+    """The lock path is built from the slot name (state/run/<slot>.lock with
+    makedirs), so a traversal name must be refused before any path is touched."""
+    import pytest
+
+    with pytest.raises(ValueError), _workspace.slot_mutation(tmp_path, "../../evil"):
+        raise AssertionError("the critical section must not open for a traversal name")
+    # Nothing escaped the home: the parent dir gained no lock/dir droppings.
+    assert not (tmp_path.parent / "evil.lock").exists()
+
+
+# --- unreadable state/run must not read as "no slots" ---------------------------
+
+
+def _make_unreadable(path) -> bool:
+    """chmod a dir to 0; returns False when the privilege drop cannot work (root)."""
+    path.chmod(0)
+    try:
+        os.listdir(path)
+    except PermissionError:
+        return True
+    path.chmod(0o755)
+    return False
+
+
+def test_iter_slot_pidfiles_raises_on_an_unreadable_run_dir(tmp_path) -> None:
+    import pytest
+
+    _write_self_pidfile(tmp_path, "assistant")
+    run_dir = tmp_path / "state" / "run"
+    if not _make_unreadable(run_dir):
+        pytest.skip("running as root: cannot make the dir unreadable")
+    try:
+        with pytest.raises(_workspace.SlotScanError, match="roster state unknown"):
+            list(_workspace.iter_slot_pidfiles(tmp_path))
+    finally:
+        run_dir.chmod(0o755)
+
+
+def test_live_and_dead_slots_propagate_the_scan_error(tmp_path) -> None:
+    """present-but-unreadable must NOT collapse to the empty set: an empty answer
+    is what lets `disco stop` claim "workspace closed" over live processes."""
+    import pytest
+
+    _write_self_pidfile(tmp_path, "assistant")
+    run_dir = tmp_path / "state" / "run"
+    if not _make_unreadable(run_dir):
+        pytest.skip("running as root: cannot make the dir unreadable")
+    try:
+        with pytest.raises(_workspace.SlotScanError):
+            _workspace.live_slots(tmp_path)
+        with pytest.raises(_workspace.SlotScanError):
+            _workspace.dead_slots(tmp_path)
+    finally:
+        run_dir.chmod(0o755)
+
+
+def test_iter_slot_pidfiles_absent_dir_still_yields_nothing(tmp_path) -> None:
+    # Dir-absent stays the benign pre-first-spawn case, NOT an error.
+    assert list(_workspace.iter_slot_pidfiles(tmp_path)) == []
+
+
+def test_iter_slot_pidfiles_skips_unsafe_stems(tmp_path) -> None:
+    """A stray file whose stem could never be a valid slot (dot-leading — e.g. an
+    editor artifact or a crashed atomic-write tmp — or traversal-shaped) must be
+    skipped, not crash the scan or flow into the terminate/path helpers."""
+    _write_self_pidfile(tmp_path, "assistant")
+    run_dir = tmp_path / "state" / "run"
+    (run_dir / ".hidden.pid").write_text("{}")
+    (run_dir / "..pid").write_text("{}")  # stem "." — a traversal shape
+    slots = [slot for slot, _ in _workspace.iter_slot_pidfiles(tmp_path)]
+    assert slots == ["assistant"]
+
+
+# --- tri-state identity at the slot level ---------------------------------------
+
+
+def test_dead_slots_excludes_an_indeterminate_slot(tmp_path, monkeypatch) -> None:
+    """Identity-read failure on a live pid is UNKNOWN, not dead: rendering it as
+    `exited` (and letting the stop sweep unlink it) would strand a live process."""
+    _write_self_pidfile(tmp_path, "assistant")
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    assert _workspace.dead_slots(tmp_path) == set()
+    assert _workspace.indeterminate_slots(tmp_path) == {"assistant"}
+
+
+def test_indeterminate_slots_empty_in_the_ordinary_cases(tmp_path) -> None:
+    _write_self_pidfile(tmp_path, "alive")
+    _write_dead_pidfile(tmp_path, "crashed")
+    assert _workspace.indeterminate_slots(tmp_path) == set()
+
+
+def test_note_local_survivors_includes_indeterminate_slots(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """An unverifiable slot's pid IS alive — only the ownership evidence is
+    missing — so the workspace-down survivors note must count it alongside the
+    provably-live ones, not imply an idle host."""
+    # A real live child ("verified") plus a self-pidfile whose token read flakes
+    # for this pid only ("unverifiable"): the note is the UNION of the two.
+    spawned = _workspace.spawn_slot(
+        tmp_path, "verified", [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    try:
+        _write_self_pidfile(tmp_path, "unverifiable")
+        real_token = procspawn._process_start_token
+        monkeypatch.setattr(
+            procspawn,
+            "_process_start_token",
+            lambda pid: None if pid == os.getpid() else real_token(pid),
+        )
+        _workspace.note_local_survivors(tmp_path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(spawned.pid, signal.SIGKILL)
+        with contextlib.suppress(OSError):
+            os.waitpid(spawned.pid, 0)
+    out = capsys.readouterr().out
+    assert "2 detached roster process(es) still running locally" in out
+    assert "unverifiable" in out
+    assert "verified" in out
+
+
+async def test_terminate_slot_indeterminate_keeps_pidfile_and_warns(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    pidfile = _write_self_pidfile(tmp_path, "assistant")
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    result = await _workspace.terminate_slot(tmp_path, "assistant")
+    assert result is procspawn.TerminateResult.INDETERMINATE
+    assert pidfile.exists()
+    out = capsys.readouterr().out
+    assert "warning: cannot verify process" in out
+    assert "assistant" in out
+    assert "leaving it untouched" in out
+
+
+async def test_terminate_slot_corrupt_pidfile_warns_about_a_possible_survivor(
+    tmp_path, capsys
+) -> None:
+    pidfile = procspawn.pidfile_for(tmp_path, "assistant")
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text("garbage {")
+    result = await _workspace.terminate_slot(tmp_path, "assistant")
+    assert result is None
+    assert not pidfile.exists()
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert "assistant" in out
+    assert "may still be running" in out
+
+
+async def test_terminate_slot_absent_pidfile_stays_silent(tmp_path, capsys) -> None:
+    assert await _workspace.terminate_slot(tmp_path, "nobody") is None
+    assert capsys.readouterr().out == ""
+
+
+# --- resolve_probe (the shared live-roster probe seam) ---------------------------
+
+
+def test_resolve_probe_passes_through_an_injected_probe() -> None:
+    async def injected(server_urls: str) -> list[str]:
+        return []
+
+    assert _workspace.resolve_probe(injected) is injected
+
+
+async def test_resolve_probe_default_wraps_the_mesh_probe(monkeypatch) -> None:
+    seen: list[str] = []
+
+    async def fake_mesh_probe(server_urls: str, **kwargs) -> list[str]:
+        seen.append(server_urls)
+        return ["alice"]
+
+    monkeypatch.setattr(
+        "calfcord.supervisor.roster._probe_live_roster", fake_mesh_probe
+    )
+    probe = _workspace.resolve_probe(None)
+    assert await probe("broker:9092") == ["alice"]
+    assert seen == ["broker:9092"]
 
 
 # --- broker_gate ---------------------------------------------------------------

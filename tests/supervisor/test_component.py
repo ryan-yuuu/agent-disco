@@ -26,7 +26,7 @@ The contracts pinned here:
 from __future__ import annotations
 
 from calfcord.supervisor import _workspace, component
-from calfcord.supervisor.procspawn import TerminateResult
+from calfcord.supervisor.procspawn import Identity, TerminateResult
 
 
 class _StubClient:
@@ -81,6 +81,11 @@ class _FakeSlots:
         def slot_is_live(home, slot):
             return slot in self.live
 
+        def slot_identity(home, slot):
+            # The tri-state twin of slot_is_live: a scripted-live slot is OURS,
+            # anything else has no record (the fake models no flaky reads).
+            return Identity.OURS if slot in self.live else None
+
         async def broker_gate(server_urls=None, probe=None):
             self.gate_calls.append(server_urls)
             return self._gate_ok
@@ -88,6 +93,7 @@ class _FakeSlots:
         monkeypatch.setattr(_workspace, "launch_slot", launch_slot)
         monkeypatch.setattr(_workspace, "terminate_slot", terminate_slot)
         monkeypatch.setattr(_workspace, "slot_is_live", slot_is_live)
+        monkeypatch.setattr(_workspace, "slot_identity", slot_identity)
         monkeypatch.setattr(_workspace, "broker_gate", broker_gate)
 
 

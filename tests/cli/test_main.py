@@ -921,10 +921,12 @@ def test_main_agent_stop_restart_all_dispatch_with_home_only(
 ) -> None:
     # `agent stop --all` / `restart --all` target every RUNNING local agent — the
     # bulk fn reads the supervisor itself, so main passes only the resolved home
-    # (no ids, no server_urls / broker probe).
+    # plus (for the SPAWN verb, restart) the broker URL its gate/probe read —
+    # stop needs no broker at all, so no server_urls may leak into it.
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
 
     captured: dict[str, object] = {}
 
@@ -939,9 +941,12 @@ def test_main_agent_stop_restart_all_dispatch_with_home_only(
     monkeypatch.setattr(roster, f"agent_{verb}", _single_boom)
     assert main(["agent", verb, "--all"]) == 0
     assert captured["home"] == home
-    # No name, no server_urls leak into the bulk-stop/restart call.
+    # No name leaks into the bulk call either way.
     assert "name" not in captured["kwargs"]
-    assert "server_urls" not in captured["kwargs"]
+    if verb == "stop":
+        assert "server_urls" not in captured["kwargs"]
+    else:
+        assert captured["kwargs"]["server_urls"] == "broker.example:9092"
 
 
 @pytest.mark.parametrize("verb", ["start", "stop", "restart"])

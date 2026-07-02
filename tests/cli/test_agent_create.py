@@ -712,6 +712,39 @@ def test_run_start_now_workspace_open_failure_propagates(
     assert "presence" not in finish.calls
 
 
+def test_run_start_now_agent_start_failure_propagates_without_online_claim(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the agent spawn itself fails (crash-on-boot rc 1), the non-zero code
+    propagates, presence is never watched, and NO 'online' line prints."""
+    finish = _FinishRecorder(running=True, agent_rc=1)
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 1
+    assert "presence" not in finish.calls
+    out = capsys.readouterr().out
+    assert "online" not in out
+
+
+def test_run_start_now_presence_failure_names_the_cause(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A raising presence watch degrades honestly AND says why — the operator
+    should not have to guess whether the watch timed out or blew up."""
+    finish = _FinishRecorder(running=True)
+
+    async def exploding_presence(server_urls, **kwargs) -> bool:
+        raise RuntimeError("broker dropped mid-watch")
+
+    finish.presence = exploding_presence
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "broker dropped mid-watch" in out
+    assert "disco doctor" in out
+
+
 def test_run_dev_run_degrades_without_prompting_start(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

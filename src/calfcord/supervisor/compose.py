@@ -53,9 +53,9 @@ _PROBE_TIMEOUT_SECONDS = 5
 _PROBE_SUCCESS_THRESHOLD = 1
 _PROBE_FAILURE_THRESHOLD = 3
 
-# Autorestart backoff shared by both restart policies (always for the substrate,
-# on_failure for the roster); max_restarts 0 == unlimited retries in Process
-# Compose, applied uniformly.
+# Autorestart backoff for the substrate's `always` policy (the only processes
+# declared here — the roster is detached, off PC, with NO auto-respawn);
+# max_restarts 0 == unlimited retries in Process Compose.
 _RESTART_BACKOFF_SECONDS = 2
 _RESTART_MAX_RESTARTS = 0
 
@@ -108,7 +108,9 @@ MCP_SLOT_PREFIX = "mcp-"
 
 
 def mcp_slot_name(server: str) -> str:
-    """The Process Compose slot for MCP server ``server`` (``mcp-<server>``)."""
+    """The roster slot name for MCP server ``server`` (``mcp-<server>``) — the
+    stem of its detached process's pidfile (``state/run/mcp-<server>.pid``) and
+    log (``state/logs/mcp-<server>.log``)."""
     return f"{MCP_SLOT_PREFIX}{server}"
 
 
@@ -170,7 +172,8 @@ def _log_location(home: str, name: str) -> str:
 
 
 def _restart(policy: str) -> dict:
-    """An ``availability`` block for ``always`` or ``on_failure``."""
+    """An ``availability`` block; the substrate always passes ``always`` (the
+    only policy left here — no roster process is declared on PC anymore)."""
     return {
         "restart": policy,
         "backoff_seconds": _RESTART_BACKOFF_SECONDS,

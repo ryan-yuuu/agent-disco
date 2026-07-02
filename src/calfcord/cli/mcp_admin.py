@@ -301,7 +301,7 @@ def _running_servers(home: Path | None) -> set[str] | None:
     if home is None:
         return None
     from calfcord.supervisor import mcp_roster
-    from calfcord.supervisor._workspace import resolve_client, workspace_is_up
+    from calfcord.supervisor._workspace import SlotScanError, resolve_client, workspace_is_up
 
     async def _read() -> set[str] | None:
         client = resolve_client(None, str(home))
@@ -310,7 +310,13 @@ def _running_servers(home: Path | None) -> set[str] | None:
         # Phase 2: running servers are read from the pidfile namespace (state/run),
         # not the supervisor REST — the workspace-up gate above still confirms the
         # substrate is open before we report a running state at all.
-        return mcp_roster.running_servers(str(home))
+        try:
+            return mcp_roster.running_servers(str(home))
+        except SlotScanError:
+            # Unreadable state/run: the state is unknowable — render the list
+            # stateless (the documented None contract), never every server as
+            # [stopped].
+            return None
 
     return asyncio.run(_read())
 

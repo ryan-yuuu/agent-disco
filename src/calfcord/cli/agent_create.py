@@ -465,18 +465,23 @@ async def _start_now(
 
     # Presence is advisory — the org is already live once the agent started. A
     # broker drop mid-watch must not crash the CLI after the agent came up, so any
-    # failure degrades to the same honest fallback as a clean timeout. ``except
-    # Exception`` (not bare) deliberately lets ``asyncio.CancelledError`` propagate.
+    # failure degrades to the same honest fallback as a clean timeout — but the
+    # CAUSE is kept and named, so the operator can tell a watch blow-up from a
+    # plain not-seen-yet. ``except Exception`` (not bare) deliberately lets
+    # ``asyncio.CancelledError`` propagate.
+    watch_error: Exception | None = None
     try:
         detected = await presence_fn(server_urls, agent_id=name, timeout_s=_ONLINE_TIMEOUT_S)
-    except Exception:
+    except Exception as exc:
         detected = False
+        watch_error = exc
     if detected:
         print(f"{name} is online — say @{name} hello in Discord")
     else:
+        cause = f" (presence watch failed: {watch_error})" if watch_error is not None else ""
         print(
             f"  {name} is starting — try `@{name} hello` in Discord. "
-            "If nothing replies, run `disco doctor`."
+            f"If nothing replies, run `disco doctor`.{cause}"
         )
     return 0
 

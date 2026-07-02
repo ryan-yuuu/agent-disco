@@ -155,30 +155,69 @@ def _run_dir(home: str | os.PathLike[str]) -> Path:
     return Path(os.fspath(home)) / "state" / "run"
 
 
+class SlotScanError(RuntimeError):
+    """``state/run`` exists but cannot be read — roster state on this host is UNKNOWN.
+
+    Distinct from the dir simply not existing yet (no slots — the benign
+    pre-first-spawn case): an unreadable scan must never collapse to "no slots",
+    because that empty answer is what would let ``disco stop`` claim "workspace
+    closed" over processes it never saw.
+    """
+
+    def __init__(self, run_dir: Path, exc: OSError) -> None:
+        super().__init__(f"cannot read {run_dir}: {exc} — roster state unknown")
+
+
 def iter_slot_pidfiles(home: str | os.PathLike[str]) -> Iterator[tuple[str, Path]]:
     """Yield ``(slot, pidfile)`` for every ``<slot>.pid`` under ``state/run`` (sorted).
 
     The slot is the filename stem, so it round-trips the naming convention the
     surfaces write (agent name, ``tools``, ``mcp-<server>``). A missing ``run`` dir
-    yields nothing rather than raising, so the scan is safe before the first spawn.
+    yields nothing rather than raising, so the scan is safe before the first spawn
+    — but a run dir that EXISTS and cannot be read raises :class:`SlotScanError`
+    (roster state unknown ≠ no slots; consumers must surface it, not swallow it).
     """
     run_dir = _run_dir(home)
     try:
-        paths = sorted(run_dir.glob("*.pid"))
-    except OSError:
+        entries = os.listdir(run_dir)
+    except FileNotFoundError:
         return
-    for path in paths:
-        yield path.stem, path
+    except OSError as exc:
+        raise SlotScanError(run_dir, exc) from exc
+    for name in sorted(entries):
+        if not name.endswith(".pid"):
+            continue
+        stem = name[: -len(".pid")]
+        try:
+            procspawn.require_safe_slot(stem)
+        except ValueError:
+            # A stray file whose stem could never be a valid slot (dot-leading
+            # editor/tmp artifacts, traversal shapes): skip it rather than let a
+            # nonsense stem flow into the path helpers downstream.
+            continue
+        yield stem, run_dir / name
 
 
 def slot_is_live(home: str | os.PathLike[str], slot: str) -> bool:
     """Whether ``slot``'s pidfile names an ours-and-alive process (the truth of "up here").
 
     A missing/torn/stale pidfile — or one naming a recycled pid — reads ``False``
-    (:func:`procspawn.is_ours_and_alive` is the reuse-proof gate).
+    (:func:`procspawn.is_ours_and_alive` is the reuse-proof gate). An
+    INDETERMINATE identity also reads ``False`` (never acted on as ours);
+    consumers that must preserve those slots use :func:`slot_identity` /
+    :func:`indeterminate_slots` instead.
     """
     record = procspawn.read_pidfile(procspawn.pidfile_for(home, slot))
     return record is not None and procspawn.is_ours_and_alive(record)
+
+
+def slot_identity(home: str | os.PathLike[str], slot: str) -> procspawn.Identity | None:
+    """The tri-state identity verdict for ``slot``'s pidfile, or ``None`` if there
+    is no usable record (missing or torn file)."""
+    record = procspawn.read_pidfile(procspawn.pidfile_for(home, slot))
+    if record is None:
+        return None
+    return procspawn.identity(record)
 
 
 def live_slots(home: str | os.PathLike[str]) -> set[str]:
@@ -200,13 +239,58 @@ def live_agent_slots(home: str | os.PathLike[str]) -> set[str]:
 
 
 def dead_slots(home: str | os.PathLike[str]) -> set[str]:
-    """Every slot with a pidfile but NO ours-and-alive process — crashed or exited.
+    """Every slot with a pidfile but PROVABLY no ours-and-alive process — crashed
+    or exited (a dead pid, a recycled pid, or a torn record).
 
     The status board renders these honestly (``not running (exited …)``) instead
     of omitting them; ``disco stop``'s sweep is the acknowledge-and-clear point
-    that removes the files.
+    that removes the files. A slot whose identity could not be READ is *not* dead
+    — it lands in :func:`indeterminate_slots` so nothing sweeps or misrenders a
+    process that may well be alive and ours.
     """
-    return {slot for slot, _ in iter_slot_pidfiles(home) if not slot_is_live(home, slot)}
+    return {
+        slot
+        for slot, _ in iter_slot_pidfiles(home)
+        if slot_identity(home, slot)
+        not in (procspawn.Identity.OURS, procspawn.Identity.INDETERMINATE)
+    }
+
+
+def note_local_survivors(home: str | os.PathLike[str]) -> None:
+    """Note any detached roster processes still alive locally (supervisor down).
+
+    Shared by the ``agent ps`` and ``disco status`` early returns: "workspace not
+    running" alone would imply an idle host, but the detached roster outlives a
+    dead/stopped supervisor — ``disco stop`` is what terminates it. Counts the
+    provably-live slots AND the indeterminate ones (their pid IS alive; only the
+    ownership evidence is momentarily unreadable — omitting them would imply an
+    idle host over a running process). An unreadable scan degrades to its own
+    warning instead of silence.
+    """
+    try:
+        survivors = sorted(live_slots(home) | indeterminate_slots(home))
+    except SlotScanError as exc:
+        print(f"warning: {exc}")
+        return
+    if survivors:
+        print(
+            f"note: {len(survivors)} detached roster process(es) still running "
+            f"locally — `disco stop` stops the ones it can verify: {', '.join(survivors)}"
+        )
+
+
+def indeterminate_slots(home: str | os.PathLike[str]) -> set[str]:
+    """Every slot whose pidfile names a LIVE pid whose identity could not be read.
+
+    The unknown middle of the tri-state: not provably ours (never signalled), not
+    provably stale (never swept). Status renders these as unverifiable so the
+    operator knows the tooling is degraded rather than seeing a lie either way.
+    """
+    return {
+        slot
+        for slot, _ in iter_slot_pidfiles(home)
+        if slot_identity(home, slot) is procspawn.Identity.INDETERMINATE
+    }
 
 
 def spawn_slot(
@@ -331,6 +415,9 @@ def slot_mutation(home: str | os.PathLike[str], slot: str) -> Iterator[None]:
     Both are non-blocking: a second holder fails immediately with a clear domain
     error rather than queueing behind a window it cannot see.
     """
+    # The per-slot lock path embeds the slot name (and _flock_nb makedirs its
+    # parent), so a traversal-shaped name must be refused before any path exists.
+    procspawn.require_safe_slot(slot)
     # Lazy import: lifecycle imports this leaf module at module level, so the
     # lock-path constant is fetched at call time to avoid an import cycle.
     from calfcord.supervisor.lifecycle import _lock_path
@@ -370,6 +457,33 @@ BROKER_UNREACHABLE_HINT = (
 )
 
 
+# The broker-wide live-roster probe shape: hand it ``server_urls``, get the NAMES
+# of every agent currently online across the org (see roster._probe_live_roster).
+LiveRosterProbe = Callable[[str], Awaitable[list[str]]]
+
+
+def resolve_probe(probe: LiveRosterProbe | None) -> LiveRosterProbe:
+    """Resolve the broker-wide live-roster probe, defaulting to the native-mesh read.
+
+    The shared seam ``roster`` (start/restart/ps) and ``lifecycle.status`` both
+    consume, homed here beside :func:`broker_gate` so a surface never has to
+    reach into another surface's privates for it. The default adapts
+    :func:`calfcord.supervisor.roster._probe_live_roster` (imported lazily —
+    ``roster`` imports this leaf module at module level, and its calfkit client
+    dependency must not become an import-time cost here) to the injectable
+    ``(server_urls) -> [names]`` shape, so tests can stub a plain async callable.
+    """
+    if probe is not None:
+        return probe
+
+    async def _default_probe(server_urls: str) -> list[str]:
+        from calfcord.supervisor.roster import _probe_live_roster
+
+        return await _probe_live_roster(server_urls)
+
+    return _default_probe
+
+
 async def broker_gate(
     server_urls: str | None, probe: Callable[[], Awaitable[bool]] | None
 ) -> bool:
@@ -392,20 +506,38 @@ async def broker_gate(
 async def terminate_slot(
     home: str | os.PathLike[str], slot: str
 ) -> procspawn.TerminateResult | None:
-    """Stop ``slot``'s process and clear its pidfile; ``None`` if there was no pidfile.
+    """Stop ``slot``'s process and clear its pidfile; ``None`` if there was no record.
 
     Reads the pidfile, terminates the process group it names (SIGTERM→SIGKILL via
     :func:`procspawn.terminate`), then removes the now-dead pidfile
-    (:func:`procspawn.cleanup_stale` keeps only a still-ours-and-alive one, so a
+    (:func:`procspawn.cleanup_stale` keeps only a still-alive one, so a
     ``NOT_OURS`` stale file is swept too). Returns the terminate outcome, or ``None``
-    when no pidfile exists at all (nothing was ever spawned for this slot here).
+    when there was no usable record (nothing spawned here, or a torn file — the
+    torn case is swept with a printed warning, since whatever process it named may
+    survive the removal unseen).
+
+    Two outcomes deliberately KEEP the pidfile: ``INDETERMINATE`` (identity
+    unreadable — never signal, never unlink; a warning tells the operator the
+    slot is unverifiable) and ``KILL_UNCONFIRMED`` (the process shrugged off
+    SIGKILL within the reap window; its pidfile stays so it remains visible to
+    status/stop rather than becoming an invisible survivor).
     """
     pidfile = procspawn.pidfile_for(home, slot)
     record = procspawn.read_pidfile(pidfile)
     if record is None:
         # No usable record: clear a torn file if present, report "nothing here".
-        procspawn.cleanup_stale(pidfile)
+        if procspawn.cleanup_stale(pidfile):
+            print(
+                f"warning: removed unreadable pidfile for slot {slot!r}; "
+                "the process it named (if any) may still be running — check ps/logs."
+            )
         return None
     result = await procspawn.terminate(record)
+    if result is procspawn.TerminateResult.INDETERMINATE:
+        print(
+            f"warning: cannot verify process {record.pid} for slot {slot!r} "
+            "(identity read failed); leaving it untouched."
+        )
+        return result
     procspawn.cleanup_stale(pidfile)
     return result

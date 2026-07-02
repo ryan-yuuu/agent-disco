@@ -1316,13 +1316,13 @@ async def test_start_contended_lock_is_a_clean_error_not_a_traceback(tmp_path, c
 
 
 async def test_stop_reports_a_wedged_slot_truthfully(tmp_path, fake_pc_bin, capsys, monkeypatch) -> None:
-    """A slot whose terminate escalated to SIGKILL but whose process is STILL alive
-    (a wedged survivor) must not be counted 'stopped' — the sweep reports it and
+    """A slot whose terminate ended KILL_UNCONFIRMED (SIGKILL sent, pid never read
+    dead) must not be counted 'stopped' — the sweep reports it FROM THE ENUM and
     keeps its live pidfile (mixed sweep: live + stale + wedged)."""
     home = _home(tmp_path)
     _write_self_pidfile(home, "live")  # terminates cleanly (scripted below)
     _write_stale_pidfile(home, "ghost")  # swept silently, never counted
-    _write_self_pidfile(home, "wedged")  # KILLED but the process survives
+    _write_self_pidfile(home, "wedged")  # SIGKILLed but the process survives
 
     async def scripted_terminate(home_arg, slot):
         if slot == "live":
@@ -1331,8 +1331,9 @@ async def test_stop_reports_a_wedged_slot_truthfully(tmp_path, fake_pc_bin, caps
         if slot == "ghost":
             procspawn.pidfile_for(home_arg, slot).unlink()
             return None
-        # "wedged": SIGKILL sent, reap timed out — the (self, alive) pidfile stays.
-        return procspawn.TerminateResult.KILLED
+        # "wedged": SIGKILL sent, the reap window closed on a live pid — the
+        # (self, alive) pidfile stays and the enum says so.
+        return procspawn.TerminateResult.KILL_UNCONFIRMED
 
     monkeypatch.setattr(_workspace, "terminate_slot", scripted_terminate)
     client = _StubClient(project_state_results=[{"running": True}])
@@ -1347,6 +1348,36 @@ async def test_stop_reports_a_wedged_slot_truthfully(tmp_path, fake_pc_bin, caps
     # The live pidfile of the survivor is kept — sweeping it would orphan the process.
     assert procspawn.pidfile_for(home, "wedged").exists()
     assert not procspawn.pidfile_for(home, "ghost").exists()
+
+
+async def test_stop_counts_an_indeterminate_survivor_as_still_running(
+    tmp_path, fake_pc_bin, capsys, monkeypatch
+) -> None:
+    """An INDETERMINATE terminate (identity unreadable; slot left untouched, its
+    per-slot warning already printed) is a survivor exactly like
+    KILL_UNCONFIRMED: the final summary's "still running" count must include it,
+    so "workspace closed" never silently overclaims."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "live")  # terminates cleanly (scripted below)
+    _write_self_pidfile(home, "unverifiable")  # left untouched by the sweep
+
+    async def scripted_terminate(home_arg, slot):
+        if slot == "live":
+            procspawn.pidfile_for(home_arg, slot).unlink()
+            return procspawn.TerminateResult.TERMINATED
+        return procspawn.TerminateResult.INDETERMINATE
+
+    monkeypatch.setattr(_workspace, "terminate_slot", scripted_terminate)
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 roster process(es) stopped" in out
+    assert "1 still running" in out
+    # The unverifiable slot's pidfile survives — the sweep never unlinked it.
+    assert procspawn.pidfile_for(home, "unverifiable").exists()
 
 
 # --- status -----------------------------------------------------------------
@@ -1404,10 +1435,19 @@ async def test_status_reconciliation_matrix(tmp_path, capsys) -> None:
     code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=probe)
     assert code == 0
     out = capsys.readouterr().out
-    assert "here_and_answering" in out and "running" in out
-    assert "started, not registered (see disco logs)" in out  # here_only
-    assert "running (another host)" in out  # remote_only
-    assert "tools" in out and "mcp-github" in out  # non-agent rows shown
+
+    def row_for(slot: str) -> str:
+        rows = [line for line in out.splitlines() if line.strip().startswith(slot)]
+        assert rows, f"no board row for {slot!r} in:\n{out}"
+        return rows[0]
+
+    # Row-bound assertions: each state phrase must sit on ITS slot's row, so a
+    # phrase leaking from another row can never satisfy the wrong case.
+    assert row_for("here_and_answering").rstrip().endswith("running")
+    assert "started, not registered (see disco logs)" in row_for("here_only")
+    assert "running (another host)" in row_for("remote_only")
+    assert row_for("tools").rstrip().endswith("running")
+    assert row_for("mcp-github").rstrip().endswith("running")
 
 
 async def test_status_broker_unreachable_shows_pidfiles_only(tmp_path, capsys) -> None:
@@ -1545,3 +1585,223 @@ def test_lifecycle_does_not_import_aiokafka() -> None:
         "isolation subprocess exited 0 but did not run to completion\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+# --- stop/status honesty: scan failures, teardown verification, survivors ------
+
+
+class _FailingSpawn:
+    """A blocking-spawn seam that fails (e.g. a wedged `down` hitting its timeout)."""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self._exc = exc or subprocess.TimeoutExpired(cmd="process-compose down", timeout=20)
+
+    def __call__(self, argv) -> None:
+        self.calls.append(list(argv))
+        raise self._exc
+
+
+async def test_stop_scan_error_does_not_claim_closed(tmp_path, capsys, monkeypatch) -> None:
+    """An unreadable state/run means the roster sweep saw NOTHING — `disco stop`
+    must report the scan failure (rc 1), not claim `workspace closed` over
+    processes it never saw. Nothing is torn down under unknown state."""
+    home = _home(tmp_path)
+
+    def raising(home_arg):
+        raise _workspace.SlotScanError(Path(home) / "state" / "run", OSError("Permission denied"))
+
+    monkeypatch.setattr(_workspace, "iter_slot_pidfiles", raising)
+    spawn_blocking = _RecordingSpawn()
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    assert spawn_blocking.calls == []  # no down under unknown roster state
+    out = capsys.readouterr().out
+    assert "roster state unknown" in out
+    assert "workspace closed" not in out
+
+
+async def test_stop_down_failure_reports_teardown_uncertain(tmp_path, fake_pc_bin, capsys) -> None:
+    """A `down` that raises (here: its bounded timeout) must not read as closed —
+    one clean line, rc 1, no raw traceback."""
+    home = _home(tmp_path)
+    spawn_blocking = _FailingSpawn()
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    assert len(spawn_blocking.calls) == 1
+    out = capsys.readouterr().out
+    assert "teardown may not have completed" in out
+    assert "disco status" in out
+    assert "workspace closed" not in out
+
+
+async def test_stop_verifies_the_supervisor_actually_stopped(tmp_path, fake_pc_bin, capsys) -> None:
+    """`down` returning is not proof: stop re-probes, and a supervisor still
+    answering must not be reported closed."""
+    home = _home(tmp_path)
+    spawn_blocking = _RecordingSpawn()  # succeeds but does nothing
+    client = _StubClient(project_state_results=[{"running": True}, {"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "teardown may not have completed" in out
+    assert "workspace closed" not in out
+
+
+async def test_status_not_running_notes_local_survivors(tmp_path, capsys) -> None:
+    """Supervisor down + detached roster processes alive: status must say so
+    rather than implying the host is idle."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    client = _StubClient(project_state_results=[RuntimeError("not up")])
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "not running" in out.lower()
+    assert "1 detached roster process(es) still running locally" in out
+    assert "assistant" in out
+    assert "disco stop" in out
+
+
+async def test_status_scan_error_degrades_with_a_warning(tmp_path, capsys, monkeypatch) -> None:
+    home = _home(tmp_path)
+
+    def raising(home_arg):
+        raise _workspace.SlotScanError(Path(home) / "state" / "run", OSError("Permission denied"))
+
+    monkeypatch.setattr(_workspace, "live_slots", raising)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+
+    assert code == 0  # read-only status still renders the substrate
+    out = capsys.readouterr().out
+    assert "broker" in out
+    assert "roster state unknown" in out
+
+
+async def test_status_renders_an_unverifiable_slot_honestly(tmp_path, capsys, monkeypatch) -> None:
+    """Identity-read failure on a live pid: the row must say the state is unknown
+    — neither `running` nor the `exited` lie (which would invite a sweep)."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    rows = [line for line in out.splitlines() if line.strip().startswith("assistant")]
+    assert rows, out
+    assert "cannot verify" in rows[0]
+    assert "exited" not in rows[0]
+
+
+async def test_status_default_probe_is_the_shared_workspace_seam(tmp_path, monkeypatch, capsys) -> None:
+    """With no probe injected, status resolves it through _workspace.resolve_probe
+    (the shared seam) — not by reaching into roster's privates."""
+    seen: list[str] = []
+
+    def fake_resolve(probe):
+        assert probe is None
+
+        async def _probe(server_urls: str) -> list[str]:
+            seen.append(server_urls)
+            return []
+
+        return _probe
+
+    monkeypatch.setattr(_workspace, "resolve_probe", fake_resolve)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(_home(tmp_path), server_urls="localhost:9092", client=client)
+
+    assert code == 0
+    assert seen == ["localhost:9092"]
+
+
+# --- start: teardown honesty on the failure paths -------------------------------
+
+
+async def test_start_priming_failure_with_failing_teardown_is_honest(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not yet"), {"ok": True}],
+        update_project_raises=RuntimeError("reconcile refused"),
+    )
+    spawn = _RecordingSpawn()
+    spawn_blocking = _FailingSpawn()
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=spawn,
+        spawn_blocking=spawn_blocking,
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 1
+    assert len(spawn_blocking.calls) == 1  # the teardown was attempted
+    out = capsys.readouterr().out
+    assert "teardown may not have completed" in out
+    assert "tore it down" not in out
+    assert "disco stop" in out or "disco status" in out
+
+
+async def test_start_readiness_timeout_with_failing_teardown_is_honest(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not yet"), {"ok": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Not Ready"}] * 200,
+    )
+    spawn = _RecordingSpawn()
+    spawn_blocking = _FailingSpawn()
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=spawn,
+        spawn_blocking=spawn_blocking,
+        clock=clock,
+        sleep=clock.sleep,
+        ready_timeout_s=5,
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "did not become ready" in out
+    assert "teardown may not have completed" in out
+    assert "tore down the workspace" not in out

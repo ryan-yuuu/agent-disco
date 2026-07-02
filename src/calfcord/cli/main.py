@@ -412,9 +412,12 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
             return asyncio.run(roster.agent_stop_all(home))
         return asyncio.run(roster.agent_stop(home, name=args.name))
     if command == "restart":
+        # Restart is a spawn verb too: thread the same broker URL start uses so
+        # its gate + duplicate probe read the operator's configured broker.
+        server_urls = os.getenv("CALF_HOST_URL") or "localhost"
         if args.all:
-            return asyncio.run(roster.agent_restart_all(home))
-        return asyncio.run(roster.agent_restart(home, name=args.name))
+            return asyncio.run(roster.agent_restart_all(home, server_urls=server_urls))
+        return asyncio.run(roster.agent_restart(home, name=args.name, server_urls=server_urls))
 
     # ``start`` (and ``start --all``) additionally consult the broker-wide
     # live-roster (mesh) probe, so they need the broker URL. ``start --all`` targets
