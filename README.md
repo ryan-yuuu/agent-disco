@@ -45,10 +45,10 @@
 | src/calfcord/cli/agent\_lifecycle.py          |      109 |        2 |       34 |        1 |     98% |249-250, 264-\>266 |
 | src/calfcord/cli/agent\_tools.py              |       89 |        9 |       26 |        1 |     91% |56, 139-144, 223-228 |
 | src/calfcord/cli/deploy.py                    |       86 |        1 |       30 |        2 |     97% |488-\>493, 497 |
-| src/calfcord/cli/discord\_discovery.py        |      187 |       17 |       48 |        8 |     89% |204-205, 229-231, 250, 352, 356, 463-\>461, 488-489, 508, 515, 523-524, 532-534 |
+| src/calfcord/cli/discord\_discovery.py        |      187 |       17 |       48 |        8 |     89% |206-207, 231-233, 252, 354, 358, 465-\>463, 490-491, 510, 517, 525-526, 534-536 |
 | src/calfcord/cli/doctor.py                    |      164 |        5 |       66 |        0 |     98% |    99-103 |
 | src/calfcord/cli/explain.py                   |       17 |        0 |        2 |        0 |    100% |           |
-| src/calfcord/cli/init.py                      |      268 |        0 |       58 |        2 |     99% |493-\>495, 605-\>exit |
+| src/calfcord/cli/init.py                      |      269 |        0 |       58 |        2 |     99% |494-\>496, 606-\>exit |
 | src/calfcord/cli/logs.py                      |       77 |        0 |       28 |        0 |    100% |           |
 | src/calfcord/cli/main.py                      |      338 |       11 |      140 |        5 |     97% |450, 470, 496, 786-788, 830-831, 848-849, 874 |
 | src/calfcord/cli/mcp\_admin.py                |      182 |       16 |       74 |        4 |     91% |92, 98-\>100, 198, 276-278, 303-321 |
@@ -90,7 +90,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7648** |  **537** | **2044** |  **104** | **92%** |           |
+| **TOTAL**                                     | **7649** |  **537** | **2044** |  **104** | **92%** |           |
 
 
 ## Setup coverage badge
