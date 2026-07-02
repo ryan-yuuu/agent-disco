@@ -18,12 +18,15 @@ Grab two values to hand to `disco init` when it asks (it writes them to
    **New Application** → name it → **Create**.
 2. On **General Information**, copy the **Application ID** — this is
    `DISCORD_APPLICATION_ID`.
-3. Open the **Bot** tab → **Reset Token** → **Copy** — this is
-   `DISCORD_BOT_TOKEN`. (There's no separate "create bot" step — every new app
-   already has a bot user, so this tab is where it lives.) Discord shows the
-   token **only once**, so copy it right away; if you lose it, just **Reset
-   Token** again. Treat it like a password; `init` verifies it on the spot when
-   you paste it.
+3. Get the bot token — this is `DISCORD_BOT_TOKEN`:
+   - Open the **Bot** tab.
+   - Click **Reset Token**.
+   - Click **Copy**.
+
+   There's no separate "create bot" step — every new app already has a bot user,
+   so this tab is where it lives. Discord shows the token **only once**, so copy
+   it right away; if you lose it, just **Reset Token** again. Treat it like a
+   password; `init` verifies it on the spot when you paste it.
 
 ## 2. Enable two intents
 
