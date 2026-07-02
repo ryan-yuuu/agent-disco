@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 
 from calfcord.health.check import BrokerProbe
-from calfcord.supervisor import _workspace, procspawn
+from calfcord.supervisor import _slot_ops, _workspace
 from calfcord.supervisor._workspace import (
     BROKER_UNREACHABLE_HINT,
     WORKSPACE_NOT_RUNNING_HINT,
@@ -34,7 +34,6 @@ from calfcord.supervisor._workspace import (
     workspace_is_up,
 )
 from calfcord.supervisor.client import ProcessComposeClient
-from calfcord.supervisor.procspawn import TerminateResult
 
 # The one shared broker-gate refusal, aliased like the not-running hint so every
 # lifecycle surface speaks with one voice.
@@ -59,15 +58,6 @@ def _component_argv(launcher: str, name: str) -> list[str]:
     """The argv that spawns component ``name`` — the SAME command the PC slot ran
     (``<launcher> run <name>``, e.g. ``... run tools``)."""
     return [launcher, "run", name]
-
-
-def _report_boot_crash(home: str, name: str) -> None:
-    """The honest failure line for a spawn that exited within its confirmation
-    window — names the slot's log (where the crash traceback landed)."""
-    print(
-        f"error: {name} exited immediately after start — "
-        f"see {procspawn.log_path_for(home, name)}"
-    )
 
 
 async def component_start(
@@ -112,22 +102,7 @@ async def component_start(
         print(_BROKER_UNREACHABLE_HINT)
         return 1
 
-    try:
-        with _workspace.slot_mutation(home, name):
-            restarted = _workspace.slot_is_live(home, name)
-            if restarted:
-                await _workspace.terminate_slot(home, name)
-            if not await _workspace.launch_slot(home, name, _component_argv(launcher, name)):
-                _report_boot_crash(home, name)
-                return 1
-            print(f"{name} {'restarted' if restarted else 'started'}")
-            return 0
-    except _workspace.SlotBusyError:
-        print(f"{name} is already being started here (another disco command holds its slot).")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
+    return await _slot_ops.start_slot(home, name, _component_argv(launcher, name), label=name)
 
 
 async def component_stop(
@@ -154,20 +129,7 @@ async def component_stop(
         print(_NOT_RUNNING_HINT)
         return 1
 
-    try:
-        with _workspace.slot_mutation(home, name):
-            result = await _workspace.terminate_slot(home, name)
-    except _workspace.SlotBusyError:
-        print(f"{name} is being started/stopped by another disco command; skipped.")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
-    if result in (TerminateResult.TERMINATED, TerminateResult.KILLED):
-        print(f"{name} stopped")
-    else:
-        print(f"{name} is not running here")
-    return 0
+    return await _slot_ops.stop_slot(home, name, label=name)
 
 
 async def component_restart(
@@ -204,17 +166,4 @@ async def component_restart(
         print(_BROKER_UNREACHABLE_HINT)
         return 1
 
-    try:
-        with _workspace.slot_mutation(home, name):
-            await _workspace.terminate_slot(home, name)
-            if not await _workspace.launch_slot(home, name, _component_argv(launcher, name)):
-                _report_boot_crash(home, name)
-                return 1
-            print(f"{name} restarted")
-            return 0
-    except _workspace.SlotBusyError:
-        print(f"{name} is already being restarted here (another disco command holds its slot).")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
+    return await _slot_ops.restart_slot(home, name, _component_argv(launcher, name), label=name)

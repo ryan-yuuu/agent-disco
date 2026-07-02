@@ -26,7 +26,7 @@ import os
 
 from calfcord.health.check import BrokerProbe
 from calfcord.mcp.selector import is_valid_server_name
-from calfcord.supervisor import _workspace, procspawn
+from calfcord.supervisor import _slot_ops, _workspace
 from calfcord.supervisor._workspace import (
     BROKER_UNREACHABLE_HINT,
     WORKSPACE_NOT_RUNNING_HINT,
@@ -36,7 +36,6 @@ from calfcord.supervisor._workspace import (
 from calfcord.supervisor.client import ProcessComposeClient
 from calfcord.supervisor.compose import MCP_SLOT_PREFIX
 from calfcord.supervisor.compose import mcp_slot_name as slot_name
-from calfcord.supervisor.procspawn import TerminateResult
 
 _NOT_RUNNING_HINT = WORKSPACE_NOT_RUNNING_HINT
 
@@ -50,13 +49,9 @@ def _mcp_argv(launcher: str, server: str) -> list[str]:
     return [launcher, "run", "mcp", server]
 
 
-def _report_boot_crash(home: str, server: str) -> None:
-    """The honest failure line for a spawn that exited within its confirmation
-    window — names the slot's log (where the crash traceback landed)."""
-    print(
-        f"error: mcp server {server} exited immediately after start — "
-        f"see {procspawn.log_path_for(home, slot_name(server))}"
-    )
+def _label(server: str) -> str:
+    """The operator-facing noun for ``server`` in every printed outcome line."""
+    return f"mcp server {server}"
 
 
 def _check_server_name(server: str) -> bool:
@@ -89,29 +84,13 @@ def running_servers(home: str | os.PathLike[str]) -> set[str]:
 async def _start_or_restart(home: str, launcher: str, server: str) -> int:
     """Spawn (or terminate + re-spawn) one server; workspace + broker already gated.
 
-    The whole check-alive → terminate → spawn → confirm section runs under the
-    slot-mutation locks (no double-spawn from concurrent starts; no interleave
-    with a ``disco stop`` sweep), and the spawn must survive its confirmation
-    window — a crash-on-boot reports the log path and returns ``1``; success says
-    ``started``/``restarted`` (presence is the callers' watchers' job).
+    The shared locked choreography (:func:`_slot_ops.start_slot`) does the work;
+    this adapter only maps the bare server name onto its ``mcp-<server>`` slot,
+    argv, and printed noun.
     """
-    slot = slot_name(server)
-    try:
-        with _workspace.slot_mutation(home, slot):
-            restarted = _workspace.slot_is_live(home, slot)
-            if restarted:
-                await _workspace.terminate_slot(home, slot)
-            if not await _workspace.launch_slot(home, slot, _mcp_argv(launcher, server)):
-                _report_boot_crash(home, server)
-                return 1
-            print(f"mcp server {server} {'restarted' if restarted else 'started'}")
-            return 0
-    except _workspace.SlotBusyError:
-        print(f"mcp server {server} is already being started here (another disco command holds its slot).")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
+    return await _slot_ops.start_slot(
+        home, slot_name(server), _mcp_argv(launcher, server), label=_label(server)
+    )
 
 
 async def mcp_start(
@@ -168,20 +147,7 @@ async def mcp_stop(
         print(_NOT_RUNNING_HINT)
         return 1
 
-    try:
-        with _workspace.slot_mutation(home, slot_name(server)):
-            result = await _workspace.terminate_slot(home, slot_name(server))
-    except _workspace.SlotBusyError:
-        print(f"mcp server {server} is being started/stopped by another disco command; skipped.")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
-    if result in (TerminateResult.TERMINATED, TerminateResult.KILLED):
-        print(f"mcp server {server} stopped")
-    else:
-        print(f"mcp server {server} is not running here")
-    return 0
+    return await _slot_ops.stop_slot(home, slot_name(server), label=_label(server))
 
 
 async def mcp_restart(
@@ -213,21 +179,9 @@ async def mcp_restart(
         print(_BROKER_UNREACHABLE_HINT)
         return 1
 
-    slot = slot_name(server)
-    try:
-        with _workspace.slot_mutation(home, slot):
-            await _workspace.terminate_slot(home, slot)
-            if not await _workspace.launch_slot(home, slot, _mcp_argv(launcher, server)):
-                _report_boot_crash(home, server)
-                return 1
-            print(f"mcp server {server} restarted")
-            return 0
-    except _workspace.SlotBusyError:
-        print(f"mcp server {server} is already being restarted here (another disco command holds its slot).")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
+    return await _slot_ops.restart_slot(
+        home, slot_name(server), _mcp_argv(launcher, server), label=_label(server)
+    )
 
 
 async def mcp_start_all(

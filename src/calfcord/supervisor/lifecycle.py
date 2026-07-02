@@ -708,7 +708,6 @@ async def status(
     server_urls: str,
     client: ProcessComposeClient | None = None,
     probe: Callable[[str], Awaitable[list[str]]] | None = None,
-    clock: Clock | None = None,
 ) -> int:
     """Render a glanceable org board, or a "not running" hint (§12.6).
 
@@ -731,8 +730,7 @@ async def status(
     broker-unreachable probe degrades to the pidfile-only view with a note
     (read-only status must never crash).
 
-    ``probe`` / ``client`` are injected for testing; ``clock`` is accepted for
-    symmetry with ``start`` and is unused today.
+    ``probe`` / ``client`` are injected for testing.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)

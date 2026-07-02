@@ -10,10 +10,10 @@ crash shows the agent offline and an operator restarts it). The shared
 spawn/terminate/scan glue is :mod:`calfcord.supervisor._workspace`.
 
 Every world-touching dependency is still injected — the broker-wide live-roster
-probe (a read of calfkit's native mesh, :func:`_probe_live_roster`), the Process
-Compose REST client (only for the substrate workspace check), and the clock — so
-the whole flow is unit-testable with no real ``process-compose`` binary, no broker,
-and (with the procspawn primitives stubbed) no real child processes.
+probe (a read of calfkit's native mesh, :func:`_probe_live_roster`) and the Process
+Compose REST client (only for the substrate workspace check) — so the whole flow
+is unit-testable with no real ``process-compose`` binary, no broker, and (with
+the procspawn primitives stubbed) no real child processes.
 
 Three design contracts from the redesign live here:
 
@@ -55,7 +55,7 @@ from collections.abc import Awaitable, Callable
 from calfkit.client import Client
 
 from calfcord.health.check import BrokerProbe
-from calfcord.supervisor import _workspace, procspawn
+from calfcord.supervisor import _slot_ops, _workspace
 from calfcord.supervisor._workspace import (
     WORKSPACE_NOT_RUNNING_HINT,
     resolve_client,
@@ -64,7 +64,6 @@ from calfcord.supervisor._workspace import (
 from calfcord.supervisor.client import ProcessComposeClient
 from calfcord.supervisor.compose import _RESERVED_PROCESS_NAMES as _NON_AGENT_PROCESSES
 from calfcord.supervisor.compose import MCP_SLOT_PREFIX
-from calfcord.supervisor.procspawn import TerminateResult
 
 # A broker-wide live-roster probe: hand it ``server_urls`` and it returns the
 # NAMES of every agent currently online across the org. Injected so tests script
@@ -78,11 +77,6 @@ Probe = Callable[[str], Awaitable[list[str]]]
 # TOTAL and errs slightly higher. A probe that exceeds it degrades exactly like
 # a broker-down probe (the callers warn and proceed / show physical-only).
 _DEFAULT_PROBE_TIMEOUT_S = 5.0
-
-# A wall clock, accepted for symmetry with ``lifecycle.status`` and future
-# freshness reconciliation. Unused today; kept so callers need not special-case
-# the roster ops when they grow a time dimension.
-Clock = Callable[[], float]
 
 # The single hint shown when an op needs a running workspace and there isn't one;
 # the one shared :data:`_workspace.WORKSPACE_NOT_RUNNING_HINT` (Fix #14), aliased
@@ -193,13 +187,9 @@ def _non_agent_error(name: str, verb: str) -> str | None:
     return None
 
 
-def _report_boot_crash(home: str, name: str) -> None:
-    """The honest failure line for a spawn that exited within its confirmation
-    window — names the slot's log (where the crash traceback landed)."""
-    print(
-        f"error: agent {name} exited immediately after start — "
-        f"see {procspawn.log_path_for(home, name)}"
-    )
+def _label(name: str) -> str:
+    """The operator-facing noun for agent ``name`` in every printed outcome line."""
+    return f"agent {name}"
 
 
 async def agent_start(
@@ -211,7 +201,6 @@ async def agent_start(
     client: ProcessComposeClient | None = None,
     probe: Probe | None = None,
     live: list[str] | None = None,
-    now: Clock | None = None,
     broker_probe: BrokerProbe | None = None,
 ) -> int:
     """Bring agent ``name`` up: a teammate clocking into the live org (§3.5).
@@ -248,8 +237,7 @@ async def agent_start(
     is the pre-resolved broker-wide roster: when given (the ``start --all`` sweep
     probes AND gates once, threading it in), the duplicate guard reads it directly
     and neither re-probes nor re-gates — so N agents cost ONE probe and ONE
-    aggregate warning, not N. ``now`` is accepted for symmetry with the rest of the
-    lifecycle surface and is unused today.
+    aggregate warning, not N.
     """
     error = _non_agent_error(name, "start")
     if error is not None:
@@ -290,24 +278,7 @@ async def agent_start(
             print(f"agent {name} is already running in the organization")
             return 0
 
-    try:
-        with _workspace.slot_mutation(home, name):
-            restarted = _workspace.slot_is_live(home, name)
-            if restarted:
-                await _workspace.terminate_slot(home, name)
-            if not await _workspace.launch_slot(home, name, _agent_argv(launcher, name)):
-                _report_boot_crash(home, name)
-                return 1
-            print(f"agent {name} {'restarted' if restarted else 'started'}")
-            return 0
-    except _workspace.SlotBusyError:
-        # A concurrent start already holds the slot: a benign duplicate action,
-        # reported honestly rather than double-spawned.
-        print(f"agent {name} is already being started here (another disco command holds its slot).")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
+    return await _slot_ops.start_slot(home, name, _agent_argv(launcher, name), label=_label(name))
 
 
 async def agent_stop(
@@ -342,22 +313,7 @@ async def agent_stop(
         print(_NOT_RUNNING_HINT)
         return 1
 
-    try:
-        with _workspace.slot_mutation(home, name):
-            result = await _workspace.terminate_slot(home, name)
-    except _workspace.SlotBusyError:
-        print(f"agent {name} is being started/stopped by another disco command; skipped.")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
-    if result in (TerminateResult.TERMINATED, TerminateResult.KILLED):
-        print(f"agent {name} stopped")
-    else:
-        # None (no pidfile), ALREADY_DEAD, or NOT_OURS (recycled pid): nothing of
-        # ours was running here — the stale record, if any, has been swept.
-        print(f"agent {name} is not running here")
-    return 0
+    return await _slot_ops.stop_slot(home, name, label=_label(name))
 
 
 async def agent_restart(
@@ -398,20 +354,7 @@ async def agent_restart(
         print(_BROKER_UNREACHABLE_HINT)
         return 1
 
-    try:
-        with _workspace.slot_mutation(home, name):
-            await _workspace.terminate_slot(home, name)
-            if not await _workspace.launch_slot(home, name, _agent_argv(launcher, name)):
-                _report_boot_crash(home, name)
-                return 1
-            print(f"agent {name} restarted")
-            return 0
-    except _workspace.SlotBusyError:
-        print(f"agent {name} is already being restarted here (another disco command holds its slot).")
-        return 0
-    except _workspace.WorkspaceBusyError as exc:
-        print(f"error: {exc}")
-        return 1
+    return await _slot_ops.restart_slot(home, name, _agent_argv(launcher, name), label=_label(name))
 
 
 async def agent_start_all(
@@ -422,7 +365,6 @@ async def agent_start_all(
     launcher: str | None = None,
     client: ProcessComposeClient | None = None,
     probe: Probe | None = None,
-    now: Clock | None = None,
     broker_probe: BrokerProbe | None = None,
 ) -> int:
     """Bring every DEFINED agent up on this host (``start --all``, behavior #1).
@@ -607,7 +549,7 @@ async def agent_restart_all(
             with _workspace.slot_mutation(home, name):
                 await _workspace.terminate_slot(home, name)
                 if not await _workspace.launch_slot(home, name, _agent_argv(launcher, name)):
-                    _report_boot_crash(home, name)
+                    _slot_ops.report_boot_crash(home, name, label=_label(name))
                     failures += 1
                     continue
         except _workspace.SlotBusyError:
@@ -631,7 +573,6 @@ async def agent_ps(
     server_urls: str,
     client: ProcessComposeClient | None = None,
     probe: Probe | None = None,
-    now: Clock | None = None,
 ) -> int:
     """Render the running-roster board: the §3.4 logical-plus-physical union.
 
@@ -654,8 +595,7 @@ async def agent_ps(
     * logical **only** → ``running on another host`` (expected under multi-host —
       this is NOT an error; the physical half is host-local by design).
 
-    ``probe`` / ``client`` are injected for testing; ``now`` is accepted for
-    symmetry with the lifecycle surface and is unused today.
+    ``probe`` / ``client`` are injected for testing.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)
