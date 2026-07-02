@@ -718,6 +718,28 @@ def test_live_finish_starts_substrate_then_agent_then_watches_reply(tmp_path: Pa
     assert finish.reply_calls[0]["agent_id"] == "scribe"
 
 
+def test_live_finish_reboot_note_says_agents_do_not_auto_start(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After a reboot `disco start` reopens only the SUBSTRATE — the detached
+    roster does not auto-start, so the live finish's reboot note must name
+    `disco agent start --all` or the operator's agents stay silently offline."""
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=_FinishStub(reply=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "disco agent start --all" in out
+
+
+def test_manual_finish_reboot_note_says_agents_do_not_auto_start(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The manual-degrade path's reboot note carries the same steer."""
+    rc = _run(_prompter(name="scribe"), tmp_path, home=None, finish=_FinishStub())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "disco agent start --all" in out
+
+
 def test_live_finish_uses_broker_url_written_by_wizard_not_pre_wizard(tmp_path: Path) -> None:
     """The live finish must use the broker URL the *wizard* wrote in its broker
     phase, NOT the pre-wizard ``server_urls`` captured before the wizard ran.
@@ -1205,25 +1227,11 @@ def test_empty_token_on_rerun_keeps_existing_secret(tmp_path: Path) -> None:
     assert read_env(env_path)["DISCORD_BOT_TOKEN"] == "tok-original"
 
 
-def test_live_finish_passes_configured_mcp_servers(tmp_path: Path, monkeypatch) -> None:
-    """The live finish enumerates mcp.json (the same no-secrets seam
-    ``disco start`` uses) so the workspace declares the mcp-<server>
-    slots from the first boot."""
-    config = tmp_path / "config"
-    config.mkdir()
-    (config / "mcp.json").write_text('{"mcpServers": {"github": {"command": "x"}}}')
-    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
-    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
-    finish = _FinishStub(reply=True)
-    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
-    assert rc == 0
-    assert finish.start_calls[0]["mcp_servers"] == ["github"]
-
-
-def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, capsys) -> None:
-    """Onboarding must reach a live org even when mcp.json is broken: warn and
-    start with no MCP slots (the strict readers — `disco start`, `mcp
-    start` — surface the config error for fixing)."""
+def test_live_finish_ignores_broken_mcp_config(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Onboarding must reach a live org even when mcp.json is broken: the live
+    finish opens a substrate-only workspace and never consults mcp.json (the
+    strict readers — `disco start`, `mcp start` — surface the config error
+    for fixing afterwards)."""
     config = tmp_path / "config"
     config.mkdir()
     (config / "mcp.json").write_text("{not json")
@@ -1232,8 +1240,8 @@ def test_live_finish_tolerates_broken_mcp_config(tmp_path: Path, monkeypatch, ca
     finish = _FinishStub(reply=True)
     rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
     assert rc == 0
-    assert finish.start_calls[0]["mcp_servers"] == []
-    assert "mcp.json" in capsys.readouterr().out
+    assert len(finish.start_calls) == 1
+    assert "mcp_servers" not in finish.start_calls[0]
 
 
 # --- _wait_for_agent_online body (the mesh presence-poll; previously monkeypatched away) ---

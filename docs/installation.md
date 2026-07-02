@@ -69,14 +69,14 @@ Discord bridge, kept alive in the background by a process supervisor the
 installer bootstraps ([Process Compose](https://f1bonacc1.github.io/process-compose),
 a single static binary, downloaded to `~/.calfcord/bin/process-compose` — the
 same way the Tansu broker binary is). You never edit the supervisor's config;
-Agent Disco generates it from your agents and `.env`.
+Agent Disco generates it from your config.
 
 Two layers are worth keeping straight:
 
 - **The substrate** — the broker and the bridge. This is the always-on office.
   `disco start` brings it up (detached, health-gated); `disco stop` closes
-  it. `start` brings up **only** the substrate — nothing else runs that you
-  didn't ask for.
+  the whole workspace (substrate **and** roster). `start` brings up **only** the
+  substrate — nothing else runs that you didn't ask for.
 - **The roster** — your agents, the tools host, and any MCP servers. These
   are teammates that clock into the running office on demand:
   `disco agent start <name>`, `disco tools start`, and so on.
@@ -224,6 +224,20 @@ disco self status      # check whether a newer version is available
 disco self update      # upgrade to the latest
 disco self rollback    # undo the last update
 ```
+
+`disco self update` does not stop a running workspace, so restart it before
+or right after upgrading — the old processes keep running the old code until
+you do:
+
+```bash
+disco stop && disco start && disco agent start --all
+```
+
+Upgrading from an older calfcord (one whose supervisor still ran the agents
+itself)? The commands that *spawn* processes (`agent start`/`restart`, `tools
+start`/`restart`, `mcp start`/`restart`) will refuse with "this workspace was
+started by an older calfcord" until you run exactly that stop/start cycle —
+`stop` and `status` keep working so you can wind the old workspace down.
 
 ## Uninstall
 

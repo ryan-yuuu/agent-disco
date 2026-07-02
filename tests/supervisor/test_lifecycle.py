@@ -11,6 +11,7 @@ each branch. No wall-clock waits: ``sleep`` advances a fake monotonic clock.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from calfcord.supervisor import lifecycle
+from calfcord.supervisor import _workspace, lifecycle, procspawn
 
 # --- fakes ------------------------------------------------------------------
 
@@ -67,6 +68,7 @@ class _StubClient:
         project_state_results: list | None = None,
         bridge_states: list | None = None,
         list_processes_result: list | None = None,
+        list_processes_raises: Exception | None = None,
         update_project_raises: Exception | None = None,
         process_info: object = None,
         process_info_raises: Exception | None = None,
@@ -74,6 +76,9 @@ class _StubClient:
         self._project_state_results = list(project_state_results or [])
         self._bridge_states = list(bridge_states or [])
         self._list_processes_result = list_processes_result or []
+        # When set, the process-list read fails the way the real client signals a
+        # transport error (the supervisor died between two REST calls): a raise.
+        self._list_processes_raises = list_processes_raises
         # When set, the priming reconcile (the buggy first project-update) fails the
         # way the real client signals a PC reconcile / transport error: a raise.
         self._update_project_raises = update_project_raises
@@ -120,6 +125,8 @@ class _StubClient:
         return self._process_info
 
     async def list_processes(self):
+        if self._list_processes_raises is not None:
+            raise self._list_processes_raises
         return self._list_processes_result
 
 
@@ -131,6 +138,74 @@ async def _reachable_broker() -> bool:
 
 def _home(tmp_path: Path) -> str:
     return str(tmp_path)
+
+
+def _define_agent(tmp_path: Path, name: str = "assistant") -> None:
+    """Drop an ``agents/<name>.md`` under the test home.
+
+    Phase 3 dropped ``start``'s ``agent_ids`` param: the success banners' create-
+    vs-start signpost now reads the home's agents dir directly (a glob — the file
+    is never parsed), so tests that want the "agent start" steer define one.
+    """
+    agents = tmp_path / "agents"
+    agents.mkdir(exist_ok=True)
+    (agents / f"{name}.md").write_text(f"---\nname: {name}\n---\nbody\n")
+
+
+@pytest.fixture(autouse=True)
+def _no_agents_dir_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The signpost honours $CALFKIT_AGENTS_DIR; keep the host env out of tests."""
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+
+class _StubProbe:
+    """A scriptable mesh probe for status (returns agent NAMES or raises)."""
+
+    def __init__(self, names: list[str] | None = None, *, raises: Exception | None = None) -> None:
+        self._names = list(names or [])
+        self._raises = raises
+        self.calls: list[str] = []
+
+    async def __call__(self, server_urls: str) -> list[str]:
+        self.calls.append(server_urls)
+        if self._raises is not None:
+            raise self._raises
+        return list(self._names)
+
+
+def _write_self_pidfile(home, slot: str) -> Path:
+    """Write a pidfile naming THIS (alive, ours) process for ``slot`` — safe to scan,
+    NEVER pass to a terminate path (it would signal the test runner)."""
+    record = procspawn._identity_for(os.getpid(), ("self",))
+    pidfile = procspawn.pidfile_for(home, slot)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(json.dumps(procspawn._record_to_dict(record)), encoding="utf-8")
+    return pidfile
+
+
+def _write_stale_pidfile(home, slot: str) -> Path:
+    """Write a pidfile naming a reaped (dead) pid for ``slot``."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    pidfile = procspawn.pidfile_for(home, slot)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(
+        json.dumps({"v": 1, "pid": proc.pid, "argv": ["gone"], "start_token": "x", "spawn_ts": 0.0, "argv_hash": "x"}),
+        encoding="utf-8",
+    )
+    return pidfile
+
+
+def _write_not_ours_pidfile(home, slot: str) -> Path:
+    """Write a pidfile naming an alive-but-NOT-ours pid (init, pid 1) — a recycled-pid
+    stale file. Safe: terminate refuses to signal a pid it cannot prove is ours."""
+    pidfile = procspawn.pidfile_for(home, slot)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(
+        json.dumps({"v": 1, "pid": 1, "argv": ["init"], "start_token": "bogus", "spawn_ts": 0.0, "argv_hash": "x"}),
+        encoding="utf-8",
+    )
+    return pidfile
 
 
 def _make_fake_binary(path: Path) -> str:
@@ -276,7 +351,6 @@ async def test_start_idempotent_when_already_running(tmp_path, capsys) -> None:
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -313,7 +387,6 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -361,12 +434,13 @@ async def test_supervisor_belongs_to_home_returns_none_when_info_unavailable() -
 # --- start: happy path ------------------------------------------------------
 
 
-async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) -> None:
-    """``start`` threads the caller-enumerated mcp.json server names through to
-    the compose generator, so each server gets its disabled ``mcp-<server>``
-    roster slot in the written project."""
+async def test_start_manifest_is_substrate_only(tmp_path, capsys, fake_pc_bin) -> None:
+    """Even with agents DEFINED for the install, the written project declares
+    ONLY the substrate — the roster (agents, ``tools``, ``mcp-<server>``) is
+    spawned off Process Compose."""
     import yaml as _yaml
 
+    _define_agent(tmp_path)
     home = _home(tmp_path)
     spawn = _RecordingSpawn()
     clock = _FakeClock()
@@ -382,8 +456,6 @@ async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) ->
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
-        mcp_servers=["github"],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -393,13 +465,12 @@ async def test_start_declares_mcp_server_slots(tmp_path, capsys, fake_pc_bin) ->
 
     assert code == 0
     project = _yaml.safe_load((tmp_path / "state" / "process-compose.yaml").read_text())
-    proc = project["processes"]["mcp-github"]
-    assert proc["command"] == "/h/shims/disco run mcp github"
-    assert proc["disabled"] is True
+    assert set(project["processes"]) == {"broker", "bridge"}
 
 
 
 async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
+    _define_agent(tmp_path)  # a defined roster steers the banner to `agent start`
     home = _home(tmp_path)
     spawn = _RecordingSpawn()
     clock = _FakeClock()
@@ -417,7 +488,6 @@ async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant", "scribe"],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -463,7 +533,8 @@ async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:
 
 
 async def test_start_zero_agents_signposts_create_not_start(tmp_path, capsys, fake_pc_bin) -> None:
-    """When no agents are DEFINED yet, the fresh-start success must point at
+    """When no agents are DEFINED yet (the home's agents dir is empty — ``start``
+    reads it directly for the signpost), the fresh-start success must point at
     ``disco agent create`` (there is nothing to ``agent start``) rather than the
     unconditional ``agent start`` steer — the empty-roster teaching moment."""
     home = _home(tmp_path)
@@ -478,7 +549,6 @@ async def test_start_zero_agents_signposts_create_not_start(tmp_path, capsys, fa
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -506,7 +576,6 @@ async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys)
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -520,6 +589,39 @@ async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys)
     assert "agent start" not in out
 
 
+async def test_start_signpost_honours_agents_dir_env_override(
+    tmp_path, capsys, fake_pc_bin, monkeypatch
+) -> None:
+    """The signpost's agents-dir read honours ``$CALFKIT_AGENTS_DIR`` — the same
+    override the shim, the runners, and ``init.resolve_paths`` honour — so an
+    install with a pinned agents dir is not misread as an empty org."""
+    override = tmp_path / "elsewhere"
+    override.mkdir()
+    (override / "scribe.md").write_text("---\nname: scribe\n---\nbody\n")
+    monkeypatch.setenv("CALFKIT_AGENTS_DIR", str(override))
+
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Ready"}],
+    )
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "disco agent start <name>" in out
+    assert "agent create" not in out
+
+
 async def test_start_log_dir_is_created(tmp_path, fake_pc_bin) -> None:
     home = _home(tmp_path)
     clock = _FakeClock()
@@ -531,7 +633,6 @@ async def test_start_log_dir_is_created(tmp_path, fake_pc_bin) -> None:
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -559,7 +660,6 @@ async def test_start_waits_for_rest_server_then_primes(tmp_path, fake_pc_bin) ->
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -595,7 +695,6 @@ async def test_start_fails_fast_when_external_broker_unreachable(
         home,
         server_urls="broker.example.com:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=_FakeClock(),
@@ -642,7 +741,6 @@ async def test_start_skips_broker_probe_for_compose_managed_loopback_broker(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -680,7 +778,6 @@ async def test_start_external_broker_manifest_omits_broker_slot(
         home,
         server_urls="broker.example.com:9092",
         launcher="/h/shims/disco",
-        agent_ids=["assistant"],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -692,7 +789,6 @@ async def test_start_external_broker_manifest_omits_broker_slot(
     procs = project["processes"]
     assert "broker" not in procs
     assert "depends_on" not in procs["bridge"]
-    assert "depends_on" not in procs["assistant"]
 
 
 # --- start: readiness timeout -> teardown -> non-zero -----------------------
@@ -716,7 +812,6 @@ async def test_start_readiness_timeout_tears_down_and_returns_nonzero(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         spawn_blocking=spawn_blocking,
@@ -763,7 +858,6 @@ async def test_start_running_but_not_ready_bridge_times_out_and_tears_down(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         clock=clock,
@@ -890,7 +984,6 @@ async def test_start_readiness_timeout_diagnoses_privileged_intents(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         spawn_blocking=_RecordingSpawn(),
@@ -903,8 +996,9 @@ async def test_start_readiness_timeout_diagnoses_privileged_intents(
     assert code == 1
     out = capsys.readouterr().out
     assert "Message Content" in out
-    # Still points the user at the log for the full traceback.
-    assert "process-compose.log" in out
+    # Points the user at the BRIDGE log — the file the diagnosis actually read
+    # (the supervisor log only records the readiness timeout).
+    assert "bridge.log" in out
 
 
 async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
@@ -923,7 +1017,6 @@ async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         spawn_blocking=_RecordingSpawn(),
@@ -936,7 +1029,10 @@ async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
     assert code == 1
     out = capsys.readouterr().out.lower()
     assert "likely the broker could not be reached" in out
-    assert "process-compose.log" in out
+    # The generic message points at the BRIDGE log too — the file the diagnoser
+    # reads and where the real traceback lands (the supervisor log only echoes
+    # the readiness timeout).
+    assert "bridge.log" in out
 
 
 async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
@@ -964,7 +1060,6 @@ async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=spawn,
         spawn_blocking=spawn_blocking,
@@ -1007,7 +1102,6 @@ async def test_start_server_up_timeout_returns_nonzero_without_priming(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -1036,7 +1130,6 @@ async def test_start_readiness_tolerates_transient_bridge_error(
         home,
         server_urls="localhost:9092",
         launcher="/h/shims/disco",
-        agent_ids=[],
         client=client,
         spawn=_RecordingSpawn(),
         clock=clock,
@@ -1135,13 +1228,169 @@ async def test_stop_issues_down_via_blocking_seam(tmp_path, fake_pc_bin) -> None
     assert int(argv[argv.index("-p") + 1]) == lifecycle.pc_port_for(home)
 
 
+async def test_stop_sweeps_live_roster_and_reports_count(tmp_path, fake_pc_bin, capsys) -> None:
+    """`disco stop` closes the roster too: a live detached process is terminated and
+    its pidfile cleared, and the count is reported honestly."""
+    home = _home(tmp_path)
+    spawn_blocking = _RecordingSpawn()
+    spawned = _workspace.spawn_slot(home, "assistant", [sys.executable, "-c", "import time; time.sleep(30)"])
+    assert _workspace.slot_is_live(home, "assistant")
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+    assert code == 0
+    assert not procspawn.pidfile_for(home, "assistant").exists()
+    assert len(spawn_blocking.calls) == 1  # substrate down still issued
+    assert "1 roster process(es) stopped" in capsys.readouterr().out
+    # No orphan left behind.
+    assert not _workspace.slot_is_live(home, "assistant")
+    _ = spawned
+
+
+async def test_stop_sweeps_stale_and_not_ours_pidfiles_silently(tmp_path, fake_pc_bin, capsys) -> None:
+    """Stale (dead pid) and not-ours (recycled pid) pidfiles are swept without a
+    signal and NOT counted as stopped processes."""
+    home = _home(tmp_path)
+    _write_stale_pidfile(home, "ghost")
+    _write_not_ours_pidfile(home, "stranger")
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+    assert code == 0
+    assert not procspawn.pidfile_for(home, "ghost").exists()
+    assert not procspawn.pidfile_for(home, "stranger").exists()
+    out = capsys.readouterr().out
+    assert "workspace closed." in out  # no "(N roster process(es) stopped)"
+
+
+async def test_stop_sweeps_orphaned_roster_when_substrate_down(tmp_path, capsys) -> None:
+    """Even with the substrate already down, `disco stop` still reaps an orphaned
+    live roster process (a crashed supervisor scenario)."""
+    home = _home(tmp_path)
+    _workspace.spawn_slot(home, "assistant", [sys.executable, "-c", "import time; time.sleep(30)"])
+    client = _StubClient(project_state_results=[RuntimeError("not up")])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+    assert code == 0
+    assert not _workspace.slot_is_live(home, "assistant")
+    assert "1 roster process(es) stopped" in capsys.readouterr().out
+
+
+async def test_stop_contended_lock_is_a_clean_error_not_a_traceback(tmp_path, capsys) -> None:
+    """A roster verb holds the lifecycle lock SHARED (for up to its spawn-confirm
+    window); `disco stop` racing it must print ONE clean error line and return 1 —
+    never dump a raw RuntimeError traceback (the CLI surface catches nothing)."""
+    home = _home(tmp_path)
+    spawn_blocking = _RecordingSpawn()
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    with _workspace.slot_mutation(home, "assistant"):
+        code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    assert spawn_blocking.calls == []  # nothing torn down mid-verb
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "in progress" in out
+    # The holder is a roster verb, not a start/stop — the message must not misname it.
+    assert "start/stop" not in out
+
+
+async def test_start_contended_lock_is_a_clean_error_not_a_traceback(tmp_path, capsys) -> None:
+    """Same for `disco start`: a contended lifecycle lock is a domain refusal."""
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    client = _StubClient(project_state_results=[RuntimeError("not up")])
+
+    with _workspace.slot_mutation(home, "assistant"):
+        code = await lifecycle.start(
+            home,
+            server_urls="localhost:9092",
+            launcher="/h/shims/disco",
+            client=client,
+            spawn=spawn,
+            clock=_FakeClock(),
+        )
+
+    assert code == 1
+    assert spawn.calls == []  # no second supervisor launched behind the holder
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "in progress" in out
+
+
+async def test_stop_reports_a_wedged_slot_truthfully(tmp_path, fake_pc_bin, capsys, monkeypatch) -> None:
+    """A slot whose terminate ended KILL_UNCONFIRMED (SIGKILL sent, pid never read
+    dead) must not be counted 'stopped' — the sweep reports it FROM THE ENUM and
+    keeps its live pidfile (mixed sweep: live + stale + wedged)."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "live")  # terminates cleanly (scripted below)
+    _write_stale_pidfile(home, "ghost")  # swept silently, never counted
+    _write_self_pidfile(home, "wedged")  # SIGKILLed but the process survives
+
+    async def scripted_terminate(home_arg, slot):
+        if slot == "live":
+            procspawn.pidfile_for(home_arg, slot).unlink()
+            return procspawn.TerminateResult.TERMINATED
+        if slot == "ghost":
+            procspawn.pidfile_for(home_arg, slot).unlink()
+            return None
+        # "wedged": SIGKILL sent, the reap window closed on a live pid — the
+        # (self, alive) pidfile stays and the enum says so.
+        return procspawn.TerminateResult.KILL_UNCONFIRMED
+
+    monkeypatch.setattr(_workspace, "terminate_slot", scripted_terminate)
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 roster process(es) stopped" in out
+    assert "1 still running" in out
+    assert "logs" in out
+    # The live pidfile of the survivor is kept — sweeping it would orphan the process.
+    assert procspawn.pidfile_for(home, "wedged").exists()
+    assert not procspawn.pidfile_for(home, "ghost").exists()
+
+
+async def test_stop_counts_an_indeterminate_survivor_as_still_running(
+    tmp_path, fake_pc_bin, capsys, monkeypatch
+) -> None:
+    """An INDETERMINATE terminate (identity unreadable; slot left untouched, its
+    per-slot warning already printed) is a survivor exactly like
+    KILL_UNCONFIRMED: the final summary's "still running" count must include it,
+    so "workspace closed" never silently overclaims."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "live")  # terminates cleanly (scripted below)
+    _write_self_pidfile(home, "unverifiable")  # left untouched by the sweep
+
+    async def scripted_terminate(home_arg, slot):
+        if slot == "live":
+            procspawn.pidfile_for(home_arg, slot).unlink()
+            return procspawn.TerminateResult.TERMINATED
+        return procspawn.TerminateResult.INDETERMINATE
+
+    monkeypatch.setattr(_workspace, "terminate_slot", scripted_terminate)
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 roster process(es) stopped" in out
+    assert "1 still running" in out
+    # The unverifiable slot's pidfile survives — the sweep never unlinked it.
+    assert procspawn.pidfile_for(home, "unverifiable").exists()
+
+
 # --- status -----------------------------------------------------------------
 
 
 async def test_status_not_running(tmp_path, capsys) -> None:
     home = _home(tmp_path)
     client = _StubClient(project_state_results=[RuntimeError("not up")])
-    code = await lifecycle.status(home, client=client)
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
     assert code == 0
     out = capsys.readouterr().out.lower()
     assert "not running" in out
@@ -1150,54 +1399,149 @@ async def test_status_not_running(tmp_path, capsys) -> None:
 
 async def test_status_running_renders_board(tmp_path, capsys) -> None:
     home = _home(tmp_path)
+    # Substrate rows come from PC; the agent's row comes from a live pidfile
+    # reconciled with the mesh probe.
+    _write_self_pidfile(home, "assistant")
     processes = [
         {"name": "broker", "status": "Running", "is_ready": "Ready"},
         {"name": "bridge", "status": "Running", "is_ready": "Ready"},
-        {"name": "assistant", "status": "Running", "is_ready": "-"},
     ]
     client = _StubClient(
         project_state_results=[{"running": True}],
         list_processes_result={"data": processes},
     )
-    code = await lifecycle.status(home, client=client)
+    code = await lifecycle.status(
+        home, server_urls="localhost:9092", client=client, probe=_StubProbe(["assistant"])
+    )
     assert code == 0
     out = capsys.readouterr().out
     for name in ("broker", "bridge", "assistant"):
         assert name in out
+    assert "running" in out
     # Reboot non-survival surfaced honestly somewhere (§12.6): the daemon is
     # session-scoped, so status must say so.
     assert "reboot" in out.lower()
 
 
-async def test_status_running_empty_roster(tmp_path, capsys) -> None:
+async def test_status_reconciliation_matrix(tmp_path, capsys) -> None:
+    """The three agent states + the pidfile-only tools/mcp rows."""
     home = _home(tmp_path)
-    # Only the substrate is up; the roster board must say "(none running)".
-    processes = [{"name": "broker", "status": "Running", "is_ready": "Ready"}]
+    _write_self_pidfile(home, "here_and_answering")  # pidfile + mesh -> running
+    _write_self_pidfile(home, "here_only")  # pidfile only -> not registered
+    _write_self_pidfile(home, "tools")  # non-agent -> running
+    _write_self_pidfile(home, "mcp-github")  # non-agent -> running
     client = _StubClient(
         project_state_results=[{"running": True}],
-        list_processes_result=processes,  # bare list (no "data" wrapper)
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
     )
-    code = await lifecycle.status(home, client=client)
+    probe = _StubProbe(["here_and_answering", "remote_only"])  # remote_only: mesh only
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=probe)
     assert code == 0
-    out = capsys.readouterr().out.lower()
-    assert "none running" in out
+    out = capsys.readouterr().out
+
+    def row_for(slot: str) -> str:
+        rows = [line for line in out.splitlines() if line.strip().startswith(slot)]
+        assert rows, f"no board row for {slot!r} in:\n{out}"
+        return rows[0]
+
+    # Row-bound assertions: each state phrase must sit on ITS slot's row, so a
+    # phrase leaking from another row can never satisfy the wrong case.
+    assert row_for("here_and_answering").rstrip().endswith("running")
+    assert "started, not registered (see disco logs)" in row_for("here_only")
+    assert "running (another host)" in row_for("remote_only")
+    assert row_for("tools").rstrip().endswith("running")
+    assert row_for("mcp-github").rstrip().endswith("running")
+
+
+async def test_status_broker_unreachable_shows_pidfiles_only(tmp_path, capsys) -> None:
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    probe = _StubProbe(raises=RuntimeError("broker down"))
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=probe)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "assistant" in out
+    # Honest degrade label: the MESH VIEW was unreadable — the substrate rows
+    # above may still show the broker Running, so "broker unreachable" lied.
+    assert "mesh roster view unreadable" in out
+    # No mesh -> the local pidfile is "started, not registered".
+    assert "started, not registered" in out
+
+
+async def test_status_renders_dead_slots_instead_of_hiding_them(tmp_path, capsys) -> None:
+    """A slot that crashed (pidfile present, process gone) must show as
+    `not running (exited — see <log>)` — never silently vanish from the board.
+    (`disco stop`'s sweep is the acknowledge-and-clear point for the files.)"""
+    home = _home(tmp_path)
+    _write_stale_pidfile(home, "assistant")
+    _write_stale_pidfile(home, "mcp-github")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "assistant" in out
+    assert "mcp-github" in out
+    assert out.count("not running (exited") == 2
+    assert str(procspawn.log_path_for(home, "assistant")) in out
+
+
+async def test_status_dead_slot_also_running_elsewhere_reports_both_truths(tmp_path, capsys) -> None:
+    """Crashed here but answering from another host: both facts are rendered."""
+    home = _home(tmp_path)
+    _write_stale_pidfile(home, "assistant")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    code = await lifecycle.status(
+        home, server_urls="localhost:9092", client=client, probe=_StubProbe(["assistant"])
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "running (another host)" in out
+    assert "exited here" in out
 
 
 async def test_status_empty_roster_signposts_start_and_create(tmp_path, capsys) -> None:
     """An empty roster is a teaching moment: the board must point at BOTH
-    ``disco agent start`` (bring a defined agent online) and ``disco agent create``
-    (add one), so a fresh org with no agents is never a dead end."""
+    ``disco agent start`` and ``disco agent create``, so a fresh org is never a
+    dead end."""
     home = _home(tmp_path)
-    processes = [{"name": "broker", "status": "Running", "is_ready": "Ready"}]
     client = _StubClient(
         project_state_results=[{"running": True}],
-        list_processes_result=processes,
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
     )
-    code = await lifecycle.status(home, client=client)
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
     assert code == 0
     out = capsys.readouterr().out
+    assert "none running" in out
     assert "disco agent start <name>" in out
     assert "disco agent create <name>" in out
+
+
+async def test_status_supervisor_dying_mid_read_degrades_not_crashes(tmp_path, capsys) -> None:
+    """The supervisor can die BETWEEN the up-probe (project_state) and the process
+    list read; read-only status must degrade to the not-running hint, never crash
+    (the docstring's promise)."""
+    home = _home(tmp_path)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_raises=RuntimeError("list_processes: connection refused"),
+    )
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+    assert code == 0
+    out = capsys.readouterr().out.lower()
+    assert "not running" in out
+    assert "disco start" in out
 
 
 def test_process_rows_skips_non_dict_items() -> None:
@@ -1247,3 +1591,382 @@ def test_lifecycle_does_not_import_aiokafka() -> None:
         "isolation subprocess exited 0 but did not run to completion\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+# --- stop/status honesty: scan failures, teardown verification, survivors ------
+
+
+class _FailingSpawn:
+    """A blocking-spawn seam that fails (e.g. a wedged `down` hitting its timeout)."""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self._exc = exc or subprocess.TimeoutExpired(cmd="process-compose down", timeout=20)
+
+    def __call__(self, argv) -> None:
+        self.calls.append(list(argv))
+        raise self._exc
+
+
+async def test_stop_scan_error_does_not_claim_closed(tmp_path, capsys, monkeypatch) -> None:
+    """An unreadable state/run means the roster sweep saw NOTHING — `disco stop`
+    must report the scan failure (rc 1), not claim `workspace closed` over
+    processes it never saw. Nothing is torn down under unknown state."""
+    home = _home(tmp_path)
+
+    def raising(home_arg):
+        raise _workspace.SlotScanError(Path(home) / "state" / "run", OSError("Permission denied"))
+
+    monkeypatch.setattr(_workspace, "iter_slot_pidfiles", raising)
+    spawn_blocking = _RecordingSpawn()
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    assert spawn_blocking.calls == []  # no down under unknown roster state
+    out = capsys.readouterr().out
+    assert "roster state unknown" in out
+    assert "workspace closed" not in out
+
+
+async def test_stop_down_failure_reports_teardown_uncertain(tmp_path, fake_pc_bin, capsys) -> None:
+    """A `down` that raises (here: its bounded timeout) must not read as closed —
+    one clean line, rc 1, no raw traceback."""
+    home = _home(tmp_path)
+    spawn_blocking = _FailingSpawn()
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    assert len(spawn_blocking.calls) == 1
+    out = capsys.readouterr().out
+    assert "teardown may not have completed" in out
+    assert "disco status" in out
+    assert "workspace closed" not in out
+
+
+async def test_stop_verifies_the_supervisor_actually_stopped(tmp_path, fake_pc_bin, capsys) -> None:
+    """`down` returning is not proof: stop re-probes, and a supervisor still
+    answering must not be reported closed."""
+    home = _home(tmp_path)
+    spawn_blocking = _RecordingSpawn()  # succeeds but does nothing
+    client = _StubClient(project_state_results=[{"running": True}, {"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "teardown may not have completed" in out
+    assert "workspace closed" not in out
+
+
+async def test_status_not_running_notes_local_survivors(tmp_path, capsys) -> None:
+    """Supervisor down + detached roster processes alive: status must say so
+    rather than implying the host is idle."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    client = _StubClient(project_state_results=[RuntimeError("not up")])
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "not running" in out.lower()
+    assert "1 detached roster process(es) still running locally" in out
+    assert "assistant" in out
+    assert "disco stop" in out
+
+
+async def test_status_scan_error_degrades_with_a_warning(tmp_path, capsys, monkeypatch) -> None:
+    home = _home(tmp_path)
+
+    def raising(home_arg):
+        raise _workspace.SlotScanError(Path(home) / "state" / "run", OSError("Permission denied"))
+
+    monkeypatch.setattr(_workspace, "classify_slots", raising)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+
+    assert code == 0  # read-only status still renders the substrate
+    out = capsys.readouterr().out
+    assert "broker" in out
+    assert "roster state unknown" in out
+
+
+async def test_status_renders_an_unverifiable_slot_honestly(tmp_path, capsys, monkeypatch) -> None:
+    """Identity-read failure on a live pid: the row must say the state is unknown
+    — neither `running` nor the `exited` lie (which would invite a sweep)."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    rows = [line for line in out.splitlines() if line.strip().startswith("assistant")]
+    assert rows, out
+    assert "cannot verify" in rows[0]
+    assert "exited" not in rows[0]
+
+
+async def test_status_default_probe_is_the_shared_workspace_seam(tmp_path, monkeypatch, capsys) -> None:
+    """With no probe injected, status resolves it through _workspace.resolve_probe
+    (the shared seam) — not by reaching into roster's privates."""
+    seen: list[str] = []
+
+    def fake_resolve(probe):
+        assert probe is None
+
+        async def _probe(server_urls: str) -> list[str]:
+            seen.append(server_urls)
+            return []
+
+        return _probe
+
+    monkeypatch.setattr(_workspace, "resolve_probe", fake_resolve)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(_home(tmp_path), server_urls="localhost:9092", client=client)
+
+    assert code == 0
+    assert seen == ["localhost:9092"]
+
+
+# --- start: teardown honesty on the failure paths -------------------------------
+
+
+async def test_start_priming_failure_with_failing_teardown_is_honest(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not yet"), {"ok": True}],
+        update_project_raises=RuntimeError("reconcile refused"),
+    )
+    spawn = _RecordingSpawn()
+    spawn_blocking = _FailingSpawn()
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=spawn,
+        spawn_blocking=spawn_blocking,
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 1
+    assert len(spawn_blocking.calls) == 1  # the teardown was attempted
+    out = capsys.readouterr().out
+    assert "teardown may not have completed" in out
+    assert "tore it down" not in out
+    assert "disco stop" in out or "disco status" in out
+
+
+async def test_start_readiness_timeout_with_failing_teardown_is_honest(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not yet"), {"ok": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Not Ready"}] * 200,
+    )
+    spawn = _RecordingSpawn()
+    spawn_blocking = _FailingSpawn()
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=spawn,
+        spawn_blocking=spawn_blocking,
+        clock=clock,
+        sleep=clock.sleep,
+        ready_timeout_s=5,
+        broker_probe=_reachable_broker,
+    )
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "did not become ready" in out
+    assert "teardown may not have completed" in out
+    assert "tore down the workspace" not in out
+
+
+# --- status: one slot snapshot, screened mesh names (fixes Q2 + S6) -------------
+
+
+async def test_status_takes_one_slot_snapshot(tmp_path, capsys, monkeypatch) -> None:
+    """The board's live/dead/unverifiable sets are projections of ONE
+    classify_slots snapshot — not three scans (3 x N identity reads, and a slot
+    dying between scans could appear in two disagreeing sets)."""
+    home = _home(tmp_path)
+    calls: list[str] = []
+
+    def fake_classify(home_arg):
+        calls.append(str(home_arg))
+        return {
+            "assistant": procspawn.Identity.OURS,
+            "crashed": procspawn.Identity.NOT_OURS,
+            "flaky": procspawn.Identity.INDETERMINATE,
+        }
+
+    monkeypatch.setattr(_workspace, "classify_slots", fake_classify)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(
+        home, server_urls="localhost:9092", client=client, probe=_StubProbe(["assistant"])
+    )
+
+    assert code == 0
+    assert len(calls) == 1  # ONE snapshot feeds every set on the board
+    out = capsys.readouterr().out
+    assert out.count("assistant") == 1  # each slot renders exactly one row
+    assert "not running (exited" in out
+    assert "state unknown" in out
+
+
+async def test_status_screens_malformed_mesh_names(tmp_path, capsys, monkeypatch) -> None:
+    """Mesh-derived names are untrusted broker-wide input: a name carrying
+    terminal escapes is dropped from the board with one aggregate warning —
+    never printed raw."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    evil = "\x1b[2J\x1b[31mpwned"
+    probe = _StubProbe(["assistant", evil])
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=probe)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "pwned" not in out
+    assert "assistant" in out
+    assert "1 invalid mesh name(s) ignored" in out
+
+
+# --- start-failure diagnosis: missing Discord settings (fix U2) ------------------
+
+
+# A trimmed pydantic-settings ValidationError of the shape the bridge prints when
+# required DISCORD_* values are absent from the effective environment.
+_MISSING_SETTINGS_TRACEBACK = """\
+Traceback (most recent call last):
+  File "/h/src/calfcord/bridge/main.py", line 31, in main
+    settings = DiscordSettings()
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for DiscordSettings
+bot_token
+  Field required [type=missing, input_value={}, input_type=dict]
+application_id
+  Field required [type=missing, input_value={}, input_type=dict]
+"""
+
+
+def test_diagnose_start_failure_names_missing_discord_settings(tmp_path) -> None:
+    """A pydantic ValidationError on the bridge's Discord settings is a config
+    gap, not a mystery: the diagnosis names the missing DISCORD_* env vars and
+    steers to `disco init`."""
+    logs_dir = _write_bridge_log(_home(tmp_path), _MISSING_SETTINGS_TRACEBACK)
+    msg = lifecycle._diagnose_start_failure(logs_dir)
+    assert msg is not None
+    assert "DISCORD_BOT_TOKEN" in msg
+    assert "DISCORD_APPLICATION_ID" in msg
+    assert "disco init" in msg
+
+
+def test_diagnose_start_failure_settings_error_without_extractable_fields(tmp_path) -> None:
+    """A DiscordSettings ValidationError whose field lines fell outside the tail
+    still gets the generic settings diagnosis (never None → the unrelated
+    broker/intents guess)."""
+    tail = "pydantic_core._pydantic_core.ValidationError: 1 validation error for DiscordSettings\n"
+    logs_dir = _write_bridge_log(_home(tmp_path), tail)
+    msg = lifecycle._diagnose_start_failure(logs_dir)
+    assert msg is not None
+    assert "Discord settings" in msg
+    assert "disco init" in msg
+
+
+def test_diagnose_start_failure_ignores_unrelated_validation_errors(tmp_path) -> None:
+    # A ValidationError for some OTHER model must not claim Discord settings.
+    tail = (
+        "pydantic_core._pydantic_core.ValidationError: "
+        "1 validation error for SomethingElse\nfield_x\n  Field required\n"
+    )
+    logs_dir = _write_bridge_log(_home(tmp_path), tail)
+    assert lifecycle._diagnose_start_failure(logs_dir) is None
+
+
+async def test_start_readiness_timeout_generic_message_points_at_bridge_log(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    """Even with NO recognised signature, the failure message names the bridge's
+    own log — the file the diagnoser reads and where the real traceback lands —
+    not the supervisor log."""
+    home = _home(tmp_path)
+    _write_bridge_log(home, "some unrelated shutdown noise\n")
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up"), {"running": True}],
+        bridge_states=[{"status": "Pending", "is_ready": "Not Ready"}] * 1000,
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        spawn_blocking=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+        ready_timeout_s=10,
+    )
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "bridge.log" in out
+
+
+def test_ensure_log_path_creates_the_logs_dir_owner_only(tmp_path) -> None:
+    """`disco start` usually creates state/logs BEFORE any slot spawns; it must
+    apply the same owner-only mode the spawn path does (slot logs land here)."""
+    home = _home(tmp_path)
+    lifecycle._ensure_log_path(home)
+    assert (Path(home, "state", "logs").stat().st_mode & 0o777) == 0o700
+
+
+def test_ensure_log_path_leaves_a_preexisting_dir_mode_alone(tmp_path) -> None:
+    home = _home(tmp_path)
+    logs_dir = Path(home, "state", "logs")
+    logs_dir.mkdir(parents=True)
+    logs_dir.chmod(0o755)
+    lifecycle._ensure_log_path(home)
+    assert (logs_dir.stat().st_mode & 0o777) == 0o755

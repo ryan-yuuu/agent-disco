@@ -35,12 +35,14 @@ import contextlib
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 from calfcord.health.check import BrokerProbe, default_broker_probe
+from calfcord.supervisor import _workspace, procspawn
 from calfcord.supervisor._workspace import (
     iter_process_dicts,
     resolve_client,
@@ -52,6 +54,7 @@ from calfcord.supervisor.compose import (
     broker_is_compose_managed,
     render_compose,
 )
+from calfcord.supervisor.procspawn import TerminateResult
 
 # A process launcher: hand it an argv and it starts the process. Production wires
 # this to a detached ``subprocess.Popen`` (the ``up`` must outlive ``start``); a
@@ -133,6 +136,45 @@ _START_FAILURE_SIGNATURES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+# The pydantic-settings ValidationError header for the bridge's Discord settings
+# model — a missing/invalid DISCORD_* value crashes the bridge before it ever
+# reaches Discord, so the diagnosis is "complete the config", not the generic
+# broker/intents guess.
+_DISCORD_SETTINGS_ERROR_MARKER = "ValidationError"
+_DISCORD_SETTINGS_MODEL = "DiscordSettings"
+
+# A pydantic error detail is a bare lowercase field name on its own line followed
+# by an indented explanation ("Field required", "Input should be …"). Cheap,
+# tail-tolerant extraction — when it finds nothing the message stays generic.
+_SETTINGS_FIELD_RE = re.compile(r"(?m)^([a-z][a-z0-9_]*)\r?\n\s+\S")
+
+
+def _diagnose_settings_validation(tail: str) -> str | None:
+    """The Discord-settings diagnosis for a pydantic ValidationError, or ``None``.
+
+    Matches only the bridge's own settings model (``DiscordSettings``) so an
+    unrelated model's ValidationError never claims a Discord config gap. Field
+    names are mapped back to the ``DISCORD_*`` env vars the operator actually
+    sets (pydantic prints the lowercase attribute names); when none are cheaply
+    extractable from the tail the message stays generic but still actionable.
+    """
+    if _DISCORD_SETTINGS_ERROR_MARKER not in tail or _DISCORD_SETTINGS_MODEL not in tail:
+        return None
+    # Only look past the LAST ValidationError header so stray lowercase log
+    # lines earlier in the tail cannot masquerade as field names.
+    section = tail[tail.rindex(_DISCORD_SETTINGS_ERROR_MARKER) :]
+    fields = [f"DISCORD_{name.upper()}" for name in _SETTINGS_FIELD_RE.findall(section)]
+    if fields:
+        named = ", ".join(dict.fromkeys(fields))  # de-dup, order kept
+        return (
+            f"the bridge is missing required Discord settings ({named}) -- "
+            "re-run `disco init` to complete them."
+        )
+    return (
+        "the bridge is missing required Discord settings -- "
+        "re-run `disco init` to complete them."
+    )
+
 
 def _read_log_tail(path: str, *, max_bytes: int = _LOG_TAIL_BYTES) -> str | None:
     """Return the last ``max_bytes`` of ``path`` as text, or ``None`` if unreadable.
@@ -168,7 +210,7 @@ def _diagnose_start_failure(log_dir: str) -> str | None:
     for signature, message in _START_FAILURE_SIGNATURES:
         if signature in tail:
             return message
-    return None
+    return _diagnose_settings_validation(tail)
 
 
 def resolve_pc_binary() -> str:
@@ -233,10 +275,15 @@ def lifecycle_lock(home: str | os.PathLike[str]):
 
     Serializes ``start``/``stop`` so two concurrent invocations cannot race two
     supervisors against one home (§12.4). Uses ``LOCK_EX | LOCK_NB`` so a second
-    holder fails *immediately* with a clear error instead of blocking
-    indefinitely. The parent ``state/`` dir is created on demand; the lock file
-    itself is kept (its presence is harmless — the advisory lock, not the file,
-    is the guard) and the fd is always closed on exit, releasing the lock.
+    holder fails *immediately* instead of blocking indefinitely. CONTENTION
+    surfaces as :class:`~calfcord.supervisor._workspace.WorkspaceBusyError` — a
+    domain refusal ``start``/``stop`` translate into one clean error line (the
+    holder may be another start/stop OR a roster verb holding the lock SHARED for
+    its spawn-confirm window, so the message names neither). Any other ``OSError``
+    (permissions, a broken state dir) propagates as the IO problem it actually is.
+    The parent ``state/`` dir is created on demand; the lock file itself is kept
+    (its presence is harmless — the advisory lock, not the file, is the guard)
+    and the fd is always closed on exit, releasing the lock.
     """
     path = _lock_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -244,10 +291,10 @@ def lifecycle_lock(home: str | os.PathLike[str]):
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise RuntimeError(
-                f"another disco start/stop is in progress for {home} "
-                f"(could not acquire {path})"
+        except BlockingIOError as exc:
+            raise _workspace.WorkspaceBusyError(
+                "another disco command is in progress for this workspace "
+                f"(could not acquire {path}); retry in a moment."
             ) from exc
         try:
             yield
@@ -415,13 +462,51 @@ def _default_spawn_blocking(argv: Sequence[str]) -> None:
 _resolve_client = resolve_client
 
 
+def _attempt_teardown(spawn_blocking: Spawn, binary: str, port: int) -> bool:
+    """Blocking ``down``; ``True`` iff it completed without raising.
+
+    ``start``'s failure paths must tear the substrate back down, but the teardown
+    itself can fail (a wedged supervisor's ``down`` hits its bounded timeout).
+    That failure is CAPTURED, never suppressed into a "tore it down" overclaim:
+    the caller words its message on this verdict, and no exception (including
+    ``TimeoutExpired``) escapes as a raw traceback.
+    """
+    try:
+        spawn_blocking([binary, "down", "-p", str(port)])
+    except Exception:
+        return False
+    return True
+
+
+# The honest suffix for a failure path whose own teardown ALSO failed.
+_TEARDOWN_UNCERTAIN = (
+    "teardown may not have completed — run `disco stop` or check `disco status`."
+)
+
+
+def _agents_defined(home: str) -> bool:
+    """Whether any agent ``.md`` is defined for this install (banner signpost only).
+
+    Phase 3 dropped ``start``'s vestigial ``agent_ids`` param (the manifest is
+    substrate-only), so the success banners' create-vs-start steer reads the
+    agents dir directly: ``$CALFKIT_AGENTS_DIR`` when set (the same override the
+    shim, the runners, and ``init.resolve_paths`` honour) else ``<home>/agents``.
+    ``detect_agents`` is the CLI's one definition of "which ``.md`` files are live
+    agents" — reused rather than re-declared so the skip rules cannot drift;
+    imported lazily because its module pulls the agents package (heavy), which
+    the supervisor must not pay at import time.
+    """
+    from calfcord.cli._agents import detect_agents
+
+    agents_dir = os.environ.get("CALFKIT_AGENTS_DIR") or os.path.join(home, "agents")
+    return bool(detect_agents(Path(agents_dir)))
+
+
 async def start(
     home: str | os.PathLike[str],
     *,
     server_urls: str,
     launcher: str,
-    agent_ids: Iterable[str],
-    mcp_servers: Iterable[str] = (),
     ready_timeout_s: float = _DEFAULT_READY_TIMEOUT_SECONDS,
     client: ProcessComposeClient | None = None,
     spawn: Spawn | None = None,
@@ -461,12 +546,20 @@ async def start(
     spawn_blocking = spawn_blocking or _default_spawn_blocking
     clock = clock or time.monotonic
     sleep = sleep or asyncio.sleep
-    # Materialize the roster once (it may be a one-shot iterable) so the success
-    # banners can tell an empty org from a defined one — an org with zero agents
-    # is steered to `agent create`, not the pointless `agent start`.
-    agent_ids = list(agent_ids)
+    # Read the defined roster once so the success banners can tell an empty org
+    # from a defined one — an org with zero agents is steered to `agent create`,
+    # not the pointless `agent start`.
+    agents_defined = _agents_defined(home)
 
-    with lifecycle_lock(home):
+    with contextlib.ExitStack() as stack:
+        # A contended lock (another start/stop, or a roster verb holding it SHARED
+        # for its spawn-confirm window) is a domain refusal, not a traceback: one
+        # clean error line, exit 1, and the holder is left undisturbed.
+        try:
+            stack.enter_context(lifecycle_lock(home))
+        except _workspace.WorkspaceBusyError as exc:
+            print(f"error: {exc}")
+            return 1
         # Idempotency (§12.4): if the office is already open, do NOT launch a
         # second supervisor — just confirm and point at the next step. But the
         # port can collide across homes (Fix #11): verify the answering supervisor
@@ -484,7 +577,7 @@ async def start(
                     "`disco start`."
                 )
                 return 1
-            if agent_ids:
+            if agents_defined:
                 print(
                     "workspace already open (broker + bridge). "
                     "Next: disco agent start <name>"
@@ -520,11 +613,12 @@ async def start(
                 return 1
 
         port = pc_port_for(home)
+        # The manifest is SUBSTRATE-ONLY: the roster (agents, ``tools``,
+        # ``mcp-<server>``) spawns off Process Compose per slot, so nothing
+        # roster-shaped is threaded into the compose render.
         yaml_text = render_compose(
-            agent_ids=list(agent_ids),
             home=home,
             launcher=launcher,
-            mcp_servers=list(mcp_servers),
             broker_managed=broker_managed,
         )
         yaml_path = _write_compose(home, yaml_text)
@@ -568,10 +662,10 @@ async def start(
         try:
             await client.update_project(yaml_text)
         except RuntimeError:
-            with contextlib.suppress(Exception):
-                spawn_blocking([binary, "down", "-p", str(port)])
+            torn_down = _attempt_teardown(spawn_blocking, binary, port)
+            outcome = "tore it down." if torn_down else _TEARDOWN_UNCERTAIN
             print(
-                "error: workspace failed to prime; tore it down. "
+                f"error: workspace failed to prime; {outcome} "
                 f"See {log_path} or run: disco doctor"
             )
             return 1
@@ -583,31 +677,35 @@ async def start(
             # the specific failure + the likeliest cause. Use the BLOCKING seam so
             # the supervisor is actually stopped before we return — a fire-and-
             # forget detached `down` could let a retried `start` collide with a
-            # supervisor still shutting down (§13.3).
-            with contextlib.suppress(Exception):
-                spawn_blocking([binary, "down", "-p", str(port)])
+            # supervisor still shutting down (§13.3). The teardown's own failure
+            # is captured too: "tore down" is only claimed when the down completed.
+            torn_down = _attempt_teardown(spawn_blocking, binary, port)
+            outcome = "tore down the workspace." if torn_down else _TEARDOWN_UNCERTAIN
             # Diagnose from the bridge's OWN log (the supervisor log only records
             # the readiness timeout; the real cause — e.g. a discord.py crash — is
             # in <home>/state/logs/bridge.log). If a known signature matches, print
             # the cause-specific fix instead of guessing; otherwise keep the generic
-            # message unchanged. The log pointer is retained either way.
+            # message. Both messages point at the BRIDGE log — the file the
+            # diagnosis reads and where the real traceback lands — never the
+            # supervisor log, which only echoes the timeout.
+            bridge_log = os.path.join(os.path.dirname(log_path), _BRIDGE_LOG_FILENAME)
             diagnosis = _diagnose_start_failure(os.path.dirname(log_path))
             if diagnosis is not None:
                 print(
                     "error: bridge did not become ready within "
-                    f"{ready_timeout_s:g}s; tore down the workspace. "
-                    f"{diagnosis} See {log_path} or run: disco doctor"
+                    f"{ready_timeout_s:g}s; {outcome} "
+                    f"{diagnosis} See {bridge_log} or run: disco doctor"
                 )
             else:
                 print(
                     "error: bridge did not become ready within "
-                    f"{ready_timeout_s:g}s; tore down the workspace. "
+                    f"{ready_timeout_s:g}s; {outcome} "
                     "Likely the broker could not be reached or Discord privileged "
-                    f"intents are off. See {log_path} or run: disco doctor"
+                    f"intents are off. See {bridge_log} or run: disco doctor"
                 )
             return 1
 
-    if agent_ids:
+    if agents_defined:
         print(
             "workspace open (broker + bridge). No agents running yet "
             "-> disco agent start <name>"
@@ -620,71 +718,283 @@ async def start(
     return 0
 
 
+async def _sweep_roster_pidfiles(home: str) -> tuple[int, int]:
+    """Terminate every live roster process and clear stale pidfiles; return
+    ``(stopped, still_running)`` — the honest split of what actually died.
+
+    ``disco stop`` closes the WHOLE workspace, roster included — but the roster lives
+    off Process Compose (Phase 2), so a ``down`` of the substrate leaves the detached
+    agent/tools/mcp processes running. This sweeps ``state/run/*.pid``: a live-and-ours
+    slot is terminated (SIGTERM→SIGKILL via :func:`_workspace.terminate_slot`, which
+    also clears its pidfile), and a stale/torn/not-ours pidfile is swept without a
+    signal. Run BEFORE the substrate ``down`` so agents can still publish their
+    departure while the broker is up.
+
+    The survivor count comes straight from the terminate ENUM — both keep-the-
+    pidfile outcomes leave a still-live pid behind: ``KILL_UNCONFIRMED`` (the
+    reap window closed on it) and ``INDETERMINATE`` (identity unreadable, left
+    untouched; ``terminate_slot`` already printed its per-slot warning).
+    ``TERMINATED`` / ``KILLED`` are confirmed deaths (``process_was_stopped`` —
+    the one membership definition). No liveness re-probe: the enum already
+    carries the verdict, and a second probe could only disagree with it racily.
+    An unreadable ``state/run`` propagates :class:`_workspace.SlotScanError` —
+    the caller must NOT read that as "nothing to sweep".
+    """
+    stopped = 0
+    wedged = 0
+    for slot, _pidfile in list(_workspace.iter_slot_pidfiles(home)):
+        result = await _workspace.terminate_slot(home, slot)
+        if result in (TerminateResult.KILL_UNCONFIRMED, TerminateResult.INDETERMINATE):
+            wedged += 1
+        elif result is not None and result.process_was_stopped:
+            stopped += 1
+    return stopped, wedged
+
+
 async def stop(
     home: str | os.PathLike[str],
     *,
     client: ProcessComposeClient | None = None,
     spawn_blocking: Spawn | None = None,
 ) -> int:
-    """Close the workspace; idempotent — a no-op if nothing is running (§12.4).
+    """Close the WHOLE workspace — substrate AND roster; idempotent (§12.4).
 
-    ``down`` is issued through the **blocking** seam so ``stop`` returns (and
-    prints "workspace closed") only after the supervisor has actually stopped — a
-    fire-and-forget detached ``down`` would let a racing ``start`` collide with a
-    supervisor still shutting down (§13.3).
+    Two teardowns under one lock: the roster is swept first
+    (:func:`_sweep_roster_pidfiles` — terminate every live detached agent/tools/mcp
+    process while the broker is still up so departures publish, and clear stale
+    pidfiles), then the substrate is brought down. ``down`` is issued through the
+    **blocking** seam so ``stop`` returns only after the supervisor has actually
+    stopped — a fire-and-forget detached ``down`` would let a racing ``start`` collide
+    with a supervisor still shutting down (§13.3).
+
+    A no-op reports honestly: with the substrate down AND nothing swept, "nothing to
+    stop"; otherwise "workspace closed", noting how many roster processes were
+    stopped — and, separately, any survivor (a wedged ``KILL_UNCONFIRMED`` or an
+    unverifiable ``INDETERMINATE`` slot) so "closed" never silently overclaims.
+    "Closed" is also VERIFIED: a ``down`` that
+    raises (e.g. its bounded timeout) or a supervisor still answering afterwards
+    reports "teardown may not have completed" and returns ``1``. An unreadable
+    ``state/run`` aborts before touching anything (the sweep saw nothing — "closed"
+    would strand every process behind it). A contended lifecycle lock (a roster
+    verb mid-spawn, or another start/stop) is a clean one-line refusal.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)
     spawn_blocking = spawn_blocking or _default_spawn_blocking
 
-    with lifecycle_lock(home):
-        if not await _supervisor_is_up(client):
-            print("nothing to stop (workspace not running).")
-            return 0
+    try:
+        with lifecycle_lock(home):
+            pc_up = await _supervisor_is_up(client)
+            # Sweep the roster first (broker still up → clean departures), then the
+            # substrate. The sweep also runs when the substrate is already down, so an
+            # orphaned roster (a crashed supervisor) is still cleaned up by `disco stop`.
+            try:
+                terminated, wedged = await _sweep_roster_pidfiles(home)
+            except _workspace.SlotScanError as exc:
+                # The sweep saw NOTHING — claiming "closed" here would strand every
+                # process behind the unreadable dir. Leave the world untouched.
+                print(f"error: {exc}")
+                print(
+                    "error: not stopping the workspace under unknown roster state — "
+                    "fix the state/run permissions and re-run `disco stop`."
+                )
+                return 1
+            teardown_uncertain = False
+            if pc_up:
+                binary = resolve_pc_binary()
+                try:
+                    spawn_blocking([binary, "down", "-p", str(pc_port_for(home))])
+                except Exception as exc:  # incl. a wedged down's TimeoutExpired
+                    print(f"error: workspace teardown failed ({exc}).")
+                    teardown_uncertain = True
+                # `down` returning is not proof: re-probe before claiming closed.
+                if not teardown_uncertain and await _supervisor_is_up(client):
+                    teardown_uncertain = True
+    except _workspace.WorkspaceBusyError as exc:
+        print(f"error: {exc}")
+        return 1
 
-        binary = resolve_pc_binary()
-        spawn_blocking([binary, "down", "-p", str(pc_port_for(home))])
-
-    print("workspace closed.")
+    if teardown_uncertain:
+        print(
+            "error: teardown may not have completed — run `disco stop` again "
+            "or check `disco status`."
+        )
+        return 1
+    if not pc_up and terminated == 0 and wedged == 0:
+        print("nothing to stop (workspace not running).")
+        return 0
+    if wedged:
+        print(
+            f"workspace closed ({terminated} roster process(es) stopped, "
+            f"{wedged} still running — see `disco logs`)."
+        )
+    elif terminated:
+        print(f"workspace closed ({terminated} roster process(es) stopped).")
+    else:
+        print("workspace closed.")
     return 0
 
 
 async def status(
     home: str | os.PathLike[str],
     *,
+    server_urls: str,
     client: ProcessComposeClient | None = None,
-    clock: Clock | None = None,
+    probe: Callable[[str], Awaitable[list[str]]] | None = None,
 ) -> int:
     """Render a glanceable org board, or a "not running" hint (§12.6).
 
-    ``clock`` is accepted for symmetry with ``start`` (and future freshness
-    reconciliation against heartbeats); it is unused today but keeps the seam
-    stable so a caller need not special-case ``status``.
+    The **substrate** rows come from Process Compose (broker + bridge). The
+    **roster** rows are the Phase-2 reconciliation of two truths: this host's live
+    pidfiles (``state/run/*.pid``) and the broker-wide mesh presence (the same probe
+    ``agent_ps`` uses). For an AGENT slot the cross-product yields three states —
+
+    * pidfile-alive **and** mesh-registered → ``running``;
+    * pidfile-alive **only** → ``started, not registered (see disco logs)`` (up here
+      but not answering — just starting, or wedged);
+    * mesh-registered **only** (no local pidfile) → ``running (another host)``.
+
+    A slot whose pidfile names a DEAD process (a crash or clean exit — no
+    auto-respawn off PC) is rendered honestly as ``not running (exited — see
+    <log>)`` rather than omitted; ``disco stop``'s sweep is the acknowledge-and-
+    clear point that removes those files. The ``tools`` singleton and
+    ``mcp-<server>`` slots carry no mesh presence, so their pidfile is the whole
+    truth: live renders ``running``, dead renders the exited row. An unreadable
+    mesh roster view degrades to the pidfile-only view with a note (read-only
+    status must never crash).
+
+    ``probe`` / ``client`` are injected for testing.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)
 
     if not await _supervisor_is_up(client):
         print("workspace not running (start it with: disco start)")
+        # The detached roster outlives a dead supervisor — say so rather than
+        # implying the host is idle.
+        _workspace.note_local_survivors(home)
         return 0
 
-    processes = _process_rows(await client.list_processes())
-    substrate = [p for p in processes if p["name"] in _SUBSTRATE]
-    roster = [p for p in processes if p["name"] not in _SUBSTRATE]
+    try:
+        payload = await client.list_processes()
+    except RuntimeError:
+        # The supervisor died between the up-probe above and this read; read-only
+        # status must degrade (the docstring's never-crash promise), and "no longer
+        # answering" is exactly the not-running state.
+        print("workspace not running (start it with: disco start)")
+        _workspace.note_local_survivors(home)
+        return 0
+    substrate = [p for p in _process_rows(payload) if p["name"] in _SUBSTRATE]
+
+    try:
+        # ONE snapshot feeds every roster set below (live/dead/unverifiable are
+        # projections of it): one scan, one identity read per slot — and a slot
+        # dying mid-render can never appear in two disagreeing sets.
+        verdicts = _workspace.classify_slots(home)
+    except _workspace.SlotScanError as exc:
+        # Unreadable state/run: the roster half of the board is UNKNOWN, not
+        # empty — warn and render what can still be read (the substrate).
+        print(f"warning: {exc}")
+        verdicts = {}
+    live = {s for s, v in verdicts.items() if v is procspawn.Identity.OURS}
+    dead = {
+        s
+        for s, v in verdicts.items()
+        if v not in (procspawn.Identity.OURS, procspawn.Identity.INDETERMINATE)
+    }
+    unverifiable = {
+        s for s, v in verdicts.items() if v is procspawn.Identity.INDETERMINATE
+    }
+    agent_slots = {slot for slot in live if _workspace.is_agent_slot(slot)}
+    other_slots = sorted(live - agent_slots)  # tools + mcp-<server>
+
+    probe = _workspace.resolve_probe(probe)
+    mesh_unreadable = False
+    try:
+        # Mesh names are broker-wide input: screened (with one aggregate
+        # warning for any malformed name) before they can reach a printed row.
+        logical = _workspace.screen_mesh_names(await probe(server_urls))
+    except Exception:
+        logical = set()
+        mesh_unreadable = True
 
     print("workspace is open.")
     print("substrate:")
     for row in substrate:
         print(_format_row(row))
     print("roster:")
-    if roster:
-        for row in roster:
-            print(_format_row(row))
-    else:
-        print("  (none running -> disco agent start <name>, or disco agent create <name> to add one)")
+    _render_roster_board(
+        home=home,
+        agent_slots=agent_slots,
+        other_slots=other_slots,
+        dead_slots=dead,
+        unverifiable_slots=unverifiable,
+        logical=logical,
+    )
+    if mesh_unreadable:
+        # Honest label: it is the mesh VIEW we could not read — the substrate
+        # rows above may well show the broker itself Running.
+        print("note: mesh roster view unreadable; roster shown from local pidfiles only.")
     # Reboot non-survival, stated honestly (§12.6): the daemon is session-scoped.
     print("note: the workspace does not survive a reboot; re-run `disco start`.")
     return 0
+
+
+def _render_roster_board(
+    *,
+    home: str,
+    agent_slots: set[str],
+    other_slots: list[str],
+    dead_slots: set[str],
+    unverifiable_slots: set[str],
+    logical: set[str],
+) -> None:
+    """Print the reconciled roster rows (see :func:`status`).
+
+    Agents reconcile pidfile-presence against mesh-presence into the three §3.4
+    states; ``tools`` / ``mcp-<server>`` slots have no mesh presence, so a live
+    pidfile renders ``running``. Dead-but-pidfile-present slots render the honest
+    ``not running (exited — see <log>)`` row instead of vanishing (crashes are the
+    board's whole job to surface under no-auto-respawn); an UNVERIFIABLE slot (a
+    live pid whose identity read failed) renders ``state unknown`` — neither the
+    ``running`` claim nor the ``exited`` lie. An entirely empty roster prints the
+    create/start signpost so the board is never a confusing blank.
+    """
+    dead_agents = {slot for slot in dead_slots if _workspace.is_agent_slot(slot)}
+    dead_others = sorted(dead_slots - dead_agents)
+    unverifiable_agents = {slot for slot in unverifiable_slots if _workspace.is_agent_slot(slot)}
+    unverifiable_others = sorted(unverifiable_slots - unverifiable_agents)
+    agent_names = sorted(agent_slots | logical | dead_agents | unverifiable_agents)
+    if not agent_names and not other_slots and not dead_others and not unverifiable_others:
+        print("  (none running -> disco agent start <name>, or disco agent create <name> to add one)")
+        return
+
+    unverifiable_state = "state unknown (cannot verify its recorded process)"
+    for name in agent_names:
+        here = name in agent_slots
+        answering = name in logical
+        log_path = procspawn.log_path_for(home, name)
+        if here and answering:
+            state = "running"
+        elif here:
+            state = "started, not registered (see disco logs)"
+        elif name in unverifiable_agents:
+            state = unverifiable_state
+        elif answering and name in dead_agents:
+            # Both truths: the org still answers for the name elsewhere, but the
+            # local instance died and its pidfile is awaiting the stop-sweep.
+            state = f"running (another host); exited here — see {log_path}"
+        elif answering:
+            state = "running (another host)"
+        else:
+            state = f"not running (exited — see {log_path})"
+        print(f"  {name:<16} {state}")
+    for slot in other_slots:
+        print(f"  {slot:<16} running")
+    for slot in unverifiable_others:
+        print(f"  {slot:<16} {unverifiable_state}")
+    for slot in dead_others:
+        print(f"  {slot:<16} not running (exited — see {procspawn.log_path_for(home, slot)})")
 
 
 def _process_rows(payload: object) -> list[dict]:
@@ -716,6 +1026,7 @@ def _write_compose(home: str, yaml_text: str) -> str:
 
 
 def _ensure_log_path(home: str) -> str:
-    logs_dir = os.path.join(home, "state", "logs")
-    os.makedirs(logs_dir, exist_ok=True)
+    # Owner-only, matching the spawn path: `disco start` usually creates
+    # state/logs first, and every detached slot's log lands in it too.
+    logs_dir = procspawn.ensure_private_dir(os.path.join(home, "state", "logs"))
     return os.path.join(logs_dir, _SUPERVISOR_LOG_FILENAME)

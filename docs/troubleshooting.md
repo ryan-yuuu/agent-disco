@@ -10,6 +10,8 @@ quickly, then explains the cause and the fix.
   - [`status` shows "process up, Discord disconnected"](#status-shows-process-up-discord-disconnected)
   - [Everything's green but the agent still doesn't reply](#everythings-green-but-the-agent-still-doesnt-reply)
   - [`status` says an agent's process is up, but it isn't registered](#status-says-an-agents-process-is-up-but-it-isnt-registered)
+  - [An agent exited immediately after `disco agent start`](#an-agent-exited-immediately-after-disco-agent-start)
+  - [`disco status` shows a stale "not running (exited)" row](#disco-status-shows-a-stale-not-running-exited-row)
   - [I changed my API key / `.env` but nothing changed](#i-changed-my-api-key--env-but-nothing-changed)
   - [Nothing survives a reboot](#nothing-survives-a-reboot)
   - [`agent start` refused: "already running in the organization"](#agent-start-refused-already-running-in-the-organization)
@@ -131,6 +133,10 @@ would miss — a silent-but-running bridge.
   disco start
   ```
 
+  (`disco stop` closes the *whole* workspace, roster included, and `disco start`
+  reopens only the substrate — so bring your teammates back afterward with
+  `disco agent start --all`, `disco tools start`, and `disco mcp start --all`.)
+
 A **healthy** bridge in `status` means "process up *and* connected to Discord" —
 so treat "Discord disconnected" as the bot being effectively offline even though
 its PID is alive.
@@ -196,6 +202,47 @@ agent's `.md`, `agent restart <agent>` is also how you reload it.
 > expected for an agent to be live in the org while running on another box. See
 > [the cross-host guard](#agent-start-refused-already-running-in-the-organization)
 > and [distributed-deployment.md](./distributed-deployment.md).
+
+### An agent exited immediately after `disco agent start`
+
+**Symptom.** `disco agent start <name>` reports that the agent **exited
+immediately after start**, naming a log path — or `disco status` shows the agent
+as `not running (exited — see …)` seconds after you started it.
+
+**What it means.** Roster members run as directly-supervised detached processes
+with **no auto-respawn**. On `start`, Agent Disco watches the new process through a
+short (~1.5 s) confirmation window; if it exits inside that window — a crash-on-boot
+from a bad `.md`, a missing API key, an import error — the start fails loudly rather
+than reporting a success that lies, and the fresh-but-dead pidfile is cleaned up.
+Nothing restarts it for you.
+
+**Resolution.** The crash traceback is in the slot's own log:
+
+```bash
+disco logs <name>              # also on disk at $CALFCORD_HOME/state/logs/<name>.log
+```
+
+Fix the cause (see
+[authoring-agents.md](./authoring-agents.md#73-common-failure-modes) for the common
+boot failures), then run `disco agent start <name>` again. The same confirmation
+applies to `disco tools start` and `disco mcp start <server>` — each reports a
+boot crash and points at `$CALFCORD_HOME/state/logs/<slot>.log`.
+
+### `disco status` shows a stale "not running (exited)" row
+
+**Symptom.** `disco status` lists a roster member as `not running (exited — see
+<log>)` when you aren't trying to run it — a leftover row that won't clear on its
+own.
+
+**What it means.** That row is a **pidfile whose process is gone** — a roster slot
+that crashed or exited (there is no auto-respawn off Process Compose). `disco
+status` surfaces it honestly instead of hiding it, so a crash stays visible rather
+than silent; the pidfile it reads lives at `$CALFCORD_HOME/state/run/<slot>.pid`.
+
+**Resolution.** `disco stop` sweeps every stale pidfile as it closes the workspace,
+so the row is gone after the next `disco start`. To clear one *without* closing the
+workspace, just start the slot again (`disco agent start <name>` / `disco tools
+start` / `disco mcp start <server>`) — a fresh spawn replaces the dead pidfile.
 
 ### I changed my API key / `.env` but nothing changed
 
@@ -298,6 +345,31 @@ the bridge having to reject anything.
 > immediately, so it isn't). The guard covers the common case — X is already
 > running and you try to start another. For the design rationale see
 > [architecture.md](./architecture.md).
+
+### After `disco self update`: "this workspace was started by an older calfcord"
+
+**Symptom.** Right after an upgrade, `disco agent start` / `restart` (or the
+`tools` / `mcp` start verbs) refuse with **"this workspace was started by an
+older calfcord — run `disco stop` then `disco start`, then re-run this
+command."**
+
+**What it means.** `disco self update` swaps the code but does **not** stop a
+running workspace. Older calfcord versions ran the whole roster *inside* the
+Process Compose supervisor; current versions run agents/tools/MCP servers as
+detached processes. Your still-running old supervisor is therefore still
+supervising roster processes, and spawning a detached twin beside them would
+duplicate every agent (double replies in Discord). The spawn verbs detect this
+and refuse; `disco stop`, `disco status`, and the stop verbs keep working so
+you can wind the old workspace down.
+
+**Resolution.** Restart the workspace on the new code:
+
+```bash
+disco stop && disco start && disco agent start --all
+```
+
+To avoid the refusal entirely, run that cycle immediately before or right
+after any `disco self update`.
 
 ---
 

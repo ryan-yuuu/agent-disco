@@ -437,6 +437,23 @@ matters in practice.
 - **Audit `agents/*.md` changes.** Every agent definition lives in the
   repo. PR-review the changes. If you don't want code-review gates on
   agent files, at minimum read the diff before deploying.
+- **Keep `$CALFCORD_HOME` owner-only.** The pidfiles under `state/run/`
+  are trusted input to a kill path: `disco stop` and the roster verbs
+  signal the processes those files name, gated by a pid + start-token
+  identity check so a recycled or attacker-written pid is never
+  signalled — but the gate is only as strong as the files being yours.
+  calfcord creates `state/run` and `state/logs` with mode `0700`; don't
+  loosen them.
+- **The detached roster outlives the supervisor.** Agents, `tools`, and
+  MCP servers run off Process Compose, so a killed or crashed supervisor
+  leaves them running. `disco stop` is the teardown that actually
+  terminates them; don't assume a dead supervisor means an idle host.
+- **Roster logs under `state/logs/` are written by calfcord itself.**
+  Each detached slot's merged stdout/stderr is appended by the spawn
+  primitive (files created `0600`, symlinks refused). Treat their
+  *contents* as untrusted — tool and model output lands there — but the
+  files themselves are calfcord-managed; nothing else should write that
+  directory.
 
 ### 5.4 Backups
 

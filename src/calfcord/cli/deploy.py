@@ -144,9 +144,13 @@ def render_systemd(*, home: str, launcher: str) -> str:
     the shim and ``pc_port_for`` resolve the same home. ``Restart=on-failure`` only
     reacts to the *fork* (the ``disco start`` ExecStart) exiting non-zero — with
     ``Type=forking`` and no ``PIDFile=`` systemd cannot track the detached
-    process-compose, so a crash *inside* the supervised tree is not auto-recovered
-    here (process-compose's own per-process restarts cover that); an
-    operator-commanded ``stop`` is left alone.
+    process-compose, so a crash *inside* the substrate is not auto-recovered here
+    (process-compose's own per-process restarts cover the broker and bridge); an
+    operator-commanded ``stop`` is left alone. The ROSTER (agents, tools, MCP
+    servers) is NOT under this unit at all: it runs as detached per-slot processes
+    with no auto-respawn, so after a boot the operator starts it (``disco agent
+    start --all``) or adds per-agent units of their own — the emitted header says
+    exactly that so the unit never overclaims.
 
     Emitted as a *user* unit (``WantedBy=default.target``, ``systemctl --user``):
     the supervisor runs under the install owner's session, so the unit carries no
@@ -167,8 +171,12 @@ def render_systemd(*, home: str, launcher: str) -> str:
         "# (a --user unit already runs as that login user — system-only owner directives\n"
         "# do not apply and are intentionally omitted).\n"
         "# Restart=on-failure only catches the `start` fork exiting non-zero; with\n"
-        "# Type=forking and no PIDFile= systemd can't track the detached supervisor, so a\n"
-        "# crash inside the tree is handled by process-compose's per-process restarts.\n"
+        "# Type=forking and no PIDFile= systemd can't track the detached supervisor. A\n"
+        "# crash inside the SUBSTRATE (broker/bridge) is covered by process-compose's\n"
+        "# own per-process restarts. The roster (agents, tools, MCP servers) is NOT\n"
+        "# under this unit: it runs detached with no auto-respawn, so after a boot run\n"
+        "# `disco agent start --all` (and `disco tools start` / `disco mcp start --all`\n"
+        "# as needed), or add per-agent units of your own.\n"
         "[Unit]\n"
         "Description=Agent Disco substrate (broker + bridge)\n"
         "After=network-online.target\n"

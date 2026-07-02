@@ -264,6 +264,40 @@ def test_tail_follow_handles_a_truncated_rotated_file(tmp_path: Path) -> None:
     assert sum(1 for line in lines if "before rotate" in line) == 1
 
 
+def test_tail_follow_replays_a_rotated_files_fresh_first_lines(tmp_path: Path) -> None:
+    # Rotate-at-spawn moves <slot>.log aside and a restarted slot writes a fresh,
+    # SMALLER file. The follower's offset must reset to 0 on the shrink so the
+    # fresh file's FIRST lines are streamed — not silently skipped by an offset
+    # left at the old file's size.
+    log_path = _write_log(tmp_path, "broker", "old old old old old\n")
+    lines, out = _sink()
+
+    calls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Truncate-and-rewrite: the restarted slot's fresh log is shorter
+            # than the follower's last offset.
+            log_path.write_text("fresh\n", encoding="utf-8")
+            return
+        raise KeyboardInterrupt
+
+    code = logs_mod.tail(
+        tmp_path,
+        agents_dir=tmp_path / "agents",
+        component="broker",
+        follow=True,
+        out=out,
+        sleep=fake_sleep,
+    )
+
+    assert code == 0
+    joined = "\n".join(lines)
+    assert "old old old" in joined
+    assert "fresh" in joined  # the restarted slot's first line is NOT dropped
+
+
 def test_tail_follow_waits_for_a_not_yet_created_file(tmp_path: Path) -> None:
     # `follow` on a valid slot whose file does not exist yet must WAIT (poll)
     # rather than error — the process may clock in moments later. The fake sleep
@@ -390,15 +424,18 @@ def test_known_names_include_mcp_server_slots(tmp_path: Path) -> None:
     mp.setenv("CALFCORD_HOME", str(tmp_path))
     mp.delenv("CALFCORD_MCP_CONFIG", raising=False)
     try:
-        names = logs_mod._known_names(agents_dir)
+        names, notes = logs_mod._known_names(agents_dir)
     finally:
         mp.undo()
     assert "mcp-github" in names
+    assert notes == []
 
 
 def test_known_names_tolerate_invalid_mcp_config(tmp_path: Path) -> None:
     """logs must keep working when mcp.json is broken — 'always show what the
-    broker said before it died' beats config strictness here."""
+    broker said before it died' beats config strictness here — but the omission
+    is NOTED, never silent (an operator tailing mcp logs must learn why they
+    are missing)."""
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
     config = tmp_path / "config"
@@ -410,8 +447,84 @@ def test_known_names_tolerate_invalid_mcp_config(tmp_path: Path) -> None:
     mp.setenv("CALFCORD_HOME", str(tmp_path))
     mp.delenv("CALFCORD_MCP_CONFIG", raising=False)
     try:
-        names = logs_mod._known_names(agents_dir)
+        names, notes = logs_mod._known_names(agents_dir)
     finally:
         mp.undo()
     assert "broker" in names
     assert not [n for n in names if n.startswith("mcp-")]
+    assert any("mcp.json unreadable" in n for n in notes)
+
+
+def test_tail_notes_a_broken_mcp_json(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "state" / "logs").mkdir(parents=True)
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "mcp.json").write_text("{not json")
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
+    monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
+    lines, out = _sink()
+
+    code = logs_mod.tail(tmp_path, agents_dir=agents_dir, out=out)
+
+    assert code == 0
+    assert any("mcp.json unreadable" in line and "omitted" in line for line in lines)
+
+
+def test_follow_survives_a_file_deleted_between_polls(tmp_path: Path) -> None:
+    """The is_file()/read_bytes window is racy: rotation (or a cleanup) can delete
+    the file in between. The pass must skip it (offset untouched) and keep
+    following — never crash the whole multi-target stream."""
+    lines, out = _sink()
+
+    class _RacyPath:
+        """is_file() says yes, but the read finds the file already gone (pass 1)."""
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def is_file(self) -> bool:
+            return True
+
+        def read_bytes(self) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                raise FileNotFoundError("deleted between is_file() and read_bytes()")
+            return b"came back\n"
+
+    calls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise KeyboardInterrupt
+
+    code = logs_mod._follow(
+        [("broker", _RacyPath())],
+        labeled=False,
+        out=out,
+        sleep=fake_sleep,
+        poll_interval=0.0,
+    )
+
+    assert code == 0
+    assert any("came back" in line for line in lines)
+
+
+# ------------------------------------------------------------- output flushing
+
+
+def test_default_out_flushes_per_line(monkeypatch):
+    """`disco logs -f | grep …` must not lag a poll behind: the default printer
+    flushes each line so piped output streams live."""
+    import builtins
+    import inspect
+
+    sig = inspect.signature(logs_mod.tail)
+    assert sig.parameters["out"].default is logs_mod._print_flushed
+
+    seen: list[dict] = []
+    monkeypatch.setattr(builtins, "print", lambda *a, **kw: seen.append(kw))
+    logs_mod._print_flushed("a line")
+    assert seen and seen[0].get("flush") is True

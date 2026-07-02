@@ -303,6 +303,26 @@ def test_rename_to_same_id_raises(tmp_path: Path) -> None:
         agent_lifecycle.rename_agent(agents_dir, "scribe", "Scribe")
 
 
+@pytest.mark.parametrize("reserved", ["tools", "mcp-y"])
+def test_run_rename_to_reserved_name_is_one_clean_line(tmp_path: Path, capsys, reserved: str) -> None:
+    """Renaming onto a reserved workspace name (`tools`, `mcp-*`) must refuse with
+    ONE clean `error:` line naming the reason — never the multi-line raw pydantic
+    validation dump the transitive AgentDefinition check would emit."""
+    agents_dir = tmp_path / "agents"
+    src = _seed_agent(agents_dir, "scribe")
+
+    rc = agent_lifecycle.run_rename(agents_dir, "scribe", reserved)
+
+    assert rc == 1
+    assert src.is_file()  # the agent never vanishes on a refused rename
+    assert not (agents_dir / f"{reserved}.md").exists()
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "reserved" in out
+    assert len(out.strip().splitlines()) == 1  # one line, not a pydantic dump
+    assert "validation error" not in out
+
+
 def test_run_rename_success(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
     _seed_agent(agents_dir, "scribe")

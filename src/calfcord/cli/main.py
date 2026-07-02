@@ -112,7 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Roster lifecycle (design §2 / §3.4-§3.5): a teammate clocking in/out of the
     # *running* office. These are thin veneers over
     # :mod:`calfcord.supervisor.roster`; the duplicate guard, the workspace check,
-    # and the §13.1 not-a-declared-slot steer live there. ``start``/``stop``/
+    # and the non-agent-slot chokepoint live there. ``start``/``stop``/
     # ``restart`` take EITHER a positional name OR ``--all`` (exactly one — the
     # mutual-exclusion is enforced in the dispatcher, not by argparse, so it can
     # carry a clear domain message). ``--all`` is LOCAL-only: it sweeps THIS host's
@@ -122,7 +122,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for _verb, _help in (
         ("start", "Bring an agent online: a teammate clocks into the live org."),
         ("stop", "Take an agent offline: a teammate clocks out."),
-        ("restart", "Reload a running agent after editing its .md."),
+        ("restart", "Restart a running agent after editing its .md."),
     ):
         _p = agent_sub.add_parser(_verb, help=_help)
         _p.add_argument("name", nargs="?", help="Agent name (or pass --all).")
@@ -135,10 +135,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     agent_sub.add_parser("ps", help="Show RUNNING agents (vs. `agent list`, which shows DEFINED agents).")
 
-    # ``tools`` is a SINGLETON roster component: one declared Process Compose slot,
-    # clocking in/out of the running office. It has NO config
-    # surface here, so it is a ``start|stop|restart`` group whose whole veneer is
-    # the dispatch to the generic ``component_start/stop`` with the slot name.
+    # ``tools`` is a SINGLETON roster component: one detached process per host
+    # (pidfile slot ``state/run/tools.pid``), clocking in/out of the running
+    # office. It has NO config surface here, so it is a ``start|stop|restart``
+    # group whose whole veneer is the dispatch to the generic
+    # ``component_start/stop`` with the slot name.
     # ``required=True`` makes a bare ``disco tools`` print help + exit non-zero
     # rather than silently no-op, so the group can grow further verbs later.
     # ``--all`` is a forward-compatible SYNONYM for the bare verb here: a singleton
@@ -150,7 +151,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for _verb, _help in (
         ("start", "Bring the tools host online."),
         ("stop", "Take the tools host offline."),
-        ("restart", "Reload the running tools host."),
+        ("restart", "Restart the running tools host."),
     ):
         _cp = tools_sub.add_parser(_verb, help=_help)
         _cp.add_argument(
@@ -184,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for _verb, _help in (
         ("start", "Bring an MCP server online (a running one is restarted in place)."),
         ("stop", "Take an MCP server offline."),
-        ("restart", "Reload an MCP server after an mcp.json edit."),
+        ("restart", "Restart an MCP server after an mcp.json edit."),
     ):
         _mp = mcp_sub.add_parser(_verb, help=_help)
         _mp.add_argument("server", nargs="?", help="Server name (an mcpServers key in mcp.json).")
@@ -236,7 +237,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # there. They take no flags today — the lifecycle entry points are nullary
     # beyond the resolved install paths.
     sub.add_parser("start", help="Open the workspace: broker + bridge, detached, health-gated.")
-    sub.add_parser("stop", help="Close the workspace (stops the supervised substrate).")
+    sub.add_parser("stop", help="Close the whole workspace (substrate and every roster process).")
     sub.add_parser("status", help="Show the org board: substrate + roster health.")
 
     # Graduation-tier surfaces (design §2 / §11). ``explain`` is a verb group (like
@@ -411,9 +412,12 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
             return asyncio.run(roster.agent_stop_all(home))
         return asyncio.run(roster.agent_stop(home, name=args.name))
     if command == "restart":
+        # Restart is a spawn verb too: thread the same broker URL start uses so
+        # its gate + duplicate probe read the operator's configured broker.
+        server_urls = os.getenv("CALF_HOST_URL") or "localhost"
         if args.all:
-            return asyncio.run(roster.agent_restart_all(home))
-        return asyncio.run(roster.agent_restart(home, name=args.name))
+            return asyncio.run(roster.agent_restart_all(home, server_urls=server_urls))
+        return asyncio.run(roster.agent_restart(home, name=args.name, server_urls=server_urls))
 
     # ``start`` (and ``start --all``) additionally consult the broker-wide
     # live-roster (mesh) probe, so they need the broker URL. ``start --all`` targets
@@ -579,10 +583,11 @@ def _run_lifecycle(command: str) -> int:
     half-built supervisor against the project-local dev tree.
 
     ``server_urls`` comes from ``CALF_HOST_URL`` (defaulting to ``localhost``,
-    the same default the runners and the broker healthcheck use); the roster is
-    the install's defined agents (:func:`detect_agents`, the seam ``agent list``
-    consumes) so the generated project declares one disabled slot per ``.md``.
-    The lifecycle coroutine's POSIX exit code is propagated unchanged.
+    the same default the runners and the broker healthcheck use). The generated
+    project is SUBSTRATE-ONLY (broker + bridge; the roster is spawned off Process
+    Compose per slot); ``start`` reads the defined roster itself for its success
+    banner's empty-org signpost. The lifecycle coroutine's POSIX exit code is
+    propagated unchanged.
     """
     home = _require_home(command, detail="the supervisor has a stable home and shim.")
     if home is None:
@@ -591,29 +596,23 @@ def _run_lifecycle(command: str) -> int:
     if command == "stop":
         return asyncio.run(lifecycle.stop(home))
     if command == "status":
-        return asyncio.run(lifecycle.status(home))
+        # status reconciles the roster's local pidfiles against the broker-wide mesh
+        # presence, so it needs the broker URL (the same CALF_HOST_URL default the
+        # runners / roster probe use).
+        server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+        return asyncio.run(lifecycle.status(home, server_urls=server_urls))
 
     # ``start`` additionally needs the shim launcher every supervised process
-    # execs under, the broker URL, and the roster to declare.
-    _, agents_dir = init.resolve_paths(home)
+    # execs under and the broker URL.
     launcher = str(home / "shims" / "disco")
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
-    # MCP servers are roster slots too: enumerate mcp.json (no-secrets reader)
-    # so the generated project declares one disabled mcp-<server> slot each. An
-    # invalid mcp.json fails the whole start actionably rather than rendering a
-    # project that silently lacks the servers.
-    mcp_servers = configured_mcp_servers_or_none()
-    if mcp_servers is None:
+    # mcp.json fail-fast (a deliberate keep): the substrate-only project declares
+    # nothing for MCP servers, but an invalid mcp.json should still fail the
+    # workspace open actionably HERE — before the operator discovers it later as
+    # N doomed `disco mcp start` attempts. Pure validation; nothing is threaded on.
+    if configured_mcp_servers_or_none() is None:
         return 1
-    return asyncio.run(
-        lifecycle.start(
-            home,
-            server_urls=server_urls,
-            launcher=launcher,
-            agent_ids=detect_agents(agents_dir),
-            mcp_servers=mcp_servers,
-        )
-    )
+    return asyncio.run(lifecycle.start(home, server_urls=server_urls, launcher=launcher))
 
 
 def _run_component(name: str, verb: str) -> int:
@@ -623,9 +622,9 @@ def _run_component(name: str, verb: str) -> int:
     surface and a thin veneer over the generic
     :func:`calfcord.supervisor.component.component_start` /
     :func:`~calfcord.supervisor.component.component_stop`. The slot ``name`` is the
-    component's declared Process Compose process (see
-    :func:`calfcord.supervisor.compose.build_compose_project`); ``verb`` selects
-    start vs stop.
+    component's pidfile slot under ``state/run/<name>.pid`` — like the rest of the
+    roster it is a detached process spawned off Process Compose (see
+    :mod:`calfcord.supervisor.procspawn`); ``verb`` selects start vs stop.
 
     Like every other lifecycle surface (substrate, agent roster), this
     drives the *install-scoped* supervisor whose REST port is derived from
@@ -662,7 +661,9 @@ def _run_logs(component: str | None, *, follow: bool) -> int:
     with the same actionable native-install message every supervisor-scoped verb
     uses rather than tailing a nonexistent project-local log dir. The agents dir is
     resolved from the same seam ``start``/``agent list`` use so the tail's known-name
-    set equals the roster the supervisor declares. Synchronous (no broker, no REST):
+    set equals the install's defined roster (each detached slot logs to the same
+    ``state/logs/<slot>.log`` convention the substrate uses). Synchronous (no
+    broker, no REST):
     :func:`logs.tail` reads files straight off disk, and its ``-f`` follow loop exits
     cleanly on Ctrl-C (``main`` maps the interrupt to 130).
     """
@@ -846,7 +847,19 @@ def main(argv: list[str] | None = None) -> int:
     except EOFError:
         print("error: this command needs an interactive terminal (stdin reached EOF).")
         return 1
-    except OSError:
+    except OSError as exc:
+        # A spawn failure (the install's launcher shim missing or not executable)
+        # arrives here as FileNotFoundError/PermissionError carrying the path. It
+        # must surface as what it is — on a non-TTY stdin it would otherwise be
+        # misdiagnosed by the raw-mode branch below as "needs an interactive
+        # terminal", which is a lie about a broken install.
+        if isinstance(exc, (FileNotFoundError, PermissionError)) and exc.filename:
+            print(
+                f"error: could not launch {exc.filename}: {exc.strerror} "
+                "(is the install's launcher shim present and executable? "
+                "Re-run the installer if not.)"
+            )
+            return 1
         # InquirerPy/prompt_toolkit raises OSError (EINVAL) when it can't put a
         # non-TTY stdin (piped / CI) into raw mode. Surface that cleanly, but only
         # when stdin genuinely isn't a TTY — re-raise anything else rather than

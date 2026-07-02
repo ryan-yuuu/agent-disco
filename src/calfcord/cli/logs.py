@@ -1,27 +1,30 @@
-"""``disco logs [component] [-f]`` — tail the supervisor's per-process logs.
+"""``disco logs [component] [-f]`` — tail the workspace's per-process logs.
 
-Process Compose writes each supervised process's stdout/stderr to
-``$CALFCORD_HOME/state/logs/<name>.log`` (the §13.2 ``log_location`` contract),
-plus its own ``process-compose.log``. This command reads those files straight
-off disk — a path that works even when the supervisor REST daemon is down (the
-file is the durable record), so "what did the broker say before it died?" is
-always answerable.
+Every component logs to ``$CALFCORD_HOME/state/logs/<name>.log``, but two
+different writers fill that directory: Process Compose captures the SUBSTRATE
+processes (``broker``/``bridge`` ``log_location``, plus its own supervisor log,
+``process-compose.log``), while :mod:`calfcord.supervisor.procspawn` appends each
+detached ROSTER slot's output (agents, ``tools``, ``mcp-<server>``) at spawn.
+This command reads those files straight off disk — a path that works even when
+the supervisor REST daemon is down (the file is the durable record), so "what
+did the broker say before it died?" is always answerable.
 
 Why read files rather than the REST log endpoint: the on-disk path is
 supervisor-independent and host-local with no port to derive or daemon to be up;
-it is the lowest-coupling way to surface "what happened here." A live process's
-logs are *also* available over REST (``GET /process/logs/...``), but that path is
-only useful while the daemon answers, so it is left to a future need.
+it is the lowest-coupling way to surface "what happened here." The substrate's
+live logs are *also* available over REST (``GET /process/logs/...``), but that
+path only covers PC-supervised processes and only while the daemon answers, so
+it is left to a future need.
 
-The set of names that *may* have a log is not hardcoded here — that would drift
-from what the generator actually declares. It is reconstructed from the same two
-seams the generator uses: the reserved substrate/component names
-(:data:`calfcord.supervisor.compose._RESERVED_PROCESS_NAMES`) and the host's
-agent ids (:func:`calfcord.cli._agents.detect_agents`, the seam ``start`` and
-``agent list`` consume), plus the supervisor's own ``process-compose`` log.
+The set of names that *may* have a log is not hardcoded here — it is
+reconstructed from the same seams the writers use: the reserved substrate +
+``tools`` names (:data:`calfcord.supervisor.compose._RESERVED_PROCESS_NAMES`),
+the host's agent ids (:func:`calfcord.cli._agents.detect_agents` over
+``agents/*.md``), the ``mcp-<server>`` slots from mcp.json, and the supervisor's
+own ``process-compose`` log.
 
-This module imports only ``_agents.detect_agents`` and the ``compose``
-log-path / name-set seams, both of which are import-light.
+This module imports only ``_agents.detect_agents``, the mcp.json name reader,
+and the ``compose`` log-path / name-set seams, all of which are import-light.
 
 The native-install guard (a dev run has no ``$CALFCORD_HOME`` and therefore no
 state/logs dir) lives in the ``main.py`` veneer, alongside every other
@@ -57,32 +60,49 @@ _SUPERVISOR_LOG_NAME = SUPERVISOR_LOG_STEM
 _FOLLOW_POLL_INTERVAL_SECONDS = 0.5
 
 
-def _known_names(agents_dir: Path) -> list[str]:
-    """The component names that may have a log, substrate/components first.
+def _print_flushed(*args, **kwargs) -> None:
+    """``print`` with an unconditional flush — the default ``out``.
 
-    Built from the same seams the generator uses so the set can never drift from
-    what ``disco start`` actually declares: the reserved substrate + fixed
-    component slots, the host's agent ids, and the supervisor's own log. Order is
-    deterministic (substrate, fixed components, sorted agents, supervisor) so the
-    merged "all logs" view and the unknown-name hint read predictably.
+    Piped stdout is block-buffered, so a bare ``print`` in the follow loop can
+    lag ``disco logs -f | grep …`` a full buffer behind the file; flushing per
+    line keeps the pipe live.
     """
+    print(*args, flush=True, **kwargs)
+
+
+def _known_names(agents_dir: Path) -> tuple[list[str], list[str]]:
+    """The component names that may have a log, plus any degradation notes.
+
+    The name set is the union of what the two log WRITERS produce: the reserved
+    substrate + ``tools`` slots, the host's agent ids (``agents/*.md``), the
+    ``mcp-<server>`` slots from mcp.json, and the supervisor's own log. Order is
+    deterministic (substrate, tools, agents, mcp, supervisor) so the merged
+    "all logs" view and the unknown-name hint read predictably.
+
+    The second element carries operator-facing notes for any part of the set
+    that could not be enumerated (today: an unreadable mcp.json) — logs stays
+    usable, but the omission is said out loud, never silent.
+    """
+    notes: list[str] = []
     # ``_RESERVED_PROCESS_NAMES`` is a frozenset; pin a stable, readable order
     # (substrate then the fixed components) rather than its hash order.
     ordered_reserved = [name for name in ("broker", "bridge", "tools") if name in _RESERVED_PROCESS_NAMES]
-    # MCP slots come from the same no-secrets mcp.json seam the compose
-    # generator uses. Tolerant on purpose: a broken mcp.json must not take the
-    # logs command down with it ("always show what the broker said before it
-    # died") — the strict readers (start, mcp start) surface the config error.
+    # MCP slots come from the same no-secrets mcp.json seam the spawn verbs use.
+    # Tolerant on purpose: a broken mcp.json must not take the logs command down
+    # with it ("always show what the broker said before it died") — the strict
+    # readers (start, mcp start) surface the config error; here it is a note.
     try:
         mcp_slots = [mcp_slot_name(s) for s in list_server_names(resolve_config_path())]
     except McpConfigError:
         mcp_slots = []
-    return [
+        notes.append("note: mcp.json unreadable; MCP logs omitted.")
+    names = [
         *ordered_reserved,
         *detect_agents(agents_dir),
         *mcp_slots,
         _SUPERVISOR_LOG_NAME,
     ]
+    return names, notes
 
 
 def _emit_file(path: Path, *, label: str | None, out: Callable[..., None]) -> None:
@@ -134,11 +154,21 @@ def _follow(
             for name, path in targets:
                 if not path.is_file():
                     continue
-                data = path.read_bytes()
-                if len(data) <= offsets[name]:
-                    # Truncated (rotation) or unchanged: reset to the new end so a
-                    # rotated-smaller file is not re-streamed from a stale offset.
-                    offsets[name] = len(data)
+                try:
+                    data = path.read_bytes()
+                except OSError:
+                    # The is_file()/read window is racy: rotation or a cleanup can
+                    # delete the file in between. Skip this pass (offset untouched
+                    # — a reappearing file streams from where we left off, or from
+                    # 0 via the shrink reset below) rather than crash the stream.
+                    continue
+                if len(data) < offsets[name]:
+                    # The file SHRANK: rotate-at-spawn moved it aside and a
+                    # restarted slot is writing a fresh file. Restart from byte 0
+                    # so the fresh file's first lines stream (an offset left at
+                    # the old size would silently skip them).
+                    offsets[name] = 0
+                if len(data) == offsets[name]:
                     continue
                 fresh = data[offsets[name] :].decode("utf-8", errors="replace")
                 offsets[name] = len(data)
@@ -156,7 +186,7 @@ def tail(
     agents_dir: Path,
     component: str | None = None,
     follow: bool = False,
-    out: Callable[..., None] = print,
+    out: Callable[..., None] = _print_flushed,
     sleep: Callable[[float], None] = time.sleep,
     poll_interval: float = _FOLLOW_POLL_INTERVAL_SECONDS,
 ) -> int:
@@ -174,7 +204,7 @@ def tail(
       actionable ``error:`` rather than raising — a missing workspace or a typo is
       operator input, not an infrastructure bug.
     * **0** — otherwise, including the benign "this slot has no log yet" case (a
-      declared component that never clocked in), which is informational, not an
+      known component that never clocked in), which is informational, not an
       error.
     """
     log_dir = home / "state" / "logs"
@@ -182,7 +212,9 @@ def tail(
         out(f"error: no logs under {log_dir} — the workspace may not be running (start it with: disco start).")
         return 1
 
-    names = _known_names(agents_dir)
+    names, notes = _known_names(agents_dir)
+    for note in notes:
+        out(note)
 
     if component is not None and component not in names:
         out(f"error: unknown component {component!r}; choose one of: {', '.join(names)} (or omit it to tail all).")

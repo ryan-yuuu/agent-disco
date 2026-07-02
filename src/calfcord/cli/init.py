@@ -321,7 +321,6 @@ def run(
         prompter,
         name=name,
         home=home,
-        agents_dir=agents_dir,
         env_path=env_path,
         server_urls=effective_server_urls,
         start_fn=start_fn,
@@ -590,7 +589,6 @@ def _run_finish(
     *,
     name: str,
     home: Path | None,
-    agents_dir: Path,
     env_path: Path,
     server_urls: str,
     start_fn: Callable[..., Awaitable[int]] | None,
@@ -641,7 +639,6 @@ def _run_finish(
             prompter,
             name=name,
             home=home,
-            agents_dir=agents_dir,
             server_urls=server_urls,
             start_fn=start_fn,
             agent_start_fn=agent_start_fn,
@@ -655,7 +652,6 @@ async def _finish_live(
     *,
     name: str,
     home: Path,
-    agents_dir: Path,
     server_urls: str,
     start_fn: Callable[..., Awaitable[int]],
     agent_start_fn: Callable[..., Awaitable[int]],
@@ -663,29 +659,16 @@ async def _finish_live(
 ) -> int:
     """Run the native live finish; returns 0 on a live org, non-zero on a failure
     *before* the org could be reached (substrate / agent start)."""
-    from calfcord.cli._agents import detect_agents
-
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
-    # supervised process execs under, the broker URL, the defined roster, and
-    # the mcp.json servers. Unlike `disco start`, a broken mcp.json is a
-    # WARNING here: onboarding's job is reaching a live org, and MCP slots are
-    # optional — the strict readers surface the error for fixing afterwards.
-    from calfcord.mcp.config import McpConfigError, list_server_names, resolve_config_path
-
-    try:
-        mcp_servers = list_server_names(resolve_config_path())
-    except McpConfigError as exc:
-        print(f"  warning: skipping MCP servers ({exc})")
-        mcp_servers = []
+    # supervised process execs under, and the broker URL. The project is
+    # substrate-only — the roster (this agent included) spawns off Process
+    # Compose right after, and mcp.json is not consulted here at all (unlike
+    # `disco start`'s deliberate fail-fast validation): onboarding's job is
+    # reaching a live org, and a broken mcp.json surfaces later through the
+    # strict readers (`disco start`, `disco mcp start`).
     launcher = str(home / "shims" / "disco")
-    rc = await start_fn(
-        home,
-        server_urls=server_urls,
-        launcher=launcher,
-        agent_ids=detect_agents(agents_dir),
-        mcp_servers=mcp_servers,
-    )
+    rc = await start_fn(home, server_urls=server_urls, launcher=launcher)
     if rc != 0:
         # start() already tore the substrate down and printed the specific cause;
         # point at the diagnostics rather than guessing one (§12.6 — never
@@ -761,7 +744,12 @@ async def _finish_live(
     print("    disco agent create <name>")
     print("Learn more:  disco explain topology  ·  docs/using-disco.md")
     print()
-    print(f"({_REBOOT_NOTE} `disco start` reopens it; `disco status` shows who's online.)")
+    # `disco start` reopens only the substrate; the detached roster does not
+    # auto-start, so the reboot note must name the agent re-start too.
+    print(
+        f"({_REBOOT_NOTE} `disco start` reopens it, then `disco agent start --all` "
+        "brings the agents back; `disco status` shows who's online.)"
+    )
     return 0
 
 
@@ -777,7 +765,8 @@ def _print_manual_finish(name: str) -> None:
     print(f"    disco agent start {name}")
     print(f"Then in Discord, say: @{name} hello")
     print("Add more teammates any time: disco agent create <name>")
-    print(f"({_REBOOT_NOTE} Re-run `disco start` after a reboot.)")
+    # Agents do not auto-start with the substrate, so the reboot steer names both.
+    print(f"({_REBOOT_NOTE} Re-run `disco start`, then `disco agent start --all`, after a reboot.)")
 
 
 def _supervisor_available(pc_binary_fn: Callable[[], str]) -> bool:

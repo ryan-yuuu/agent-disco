@@ -93,16 +93,14 @@ covering the whole lifecycle.
 disco agent create               # or name it up front: disco agent create scribe
 ```
 
-A brand-new agent isn't in the running workspace yet, so the supervisor doesn't know about it. After creating
-one, **reload the workspace** so it picks up the new agent, then bring the agent online:
+A brand-new agent runs as its own supervised process, so you bring it online directly — there's no
+workspace reload:
 
 ```bash
-disco stop && disco start     # reload the workspace so it sees the new agent
-disco agent start scribe         # clock the agent in
+disco agent start scribe         # clock the new agent in (the workspace must be open)
 ```
 
-(Already-defined agents don't need the reload — only a *newly created* one does. The bridge also re-registers
-its `/<name>` slash command on this reload.)
+(If the workspace isn't open yet, run `disco start` first, then `disco agent start scribe`.)
 
 **Bring an agent online or take it offline** — clock a teammate in or out without touching anyone else:
 
@@ -188,9 +186,8 @@ disco mcp restart github         # reload after editing its mcp.json entry
 disco mcp remove github          # delete the entry (--force to skip the confirm)
 ```
 
-A server you add *after* `disco start` isn't a declared supervisor slot yet,
-so reload the workspace once (`disco stop && disco start`) before starting
-it — `disco mcp start` prints this hint when it applies. Then grant the tools
+A server you add *after* `disco start` spawns as its own detached process, so
+`disco mcp start github` brings it online immediately — no workspace reload. Then grant the tools
 to an agent by adding an `mcp/<server>` (or `mcp/<server>/<tool>`) entry to its
 `tools:` list — `disco agent tools <name>` offers those rows — and restart
 the agent to apply.

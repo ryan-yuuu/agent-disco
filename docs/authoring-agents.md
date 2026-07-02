@@ -30,8 +30,8 @@ into a calfkit `Agent` node addressed **by name** (no per-channel topic
 subscriptions). The **bridge no longer reads `agents/*.md`** — it resolves
 `@mention`s against calfkit's live agent **mesh** and derives each agent's
 Discord persona from its `name`. So a brand-new `.md` is brought online
-with `disco agent start <name>` (after a one-time workspace reload so
-the supervisor declares its slot — see
+with `disco agent start <name>` directly — the agent runs as its own
+supervised process, so there is no workspace reload (see
 [`using-disco.md`](using-disco.md#build-your-team-of-agents)); there
 is **no bridge restart and no per-agent slash command** — agents are
 invoked by `@<name>` mention, not `/<name>`.
@@ -439,7 +439,7 @@ survive a round-trip through the CLI editors on a live agent file.
 
 ### 7.1 Logs
 
-The agent runner logs to stdout, which the supervisor captures to
+The agent runner logs to stdout, captured directly to its slot log at
 `$CALFCORD_HOME/state/logs/<name>.log`. Tail one agent (or follow with
 `-f`):
 
@@ -626,11 +626,11 @@ agent's identity or existence, so they are their own commands.
 These commands edit the `.md` on disk; the running agent bakes its
 config at boot (the same one-shot constraint behind the "restart required"
 notes in §3.3 and §6). So **run `disco agent restart <name>`** after any
-edit to apply it. A *newly created* agent additionally needs a one-time
-workspace reload (`disco stop && disco start`) so the supervisor
-declares its slot before `disco agent start <name>` — but there is **no
-bridge slash-command re-sync**, since agents are invoked by `@mention`, not
-`/<name>`. Each command prints the matching restart hint on success.
+edit to apply it. A *newly created* agent is brought online directly with
+`disco agent start <name>` — the agent runs as its own supervised process, so
+there is no workspace reload — and there is **no bridge slash-command
+re-sync**, since agents are invoked by `@mention`, not `/<name>`. Each command
+prints the matching restart hint on success.
 
 The same boot-time rule covers credentials and `.env`: a changed API key,
 model, or provider in `.env` is read only at boot too, so it also needs a

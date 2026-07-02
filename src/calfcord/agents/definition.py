@@ -37,7 +37,7 @@ import frontmatter
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from calfcord.agents.identifier import AGENT_ID_PATTERN
+from calfcord.agents.identifier import AGENT_ID_PATTERN, reserved_agent_id_error
 from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
 
 Provider = Literal["anthropic", "openai", "openai-codex"]
@@ -152,6 +152,13 @@ class AgentDefinition(BaseModel):
     def _validate_agent_id(cls, v: str) -> str:
         if not AGENT_ID_PATTERN.fullmatch(v):
             raise ValueError(f"name must match [a-z0-9_-]{{1,32}}, got {v!r}")
+        # Reserved workspace-slot names (broker/bridge/tools, mcp-*): agents
+        # share the slot namespace with those processes, so the collision must
+        # fail HERE — the chokepoint every read path (parse_agent_md) and write
+        # path (validate-before-write) runs through — not first at `agent start`.
+        reserved = reserved_agent_id_error(v)
+        if reserved is not None:
+            raise ValueError(reserved)
         return v
 
     @field_validator("description")

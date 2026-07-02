@@ -222,10 +222,14 @@ def _check_daemon_alive(beat: Heartbeat, *, now: datetime) -> Result:
     if is_fresh(beat, now=now):
         who = f" (bot: {beat.identity})" if beat.identity else ""
         return Result("daemon", "ok", f"bridge alive{who}")
+    # `stop && start` is the right remedy (the bridge is substrate), but `stop`
+    # also sweeps the roster and `start` reopens only the substrate — so the
+    # remedy names the roster re-start too, or it would strand the agents.
     return Result(
         "daemon",
         "fail",
-        "bridge heartbeat is stale (wedged/zombie) — restart: `disco stop && disco start`",
+        "bridge heartbeat is stale (wedged/zombie) — restart: `disco stop && disco start`, "
+        "then `disco agent start --all`",
     )
 
 
@@ -313,7 +317,13 @@ def run(
     elif home is not None and not daemon_up:
         # The install has a home but the workspace is closed: not a failure, but
         # always name the next step so a returning user is never stranded (§12.6).
-        print("\nworkspace not running — open it with: `disco start`")
+        # `disco start` reopens only the substrate — the roster runs detached and
+        # does not auto-start, so name its re-start too (matching the stale-daemon
+        # remedy) or the agents stay silently offline.
+        print(
+            "\nworkspace not running — open it with: `disco start`, "
+            "then `disco agent start --all`"
+        )
 
     failures = sum(1 for r in all_results if r.status == "fail")
     warnings = sum(1 for r in all_results if r.status == "warn")
@@ -324,7 +334,12 @@ def run(
     if warnings:
         print(f"ready, with {warnings} warning(s) — review the ⚠ items above.")
         return 0
-    print("all checks passed — you're ready to start calfcord.")
+    # State-aware closer: when the runtime board above just showed the workspace
+    # OPEN, "you're ready to start" would contradict doctor's own findings.
+    if daemon_up:
+        print("all checks passed — the workspace is open and healthy.")
+    else:
+        print("all checks passed — you're ready to start calfcord.")
     return 0
 
 

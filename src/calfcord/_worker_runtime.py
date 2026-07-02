@@ -26,20 +26,24 @@ after we installed our own handlers silently clobbers ours: a commanded
 ``SIGTERM`` would then fire only FastStream's handler, draining the worker and
 returning ``run()`` cleanly — but our stop event would never be set, so the
 clean return reads as the "returned unexpectedly" crash below and the process
-exits non-zero (a false crash that can spuriously restart under
-``Restart=on-failure``). The embedded surface installs no signal handlers, so
-ours survive and a commanded signal drains cleanly (exit 0).
+exits non-zero — a false crash exit that would misreport a cleanly commanded
+stop. The embedded surface installs no signal handlers, so ours survive and a
+commanded signal drains cleanly (exit 0).
 
-The supervisor invariant
--------------------------
+The exit-code invariant
+------------------------
 
 A worker that finishes *without* a shutdown signal is unexpected — under
-normal operation the only way out is a signal. If we let that case exit 0, a
-supervisor configured for ``Restart=on-failure`` would leave the process
-down. So a signal-less worker exit (a boot crash, or a serving loop that ends
-on its own) is converted into a re-raised exception — the worker's own crash,
-or a synthesized :class:`RuntimeError` for a clean-but-signal-less exit — to
-force a non-zero exit and a restart.
+normal operation the only way out is a signal. So a signal-less worker exit
+(a boot crash, or a serving loop that ends on its own) is converted into a
+re-raised exception — the worker's own crash, or a synthesized
+:class:`RuntimeError` for a clean-but-signal-less exit — forcing a NON-ZERO
+exit. Nothing auto-restarts a roster process anymore (they run detached with
+no supervisor — a crash simply shows the slot offline until an operator
+restarts it), so the non-zero exit is now about *honesty*, not respawn
+triggering: the spawn-confirmation window and the status board both read the
+process's fate from it, and a lying exit 0 would report a dead-on-arrival
+worker as a clean stop.
 """
 
 from __future__ import annotations

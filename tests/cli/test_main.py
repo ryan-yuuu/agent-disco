@@ -297,6 +297,40 @@ def test_main_maps_oserror_to_clean_exit_when_stdin_not_a_tty(
     assert "interactive terminal" in capsys.readouterr().out
 
 
+def test_main_reports_a_missing_launcher_as_a_launch_failure_not_a_tty_problem(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A FileNotFoundError from spawning the shim must surface as what it is — a
+    missing/non-executable launcher, naming the path — even on a non-TTY stdin
+    (it must NOT be misdiagnosed as 'needs an interactive terminal')."""
+
+    def _raise(parser: object, args: object) -> int:
+        raise FileNotFoundError(2, "No such file or directory", "/opt/disco/shims/disco")
+
+    monkeypatch.setattr(main_mod, "_dispatch", _raise)
+    monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: False)
+
+    assert main(["agent", "start", "scribe"]) == 1
+    out = capsys.readouterr().out
+    assert "/opt/disco/shims/disco" in out
+    assert "interactive terminal" not in out
+
+
+def test_main_reports_a_non_executable_launcher_with_its_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _raise(parser: object, args: object) -> int:
+        raise PermissionError(13, "Permission denied", "/opt/disco/shims/disco")
+
+    monkeypatch.setattr(main_mod, "_dispatch", _raise)
+    monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: False)
+
+    assert main(["agent", "start", "scribe"]) == 1
+    out = capsys.readouterr().out
+    assert "/opt/disco/shims/disco" in out
+    assert "interactive terminal" not in out
+
+
 def test_main_reraises_oserror_on_a_real_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     """An ``OSError`` with stdin a real TTY is a genuine bug — it must propagate,
     not be masked behind the friendly non-TTY message."""
@@ -480,26 +514,22 @@ def test_main_lifecycle_help_exits_zero(verb: str) -> None:
 
 def test_main_start_dispatches_with_resolved_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # ``start`` must resolve home from CALFCORD_HOME, build the launcher as the
-    # install's shim, read server_urls from CALF_HOST_URL, and enumerate the
-    # agents dir for the roster — then asyncio.run lifecycle.start and propagate
-    # its exit code.
+    # install's shim, and read server_urls from CALF_HOST_URL — then asyncio.run
+    # lifecycle.start and propagate its exit code. (The defined roster is read by
+    # lifecycle.start itself for its banner signpost; nothing is threaded here.)
     home = tmp_path / "home"
-    agents = home / "agents"
-    agents.mkdir(parents=True)
-    (agents / "assistant.md").write_text("---\nname: assistant\nmodel: gpt-5-nano\n---\nYou are assistant.\n")
-    (agents / "scribe.md").write_text("---\nname: scribe\nmodel: gpt-5-nano\n---\nYou are scribe.\n")
+    (home / "agents").mkdir(parents=True)
     monkeypatch.setenv("CALFCORD_HOME", str(home))
     monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
     monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
 
     captured: dict[str, object] = {}
 
-    async def _start(home_arg, *, server_urls, launcher, agent_ids, **kwargs):
+    async def _start(home_arg, *, server_urls, launcher, **kwargs):
         captured.update(
             home=home_arg,
             server_urls=server_urls,
             launcher=launcher,
-            agent_ids=list(agent_ids),
         )
         return 0
 
@@ -508,8 +538,6 @@ def test_main_start_dispatches_with_resolved_args(monkeypatch: pytest.MonkeyPatc
     assert captured["home"] == home
     assert captured["server_urls"] == "broker.example:9092"
     assert captured["launcher"] == str(home / "shims" / "disco")
-    # Roster is the sorted .md stems (the same seam `agent list` uses).
-    assert captured["agent_ids"] == ["assistant", "scribe"]
 
 
 def test_main_start_propagates_nonzero_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -586,6 +614,29 @@ def test_main_stop_propagates_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     monkeypatch.setattr(lifecycle, "stop", _stop)
     assert main(["stop"]) == 3
+
+
+def test_main_stop_contended_lock_prints_one_clean_error_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`disco stop` racing an in-flight roster verb (which holds the lifecycle lock
+    SHARED for its spawn-confirm window) must exit 1 with ONE clean error line —
+    never a raw RuntimeError traceback escaping main()."""
+    from calfcord.supervisor import _workspace
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    # The REAL lifecycle.stop runs: the contended lock raises before any REST call.
+    with _workspace.slot_mutation(str(home), "assistant"):
+        rc = main(["stop"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "in progress" in out
+    assert "Traceback" not in out
 
 
 def test_main_status_dispatches_with_resolved_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -870,10 +921,12 @@ def test_main_agent_stop_restart_all_dispatch_with_home_only(
 ) -> None:
     # `agent stop --all` / `restart --all` target every RUNNING local agent — the
     # bulk fn reads the supervisor itself, so main passes only the resolved home
-    # (no ids, no server_urls / broker probe).
+    # plus (for the SPAWN verb, restart) the broker URL its gate/probe read —
+    # stop needs no broker at all, so no server_urls may leak into it.
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
 
     captured: dict[str, object] = {}
 
@@ -888,9 +941,12 @@ def test_main_agent_stop_restart_all_dispatch_with_home_only(
     monkeypatch.setattr(roster, f"agent_{verb}", _single_boom)
     assert main(["agent", verb, "--all"]) == 0
     assert captured["home"] == home
-    # No name, no server_urls leak into the bulk-stop/restart call.
+    # No name leaks into the bulk call either way.
     assert "name" not in captured["kwargs"]
-    assert "server_urls" not in captured["kwargs"]
+    if verb == "stop":
+        assert "server_urls" not in captured["kwargs"]
+    else:
+        assert captured["kwargs"]["server_urls"] == "broker.example:9092"
 
 
 @pytest.mark.parametrize("verb", ["start", "stop", "restart"])
@@ -1597,30 +1653,28 @@ def test_main_mcp_without_home_errors_native_install(
     assert "CALFCORD_HOME" in capsys.readouterr().out
 
 
-def test_main_start_passes_mcp_servers_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # `disco start` enumerates mcp.json alongside the agents dir so the
-    # generated project declares one disabled slot per server.
+def test_main_start_fails_fast_on_broken_mcp_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # The substrate-only project declares nothing for MCP servers, but `disco
+    # start` deliberately KEEPS mcp.json validation as a fail-fast: an invalid
+    # config fails the workspace open actionably here, before it would surface
+    # later as N doomed `disco mcp start` attempts. The workspace must not open.
     home = tmp_path / "home"
-    agents = home / "agents"
-    agents.mkdir(parents=True)
-    (agents / "assistant.md").write_text("---\nname: assistant\nmodel: gpt-5-nano\n---\nYou are assistant.\n")
+    (home / "agents").mkdir(parents=True)
     config = home / "config"
     config.mkdir()
-    (config / "mcp.json").write_text('{"mcpServers": {"github": {"command": "x"}}}')
+    (config / "mcp.json").write_text("{not json")
     monkeypatch.setenv("CALFCORD_HOME", str(home))
     monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
     monkeypatch.delenv("CALFCORD_MCP_CONFIG", raising=False)
 
-    captured: dict[str, object] = {}
-
-    async def _start(home_arg, *, server_urls, launcher, agent_ids, mcp_servers=(), **kwargs):
-        captured.update(agent_ids=list(agent_ids), mcp_servers=list(mcp_servers))
-        return 0
+    async def _start(*args, **kwargs):
+        raise AssertionError("lifecycle.start must not run on a broken mcp.json")
 
     monkeypatch.setattr(lifecycle, "start", _start)
-    assert main(["start"]) == 0
-    assert captured["agent_ids"] == ["assistant"]
-    assert captured["mcp_servers"] == ["github"]
+    assert main(["start"]) == 1
+    assert "error" in capsys.readouterr().out.lower()
 
 
 def test_main_mcp_add_dispatches_with_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
