@@ -264,6 +264,40 @@ def test_tail_follow_handles_a_truncated_rotated_file(tmp_path: Path) -> None:
     assert sum(1 for line in lines if "before rotate" in line) == 1
 
 
+def test_tail_follow_replays_a_rotated_files_fresh_first_lines(tmp_path: Path) -> None:
+    # Rotate-at-spawn moves <slot>.log aside and a restarted slot writes a fresh,
+    # SMALLER file. The follower's offset must reset to 0 on the shrink so the
+    # fresh file's FIRST lines are streamed — not silently skipped by an offset
+    # left at the old file's size.
+    log_path = _write_log(tmp_path, "broker", "old old old old old\n")
+    lines, out = _sink()
+
+    calls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Truncate-and-rewrite: the restarted slot's fresh log is shorter
+            # than the follower's last offset.
+            log_path.write_text("fresh\n", encoding="utf-8")
+            return
+        raise KeyboardInterrupt
+
+    code = logs_mod.tail(
+        tmp_path,
+        agents_dir=tmp_path / "agents",
+        component="broker",
+        follow=True,
+        out=out,
+        sleep=fake_sleep,
+    )
+
+    assert code == 0
+    joined = "\n".join(lines)
+    assert "old old old" in joined
+    assert "fresh" in joined  # the restarted slot's first line is NOT dropped
+
+
 def test_tail_follow_waits_for_a_not_yet_created_file(tmp_path: Path) -> None:
     # `follow` on a valid slot whose file does not exist yet must WAIT (poll)
     # rather than error — the process may clock in moments later. The fake sleep

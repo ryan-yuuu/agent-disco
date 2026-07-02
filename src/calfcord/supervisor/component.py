@@ -98,6 +98,13 @@ async def component_start(
         print(_NOT_RUNNING_HINT)
         return 1
 
+    # Legacy-workspace guard (fail-open): an old-main supervisor still runs the
+    # roster (this singleton included) as PC slots — spawning beside it would
+    # double the component.
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
+        return 1
+
     if not await _workspace.broker_gate(None, broker_probe):
         print(_BROKER_UNREACHABLE_HINT)
         return 1
@@ -160,6 +167,11 @@ async def component_restart(
 
     if not await _workspace_is_up(client):
         print(_NOT_RUNNING_HINT)
+        return 1
+
+    # Legacy-workspace guard (fail-open), like every spawn verb.
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
         return 1
 
     if not await _workspace.broker_gate(None, broker_probe):

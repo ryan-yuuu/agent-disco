@@ -30,15 +30,21 @@ from calfcord.supervisor.procspawn import TerminateResult
 
 
 class _StubClient:
-    """A scriptable stand-in for ProcessComposeClient — only the workspace check."""
+    """A scriptable stand-in for ProcessComposeClient — the workspace check plus
+    the declared-process read the legacy-workspace guard consults (``processes``
+    defaults to the modern substrate-only project)."""
 
-    def __init__(self, *, workspace_up: bool = True) -> None:
+    def __init__(self, *, workspace_up: bool = True, processes: list | None = None) -> None:
         self._workspace_up = workspace_up
+        self._processes = processes if processes is not None else [{"name": "broker"}, {"name": "bridge"}]
 
     async def project_state(self):
         if not self._workspace_up:
             raise RuntimeError("project_state: connection refused")
         return {"status": "ok"}
+
+    async def list_processes(self):
+        return self._processes
 
 
 class _FakeSlots:
@@ -279,6 +285,69 @@ async def test_component_start_concurrent_holder_reports_busy(tmp_path, capsys, 
     assert rc == 0
     assert slots.spawned == []
     assert "already" in capsys.readouterr().out
+
+
+async def test_component_restart_concurrent_holder_reports_busy(tmp_path, capsys, monkeypatch):
+    """A restart racing another command's slot mutation is benign: the honest busy
+    line, exit 0, and NOTHING terminated or spawned."""
+    slots = _FakeSlots(["tools"])
+    slots.install(monkeypatch)
+
+    with _workspace.slot_mutation(_home(tmp_path), "tools"):
+        rc = await component.component_restart(_home(tmp_path), name="tools", client=_StubClient())
+
+    assert rc == 0
+    assert slots.terminated == []
+    assert slots.spawned == []
+    assert "already being restarted" in capsys.readouterr().out
+
+
+# --- legacy-workspace guard (upgrade over a live old-style workspace) ---------
+
+_LEGACY_PROCESSES = [{"name": "broker"}, {"name": "bridge"}, {"name": "tools"}]
+
+
+async def test_component_start_refuses_a_legacy_pc_supervised_workspace(tmp_path, capsys, monkeypatch):
+    """An old-main workspace still supervises `tools` under PC; spawning a detached
+    twin beside it would double the singleton — refuse with the upgrade remedy."""
+    slots = _FakeSlots()
+    slots.install(monkeypatch)
+
+    rc = await component.component_start(
+        _home(tmp_path), name="tools", client=_StubClient(processes=_LEGACY_PROCESSES)
+    )
+
+    assert rc == 1
+    assert slots.spawned == []
+    out = capsys.readouterr().out
+    assert "older calfcord" in out
+
+
+async def test_component_restart_refuses_a_legacy_pc_supervised_workspace(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["tools"])
+    slots.install(monkeypatch)
+
+    rc = await component.component_restart(
+        _home(tmp_path), name="tools", client=_StubClient(processes=_LEGACY_PROCESSES)
+    )
+
+    assert rc == 1
+    assert slots.terminated == []
+    assert slots.spawned == []
+    assert "older calfcord" in capsys.readouterr().out
+
+
+async def test_component_stop_stays_usable_on_a_legacy_workspace(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["tools"])
+    slots.install(monkeypatch)
+
+    rc = await component.component_stop(
+        _home(tmp_path), name="tools", client=_StubClient(processes=_LEGACY_PROCESSES)
+    )
+
+    assert rc == 0
+    assert slots.terminated == ["tools"]
+    assert "tools stopped" in capsys.readouterr().out
 
 
 # --- default wiring ----------------------------------------------------------

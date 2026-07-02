@@ -616,6 +616,29 @@ def test_main_stop_propagates_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert main(["stop"]) == 3
 
 
+def test_main_stop_contended_lock_prints_one_clean_error_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`disco stop` racing an in-flight roster verb (which holds the lifecycle lock
+    SHARED for its spawn-confirm window) must exit 1 with ONE clean error line —
+    never a raw RuntimeError traceback escaping main()."""
+    from calfcord.supervisor import _workspace
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+    # The REAL lifecycle.stop runs: the contended lock raises before any REST call.
+    with _workspace.slot_mutation(str(home), "assistant"):
+        rc = main(["stop"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "in progress" in out
+    assert "Traceback" not in out
+
+
 def test_main_status_dispatches_with_resolved_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()

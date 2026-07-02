@@ -326,6 +326,10 @@ def test_daemon_down_skips_runtime_section(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "disco start" in out  # the next-step hint for a closed workspace
+    # `disco start` reopens only the substrate — the closed-workspace remedy must
+    # also name the roster re-start (matching the stale-daemon remedy) or the
+    # operator's agents stay silently offline.
+    assert "disco agent start --all" in out
     # The runtime roster line never renders when the daemon is down.
     assert "roster" not in out.lower()
 

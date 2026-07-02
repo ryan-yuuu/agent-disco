@@ -138,7 +138,11 @@ What each target renders:
   derived REST port, and the readiness gate rather than reconstructing
   them. It is the one artifact whose correctness is vouched for, yet it is
   still headed *reference* because the `User=` and paths vary per host:
-  validate before `systemctl --user enable --now`.
+  validate before `systemctl --user enable --now`. The unit covers the
+  substrate only — the roster runs detached with no auto-respawn, so after a
+  reboot start the agents yourself (`disco agent start --all`, plus
+  `disco tools start` / `disco mcp start --all` as needed) or add per-agent
+  units of your own.
 - **`k8s`** — **reference** manifests (clearly annotated as such): a
   bundled broker workload + Service, a ConfigMap with the shared
   `CALF_HOST_URL`, and one Deployment per process type (bridge / tools) plus

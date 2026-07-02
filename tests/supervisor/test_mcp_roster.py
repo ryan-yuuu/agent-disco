@@ -27,15 +27,21 @@ from calfcord.supervisor.procspawn import TerminateResult
 
 
 class _StubClient:
-    """A scriptable stand-in for ProcessComposeClient — only the workspace check."""
+    """A scriptable stand-in for ProcessComposeClient — the workspace check plus
+    the declared-process read the legacy-workspace guard consults (``processes``
+    defaults to the modern substrate-only project)."""
 
-    def __init__(self, *, workspace_up: bool = True) -> None:
+    def __init__(self, *, workspace_up: bool = True, processes: list | None = None) -> None:
         self._workspace_up = workspace_up
+        self._processes = processes if processes is not None else [{"name": "broker"}, {"name": "bridge"}]
 
     async def project_state(self):
         if not self._workspace_up:
             raise RuntimeError("project_state: connection refused")
         return {"status": "ok"}
+
+    async def list_processes(self):
+        return self._processes
 
 
 class _FakeSlots:
@@ -302,6 +308,122 @@ async def test_mcp_stop_respects_a_concurrent_slot_holder(tmp_path, capsys, monk
     assert rc == 0
     assert slots.terminated == []
     assert "another disco command" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda h, c: mcp_roster.mcp_stop(h, server="Bad Name!", client=c),
+        lambda h, c: mcp_roster.mcp_restart(h, server="Bad Name!", client=c),
+    ],
+    ids=["stop", "restart"],
+)
+async def test_mcp_stop_and_restart_refuse_an_invalid_server_name(tmp_path, capsys, monkeypatch, call):
+    """The selector-grammar guard fires on stop/restart too (not just start):
+    a name that could never be an mcp.json key is refused before any slot work."""
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+
+    rc = await call(_home(tmp_path), _StubClient())
+
+    assert rc == 1
+    assert slots.terminated == []
+    assert slots.spawned == []
+    assert "invalid MCP server name" in capsys.readouterr().out
+
+
+async def test_mcp_stop_all_workspace_busy_is_an_error_not_a_skip(tmp_path, capsys, monkeypatch):
+    """A `disco start`/`stop` holding the lifecycle lock EXCLUSIVELY while the stop
+    sweep runs is a real refusal per slot: an error line and a nonzero sweep exit
+    (unlike the benign per-slot busy skip)."""
+    from calfcord.supervisor.lifecycle import lifecycle_lock
+
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+
+    with lifecycle_lock(_home(tmp_path)):
+        rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=_StubClient())
+
+    assert rc == 1
+    assert slots.terminated == []
+    out = capsys.readouterr().out
+    assert out.count("error:") == 1
+    assert "in progress" in out
+
+
+async def test_mcp_restart_concurrent_holder_reports_busy(tmp_path, capsys, monkeypatch):
+    """A restart racing another command's slot mutation is benign: the honest busy
+    line, exit 0, and NOTHING terminated or spawned."""
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+
+    with _workspace.slot_mutation(_home(tmp_path), "mcp-github"):
+        rc = await mcp_roster.mcp_restart(_home(tmp_path), server="github", client=_StubClient())
+
+    assert rc == 0
+    assert slots.terminated == []
+    assert slots.spawned == []
+    assert "already being restarted" in capsys.readouterr().out
+
+
+async def test_mcp_restart_all_busy_slot_is_reported_and_benign(tmp_path, capsys, monkeypatch):
+    """A busy slot in the restart sweep is skipped with an honest line and does not
+    fail the sweep — the other slots still restart."""
+    slots = _FakeSlots(["mcp-alpha", "mcp-beta"])
+    slots.install(monkeypatch)
+
+    with _workspace.slot_mutation(_home(tmp_path), "mcp-alpha"):
+        rc = await mcp_roster.mcp_restart_all(_home(tmp_path), client=_StubClient())
+
+    assert rc == 0
+    assert slots.terminated == ["mcp-beta"]
+    assert ("mcp-beta", _argv(tmp_path, "beta")) in slots.spawned
+    assert all(slot != "mcp-alpha" for slot, _ in slots.spawned)
+    assert "already" in capsys.readouterr().out
+
+
+# --- legacy-workspace guard (upgrade over a live old-style workspace) ---------
+
+_LEGACY_PROCESSES = [{"name": "broker"}, {"name": "bridge"}, {"name": "mcp-github"}]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c, h: mcp_roster.mcp_start(h, server="github", client=c),
+        lambda c, h: mcp_roster.mcp_restart(h, server="github", client=c),
+        lambda c, h: mcp_roster.mcp_start_all(h, servers=["github"], client=c),
+        lambda c, h: mcp_roster.mcp_restart_all(h, client=c),
+    ],
+    ids=["start", "restart", "start_all", "restart_all"],
+)
+async def test_mcp_spawn_verbs_refuse_a_legacy_pc_supervised_workspace(
+    tmp_path, capsys, monkeypatch, call
+):
+    """An old-main workspace still supervises mcp- slots under PC; every SPAWN verb
+    refuses with the upgrade remedy (stops stay usable)."""
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+
+    rc = await call(_StubClient(processes=_LEGACY_PROCESSES), _home(tmp_path))
+
+    assert rc == 1
+    assert slots.spawned == []
+    assert slots.terminated == []
+    assert "older calfcord" in capsys.readouterr().out
+
+
+async def test_mcp_stop_stays_usable_on_a_legacy_workspace(tmp_path, capsys, monkeypatch):
+    slots = _FakeSlots(["mcp-github"])
+    slots.install(monkeypatch)
+
+    rc = await mcp_roster.mcp_stop(
+        _home(tmp_path), server="github", client=_StubClient(processes=_LEGACY_PROCESSES)
+    )
+
+    assert rc == 0
+    assert slots.terminated == ["mcp-github"]
+    assert "mcp server github stopped" in capsys.readouterr().out
 
 
 async def test_mcp_stop_all_busy_slot_is_reported_and_benign(tmp_path, capsys, monkeypatch):

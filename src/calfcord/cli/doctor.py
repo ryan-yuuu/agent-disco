@@ -317,7 +317,13 @@ def run(
     elif home is not None and not daemon_up:
         # The install has a home but the workspace is closed: not a failure, but
         # always name the next step so a returning user is never stranded (§12.6).
-        print("\nworkspace not running — open it with: `disco start`")
+        # `disco start` reopens only the substrate — the roster runs detached and
+        # does not auto-start, so name its re-start too (matching the stale-daemon
+        # remedy) or the agents stay silently offline.
+        print(
+            "\nworkspace not running — open it with: `disco start`, "
+            "then `disco agent start --all`"
+        )
 
     failures = sum(1 for r in all_results if r.status == "fail")
     warnings = sum(1 for r in all_results if r.status == "warn")

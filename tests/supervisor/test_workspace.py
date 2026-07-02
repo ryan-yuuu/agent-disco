@@ -92,6 +92,67 @@ def test_iter_process_dicts_skips_non_dicts_and_none() -> None:
     assert list(_workspace.iter_process_dicts(None)) == []
 
 
+# --- legacy-workspace guard (upgrade over a live old-style workspace) --------
+
+
+class _ProcessListClient:
+    """A stub whose ``list_processes`` returns a scripted payload or raises."""
+
+    def __init__(self, payload: object = None, *, raises: Exception | None = None) -> None:
+        self._payload = payload
+        self._raises = raises
+
+    async def list_processes(self):
+        if self._raises is not None:
+            raise self._raises
+        return self._payload
+
+
+async def test_legacy_pc_roster_false_for_a_substrate_only_project() -> None:
+    client = _ProcessListClient([{"name": "broker"}, {"name": "bridge"}])
+    assert await _workspace.legacy_pc_roster(client) is False
+
+
+async def test_legacy_pc_roster_true_when_pc_still_supervises_roster_processes() -> None:
+    # An old-style workspace declared the roster (agents/tools/mcp) as PC slots;
+    # any non-substrate process means spawning beside it would split-brain.
+    client = _ProcessListClient(
+        {"data": [{"name": "broker"}, {"name": "bridge"}, {"name": "assistant"}]}
+    )
+    assert await _workspace.legacy_pc_roster(client) is True
+
+
+async def test_legacy_pc_roster_true_for_a_legacy_tools_slot() -> None:
+    client = _ProcessListClient([{"name": "broker"}, {"name": "bridge"}, {"name": "tools"}])
+    assert await _workspace.legacy_pc_roster(client) is True
+
+
+async def test_legacy_pc_roster_fails_open_when_the_read_raises() -> None:
+    # The check is best-effort: an unreadable process list must NOT block the
+    # spawn verbs (proceed as today).
+    client = _ProcessListClient(raises=RuntimeError("connection refused"))
+    assert await _workspace.legacy_pc_roster(client) is False
+
+
+async def test_legacy_pc_roster_fails_open_on_a_client_without_the_route() -> None:
+    class _Bare:
+        pass
+
+    assert await _workspace.legacy_pc_roster(_Bare()) is False
+
+
+async def test_legacy_pc_roster_skips_entries_without_a_name() -> None:
+    # A wire-shape wobble (a dict row missing "name") must not read as legacy.
+    client = _ProcessListClient([{"status": "Running"}, {"name": "bridge"}])
+    assert await _workspace.legacy_pc_roster(client) is False
+
+
+def test_legacy_workspace_hint_names_the_remedy() -> None:
+    assert "older calfcord" in _workspace.LEGACY_WORKSPACE_HINT
+    assert "disco stop" in _workspace.LEGACY_WORKSPACE_HINT
+    assert "disco start" in _workspace.LEGACY_WORKSPACE_HINT
+
+
 # --- roster-slot primitives (Phase 2) ---------------------------------------
 
 
@@ -167,6 +228,9 @@ def test_is_agent_slot_classification() -> None:
     assert _workspace.is_agent_slot("broker") is False
     assert _workspace.is_agent_slot("bridge") is False
     assert _workspace.is_agent_slot("mcp-github") is False
+    # The supervisor's own log stem: never an agent (a pre-guard `.md` must not
+    # let a roster verb spawn a slot that shares the supervisor's log file).
+    assert _workspace.is_agent_slot("process-compose") is False
 
 
 def test_live_agent_slots_excludes_tools_and_mcp(tmp_path) -> None:
@@ -266,6 +330,38 @@ async def test_launch_slot_false_and_cleans_pidfile_when_it_exits_immediately(tm
     )
     assert ok is False
     assert not procspawn.pidfile_for(tmp_path, "job").exists()
+
+
+async def test_launch_slot_false_on_a_mid_window_death(tmp_path, monkeypatch) -> None:
+    """A process alive on the FIRST liveness poll but dead on a later one (a
+    mid-window death) must read False — driven deterministically: scripted
+    liveness plus a clock pinned before the deadline, so the loop is forced
+    through the sleep-and-recheck arm with no real child and no real time."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        _workspace, "spawn_slot", lambda home, slot, argv: SimpleNamespace(pid=os.getpid())
+    )
+    liveness = iter([True, False])
+    monkeypatch.setattr(_workspace, "slot_is_live", lambda home, slot: next(liveness))
+    cleaned: list = []
+    monkeypatch.setattr(procspawn, "cleanup_stale", lambda pidfile: cleaned.append(pidfile))
+    slept: list[float] = []
+
+    async def recording_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    ok = await _workspace.launch_slot(
+        tmp_path,
+        "job",
+        ["cmd"],
+        clock=lambda: 0.0,  # never past the deadline: only death can end the loop
+        sleep=recording_sleep,
+    )
+
+    assert ok is False
+    assert slept == [_workspace._SPAWN_CONFIRM_POLL_S]  # one poll between checks
+    assert cleaned == [procspawn.pidfile_for(tmp_path, "job")]
 
 
 # --- slot_mutation: the spawn-critical-section locks --------------------------

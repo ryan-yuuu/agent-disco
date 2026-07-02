@@ -110,6 +110,19 @@ def test_systemd_header_does_not_overclaim_crash_recovery() -> None:
     assert "recovers a crashed supervisor" not in rendered
 
 
+def test_systemd_header_states_the_roster_is_not_auto_restarted() -> None:
+    # The unit supervises only the SUBSTRATE: the roster (agents/tools/mcp) runs
+    # detached with no auto-respawn and does not come back with the unit — the
+    # header must say so and name the post-boot step, not imply PC's per-process
+    # restarts cover the whole tree.
+    rendered = deploy.render_systemd(home=_HOME, launcher=_LAUNCHER)
+    assert "disco agent start --all" in rendered
+    lowered = rendered.lower()
+    assert "substrate" in lowered
+    # No stale claim that per-process restarts cover "a crash inside the tree".
+    assert "crash inside the tree is handled" not in lowered
+
+
 def test_systemd_is_deterministic() -> None:
     a = deploy.render_systemd(home=_HOME, launcher=_LAUNCHER)
     b = deploy.render_systemd(home=_HOME, launcher=_LAUNCHER)

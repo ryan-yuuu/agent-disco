@@ -235,10 +235,15 @@ def lifecycle_lock(home: str | os.PathLike[str]):
 
     Serializes ``start``/``stop`` so two concurrent invocations cannot race two
     supervisors against one home (§12.4). Uses ``LOCK_EX | LOCK_NB`` so a second
-    holder fails *immediately* with a clear error instead of blocking
-    indefinitely. The parent ``state/`` dir is created on demand; the lock file
-    itself is kept (its presence is harmless — the advisory lock, not the file,
-    is the guard) and the fd is always closed on exit, releasing the lock.
+    holder fails *immediately* instead of blocking indefinitely. CONTENTION
+    surfaces as :class:`~calfcord.supervisor._workspace.WorkspaceBusyError` — a
+    domain refusal ``start``/``stop`` translate into one clean error line (the
+    holder may be another start/stop OR a roster verb holding the lock SHARED for
+    its spawn-confirm window, so the message names neither). Any other ``OSError``
+    (permissions, a broken state dir) propagates as the IO problem it actually is.
+    The parent ``state/`` dir is created on demand; the lock file itself is kept
+    (its presence is harmless — the advisory lock, not the file, is the guard)
+    and the fd is always closed on exit, releasing the lock.
     """
     path = _lock_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -246,10 +251,10 @@ def lifecycle_lock(home: str | os.PathLike[str]):
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise RuntimeError(
-                f"another disco start/stop is in progress for {home} "
-                f"(could not acquire {path})"
+        except BlockingIOError as exc:
+            raise _workspace.WorkspaceBusyError(
+                "another disco command is in progress for this workspace "
+                f"(could not acquire {path}); retry in a moment."
             ) from exc
         try:
             yield
@@ -484,7 +489,15 @@ async def start(
     # not the pointless `agent start`.
     agents_defined = _agents_defined(home)
 
-    with lifecycle_lock(home):
+    with contextlib.ExitStack() as stack:
+        # A contended lock (another start/stop, or a roster verb holding it SHARED
+        # for its spawn-confirm window) is a domain refusal, not a traceback: one
+        # clean error line, exit 1, and the holder is left undisturbed.
+        try:
+            stack.enter_context(lifecycle_lock(home))
+        except _workspace.WorkspaceBusyError as exc:
+            print(f"error: {exc}")
+            return 1
         # Idempotency (§12.4): if the office is already open, do NOT launch a
         # second supervisor — just confirm and point at the next step. But the
         # port can collide across homes (Fix #11): verify the answering supervisor
@@ -639,9 +652,9 @@ async def start(
     return 0
 
 
-async def _sweep_roster_pidfiles(home: str) -> int:
-    """Terminate every live roster process and clear stale pidfiles; return the count
-    of processes we actually stopped.
+async def _sweep_roster_pidfiles(home: str) -> tuple[int, int]:
+    """Terminate every live roster process and clear stale pidfiles; return
+    ``(stopped, wedged)`` — the honest split of what actually died.
 
     ``disco stop`` closes the WHOLE workspace, roster included — but the roster lives
     off Process Compose (Phase 2), so a ``down`` of the substrate leaves the detached
@@ -650,13 +663,24 @@ async def _sweep_roster_pidfiles(home: str) -> int:
     also clears its pidfile), and a stale/torn/not-ours pidfile is swept without a
     signal. Run BEFORE the substrate ``down`` so agents can still publish their
     departure while the broker is up.
+
+    A ``KILLED`` outcome only means SIGKILL was *sent* (the reap wait is bounded and
+    best-effort), so a slot still ours-and-alive after its terminate is a WEDGED
+    survivor: it is counted separately, never as "stopped", and its live pidfile is
+    kept (``terminate_slot``'s cleanup only sweeps stale files) so the process is
+    not orphaned from the tooling's view.
     """
-    terminated = 0
+    stopped = 0
+    wedged = 0
     for slot, _pidfile in list(_workspace.iter_slot_pidfiles(home)):
         result = await _workspace.terminate_slot(home, slot)
-        if result in (TerminateResult.TERMINATED, TerminateResult.KILLED):
-            terminated += 1
-    return terminated
+        if result not in (TerminateResult.TERMINATED, TerminateResult.KILLED):
+            continue
+        if _workspace.slot_is_live(home, slot):
+            wedged += 1
+        else:
+            stopped += 1
+    return stopped, wedged
 
 
 async def stop(
@@ -676,26 +700,38 @@ async def stop(
     with a supervisor still shutting down (§13.3).
 
     A no-op reports honestly: with the substrate down AND nothing swept, "nothing to
-    stop"; otherwise "workspace closed", noting how many roster processes were stopped.
+    stop"; otherwise "workspace closed", noting how many roster processes were
+    stopped — and, separately, any WEDGED survivor (a slot still alive after its
+    SIGKILL) so "closed" never silently overclaims. A contended lifecycle lock (a
+    roster verb mid-spawn, or another start/stop) is a clean one-line refusal.
     """
     home = os.fspath(home)
     client = _resolve_client(client, home)
     spawn_blocking = spawn_blocking or _default_spawn_blocking
 
-    with lifecycle_lock(home):
-        pc_up = await _supervisor_is_up(client)
-        # Sweep the roster first (broker still up → clean departures), then the
-        # substrate. The sweep also runs when the substrate is already down, so an
-        # orphaned roster (a crashed supervisor) is still cleaned up by `disco stop`.
-        terminated = await _sweep_roster_pidfiles(home)
-        if pc_up:
-            binary = resolve_pc_binary()
-            spawn_blocking([binary, "down", "-p", str(pc_port_for(home))])
+    try:
+        with lifecycle_lock(home):
+            pc_up = await _supervisor_is_up(client)
+            # Sweep the roster first (broker still up → clean departures), then the
+            # substrate. The sweep also runs when the substrate is already down, so an
+            # orphaned roster (a crashed supervisor) is still cleaned up by `disco stop`.
+            terminated, wedged = await _sweep_roster_pidfiles(home)
+            if pc_up:
+                binary = resolve_pc_binary()
+                spawn_blocking([binary, "down", "-p", str(pc_port_for(home))])
+    except _workspace.WorkspaceBusyError as exc:
+        print(f"error: {exc}")
+        return 1
 
-    if not pc_up and terminated == 0:
+    if not pc_up and terminated == 0 and wedged == 0:
         print("nothing to stop (workspace not running).")
         return 0
-    if terminated:
+    if wedged:
+        print(
+            f"workspace closed ({terminated} roster process(es) stopped, "
+            f"{wedged} still running — see `disco logs`)."
+        )
+    elif terminated:
         print(f"workspace closed ({terminated} roster process(es) stopped).")
     else:
         print("workspace closed.")
@@ -739,7 +775,15 @@ async def status(
         print("workspace not running (start it with: disco start)")
         return 0
 
-    substrate = [p for p in _process_rows(await client.list_processes()) if p["name"] in _SUBSTRATE]
+    try:
+        payload = await client.list_processes()
+    except RuntimeError:
+        # The supervisor died between the up-probe above and this read; read-only
+        # status must degrade (the docstring's never-crash promise), and "no longer
+        # answering" is exactly the not-running state.
+        print("workspace not running (start it with: disco start)")
+        return 0
+    substrate = [p for p in _process_rows(payload) if p["name"] in _SUBSTRATE]
 
     live = _workspace.live_slots(home)
     dead = _workspace.dead_slots(home)

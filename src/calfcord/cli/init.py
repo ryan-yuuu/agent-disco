@@ -744,7 +744,12 @@ async def _finish_live(
     print("    disco agent create <name>")
     print("Learn more:  disco explain topology  ·  docs/using-disco.md")
     print()
-    print(f"({_REBOOT_NOTE} `disco start` reopens it; `disco status` shows who's online.)")
+    # `disco start` reopens only the substrate; the detached roster does not
+    # auto-start, so the reboot note must name the agent re-start too.
+    print(
+        f"({_REBOOT_NOTE} `disco start` reopens it, then `disco agent start --all` "
+        "brings the agents back; `disco status` shows who's online.)"
+    )
     return 0
 
 
@@ -760,7 +765,8 @@ def _print_manual_finish(name: str) -> None:
     print(f"    disco agent start {name}")
     print(f"Then in Discord, say: @{name} hello")
     print("Add more teammates any time: disco agent create <name>")
-    print(f"({_REBOOT_NOTE} Re-run `disco start` after a reboot.)")
+    # Agents do not auto-start with the substrate, so the reboot steer names both.
+    print(f"({_REBOOT_NOTE} Re-run `disco start`, then `disco agent start --all`, after a reboot.)")
 
 
 def _supervisor_available(pc_binary_fn: Callable[[], str]) -> bool:

@@ -119,6 +119,12 @@ async def mcp_start(
         print(_NOT_RUNNING_HINT)
         return 1
 
+    # Legacy-workspace guard (fail-open): an old-main supervisor still runs the
+    # mcp- slots under PC — spawning beside it would duplicate the server.
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
+        return 1
+
     if not await _workspace.broker_gate(None, broker_probe):
         print(_BROKER_UNREACHABLE_HINT)
         return 1
@@ -175,6 +181,11 @@ async def mcp_restart(
         print(_NOT_RUNNING_HINT)
         return 1
 
+    # Legacy-workspace guard (fail-open), like every spawn verb.
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
+        return 1
+
     if not await _workspace.broker_gate(None, broker_probe):
         print(_BROKER_UNREACHABLE_HINT)
         return 1
@@ -208,6 +219,11 @@ async def mcp_start_all(
 
     if not await workspace_is_up(client):
         print(_NOT_RUNNING_HINT)
+        return 1
+
+    # Legacy-workspace guard and broker gate, ONCE for the whole sweep.
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
         return 1
 
     if not await _workspace.broker_gate(None, broker_probe):
@@ -264,9 +280,15 @@ async def _sweep_running(
         print(_NOT_RUNNING_HINT)
         return 1
 
-    if verb == "restart" and not await _workspace.broker_gate(None, broker_probe):
-        print(_BROKER_UNREACHABLE_HINT)
-        return 1
+    # Restart is a spawn verb, so it carries the spawn pre-flights (the stop sweep
+    # needs neither: termination stays usable on a legacy workspace).
+    if verb == "restart":
+        if await _workspace.legacy_pc_roster(client):
+            print(_workspace.LEGACY_WORKSPACE_HINT)
+            return 1
+        if not await _workspace.broker_gate(None, broker_probe):
+            print(_BROKER_UNREACHABLE_HINT)
+            return 1
 
     running = sorted(_live_mcp_slots(home))
     if not running:

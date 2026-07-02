@@ -41,6 +41,7 @@ import yaml
 
 from calfcord.agents import md_writer
 from calfcord.agents.definition import AgentDefinition, parse_agent_md
+from calfcord.agents.identifier import reserved_agent_id_error
 from calfcord.cli._agents import atomic_write, slug_stem
 from calfcord.cli._fields import FIELDS_BY_KEY, write_simple_field
 
@@ -190,12 +191,18 @@ def rename_agent(agents_dir: Path, old: str, new: str) -> None:
     state.
 
     Raises:
-        ValueError: ``new`` is not a legal agent stem, equals ``old``, the source
+        ValueError: ``new`` is not a legal agent stem, is a reserved workspace
+            name (``tools``/``broker``/``bridge``/``mcp-*`` — refused HERE with
+            the one clean chokepoint message rather than surfacing transitively
+            as a raw pydantic validation dump), equals ``old``, the source
             ``.md`` is missing/unparseable, or the target ``agents_dir/<new>.md``
             already exists — renaming onto it would clobber a live agent.
         OSError: a filesystem error writing the new ``.md`` or deleting the old.
     """
     new_stem = slug_stem(new)
+    reserved = reserved_agent_id_error(new_stem)
+    if reserved is not None:
+        raise ValueError(reserved)
     if new_stem == old:
         raise ValueError(f"new name {new!r} resolves to the same agent id {old!r}")
 

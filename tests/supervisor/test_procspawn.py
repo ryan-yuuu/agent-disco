@@ -158,6 +158,25 @@ def test_spawn_detached_does_not_rotate_a_small_log(tmp_path: Path) -> None:
     assert "prior-line" in log.read_text()  # still appended, not rotated
 
 
+def test_rotation_fires_at_exactly_the_threshold(tmp_path: Path) -> None:
+    """The boundary is INCLUSIVE: a log of exactly _LOG_ROTATE_AT_BYTES rotates
+    (the guard is `size < threshold: return`, i.e. rotate at >=) — pinned so the
+    == semantics cannot silently flip to strictly-greater."""
+    log = tmp_path / "job.log"
+    log.write_bytes(b"x" * procspawn._LOG_ROTATE_AT_BYTES)
+    procspawn._rotate_log_at_spawn(log)
+    assert not log.exists()
+    assert log.with_name("job.log.1").exists()
+
+
+def test_rotation_skips_one_byte_below_the_threshold(tmp_path: Path) -> None:
+    log = tmp_path / "job.log"
+    log.write_bytes(b"x" * (procspawn._LOG_ROTATE_AT_BYTES - 1))
+    procspawn._rotate_log_at_spawn(log)
+    assert log.exists()
+    assert not log.with_name("job.log.1").exists()
+
+
 def test_spawn_detached_honors_cwd(tmp_path: Path) -> None:
     workdir = tmp_path / "elsewhere"
     workdir.mkdir()
@@ -199,6 +218,20 @@ def test_read_pidfile_missing_required_field_returns_none(tmp_path: Path) -> Non
     pidfile = tmp_path / "partial.pid"
     pidfile.write_text(json.dumps({"argv": ["x"]}))  # no pid
     assert procspawn.read_pidfile(pidfile) is None
+
+
+def test_read_pidfile_non_mapping_json_returns_none(tmp_path: Path) -> None:
+    # Valid JSON that is not an object (a bare list) is still "no usable record".
+    pidfile = tmp_path / "list.pid"
+    pidfile.write_text(json.dumps([1, 2, 3]))
+    assert procspawn.read_pidfile(pidfile) is None
+
+
+def test_pid_alive_rejects_non_positive_pids() -> None:
+    # os.kill treats 0/-1 as broadcast/group targets, so the probe must refuse
+    # them outright rather than accidentally signalling a whole group.
+    assert procspawn._pid_alive(0) is False
+    assert procspawn._pid_alive(-1) is False
 
 
 def test_read_pidfile_roundtrips_a_spawned_record(tmp_path: Path) -> None:

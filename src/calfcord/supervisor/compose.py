@@ -85,16 +85,18 @@ _HEALTHY = "process_healthy"
 # import-light, keeping the logs CLI's decoupling intact.
 SUPERVISOR_LOG_STEM = "process-compose"
 
-# Slot names owned by the substrate (``broker``/``bridge``, on Process Compose)
-# and the ``tools`` singleton (a roster slot spawned off PC). An agent whose id
-# equalled one of these would collide with that process — in the substrate's
-# compose ``processes`` dict for broker/bridge, or in the ``state/run/<slot>.pid``
-# pidfile namespace for ``tools`` — so agent names may never take them: the
-# create-/parse-time guard lives in :data:`calfcord.agents.identifier
+# Slot names owned by the substrate (``broker``/``bridge``, on Process Compose),
+# the ``tools`` singleton (a roster slot spawned off PC), and the supervisor's
+# own log stem (``process-compose`` — not a slot, but every roster slot logs to
+# ``state/logs/<slot>.log``, and the supervisor's ``-L`` log is
+# ``state/logs/process-compose.log``, so an agent by that name would share and
+# rotate-at-spawn the live supervisor's log). An agent whose id equalled one of
+# these would collide with that process/file, so agent names may never take
+# them: the create-/parse-time guard lives in :data:`calfcord.agents.identifier
 # .RESERVED_AGENT_IDS` (this module cannot import it — ``calfcord.agents``'s
 # package init pulls calfkit, and the supervisor stays import-light — so the two
 # literals are pinned equal by test instead: ``test_identifier``).
-_RESERVED_PROCESS_NAMES = frozenset({"broker", "bridge", "tools"})
+_RESERVED_PROCESS_NAMES = frozenset({"broker", "bridge", "tools", SUPERVISOR_LOG_STEM})
 
 # The slot-name convention for MCP servers, homed here (like SUPERVISOR_LOG_STEM)
 # because the roster surfaces spawn ``mcp-<server>`` slots and the shared

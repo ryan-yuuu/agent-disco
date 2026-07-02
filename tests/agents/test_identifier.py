@@ -62,7 +62,11 @@ class TestReservedAgentIds:
     """
 
     def test_reserved_set_pins_the_slot_names(self) -> None:
-        assert frozenset({"broker", "bridge", "tools"}) == RESERVED_AGENT_IDS
+        # ``process-compose`` is reserved for the supervisor's own log: an agent by
+        # that name would share state/logs/process-compose.log with the live
+        # supervisor — and rotate-at-spawn would rename the supervisor's log out
+        # from under it.
+        assert frozenset({"broker", "bridge", "tools", "process-compose"}) == RESERVED_AGENT_IDS
         assert MCP_SLOT_PREFIX == "mcp-"
 
     def test_reserved_set_matches_the_supervisor_slot_namespace(self) -> None:
@@ -74,13 +78,21 @@ class TestReservedAgentIds:
         assert RESERVED_AGENT_IDS == compose._RESERVED_PROCESS_NAMES
         assert MCP_SLOT_PREFIX == compose.MCP_SLOT_PREFIX
 
-    @pytest.mark.parametrize("name", ["broker", "bridge", "tools"])
+    @pytest.mark.parametrize("name", ["broker", "bridge", "tools", "process-compose"])
     def test_reserved_names_yield_an_error(self, name: str) -> None:
         message = reserved_agent_id_error(name)
         assert message is not None
         assert name in message
         # The message must say WHY the name is off-limits (the process it collides with).
         assert "reserved" in message
+
+    def test_process_compose_error_names_the_log_collision(self) -> None:
+        # The collision is the supervisor's LOG file, not a process slot — the
+        # reason shown must say so, not claim a bogus process-namespace clash.
+        message = reserved_agent_id_error("process-compose")
+        assert message is not None
+        assert "log" in message
+        assert "pick another agent name" in message
 
     @pytest.mark.parametrize("name", ["mcp-github", "mcp-", "mcp-x"])
     def test_mcp_prefix_yields_an_error(self, name: str) -> None:

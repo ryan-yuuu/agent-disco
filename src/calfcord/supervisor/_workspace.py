@@ -89,6 +89,47 @@ def iter_process_dicts(payload: object) -> Iterator[dict]:
             yield item
 
 
+# --- legacy-workspace guard (upgrade over a live old-style workspace) --------
+
+# The refusal every roster SPAWN verb prints when the answering supervisor was
+# started by an older calfcord (see :func:`legacy_pc_roster`). Centralized like
+# the not-running hint so the surfaces speak with one voice.
+LEGACY_WORKSPACE_HINT = (
+    "error: this workspace was started by an older calfcord — run `disco stop` "
+    "then `disco start`, then re-run this command."
+)
+
+# The only processes a MODERN (detached-roster) project declares. Anything else
+# in the supervisor's process list means the roster still runs under PC.
+_SUBSTRATE_PROCESS_NAMES = frozenset({"broker", "bridge"})
+
+
+async def legacy_pc_roster(client: ProcessComposeClient) -> bool:
+    """Whether the answering supervisor still supervises ROSTER processes (old main).
+
+    ``disco self update`` does not stop a running workspace, so after an upgrade the
+    old supervisor can still be running the roster as PC-declared slots while
+    ``state/run/`` is empty. A detached spawn beside that would DUPLICATE the agent
+    (split-brain: double replies in Discord), so the spawn verbs consult this and
+    refuse with :data:`LEGACY_WORKSPACE_HINT`; stops and status stay usable so the
+    operator can wind the old workspace down.
+
+    Cheap (one REST read of the project the caller already reached) and FAIL-OPEN:
+    any failure to read or parse the process list returns ``False`` — detection is
+    best-effort and must never become a new way for a healthy start to fail. A
+    row missing its name is skipped for the same reason.
+    """
+    try:
+        payload = await client.list_processes()
+    except Exception:
+        return False
+    for item in iter_process_dicts(payload):
+        name = item.get("name")
+        if isinstance(name, str) and name not in _SUBSTRATE_PROCESS_NAMES:
+            return True
+    return False
+
+
 # --- roster-slot primitives (Phase 2: roster off Process Compose) -----------
 #
 # The substrate (broker + bridge) stays on Process Compose; the roster (agents,

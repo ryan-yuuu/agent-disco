@@ -346,6 +346,31 @@ the bridge having to reject anything.
 > running and you try to start another. For the design rationale see
 > [architecture.md](./architecture.md).
 
+### After `disco self update`: "this workspace was started by an older calfcord"
+
+**Symptom.** Right after an upgrade, `disco agent start` / `restart` (or the
+`tools` / `mcp` start verbs) refuse with **"this workspace was started by an
+older calfcord — run `disco stop` then `disco start`, then re-run this
+command."**
+
+**What it means.** `disco self update` swaps the code but does **not** stop a
+running workspace. Older calfcord versions ran the whole roster *inside* the
+Process Compose supervisor; current versions run agents/tools/MCP servers as
+detached processes. Your still-running old supervisor is therefore still
+supervising roster processes, and spawning a detached twin beside them would
+duplicate every agent (double replies in Discord). The spawn verbs detect this
+and refuse; `disco stop`, `disco status`, and the stop verbs keep working so
+you can wind the old workspace down.
+
+**Resolution.** Restart the workspace on the new code:
+
+```bash
+disco stop && disco start && disco agent start --all
+```
+
+To avoid the refusal entirely, run that cycle immediately before or right
+after any `disco self update`.
+
 ---
 
 ## Codex subscription auth

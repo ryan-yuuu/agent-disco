@@ -225,6 +225,18 @@ disco self update      # upgrade to the latest
 disco self rollback    # undo the last update
 ```
 
+`disco self update` does not stop a running workspace, so restart it before
+or right after upgrading — the old processes keep running the old code until
+you do:
+
+```bash
+disco stop && disco start && disco agent start --all
+```
+
+Upgrading from an older calfcord (one whose supervisor still ran the agents
+itself)? The agent commands will refuse with "this workspace was started by an
+older calfcord" until you run exactly that stop/start cycle.
+
 ## Uninstall
 
 ```bash

@@ -68,6 +68,7 @@ class _StubClient:
         project_state_results: list | None = None,
         bridge_states: list | None = None,
         list_processes_result: list | None = None,
+        list_processes_raises: Exception | None = None,
         update_project_raises: Exception | None = None,
         process_info: object = None,
         process_info_raises: Exception | None = None,
@@ -75,6 +76,9 @@ class _StubClient:
         self._project_state_results = list(project_state_results or [])
         self._bridge_states = list(bridge_states or [])
         self._list_processes_result = list_processes_result or []
+        # When set, the process-list read fails the way the real client signals a
+        # transport error (the supervisor died between two REST calls): a raise.
+        self._list_processes_raises = list_processes_raises
         # When set, the priming reconcile (the buggy first project-update) fails the
         # way the real client signals a PC reconcile / transport error: a raise.
         self._update_project_raises = update_project_raises
@@ -121,6 +125,8 @@ class _StubClient:
         return self._process_info
 
     async def list_processes(self):
+        if self._list_processes_raises is not None:
+            raise self._list_processes_raises
         return self._list_processes_result
 
 
@@ -1266,6 +1272,83 @@ async def test_stop_sweeps_orphaned_roster_when_substrate_down(tmp_path, capsys)
     assert "1 roster process(es) stopped" in capsys.readouterr().out
 
 
+async def test_stop_contended_lock_is_a_clean_error_not_a_traceback(tmp_path, capsys) -> None:
+    """A roster verb holds the lifecycle lock SHARED (for up to its spawn-confirm
+    window); `disco stop` racing it must print ONE clean error line and return 1 —
+    never dump a raw RuntimeError traceback (the CLI surface catches nothing)."""
+    home = _home(tmp_path)
+    spawn_blocking = _RecordingSpawn()
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    with _workspace.slot_mutation(home, "assistant"):
+        code = await lifecycle.stop(home, client=client, spawn_blocking=spawn_blocking)
+
+    assert code == 1
+    assert spawn_blocking.calls == []  # nothing torn down mid-verb
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "in progress" in out
+    # The holder is a roster verb, not a start/stop — the message must not misname it.
+    assert "start/stop" not in out
+
+
+async def test_start_contended_lock_is_a_clean_error_not_a_traceback(tmp_path, capsys) -> None:
+    """Same for `disco start`: a contended lifecycle lock is a domain refusal."""
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    client = _StubClient(project_state_results=[RuntimeError("not up")])
+
+    with _workspace.slot_mutation(home, "assistant"):
+        code = await lifecycle.start(
+            home,
+            server_urls="localhost:9092",
+            launcher="/h/shims/disco",
+            client=client,
+            spawn=spawn,
+            clock=_FakeClock(),
+        )
+
+    assert code == 1
+    assert spawn.calls == []  # no second supervisor launched behind the holder
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "in progress" in out
+
+
+async def test_stop_reports_a_wedged_slot_truthfully(tmp_path, fake_pc_bin, capsys, monkeypatch) -> None:
+    """A slot whose terminate escalated to SIGKILL but whose process is STILL alive
+    (a wedged survivor) must not be counted 'stopped' — the sweep reports it and
+    keeps its live pidfile (mixed sweep: live + stale + wedged)."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "live")  # terminates cleanly (scripted below)
+    _write_stale_pidfile(home, "ghost")  # swept silently, never counted
+    _write_self_pidfile(home, "wedged")  # KILLED but the process survives
+
+    async def scripted_terminate(home_arg, slot):
+        if slot == "live":
+            procspawn.pidfile_for(home_arg, slot).unlink()
+            return procspawn.TerminateResult.TERMINATED
+        if slot == "ghost":
+            procspawn.pidfile_for(home_arg, slot).unlink()
+            return None
+        # "wedged": SIGKILL sent, reap timed out — the (self, alive) pidfile stays.
+        return procspawn.TerminateResult.KILLED
+
+    monkeypatch.setattr(_workspace, "terminate_slot", scripted_terminate)
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    code = await lifecycle.stop(home, client=client, spawn_blocking=_RecordingSpawn())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 roster process(es) stopped" in out
+    assert "1 still running" in out
+    assert "logs" in out
+    # The live pidfile of the survivor is kept — sweeping it would orphan the process.
+    assert procspawn.pidfile_for(home, "wedged").exists()
+    assert not procspawn.pidfile_for(home, "ghost").exists()
+
+
 # --- status -----------------------------------------------------------------
 
 
@@ -1397,6 +1480,22 @@ async def test_status_empty_roster_signposts_start_and_create(tmp_path, capsys) 
     assert "none running" in out
     assert "disco agent start <name>" in out
     assert "disco agent create <name>" in out
+
+
+async def test_status_supervisor_dying_mid_read_degrades_not_crashes(tmp_path, capsys) -> None:
+    """The supervisor can die BETWEEN the up-probe (project_state) and the process
+    list read; read-only status must degrade to the not-running hint, never crash
+    (the docstring's promise)."""
+    home = _home(tmp_path)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_raises=RuntimeError("list_processes: connection refused"),
+    )
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=_StubProbe())
+    assert code == 0
+    out = capsys.readouterr().out.lower()
+    assert "not running" in out
+    assert "disco start" in out
 
 
 def test_process_rows_skips_non_dict_items() -> None:

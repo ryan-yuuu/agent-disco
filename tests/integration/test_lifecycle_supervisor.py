@@ -210,18 +210,17 @@ async def test_lifecycle_against_real_process_compose(
         )
 
         # (d) the lockfile blocks a concurrent start: while the exclusive
-        # lifecycle lock is held, start cannot acquire it and raises (flock is
-        # per open-file-description, so a second os.open in-process is blocked too).
-        with (
-            lifecycle.lifecycle_lock(home),
-            pytest.raises(RuntimeError, match="in progress"),
-        ):
-            await lifecycle.start(
+        # lifecycle lock is held, start cannot acquire it and REFUSES cleanly —
+        # one error line, exit 1, never a raw traceback (flock is per
+        # open-file-description, so a second os.open in-process is blocked too).
+        with lifecycle.lifecycle_lock(home):
+            rc_blocked = await lifecycle.start(
                 home,
                 server_urls="localhost:9092",
                 launcher="unused-by-stub",
                 ready_timeout_s=_READY_TIMEOUT_S,
             )
+        assert rc_blocked == 1
         # The supervisor is untouched by the blocked attempt.
         assert (await client.get_process("broker"))["pid"] == broker_pid
 

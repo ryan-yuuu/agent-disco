@@ -463,7 +463,7 @@ def test_run_positional_name_pre_answers_the_prompt(tmp_path: Path) -> None:
     assert (agents_dir / "scribe.md").is_file()
 
 
-@pytest.mark.parametrize("reserved", ["tools", "broker", "bridge", "mcp-github"])
+@pytest.mark.parametrize("reserved", ["tools", "broker", "bridge", "process-compose", "mcp-github"])
 def test_run_reserved_name_reprompts_with_reason(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], reserved: str
 ) -> None:
@@ -626,6 +626,26 @@ def test_run_start_now_yes_presence_timeout_degrades(
     assert rc == 0
     out = capsys.readouterr().out
     assert "scribe is online — say" not in out
+    assert "disco doctor" in out
+
+
+def test_run_start_now_presence_fn_raising_degrades_not_crashes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The presence watcher opens its own broker connection — a raise mid-watch
+    (broker drop) must DEGRADE to the honest 'try it yourself / disco doctor'
+    fallback, never crash the CLI after the agent already started."""
+    finish = _FinishRecorder(running=True)
+
+    async def exploding_presence(server_urls, **kwargs) -> bool:
+        raise RuntimeError("broker dropped mid-watch")
+
+    finish.presence = exploding_presence  # the seam _run_live hands to run()
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "scribe is online — say" not in out  # no green light that lies
     assert "disco doctor" in out
 
 

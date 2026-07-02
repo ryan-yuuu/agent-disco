@@ -252,9 +252,16 @@ async def agent_start(
         print(_NOT_RUNNING_HINT)
         return 1
 
-    if live is None and not await _workspace.broker_gate(server_urls, broker_probe):
-        print(_BROKER_UNREACHABLE_HINT)
-        return 1
+    # Pre-flights the bulk sweep already ran ONCE (it threads ``live`` in): the
+    # legacy-workspace guard (an old-main supervisor still runs the roster as PC
+    # slots — spawning beside it would split-brain; fail-open) and the broker gate.
+    if live is None:
+        if await _workspace.legacy_pc_roster(client):
+            print(_workspace.LEGACY_WORKSPACE_HINT)
+            return 1
+        if not await _workspace.broker_gate(server_urls, broker_probe):
+            print(_BROKER_UNREACHABLE_HINT)
+            return 1
 
     # Duplicate guard (§3.5), read-only so it runs OUTSIDE the locks: the probe is
     # broker-wide, so a name live on ANOTHER host is caught here, CLI-side, with no
@@ -322,6 +329,7 @@ async def agent_restart(
     name: str,
     launcher: str | None = None,
     client: ProcessComposeClient | None = None,
+    probe: Probe | None = None,
     broker_probe: BrokerProbe | None = None,
 ) -> int:
     """Reload agent ``name`` after an edited ``.md`` (terminate + re-spawn).
@@ -331,11 +339,17 @@ async def agent_restart(
     is spawned. Restart of a not-running agent simply brings it up — the expected
     effect. Non-agent chokepoint first (an ``agent restart tools`` must not replace
     the singleton with a bogus ``run agent tools`` process), then the workspace
-    check and the broker gate (the effective ``CALF_HOST_URL``; killing a healthy
-    agent to spawn a doomed one during a broker bounce would be worse than
-    refusing). The terminate + spawn runs under the slot-mutation locks, and the
-    spawn must survive its confirmation window — a crash-on-boot reports the log
-    path and returns ``1``; otherwise ``agent <name> restarted``, return ``0``.
+    check, the legacy-workspace guard, and the broker gate (the effective
+    ``CALF_HOST_URL``; killing a healthy agent to spawn a doomed one during a
+    broker bounce would be worse than refusing).
+
+    A restart with NO local pidfile is a spawn in disguise, so it runs the SAME
+    §3.5 org-wide duplicate guard as :func:`agent_start` (same semantics: a name
+    answering on another host is a benign refusal, ``0``; an unreadable mesh warns
+    and proceeds) — without it, ``restart`` would be a duplicate-guard bypass.
+    The terminate + spawn runs under the slot-mutation locks, and the spawn must
+    survive its confirmation window — a crash-on-boot reports the log path and
+    returns ``1``; otherwise ``agent <name> restarted``, return ``0``.
     """
     error = _non_agent_error(name, "restart")
     if error is not None:
@@ -350,9 +364,26 @@ async def agent_restart(
         print(_NOT_RUNNING_HINT)
         return 1
 
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
+        return 1
+
     if not await _workspace.broker_gate(None, broker_probe):
         print(_BROKER_UNREACHABLE_HINT)
         return 1
+
+    # Duplicate guard (§3.5), exactly agent_start's: only for a name NOT live here
+    # (a local instance restarts in place, never misread as a remote duplicate).
+    if not _workspace.slot_is_live(home, name):
+        probe = _resolve_probe(probe)
+        try:
+            live = await probe(os.getenv("CALF_HOST_URL") or "localhost")
+        except Exception:
+            print("warning: could not verify org-wide duplicates (broker unreachable); proceeding.")
+            live = []
+        if name in live:
+            print(f"agent {name} is already running in the organization")
+            return 0
 
     return await _slot_ops.restart_slot(home, name, _agent_argv(launcher, name), label=_label(name))
 
@@ -407,8 +438,12 @@ async def agent_start_all(
         print("no agents defined")
         return 0
 
-    # Gate the broker ONCE for the whole sweep (each per-id ``agent_start`` skips
-    # its own gate because ``live`` is threaded in below).
+    # The legacy-workspace guard and the broker gate run ONCE for the whole sweep
+    # (each per-id ``agent_start`` skips both because ``live`` is threaded in below).
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
+        return 1
+
     if not await _workspace.broker_gate(server_urls, broker_probe):
         print(_BROKER_UNREACHABLE_HINT)
         return 1
@@ -532,6 +567,12 @@ async def agent_restart_all(
 
     if not await _workspace_is_up(client):
         print(_NOT_RUNNING_HINT)
+        return 1
+
+    # Spawn pre-flights, ONCE for the sweep: the legacy-workspace guard, then the
+    # broker gate.
+    if await _workspace.legacy_pc_roster(client):
+        print(_workspace.LEGACY_WORKSPACE_HINT)
         return 1
 
     if not await _workspace.broker_gate(None, broker_probe):

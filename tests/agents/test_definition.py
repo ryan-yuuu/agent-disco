@@ -38,7 +38,7 @@ class TestAgentDefinitionValidators:
         with pytest.raises(ValidationError, match="name"):
             _make_definition(agent_id=bad_id)
 
-    @pytest.mark.parametrize("reserved", ["broker", "bridge", "tools", "mcp-github"])
+    @pytest.mark.parametrize("reserved", ["broker", "bridge", "tools", "process-compose", "mcp-github"])
     def test_reserved_agent_id_rejected(self, reserved: str) -> None:
         """Agents share the workspace slot namespace with the substrate, the
         ``tools`` singleton, and the ``mcp-<server>`` slots, so a reserved name
@@ -290,7 +290,7 @@ class TestParseAgentMd:
         d = parse_agent_md(path)
         assert d.memory is True
 
-    @pytest.mark.parametrize("reserved", ["tools", "broker", "bridge", "mcp-github"])
+    @pytest.mark.parametrize("reserved", ["tools", "broker", "bridge", "process-compose", "mcp-github"])
     def test_reserved_name_md_rejected_at_parse(self, tmp_path: Path, reserved: str) -> None:
         """A hand-written ``agents/tools.md`` (etc.) must fail at parse time with
         a message naming the reserved slot it collides with, so the operator

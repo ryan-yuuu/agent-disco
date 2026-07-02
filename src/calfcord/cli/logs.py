@@ -135,10 +135,13 @@ def _follow(
                 if not path.is_file():
                     continue
                 data = path.read_bytes()
-                if len(data) <= offsets[name]:
-                    # Truncated (rotation) or unchanged: reset to the new end so a
-                    # rotated-smaller file is not re-streamed from a stale offset.
-                    offsets[name] = len(data)
+                if len(data) < offsets[name]:
+                    # The file SHRANK: rotate-at-spawn moved it aside and a
+                    # restarted slot is writing a fresh file. Restart from byte 0
+                    # so the fresh file's first lines stream (an offset left at
+                    # the old size would silently skip them).
+                    offsets[name] = 0
+                if len(data) == offsets[name]:
                     continue
                 fresh = data[offsets[name] :].decode("utf-8", errors="replace")
                 offsets[name] = len(data)
