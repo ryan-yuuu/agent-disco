@@ -28,7 +28,7 @@ import contextlib
 import fcntl
 import os
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 
 from calfcord.supervisor import procspawn
@@ -220,9 +220,34 @@ def slot_identity(home: str | os.PathLike[str], slot: str) -> procspawn.Identity
     return procspawn.identity(record)
 
 
+def classify_slots(
+    home: str | os.PathLike[str],
+) -> dict[str, procspawn.Identity | None]:
+    """ONE snapshot of every ``state/run`` slot: slot → identity verdict.
+
+    One directory scan with exactly one pidfile read + one identity read per slot
+    (each identity read is a ``ps`` exec on darwin, so this bounds the cost at N,
+    not sets x N). ``None`` means the pidfile exists but carries no usable record
+    (torn/corrupt). Every set-shaped consumer (:func:`live_slots` /
+    :func:`dead_slots` / :func:`indeterminate_slots` and the status boards) is a
+    projection of this ONE snapshot, so a slot dying between two scans can never
+    appear in two disagreeing sets (the cross-scan TOCTOU). Propagates
+    :class:`SlotScanError` for an unreadable run dir, like the scan it wraps.
+    """
+    verdicts: dict[str, procspawn.Identity | None] = {}
+    for slot, pidfile in iter_slot_pidfiles(home):
+        record = procspawn.read_pidfile(pidfile)
+        verdicts[slot] = None if record is None else procspawn.identity(record)
+    return verdicts
+
+
 def live_slots(home: str | os.PathLike[str]) -> set[str]:
     """Every slot with an ours-and-alive pidfile under ``state/run`` (any slot type)."""
-    return {slot for slot, _ in iter_slot_pidfiles(home) if slot_is_live(home, slot)}
+    return {
+        slot
+        for slot, verdict in classify_slots(home).items()
+        if verdict is procspawn.Identity.OURS
+    }
 
 
 def is_agent_slot(slot: str) -> bool:
@@ -250,9 +275,8 @@ def dead_slots(home: str | os.PathLike[str]) -> set[str]:
     """
     return {
         slot
-        for slot, _ in iter_slot_pidfiles(home)
-        if slot_identity(home, slot)
-        not in (procspawn.Identity.OURS, procspawn.Identity.INDETERMINATE)
+        for slot, verdict in classify_slots(home).items()
+        if verdict not in (procspawn.Identity.OURS, procspawn.Identity.INDETERMINATE)
     }
 
 
@@ -268,10 +292,15 @@ def note_local_survivors(home: str | os.PathLike[str]) -> None:
     warning instead of silence.
     """
     try:
-        survivors = sorted(live_slots(home) | indeterminate_slots(home))
+        verdicts = classify_slots(home)
     except SlotScanError as exc:
         print(f"warning: {exc}")
         return
+    survivors = sorted(
+        slot
+        for slot, verdict in verdicts.items()
+        if verdict in (procspawn.Identity.OURS, procspawn.Identity.INDETERMINATE)
+    )
     if survivors:
         print(
             f"note: {len(survivors)} detached roster process(es) still running "
@@ -288,8 +317,8 @@ def indeterminate_slots(home: str | os.PathLike[str]) -> set[str]:
     """
     return {
         slot
-        for slot, _ in iter_slot_pidfiles(home)
-        if slot_identity(home, slot) is procspawn.Identity.INDETERMINATE
+        for slot, verdict in classify_slots(home).items()
+        if verdict is procspawn.Identity.INDETERMINATE
     }
 
 
@@ -338,11 +367,16 @@ async def launch_slot(
     """Spawn ``slot`` and confirm it survives a short grace window.
 
     Returns ``True`` when the process is still ours-and-alive at the end of the
-    window ("started" — nothing more). Returns ``False`` when it exited during the
-    window (crash-on-boot): the fresh-but-dead pidfile is cleaned so the failed
-    start leaves no stale record, and the caller reports the failure with the
-    slot's log path. ``clock``/``sleep`` are injected so tests drive the window
-    without real time.
+    window ("started" — nothing more). Returns ``False`` only when it PROVABLY
+    exited during the window (crash-on-boot): the fresh-but-dead pidfile is
+    cleaned so the failed start leaves no stale record, and the caller reports
+    the failure with the slot's log path. The check reads the TRI-STATE identity,
+    not the collapsed boolean: an ``INDETERMINATE`` reading mid-window (a
+    transient darwin ``ps`` flake) is "keep polling", never "exited immediately"
+    — and one that persists to the deadline degrades to succeed-with-a-warning
+    (naming the slot's log), because sweeping the pidfile of a process that may
+    well be alive and ours would orphan it from every stop/status path.
+    ``clock``/``sleep`` are injected so tests drive the window without real time.
     """
     spawned = spawn_slot(home, slot, argv)
     deadline = clock() + _SPAWN_CONFIRM_WINDOW_S
@@ -353,10 +387,18 @@ async def launch_slot(
         # check below would read True for the whole window and the caller would
         # print "started" for a dead process.
         procspawn.reap(spawned.pid)
-        if not slot_is_live(home, slot):
+        verdict = slot_identity(home, slot)
+        if verdict not in (procspawn.Identity.OURS, procspawn.Identity.INDETERMINATE):
+            # Provably dead (or a torn/superseded record): the honest crash-on-boot.
             procspawn.cleanup_stale(procspawn.pidfile_for(home, slot))
             return False
         if clock() >= deadline:
+            if verdict is procspawn.Identity.INDETERMINATE:
+                print(
+                    f"warning: {slot} started but its process identity could not "
+                    "be re-read during the confirmation window; assuming it is "
+                    f"running — see {procspawn.log_path_for(home, slot)}"
+                )
             return True
         await sleep(_SPAWN_CONFIRM_POLL_S)
 
@@ -433,6 +475,9 @@ def slot_mutation(home: str | os.PathLike[str], slot: str) -> Iterator[None]:
         ) from exc
     try:
         try:
+            # The run dir is created HERE (owner-only: pidfiles are trusted input
+            # to a kill path) rather than left to _flock_nb's default-mode makedirs.
+            procspawn.ensure_private_dir(_run_dir(home))
             slot_guard = _flock_nb(_run_dir(home) / f"{slot}.lock", fcntl.LOCK_EX)
             slot_guard.__enter__()
         except BlockingIOError as exc:
@@ -460,6 +505,38 @@ BROKER_UNREACHABLE_HINT = (
 # The broker-wide live-roster probe shape: hand it ``server_urls``, get the NAMES
 # of every agent currently online across the org (see roster._probe_live_roster).
 LiveRosterProbe = Callable[[str], Awaitable[list[str]]]
+
+
+def screen_mesh_names(names: Iterable[str]) -> set[str]:
+    """Keep only well-formed agent ids from a MESH-derived name list.
+
+    The mesh roster is broker-wide input: any producer that can write
+    ``calf.agents`` chooses its own name, so a name is untrusted bytes until it
+    matches :data:`AGENT_ID_PATTERN` — printing a non-conforming one verbatim
+    would hand terminal escape sequences to the status boards. Non-conforming
+    names are DROPPED with one aggregate warning (never echoed raw, not even in
+    the warning). The shared screen for every board that renders mesh names
+    (``disco status`` / ``agent ps``).
+    """
+    # Lazy: the identifier module is a stdlib-only leaf, but importing it runs
+    # the heavy ``calfcord.agents`` package __init__ (which pulls calfkit /
+    # aiokafka) — deferred to call time so this module stays import-light (the
+    # lifecycle import-isolation contract).
+    from calfcord.agents.identifier import AGENT_ID_PATTERN
+
+    valid: set[str] = set()
+    dropped = 0
+    for name in names:
+        if isinstance(name, str) and AGENT_ID_PATTERN.fullmatch(name) is not None:
+            valid.add(name)
+        else:
+            dropped += 1
+    if dropped:
+        print(
+            f"warning: {dropped} invalid mesh name(s) ignored "
+            "(not well-formed agent ids)."
+        )
+    return valid
 
 
 def resolve_probe(probe: LiveRosterProbe | None) -> LiveRosterProbe:

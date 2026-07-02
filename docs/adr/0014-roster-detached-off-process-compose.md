@@ -54,3 +54,7 @@ direction, but not available today (see
   per slot.
 - The lifecycle-lock contention message can be imprecise about which command holds
   the lock.
+- **Known limitation:** if a slot's session leader dies while forked group members
+  survive, `terminate` reads `ALREADY_DEAD` off the leader pid and the survivors
+  become CLI-invisible orphans (no pidfile names them) — parity with the Process
+  Compose era, which also only tracked the leader.

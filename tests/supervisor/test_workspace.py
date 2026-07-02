@@ -344,8 +344,8 @@ async def test_launch_slot_false_on_a_mid_window_death(tmp_path, monkeypatch) ->
     monkeypatch.setattr(
         _workspace, "spawn_slot", lambda home, slot, argv: SimpleNamespace(pid=os.getpid())
     )
-    liveness = iter([True, False])
-    monkeypatch.setattr(_workspace, "slot_is_live", lambda home, slot: next(liveness))
+    verdicts = iter([procspawn.Identity.OURS, procspawn.Identity.NOT_OURS])
+    monkeypatch.setattr(_workspace, "slot_identity", lambda home, slot: next(verdicts))
     cleaned: list = []
     monkeypatch.setattr(procspawn, "cleanup_stale", lambda pidfile: cleaned.append(pidfile))
     slept: list[float] = []
@@ -672,3 +672,163 @@ async def test_broker_gate_falls_back_to_calf_host_url_env(monkeypatch) -> None:
     monkeypatch.setenv("CALF_HOST_URL", "env-broker:9092")
     assert await _workspace.broker_gate(None, None) is True
     assert seen["server_urls"] == "env-broker:9092"
+
+
+# --- classify_slots: one scan, one identity read per slot (fix Q2) ---------------
+
+
+def test_classify_slots_maps_every_pidfile_to_its_verdict(tmp_path) -> None:
+    _write_self_pidfile(tmp_path, "alive")
+    _write_dead_pidfile(tmp_path, "crashed")
+    pidfile = procspawn.pidfile_for(tmp_path, "torn")
+    pidfile.write_text("garbage {")
+    verdicts = _workspace.classify_slots(tmp_path)
+    assert verdicts == {
+        "alive": procspawn.Identity.OURS,
+        "crashed": procspawn.Identity.NOT_OURS,
+        "torn": None,
+    }
+
+
+def test_classify_slots_reads_each_identity_exactly_once(tmp_path, monkeypatch) -> None:
+    """The whole point of the snapshot: N slots cost ONE scan and N identity
+    reads (each a `ps` on darwin) — not 3 x N across live/dead/indeterminate."""
+    _write_self_pidfile(tmp_path, "a")
+    _write_self_pidfile(tmp_path, "b")
+    _write_dead_pidfile(tmp_path, "c")
+    identity_calls: list[int] = []
+    real_identity = procspawn.identity
+
+    def counting_identity(record):
+        identity_calls.append(record.pid)
+        return real_identity(record)
+
+    monkeypatch.setattr(procspawn, "identity", counting_identity)
+    _workspace.classify_slots(tmp_path)
+    assert len(identity_calls) == 3
+
+
+def test_scan_projections_are_views_of_one_classification(tmp_path, monkeypatch) -> None:
+    """live/dead/indeterminate/live-agent are projections of classify_slots, so a
+    slot can never appear in two sets (the cross-scan TOCTOU) and patching the
+    snapshot governs them all."""
+    snapshot = {
+        "assistant": procspawn.Identity.OURS,
+        "tools": procspawn.Identity.OURS,
+        "crashed": procspawn.Identity.NOT_OURS,
+        "torn": None,
+        "flaky": procspawn.Identity.INDETERMINATE,
+    }
+    monkeypatch.setattr(_workspace, "classify_slots", lambda home: dict(snapshot))
+    assert _workspace.live_slots(tmp_path) == {"assistant", "tools"}
+    assert _workspace.live_agent_slots(tmp_path) == {"assistant"}
+    assert _workspace.dead_slots(tmp_path) == {"crashed", "torn"}
+    assert _workspace.indeterminate_slots(tmp_path) == {"flaky"}
+
+
+def test_note_local_survivors_takes_one_snapshot(tmp_path, capsys, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_classify(home):
+        calls.append(str(home))
+        return {
+            "alive": procspawn.Identity.OURS,
+            "flaky": procspawn.Identity.INDETERMINATE,
+            "crashed": procspawn.Identity.NOT_OURS,
+        }
+
+    monkeypatch.setattr(_workspace, "classify_slots", fake_classify)
+    _workspace.note_local_survivors(tmp_path)
+    assert len(calls) == 1  # ONE scan for the whole note, not live+indeterminate
+    out = capsys.readouterr().out
+    assert "2 detached roster process(es) still running locally" in out
+    assert "alive" in out and "flaky" in out
+    assert "crashed" not in out
+
+
+# --- launch_slot: an indeterminate flake is not a boot crash (fix Q4) ------------
+
+
+def _fake_spawn(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        _workspace, "spawn_slot", lambda home, slot, argv: SimpleNamespace(pid=os.getpid())
+    )
+
+
+async def _no_sleep_quick(_s: float) -> None:
+    return None
+
+
+async def test_launch_slot_keeps_polling_through_an_indeterminate_flake(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """A mid-window INDETERMINATE reading (a transient darwin `ps` flake) is NOT
+    an exit: the loop keeps polling, and a recovered OURS reading ends in a
+    clean, warning-free success."""
+    _fake_spawn(monkeypatch)
+    verdicts = iter([procspawn.Identity.INDETERMINATE, procspawn.Identity.OURS])
+    monkeypatch.setattr(_workspace, "slot_identity", lambda home, slot: next(verdicts))
+    cleaned: list = []
+    monkeypatch.setattr(procspawn, "cleanup_stale", lambda pidfile: cleaned.append(pidfile))
+
+    ok = await _workspace.launch_slot(
+        tmp_path,
+        "job",
+        ["cmd"],
+        clock=_StepClock(0.0, 0.0, 999.0),  # flake before the deadline, recover at it
+        sleep=_no_sleep_quick,
+    )
+
+    assert ok is True
+    assert cleaned == []  # never treated as a crash-on-boot
+    assert "warning" not in capsys.readouterr().out.lower()
+
+
+async def test_launch_slot_indeterminate_through_the_deadline_succeeds_with_warning(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """Identity unreadable for the WHOLE window: the honest outcome is
+    succeed-with-warning (naming the slot's log) — never 'exited immediately'
+    plus a pidfile sweep over a process that may well be alive and ours."""
+    _fake_spawn(monkeypatch)
+    monkeypatch.setattr(
+        _workspace, "slot_identity", lambda home, slot: procspawn.Identity.INDETERMINATE
+    )
+    cleaned: list = []
+    monkeypatch.setattr(procspawn, "cleanup_stale", lambda pidfile: cleaned.append(pidfile))
+
+    ok = await _workspace.launch_slot(
+        tmp_path,
+        "job",
+        ["cmd"],
+        clock=_StepClock(0.0, 999.0),
+        sleep=_no_sleep_quick,
+    )
+
+    assert ok is True
+    assert cleaned == []  # the unverifiable pidfile is preserved
+    out = capsys.readouterr().out
+    assert "warning" in out.lower()
+    assert "job" in out
+    assert str(procspawn.log_path_for(tmp_path, "job")) in out
+
+
+# --- slot_mutation creates state/run owner-only (fix S4) -------------------------
+
+
+def test_slot_mutation_creates_the_run_dir_owner_only(tmp_path) -> None:
+    with _workspace.slot_mutation(tmp_path, "assistant"):
+        pass
+    run_dir = tmp_path / "state" / "run"
+    assert (run_dir.stat().st_mode & 0o777) == 0o700
+
+
+def test_slot_mutation_leaves_a_preexisting_run_dir_mode_alone(tmp_path) -> None:
+    run_dir = tmp_path / "state" / "run"
+    run_dir.mkdir(parents=True)
+    run_dir.chmod(0o755)
+    with _workspace.slot_mutation(tmp_path, "assistant"):
+        pass
+    assert (run_dir.stat().st_mode & 0o777) == 0o755

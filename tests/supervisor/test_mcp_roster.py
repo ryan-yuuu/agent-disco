@@ -518,3 +518,24 @@ async def test_mcp_stop_all_scan_error_is_reported_not_none_running(tmp_path, ca
     out = capsys.readouterr().out
     assert "roster state unknown" in out
     assert "no MCP servers running" not in out
+
+
+async def test_mcp_stop_all_workspace_busy_aborts_once_not_per_slot(
+    tmp_path, capsys, monkeypatch
+):
+    """The lifecycle lock is workspace-wide: every remaining slot would refuse
+    identically, so a contended sweep reports ONE honest error and stops —
+    agent-sweep semantics, not an error line per remaining server."""
+    from calfcord.supervisor.lifecycle import lifecycle_lock
+
+    slots = _FakeSlots(["mcp-alpha", "mcp-beta", "mcp-gamma"])
+    slots.install(monkeypatch)
+
+    with lifecycle_lock(_home(tmp_path)):
+        rc = await mcp_roster.mcp_stop_all(_home(tmp_path), client=_StubClient())
+
+    assert rc == 1
+    assert slots.terminated == []
+    out = capsys.readouterr().out
+    assert out.count("error:") == 1  # ONE aggregate refusal, then the sweep stops
+    assert "in progress" in out

@@ -49,8 +49,10 @@ CLI entry point.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 
 from calfkit.client import Client
 
@@ -106,6 +108,33 @@ def _agent_argv(launcher: str, name: str) -> list[str]:
     return [launcher, "run", "agent", name]
 
 
+# The broker-client loggers silenced for the DURATION of one mesh probe. Setting
+# the parent level filters the whole subtree (children are NOTSET and defer up).
+_NOISY_MESH_LOGGERS = ("aiokafka", "kafka")
+
+
+@contextlib.contextmanager
+def _quiet_mesh_probe() -> Iterator[None]:
+    """Silence broker-client log noise for the duration of ONE mesh probe.
+
+    An unreadable ``calf.agents`` view makes aiokafka spray dozens of raw
+    connector-error lines (plus an "Unclosed AIOKafkaConsumer" on teardown) at
+    the terminal before the caller's one honest warning. The suppression is
+    scoped to the probe call ONLY — never a global silence, so real runners in
+    this process keep their broker-client logs — and the prior levels are
+    restored on exit.
+    """
+    loggers = [logging.getLogger(name) for name in _NOISY_MESH_LOGGERS]
+    saved = [(logger, logger.level) for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.CRITICAL + 1)
+    try:
+        yield
+    finally:
+        for logger, level in saved:
+            logger.setLevel(level)
+
+
 async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PROBE_TIMEOUT_S) -> list[str]:
     """Read the online agent names from calfkit's native mesh (``calf.agents``).
 
@@ -120,18 +149,25 @@ async def _probe_live_roster(server_urls: str, *, timeout_s: float = _DEFAULT_PR
     :class:`~calfkit.exceptions.MeshUnavailableError` (broker down, the
     ``calf.agents`` topic not yet created, the view still establishing, or a dead
     reader) or a timeout PROPAGATES to the caller, whose ``except Exception``
-    degrades ("broker unreachable; …"). A successful read of an empty roster
-    returns ``[]`` ("nobody online") — distinct from the raise ("couldn't read
-    it"), so the duplicate guard never treats an unreadable roster as a confident
-    "nobody online".
+    degrades ("mesh roster view unreadable; …"). A successful read of an empty
+    roster returns ``[]`` ("nobody online") — distinct from the raise ("couldn't
+    read it"), so the duplicate guard never treats an unreadable roster as a
+    confident "nobody online".
     """
-    client = Client.connect(server_urls)
-    try:
-        async with asyncio.timeout(timeout_s):
-            agents = await client.mesh.get_agents()
-            return sorted(info.name for info in agents.values())
-    finally:
-        await client.aclose()
+    with _quiet_mesh_probe():
+        client = Client.connect(server_urls)
+        try:
+            async with asyncio.timeout(timeout_s):
+                agents = await client.mesh.get_agents()
+                return sorted(info.name for info in agents.values())
+        finally:
+            try:
+                await client.aclose()
+            finally:
+                # Drop the last strong ref INSIDE the quiet window: a failed
+                # probe's teardown noise (e.g. an unclosed-consumer __del__ log)
+                # fires here, not later in the caller's except block.
+                del client
 
 
 # The probe resolver is the one shared :func:`_workspace.resolve_probe` (its
@@ -285,7 +321,7 @@ async def agent_start(
                 # unreadable we cannot verify org-wide duplicates, so warn and
                 # proceed with the local spawn rather than blocking it — a
                 # same-host duplicate is impossible (the locked live-check governs).
-                print("warning: could not verify org-wide duplicates (broker unreachable); proceeding.")
+                print("warning: could not verify org-wide duplicates (mesh roster view unreadable); proceeding.")
                 live = []
         if name in live:
             print(f"agent {name} is already running in the organization")
@@ -387,7 +423,7 @@ async def agent_restart(
         try:
             live = await probe(server_urls or os.getenv("CALF_HOST_URL") or "localhost")
         except Exception:
-            print("warning: could not verify org-wide duplicates (broker unreachable); proceeding.")
+            print("warning: could not verify org-wide duplicates (mesh roster view unreadable); proceeding.")
             live = []
         if name in live:
             print(f"agent {name} is already running in the organization")
@@ -464,7 +500,7 @@ async def agent_start_all(
         live: list[str] = await probe(server_urls)
         probe_unavailable = False
     except Exception:
-        print("warning: could not verify org-wide duplicates (broker unreachable); proceeding for all agents.")
+        print("warning: could not verify org-wide duplicates (mesh roster view unreadable); proceeding for all agents.")
         live = []
         probe_unavailable = True
 
@@ -489,7 +525,7 @@ async def agent_start_all(
 
     summary = f"start --all: {len(agent_ids)} agent(s) processed, {failures} failed."
     if probe_unavailable:
-        summary += " (org-wide duplicate check skipped: broker unreachable)"
+        summary += " (org-wide duplicate check skipped: mesh roster view unreadable)"
     print(summary)
     return 1 if failures else 0
 
@@ -548,7 +584,7 @@ async def agent_stop_all(
         except _workspace.WorkspaceBusyError as exc:
             # The lifecycle lock is workspace-wide: every remaining item would
             # hit the same refusal, so report it ONCE and stop the sweep (the
-            # mcp sweeps' honest-single-error behavior).
+            # abort-once semantics the mcp stop sweep shares).
             print(f"error: {exc}")
             return 1
         except Exception as exc:
@@ -645,7 +681,8 @@ async def agent_restart_all(
             continue
         except _workspace.WorkspaceBusyError as exc:
             # Workspace-wide: every remaining item would refuse identically, so
-            # one honest error closes the sweep (mcp-sweep parity).
+            # one honest error closes the sweep (the abort-once semantics the
+            # mcp stop sweep shares).
             print(f"error: {exc}")
             return 1
         except Exception as exc:
@@ -708,12 +745,16 @@ async def agent_ps(
 
     probe = _resolve_probe(probe)
     try:
-        logical = set(await probe(server_urls))
+        # Mesh names are broker-wide input, so they are screened before any
+        # print: a malformed name is dropped with one aggregate warning, never
+        # rendered raw onto the board (terminal-injection surface).
+        logical = _workspace.screen_mesh_names(await probe(server_urls))
     except Exception:
-        # The probe talks to the broker; a broker hiccup must not crash read-only
-        # `ps`. Degrade to the physical (host-local) view with a note.
+        # An unreadable mesh view must not crash read-only `ps`. Degrade to the
+        # physical (host-local) view with an honest note — the substrate's
+        # broker may well be Running; it is the VIEW we could not read.
         logical = set()
-        print("note: broker unreachable; showing locally-running agents only.")
+        print("note: mesh roster view unreadable; showing locally-running agents only.")
 
     _render_ps_board(physical=physical, logical=logical)
     return 0

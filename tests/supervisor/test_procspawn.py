@@ -841,3 +841,194 @@ async def test_terminate_kills_the_whole_group_including_a_forked_child(
     while procspawn._pid_alive(grandchild):
         assert time.monotonic() < deadline, "forked grandchild survived the group kill"
         time.sleep(0.01)
+
+
+# --- identity: a failed token read on a provably-dead pid (fix Q3) -----------
+
+
+def test_identity_not_ours_when_token_read_fails_and_pid_died(monkeypatch) -> None:
+    """A token read that fails because the process DIED mid-check is not an
+    unknown: re-checking liveness proves the pid is gone, and a dead pid can
+    never be our live process — NOT_OURS, not INDETERMINATE (which would park a
+    plainly-dead slot as unverifiable forever)."""
+    alive_answers = iter([True, False])  # alive at the first gate, dead at the re-check
+    monkeypatch.setattr(procspawn, "_pid_alive", lambda pid: next(alive_answers))
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    record = procspawn.PidRecord(
+        pid=4242, argv=("whatever",), start_token="tok", spawn_ts=0.0, argv_hash="x"
+    )
+    assert procspawn.identity(record) is procspawn.Identity.NOT_OURS
+
+
+def test_identity_still_indeterminate_when_pid_stays_alive(monkeypatch) -> None:
+    """The Q3 re-check must not weaken the tri-state: a live pid whose token
+    read fails is still INDETERMINATE."""
+    monkeypatch.setattr(procspawn, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: None)
+    record = procspawn.PidRecord(
+        pid=4242, argv=("whatever",), start_token="tok", spawn_ts=0.0, argv_hash="x"
+    )
+    assert procspawn.identity(record) is procspawn.Identity.INDETERMINATE
+
+
+# --- terminate: identity re-verified before the SIGKILL escalation (fix S2) --
+
+
+def _sigkill_escalation_seams(monkeypatch, *, tokens: list[str | None]) -> list[int]:
+    """Drive terminate to the SIGKILL decision point with scripted identity.
+
+    The pid always reads alive (so the graceful window expires), reap is a no-op,
+    and ``_process_start_token`` pops from ``tokens`` (the first read is the
+    entry gate; the next is the pre-SIGKILL re-verification). Returns the list
+    of signals actually sent."""
+    signals: list[int] = []
+    monkeypatch.setattr(procspawn, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(procspawn, "reap", lambda pid: None)
+    monkeypatch.setattr(
+        procspawn, "_signal_group_or_pid", lambda pid, sig: signals.append(sig)
+    )
+    reads = iter(tokens)
+    monkeypatch.setattr(procspawn, "_process_start_token", lambda pid: next(reads))
+    return signals
+
+
+async def test_terminate_does_not_sigkill_when_identity_flips_indeterminate(
+    monkeypatch,
+) -> None:
+    """The graceful window is long; by SIGKILL time the identity evidence may
+    have gone unreadable. An unverifiable process is NEVER SIGKILLed — the
+    result says so honestly instead of escalating on stale proof."""
+    signals = _sigkill_escalation_seams(monkeypatch, tokens=["tok", None])
+    record = procspawn.PidRecord(
+        pid=4242, argv=("w",), start_token="tok", spawn_ts=0.0, argv_hash="x"
+    )
+    clock = _FakeClock()
+    result = await procspawn.terminate(
+        record, term_timeout_s=0.0, sleep=_advancing_sleep(clock, []), clock=clock
+    )
+    assert result is procspawn.TerminateResult.INDETERMINATE
+    assert signals == [signal.SIGTERM]  # no SIGKILL on unverifiable identity
+
+
+async def test_terminate_reports_terminated_when_pid_recycled_before_sigkill(
+    monkeypatch,
+) -> None:
+    """A token MISMATCH at the SIGKILL decision point means our process died
+    after SIGTERM and the pid was recycled: the truthful outcome is TERMINATED —
+    and the recycled stranger is never SIGKILLed."""
+    signals = _sigkill_escalation_seams(monkeypatch, tokens=["tok", "recycled"])
+    record = procspawn.PidRecord(
+        pid=4242, argv=("w",), start_token="tok", spawn_ts=0.0, argv_hash="x"
+    )
+    clock = _FakeClock()
+    result = await procspawn.terminate(
+        record, term_timeout_s=0.0, sleep=_advancing_sleep(clock, []), clock=clock
+    )
+    assert result is procspawn.TerminateResult.TERMINATED
+    assert signals == [signal.SIGTERM]
+
+
+# --- reap: non-positive pids must never reach waitpid (fix S3) ---------------
+
+
+def test_reap_never_calls_waitpid_for_non_positive_pids(monkeypatch) -> None:
+    """``os.waitpid(0, …)`` waits on ANY child in our process group and
+    ``waitpid(-1, …)`` on any child at all — a corrupt pidfile must not let a
+    bogus pid quietly reap an unrelated child of this process."""
+    calls: list[int] = []
+    monkeypatch.setattr(
+        procspawn.os, "waitpid", lambda pid, flags: calls.append(pid) or (0, 0)
+    )
+    procspawn.reap(0)
+    procspawn.reap(-1)
+    assert calls == []
+    procspawn.reap(999999)  # a positive pid still goes through
+    assert calls == [999999]
+
+
+# --- darwin ps pinned to /bin/ps (fix S5) -------------------------------------
+
+
+def test_darwin_start_token_pins_the_absolute_ps_path(monkeypatch) -> None:
+    """The start-token read feeds a kill decision, so the helper must exec the
+    system ``/bin/ps`` by absolute path — never resolve ``ps`` off a caller's
+    $PATH (where a planted binary could forge a token)."""
+    from types import SimpleNamespace
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="Mon Jan  1 00:00:00 2026\n")
+
+    monkeypatch.setattr(procspawn.subprocess, "run", fake_run)
+    assert procspawn._darwin_start_token(123) == "Mon Jan  1 00:00:00 2026"
+    assert seen and seen[0][0] == "/bin/ps"
+
+
+# --- private modes for the state dirs and slot logs (fix S4) -----------------
+
+
+def test_spawn_detached_creates_owner_only_dirs_and_log(tmp_path: Path) -> None:
+    """state/run and state/logs are trusted input to a kill path (pidfiles) and
+    an append target (logs): when THIS code creates them they are 0700, and a
+    fresh slot log is 0600."""
+    spawned = _spawn_py("pass", tmp_path)
+    _wait(spawned.pid)
+    logs_dir = procspawn.log_path_for(tmp_path, "job").parent
+    run_dir = procspawn.pidfile_for(tmp_path, "job").parent
+    assert (logs_dir.stat().st_mode & 0o777) == 0o700
+    assert (run_dir.stat().st_mode & 0o777) == 0o700
+    assert (procspawn.log_path_for(tmp_path, "job").stat().st_mode & 0o777) == 0o600
+
+
+def test_ensure_private_dir_leaves_a_preexisting_dir_alone(tmp_path: Path) -> None:
+    """Only dirs WE create are tightened; a pre-existing operator dir keeps its
+    mode (never chmod user dirs behind their back)."""
+    existing = tmp_path / "state" / "logs"
+    existing.mkdir(parents=True)
+    existing.chmod(0o755)
+    procspawn.ensure_private_dir(existing)
+    assert (existing.stat().st_mode & 0o777) == 0o755
+
+
+# --- the slot log must never follow a symlink (fix S7) ------------------------
+
+
+def test_spawn_detached_refuses_a_symlinked_log(tmp_path: Path) -> None:
+    """A symlink planted at the slot's log path would let the append (and the
+    rotate-rename) target an arbitrary file. The spawn is refused BEFORE any
+    child exists (kill-nothing), with an error naming the offending path."""
+    target = tmp_path / "victim.txt"
+    target.write_text("precious")
+    log_path = procspawn.log_path_for(tmp_path, "job")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="symlink") as excinfo:
+        procspawn.spawn_detached(
+            [sys.executable, "-c", "pass"],
+            log_path=log_path,
+            pidfile=procspawn.pidfile_for(tmp_path, "job"),
+        )
+    assert str(log_path) in str(excinfo.value)
+    assert not procspawn.pidfile_for(tmp_path, "job").exists()
+    assert target.read_text() == "precious"  # nothing appended through the link
+
+
+def test_rotation_sizes_the_symlink_not_its_target(tmp_path: Path) -> None:
+    """Rotate-at-spawn must lstat: sizing THROUGH a planted symlink would let an
+    attacker-chosen huge target trigger renames around the link."""
+    target = tmp_path / "huge.bin"
+    with open(target, "wb") as handle:  # sparse: at-threshold without real bytes
+        handle.seek(procspawn._LOG_ROTATE_AT_BYTES)
+        handle.write(b"x")
+    log_path = tmp_path / "state" / "logs" / "job.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.symlink_to(target)
+
+    procspawn._rotate_log_at_spawn(log_path)
+
+    assert log_path.is_symlink()  # not renamed into the backup chain
+    assert not log_path.with_name("job.log.1").exists()
+    assert target.exists()

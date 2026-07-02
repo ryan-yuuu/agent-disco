@@ -996,8 +996,9 @@ async def test_start_readiness_timeout_diagnoses_privileged_intents(
     assert code == 1
     out = capsys.readouterr().out
     assert "Message Content" in out
-    # Still points the user at the log for the full traceback.
-    assert "process-compose.log" in out
+    # Points the user at the BRIDGE log — the file the diagnosis actually read
+    # (the supervisor log only records the readiness timeout).
+    assert "bridge.log" in out
 
 
 async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
@@ -1028,7 +1029,10 @@ async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
     assert code == 1
     out = capsys.readouterr().out.lower()
     assert "likely the broker could not be reached" in out
-    assert "process-compose.log" in out
+    # The generic message points at the BRIDGE log too — the file the diagnoser
+    # reads and where the real traceback lands (the supervisor log only echoes
+    # the readiness timeout).
+    assert "bridge.log" in out
 
 
 async def test_start_priming_reconcile_failure_tears_down_and_returns_nonzero(
@@ -1463,7 +1467,9 @@ async def test_status_broker_unreachable_shows_pidfiles_only(tmp_path, capsys) -
     assert code == 0
     out = capsys.readouterr().out
     assert "assistant" in out
-    assert "broker unreachable" in out
+    # Honest degrade label: the MESH VIEW was unreadable — the substrate rows
+    # above may still show the broker Running, so "broker unreachable" lied.
+    assert "mesh roster view unreadable" in out
     # No mesh -> the local pidfile is "started, not registered".
     assert "started, not registered" in out
 
@@ -1679,7 +1685,7 @@ async def test_status_scan_error_degrades_with_a_warning(tmp_path, capsys, monke
     def raising(home_arg):
         raise _workspace.SlotScanError(Path(home) / "state" / "run", OSError("Permission denied"))
 
-    monkeypatch.setattr(_workspace, "live_slots", raising)
+    monkeypatch.setattr(_workspace, "classify_slots", raising)
     client = _StubClient(
         project_state_results=[{"running": True}],
         list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
@@ -1805,3 +1811,162 @@ async def test_start_readiness_timeout_with_failing_teardown_is_honest(
     assert "did not become ready" in out
     assert "teardown may not have completed" in out
     assert "tore down the workspace" not in out
+
+
+# --- status: one slot snapshot, screened mesh names (fixes Q2 + S6) -------------
+
+
+async def test_status_takes_one_slot_snapshot(tmp_path, capsys, monkeypatch) -> None:
+    """The board's live/dead/unverifiable sets are projections of ONE
+    classify_slots snapshot — not three scans (3 x N identity reads, and a slot
+    dying between scans could appear in two disagreeing sets)."""
+    home = _home(tmp_path)
+    calls: list[str] = []
+
+    def fake_classify(home_arg):
+        calls.append(str(home_arg))
+        return {
+            "assistant": procspawn.Identity.OURS,
+            "crashed": procspawn.Identity.NOT_OURS,
+            "flaky": procspawn.Identity.INDETERMINATE,
+        }
+
+    monkeypatch.setattr(_workspace, "classify_slots", fake_classify)
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.status(
+        home, server_urls="localhost:9092", client=client, probe=_StubProbe(["assistant"])
+    )
+
+    assert code == 0
+    assert len(calls) == 1  # ONE snapshot feeds every set on the board
+    out = capsys.readouterr().out
+    assert out.count("assistant") == 1  # each slot renders exactly one row
+    assert "not running (exited" in out
+    assert "state unknown" in out
+
+
+async def test_status_screens_malformed_mesh_names(tmp_path, capsys, monkeypatch) -> None:
+    """Mesh-derived names are untrusted broker-wide input: a name carrying
+    terminal escapes is dropped from the board with one aggregate warning —
+    never printed raw."""
+    home = _home(tmp_path)
+    _write_self_pidfile(home, "assistant")
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        list_processes_result=[{"name": "broker", "status": "Running", "is_ready": "Ready"}],
+    )
+    evil = "\x1b[2J\x1b[31mpwned"
+    probe = _StubProbe(["assistant", evil])
+
+    code = await lifecycle.status(home, server_urls="localhost:9092", client=client, probe=probe)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "pwned" not in out
+    assert "assistant" in out
+    assert "1 invalid mesh name(s) ignored" in out
+
+
+# --- start-failure diagnosis: missing Discord settings (fix U2) ------------------
+
+
+# A trimmed pydantic-settings ValidationError of the shape the bridge prints when
+# required DISCORD_* values are absent from the effective environment.
+_MISSING_SETTINGS_TRACEBACK = """\
+Traceback (most recent call last):
+  File "/h/src/calfcord/bridge/main.py", line 31, in main
+    settings = DiscordSettings()
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for DiscordSettings
+bot_token
+  Field required [type=missing, input_value={}, input_type=dict]
+application_id
+  Field required [type=missing, input_value={}, input_type=dict]
+"""
+
+
+def test_diagnose_start_failure_names_missing_discord_settings(tmp_path) -> None:
+    """A pydantic ValidationError on the bridge's Discord settings is a config
+    gap, not a mystery: the diagnosis names the missing DISCORD_* env vars and
+    steers to `disco init`."""
+    logs_dir = _write_bridge_log(_home(tmp_path), _MISSING_SETTINGS_TRACEBACK)
+    msg = lifecycle._diagnose_start_failure(logs_dir)
+    assert msg is not None
+    assert "DISCORD_BOT_TOKEN" in msg
+    assert "DISCORD_APPLICATION_ID" in msg
+    assert "disco init" in msg
+
+
+def test_diagnose_start_failure_settings_error_without_extractable_fields(tmp_path) -> None:
+    """A DiscordSettings ValidationError whose field lines fell outside the tail
+    still gets the generic settings diagnosis (never None → the unrelated
+    broker/intents guess)."""
+    tail = "pydantic_core._pydantic_core.ValidationError: 1 validation error for DiscordSettings\n"
+    logs_dir = _write_bridge_log(_home(tmp_path), tail)
+    msg = lifecycle._diagnose_start_failure(logs_dir)
+    assert msg is not None
+    assert "Discord settings" in msg
+    assert "disco init" in msg
+
+
+def test_diagnose_start_failure_ignores_unrelated_validation_errors(tmp_path) -> None:
+    # A ValidationError for some OTHER model must not claim Discord settings.
+    tail = (
+        "pydantic_core._pydantic_core.ValidationError: "
+        "1 validation error for SomethingElse\nfield_x\n  Field required\n"
+    )
+    logs_dir = _write_bridge_log(_home(tmp_path), tail)
+    assert lifecycle._diagnose_start_failure(logs_dir) is None
+
+
+async def test_start_readiness_timeout_generic_message_points_at_bridge_log(
+    tmp_path, capsys, fake_pc_bin
+) -> None:
+    """Even with NO recognised signature, the failure message names the bridge's
+    own log — the file the diagnoser reads and where the real traceback lands —
+    not the supervisor log."""
+    home = _home(tmp_path)
+    _write_bridge_log(home, "some unrelated shutdown noise\n")
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up"), {"running": True}],
+        bridge_states=[{"status": "Pending", "is_ready": "Not Ready"}] * 1000,
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        spawn_blocking=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+        ready_timeout_s=10,
+    )
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "bridge.log" in out
+
+
+def test_ensure_log_path_creates_the_logs_dir_owner_only(tmp_path) -> None:
+    """`disco start` usually creates state/logs BEFORE any slot spawns; it must
+    apply the same owner-only mode the spawn path does (slot logs land here)."""
+    home = _home(tmp_path)
+    lifecycle._ensure_log_path(home)
+    assert (Path(home, "state", "logs").stat().st_mode & 0o777) == 0o700
+
+
+def test_ensure_log_path_leaves_a_preexisting_dir_mode_alone(tmp_path) -> None:
+    home = _home(tmp_path)
+    logs_dir = Path(home, "state", "logs")
+    logs_dir.mkdir(parents=True)
+    logs_dir.chmod(0o755)
+    lifecycle._ensure_log_path(home)
+    assert (logs_dir.stat().st_mode & 0o777) == 0o755

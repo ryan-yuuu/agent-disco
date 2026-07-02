@@ -35,6 +35,7 @@ import contextlib
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -135,6 +136,45 @@ _START_FAILURE_SIGNATURES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+# The pydantic-settings ValidationError header for the bridge's Discord settings
+# model — a missing/invalid DISCORD_* value crashes the bridge before it ever
+# reaches Discord, so the diagnosis is "complete the config", not the generic
+# broker/intents guess.
+_DISCORD_SETTINGS_ERROR_MARKER = "ValidationError"
+_DISCORD_SETTINGS_MODEL = "DiscordSettings"
+
+# A pydantic error detail is a bare lowercase field name on its own line followed
+# by an indented explanation ("Field required", "Input should be …"). Cheap,
+# tail-tolerant extraction — when it finds nothing the message stays generic.
+_SETTINGS_FIELD_RE = re.compile(r"(?m)^([a-z][a-z0-9_]*)\r?\n\s+\S")
+
+
+def _diagnose_settings_validation(tail: str) -> str | None:
+    """The Discord-settings diagnosis for a pydantic ValidationError, or ``None``.
+
+    Matches only the bridge's own settings model (``DiscordSettings``) so an
+    unrelated model's ValidationError never claims a Discord config gap. Field
+    names are mapped back to the ``DISCORD_*`` env vars the operator actually
+    sets (pydantic prints the lowercase attribute names); when none are cheaply
+    extractable from the tail the message stays generic but still actionable.
+    """
+    if _DISCORD_SETTINGS_ERROR_MARKER not in tail or _DISCORD_SETTINGS_MODEL not in tail:
+        return None
+    # Only look past the LAST ValidationError header so stray lowercase log
+    # lines earlier in the tail cannot masquerade as field names.
+    section = tail[tail.rindex(_DISCORD_SETTINGS_ERROR_MARKER) :]
+    fields = [f"DISCORD_{name.upper()}" for name in _SETTINGS_FIELD_RE.findall(section)]
+    if fields:
+        named = ", ".join(dict.fromkeys(fields))  # de-dup, order kept
+        return (
+            f"the bridge is missing required Discord settings ({named}) -- "
+            "re-run `disco init` to complete them."
+        )
+    return (
+        "the bridge is missing required Discord settings -- "
+        "re-run `disco init` to complete them."
+    )
+
 
 def _read_log_tail(path: str, *, max_bytes: int = _LOG_TAIL_BYTES) -> str | None:
     """Return the last ``max_bytes`` of ``path`` as text, or ``None`` if unreadable.
@@ -170,7 +210,7 @@ def _diagnose_start_failure(log_dir: str) -> str | None:
     for signature, message in _START_FAILURE_SIGNATURES:
         if signature in tail:
             return message
-    return None
+    return _diagnose_settings_validation(tail)
 
 
 def resolve_pc_binary() -> str:
@@ -645,20 +685,23 @@ async def start(
             # the readiness timeout; the real cause — e.g. a discord.py crash — is
             # in <home>/state/logs/bridge.log). If a known signature matches, print
             # the cause-specific fix instead of guessing; otherwise keep the generic
-            # message unchanged. The log pointer is retained either way.
+            # message. Both messages point at the BRIDGE log — the file the
+            # diagnosis reads and where the real traceback lands — never the
+            # supervisor log, which only echoes the timeout.
+            bridge_log = os.path.join(os.path.dirname(log_path), _BRIDGE_LOG_FILENAME)
             diagnosis = _diagnose_start_failure(os.path.dirname(log_path))
             if diagnosis is not None:
                 print(
                     "error: bridge did not become ready within "
                     f"{ready_timeout_s:g}s; {outcome} "
-                    f"{diagnosis} See {log_path} or run: disco doctor"
+                    f"{diagnosis} See {bridge_log} or run: disco doctor"
                 )
             else:
                 print(
                     "error: bridge did not become ready within "
                     f"{ready_timeout_s:g}s; {outcome} "
                     "Likely the broker could not be reached or Discord privileged "
-                    f"intents are off. See {log_path} or run: disco doctor"
+                    f"intents are off. See {bridge_log} or run: disco doctor"
                 )
             return 1
 
@@ -816,9 +859,9 @@ async def status(
     <log>)`` rather than omitted; ``disco stop``'s sweep is the acknowledge-and-
     clear point that removes those files. The ``tools`` singleton and
     ``mcp-<server>`` slots carry no mesh presence, so their pidfile is the whole
-    truth: live renders ``running``, dead renders the exited row. A
-    broker-unreachable probe degrades to the pidfile-only view with a note
-    (read-only status must never crash).
+    truth: live renders ``running``, dead renders the exited row. An unreadable
+    mesh roster view degrades to the pidfile-only view with a note (read-only
+    status must never crash).
 
     ``probe`` / ``client`` are injected for testing.
     """
@@ -844,24 +887,36 @@ async def status(
     substrate = [p for p in _process_rows(payload) if p["name"] in _SUBSTRATE]
 
     try:
-        live = _workspace.live_slots(home)
-        dead = _workspace.dead_slots(home)
-        unverifiable = _workspace.indeterminate_slots(home)
+        # ONE snapshot feeds every roster set below (live/dead/unverifiable are
+        # projections of it): one scan, one identity read per slot — and a slot
+        # dying mid-render can never appear in two disagreeing sets.
+        verdicts = _workspace.classify_slots(home)
     except _workspace.SlotScanError as exc:
         # Unreadable state/run: the roster half of the board is UNKNOWN, not
         # empty — warn and render what can still be read (the substrate).
         print(f"warning: {exc}")
-        live, dead, unverifiable = set(), set(), set()
+        verdicts = {}
+    live = {s for s, v in verdicts.items() if v is procspawn.Identity.OURS}
+    dead = {
+        s
+        for s, v in verdicts.items()
+        if v not in (procspawn.Identity.OURS, procspawn.Identity.INDETERMINATE)
+    }
+    unverifiable = {
+        s for s, v in verdicts.items() if v is procspawn.Identity.INDETERMINATE
+    }
     agent_slots = {slot for slot in live if _workspace.is_agent_slot(slot)}
     other_slots = sorted(live - agent_slots)  # tools + mcp-<server>
 
     probe = _workspace.resolve_probe(probe)
-    broker_unreachable = False
+    mesh_unreadable = False
     try:
-        logical = set(await probe(server_urls))
+        # Mesh names are broker-wide input: screened (with one aggregate
+        # warning for any malformed name) before they can reach a printed row.
+        logical = _workspace.screen_mesh_names(await probe(server_urls))
     except Exception:
         logical = set()
-        broker_unreachable = True
+        mesh_unreadable = True
 
     print("workspace is open.")
     print("substrate:")
@@ -876,8 +931,10 @@ async def status(
         unverifiable_slots=unverifiable,
         logical=logical,
     )
-    if broker_unreachable:
-        print("note: broker unreachable; roster shown from local pidfiles only.")
+    if mesh_unreadable:
+        # Honest label: it is the mesh VIEW we could not read — the substrate
+        # rows above may well show the broker itself Running.
+        print("note: mesh roster view unreadable; roster shown from local pidfiles only.")
     # Reboot non-survival, stated honestly (§12.6): the daemon is session-scoped.
     print("note: the workspace does not survive a reboot; re-run `disco start`.")
     return 0
@@ -969,6 +1026,7 @@ def _write_compose(home: str, yaml_text: str) -> str:
 
 
 def _ensure_log_path(home: str) -> str:
-    logs_dir = os.path.join(home, "state", "logs")
-    os.makedirs(logs_dir, exist_ok=True)
+    # Owner-only, matching the spawn path: `disco start` usually creates
+    # state/logs first, and every detached slot's log lands in it too.
+    logs_dir = procspawn.ensure_private_dir(os.path.join(home, "state", "logs"))
     return os.path.join(logs_dir, _SUPERVISOR_LOG_FILENAME)

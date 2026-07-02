@@ -912,7 +912,7 @@ async def test_agent_start_all_broker_down_warns_once_not_per_id(tmp_path, capsy
     assert rc == 0
     out = capsys.readouterr().out
     assert out.count("could not verify org-wide duplicates") == 1
-    assert "org-wide duplicate check skipped: broker unreachable" in out
+    assert "org-wide duplicate check skipped: mesh roster view unreadable" in out
 
 
 async def test_agent_start_all_workspace_down(tmp_path, capsys, monkeypatch):
@@ -1148,7 +1148,9 @@ async def test_agent_ps_tolerates_probe_failure(tmp_path, capsys, monkeypatch):
     rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=_StubClient(), probe=probe)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "broker unreachable" in out
+    # Honest degrade label: the MESH VIEW was unreadable (the broker row may
+    # well still be Running — "broker unreachable" over-claimed the cause).
+    assert "mesh roster view unreadable" in out
     assert "assistant" in out  # physical view still shown
 
 
@@ -1444,7 +1446,11 @@ async def test_agent_ps_workspace_down_notes_local_survivors(tmp_path, capsys, m
     imply the host is idle — it notes the local survivors."""
     slots = _FakeSlots()
     slots.install(monkeypatch)
-    monkeypatch.setattr(_workspace, "live_slots", lambda home: {"assistant", "tools"})
+    monkeypatch.setattr(
+        _workspace,
+        "classify_slots",
+        lambda home: {"assistant": Identity.OURS, "tools": Identity.OURS},
+    )
 
     rc = await roster.agent_ps(
         _home(tmp_path), server_urls=_SERVERS, client=_StubClient(workspace_up=False), probe=_StubProbe([])
@@ -1602,3 +1608,67 @@ async def test_agent_restart_all_threads_server_urls_to_the_gate(tmp_path, monke
 
     assert rc == 0
     assert slots.gate_calls == ["given-broker:9092"]
+
+
+# --- mesh-derived names are screened before printing (fix S6) --------------------
+
+
+async def test_agent_ps_screens_malformed_mesh_names(tmp_path, capsys, monkeypatch):
+    """Mesh names are broker-wide input: a name carrying terminal escapes must
+    never be printed raw — it is dropped from the board with ONE aggregate
+    warning that does not echo the bytes either."""
+    slots = _FakeSlots(["assistant"])
+    slots.install(monkeypatch)
+    evil = "\x1b[2J\x1b[31mpwned"
+    probe = _StubProbe(["assistant", evil, "UPPER!name"])
+
+    rc = await roster.agent_ps(_home(tmp_path), server_urls=_SERVERS, client=_StubClient(), probe=probe)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out  # the escape bytes never reach the terminal
+    assert "pwned" not in out
+    assert "assistant" in out
+    assert "2 invalid mesh name(s) ignored" in out
+
+
+# --- the mesh probe must not spray broker-client log noise (fix U1) --------------
+
+
+async def test_probe_live_roster_suppresses_kafka_log_noise(monkeypatch, caplog):
+    """An unreadable calf.agents view makes aiokafka log dozens of raw error
+    lines (plus 'Unclosed AIOKafkaConsumer') before the caller's one honest
+    warning. The probe silences those loggers for ITS OWN duration only."""
+    import logging
+
+    class _FakeMesh:
+        async def get_agents(self):
+            # The library noise the real client emits on an unreadable view.
+            logging.getLogger("aiokafka.consumer.group_coordinator").error(
+                "Metadata update failed"
+            )
+            logging.getLogger("aiokafka").error("Unclosed AIOKafkaConsumer")
+            raise MeshUnavailableError("calf.agents unreadable", reason="reader_dead")
+
+    class _FakeClient:
+        mesh = _FakeMesh()
+
+        @classmethod
+        def connect(cls, server_urls):
+            return cls()
+
+        async def aclose(self):
+            logging.getLogger("aiokafka").error("Unclosed AIOKafkaConsumer")
+
+    monkeypatch.setattr(roster, "Client", _FakeClient)
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(MeshUnavailableError):
+        await roster._probe_live_roster("localhost:9092")
+
+    assert [r for r in caplog.records if r.name.startswith("aiokafka")] == []
+    # Scoped suppression: the loggers are restored after the probe (a real
+    # runner in this process must keep its aiokafka logs).
+    assert logging.getLogger("aiokafka").level == logging.NOTSET
+    assert logging.getLogger("aiokafka.consumer.group_coordinator").isEnabledFor(
+        logging.ERROR
+    )

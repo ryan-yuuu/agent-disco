@@ -272,6 +272,9 @@ async def _sweep_running(
     mutation locks; a BUSY slot is reported and skipped (benign, never a counted
     failure), and each restart's spawn must survive its confirmation window — a
     crash-on-boot is reported per server and turns the sweep's exit code non-zero.
+    A contended LIFECYCLE lock (a ``disco start``/``stop`` in flight) aborts the
+    stop sweep with ONE honest error (agent-sweep semantics) — it is
+    workspace-wide, so every remaining slot would refuse identically.
     """
     home = os.fspath(home)
     launcher = launcher or _workspace.launcher_for(home)
@@ -311,9 +314,10 @@ async def _sweep_running(
                 print(f"mcp server {server} is being started/stopped by another disco command; skipped.")
                 continue
             except _workspace.WorkspaceBusyError as exc:
+                # Workspace-wide: every remaining slot would refuse identically,
+                # so one honest error closes the sweep (agent-sweep semantics).
                 print(f"error: {exc}")
-                worst = 1
-                continue
+                return 1
             if result is TerminateResult.KILL_UNCONFIRMED:
                 print(
                     f"error: mcp server {server} did not die after SIGKILL — still "

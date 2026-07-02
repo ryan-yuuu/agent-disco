@@ -334,7 +334,12 @@ def run(
     if warnings:
         print(f"ready, with {warnings} warning(s) — review the ⚠ items above.")
         return 0
-    print("all checks passed — you're ready to start calfcord.")
+    # State-aware closer: when the runtime board above just showed the workspace
+    # OPEN, "you're ready to start" would contradict doctor's own findings.
+    if daemon_up:
+        print("all checks passed — the workspace is open and healthy.")
+    else:
+        print("all checks passed — you're ready to start calfcord.")
     return 0
 
 

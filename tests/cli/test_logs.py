@@ -510,3 +510,21 @@ def test_follow_survives_a_file_deleted_between_polls(tmp_path: Path) -> None:
 
     assert code == 0
     assert any("came back" in line for line in lines)
+
+
+# ------------------------------------------------------------- output flushing
+
+
+def test_default_out_flushes_per_line(monkeypatch):
+    """`disco logs -f | grep …` must not lag a poll behind: the default printer
+    flushes each line so piped output streams live."""
+    import builtins
+    import inspect
+
+    sig = inspect.signature(logs_mod.tail)
+    assert sig.parameters["out"].default is logs_mod._print_flushed
+
+    seen: list[dict] = []
+    monkeypatch.setattr(builtins, "print", lambda *a, **kw: seen.append(kw))
+    logs_mod._print_flushed("a line")
+    assert seen and seen[0].get("flush") is True

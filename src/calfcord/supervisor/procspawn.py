@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -213,6 +214,24 @@ def require_safe_slot(slot: str) -> str:
     return slot
 
 
+def ensure_private_dir(path: str | os.PathLike[str]) -> Path:
+    """Create ``path`` (and parents) if missing, owner-only (``0700``); return it.
+
+    ``state/run`` holds pidfiles (trusted input to a kill path) and ``state/logs``
+    holds the slot logs, so the dirs THIS code creates are tightened to the owner
+    regardless of umask. A pre-existing dir is left exactly as the operator set
+    it — creating is ours to harden, re-modding user dirs is not.
+    """
+    path = Path(os.fspath(path))
+    if not path.is_dir():
+        path.mkdir(parents=True, exist_ok=True)
+        # chmod (not mkdir's mode) so the target mode lands regardless of umask;
+        # best-effort — a chmod-refusing filesystem must not fail the caller.
+        with contextlib.suppress(OSError):
+            path.chmod(0o700)
+    return path
+
+
 def pidfile_for(home: str | os.PathLike[str], slot: str) -> Path:
     """The pidfile path for ``slot`` under ``home``: ``<home>/state/run/<slot>.pid``."""
     require_safe_slot(slot)
@@ -260,14 +279,28 @@ def spawn_detached(
     argv = [os.fspath(a) for a in argv]
     log_path = Path(log_path)
     pidfile = Path(pidfile)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(log_path.parent)
     _rotate_log_at_spawn(log_path)
 
     # Binary append: never truncate an existing log, and let the child's own dup'd
-    # fd carry the writes after the parent closes its handle. Not a `with` block —
-    # the handle must stay open across the Popen (which dup's it) and is closed
-    # explicitly in the finally, so a context manager would not fit.
-    log_handle = open(log_path, "ab")  # noqa: SIM115
+    # fd carry the writes after the parent closes its handle. Opened with
+    # O_NOFOLLOW + mode 0600: a symlink planted at the log path would otherwise
+    # redirect the append (and the rotate-rename) to an arbitrary file, so it is
+    # refused HERE, before any child exists — a kill-nothing failure. Not a
+    # `with` block — the handle must stay open across the Popen (which dup's it)
+    # and is closed explicitly in the finally, so a context manager would not fit.
+    try:
+        log_fd = os.open(
+            log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600
+        )
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK) or log_path.is_symlink():
+            raise RuntimeError(
+                f"refusing to spawn: log path {log_path} is a symlink — "
+                "remove it and retry"
+            ) from exc
+        raise
+    log_handle = os.fdopen(log_fd, "ab")
     try:
         # argv is caller-controlled but passed as a list (no shell), so there is no
         # interpolation surface; the child is detached into its own session.
@@ -298,6 +331,7 @@ def spawn_detached(
             "than leak an untrackable process — retry the start"
         )
     try:
+        ensure_private_dir(pidfile.parent)
         atomic_write_text(pidfile, json.dumps(_record_to_dict(record)))
     except OSError as exc:
         # Without a pidfile NOTHING can ever find or stop this child again (every
@@ -332,7 +366,10 @@ def _rotate_log_at_spawn(log_path: Path) -> None:
     growth is NOT bounded here (see the module docstring).
     """
     try:
-        if log_path.stat().st_size < _LOG_ROTATE_AT_BYTES:
+        # lstat, not stat: sizing THROUGH a planted symlink would let an
+        # attacker-chosen huge target trigger renames around the link (the open
+        # below refuses the symlink itself via O_NOFOLLOW).
+        if log_path.lstat().st_size < _LOG_ROTATE_AT_BYTES:
             return
     except OSError:
         return
@@ -434,6 +471,12 @@ def identity(record: PidRecord) -> Identity:
         return Identity.NOT_OURS
     current = _process_start_token(record.pid)
     if current is None:
+        # The token read failed — but if the pid died BETWEEN the liveness gate
+        # and the read (the common reason a read fails), that is not an unknown:
+        # a provably-dead pid can never be our live process. Only a read that
+        # fails while the pid stays alive is genuinely indeterminate.
+        if not _pid_alive(record.pid):
+            return Identity.NOT_OURS
         return Identity.INDETERMINATE
     return Identity.OURS if current == record.start_token else Identity.NOT_OURS
 
@@ -502,10 +545,15 @@ def _linux_start_token(pid: int) -> str | None:
 
 
 def _darwin_start_token(pid: int) -> str | None:
-    """The ``ps -o lstart`` start timestamp for ``pid``, or ``None`` if unreadable."""
+    """The ``ps -o lstart`` start timestamp for ``pid``, or ``None`` if unreadable.
+
+    Pinned to ``/bin/ps`` by absolute path: the token feeds a kill decision, so
+    it must come from the system binary, never a ``ps`` resolved off a caller's
+    ``$PATH`` (where a planted binary could forge a matching token).
+    """
     try:
         completed = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True,
             text=True,
             timeout=_PS_TIMEOUT_S,
@@ -543,8 +591,12 @@ async def terminate(
        falling back to the bare pid if the group signal fails.
     3. Poll for death up to ``term_timeout_s`` (bounded by the injected ``clock`` /
        ``sleep``). Died → ``TERMINATED``.
-    4. Otherwise SIGKILL the group and wait (bounded) for the reap: observed dead →
-       ``KILLED``; still alive when the window closes → ``KILL_UNCONFIRMED`` (a
+    4. Otherwise RE-VERIFY identity (the entry proof is stale after a long
+       graceful window): a recycled pid reads ``TERMINATED`` (our process died
+       post-SIGTERM), an unreadable identity reads ``INDETERMINATE`` — neither is
+       ever SIGKILLed. Only a still-provably-ours process is escalated: SIGKILL
+       the group and wait (bounded) for the reap: observed dead → ``KILLED``;
+       still alive when the window closes → ``KILL_UNCONFIRMED`` (a
        wedged/unkillable process — callers must not claim it stopped).
     """
     pid = record.pid
@@ -562,6 +614,18 @@ async def terminate(
 
     _signal_group_or_pid(pid, signal.SIGTERM)
     if await _wait_until_dead(pid, timeout_s=term_timeout_s, clock=clock, sleep=sleep):
+        return TerminateResult.TERMINATED
+
+    # Re-verify identity IMMEDIATELY before the SIGKILL escalation: the graceful
+    # window can be long, and the entry-gate proof is stale by now. A mismatch
+    # means our process died after the SIGTERM and the pid was recycled — the
+    # truthful outcome is TERMINATED, and the stranger is never signalled. An
+    # unreadable identity is returned as such: we do not SIGKILL what we can no
+    # longer prove is ours.
+    verdict = identity(record)
+    if verdict is Identity.INDETERMINATE:
+        return TerminateResult.INDETERMINATE
+    if verdict is not Identity.OURS:
         return TerminateResult.TERMINATED
 
     _signal_group_or_pid(pid, signal.SIGKILL)
@@ -609,7 +673,12 @@ def reap(pid: int) -> None:
     window) must do the same — nothing else waits on a detached child. ``ECHILD``
     (the process is not our child — the common cross-invocation case) and any
     other ``OSError`` are ignored: reaping is a courtesy, never load-bearing.
+    Non-positive pids are rejected outright: ``waitpid(0, …)`` / ``waitpid(-1,
+    …)`` wait on *any* child (group/broadcast semantics), so a corrupt pidfile
+    must never let a bogus pid quietly reap an unrelated child of this process.
     """
+    if pid <= 0:
+        return
     with contextlib.suppress(OSError):
         os.waitpid(pid, os.WNOHANG)
 

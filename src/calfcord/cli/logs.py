@@ -60,6 +60,16 @@ _SUPERVISOR_LOG_NAME = SUPERVISOR_LOG_STEM
 _FOLLOW_POLL_INTERVAL_SECONDS = 0.5
 
 
+def _print_flushed(*args, **kwargs) -> None:
+    """``print`` with an unconditional flush — the default ``out``.
+
+    Piped stdout is block-buffered, so a bare ``print`` in the follow loop can
+    lag ``disco logs -f | grep …`` a full buffer behind the file; flushing per
+    line keeps the pipe live.
+    """
+    print(*args, flush=True, **kwargs)
+
+
 def _known_names(agents_dir: Path) -> tuple[list[str], list[str]]:
     """The component names that may have a log, plus any degradation notes.
 
@@ -176,7 +186,7 @@ def tail(
     agents_dir: Path,
     component: str | None = None,
     follow: bool = False,
-    out: Callable[..., None] = print,
+    out: Callable[..., None] = _print_flushed,
     sleep: Callable[[float], None] = time.sleep,
     poll_interval: float = _FOLLOW_POLL_INTERVAL_SECONDS,
 ) -> int:

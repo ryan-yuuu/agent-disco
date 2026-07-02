@@ -467,3 +467,27 @@ class _FrozenDatetime(datetime):
     @classmethod
     def now(cls, tz=None):  # matches datetime.now signature
         return _NOW
+
+
+# ------------------------------------------------------------ state-aware closer
+
+
+def test_all_ok_closer_is_state_aware_when_workspace_open(monkeypatch, tmp_path, capsys):
+    """When doctor's own runtime board just showed the workspace OPEN (fresh
+    bridge beat), the closer must not say "you're ready to start" — the
+    operator already started it."""
+    rc, _ = _run_runtime(monkeypatch, tmp_path, beats={"bridge": _beat()})
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ready to start" not in out
+    assert "all checks passed" in out
+    assert "workspace is open" in out
+
+
+def test_all_ok_closer_still_steers_to_start_when_workspace_closed(
+    monkeypatch, tmp_path, capsys
+):
+    rc, _ = _run_runtime(monkeypatch, tmp_path, beats={})  # no beat -> closed
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ready to start" in out
