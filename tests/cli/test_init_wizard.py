@@ -1593,3 +1593,33 @@ async def test_wait_broker_down_times_out_to_false(monkeypatch):
     ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=0.0)
     assert ok is False
     assert fake.aclosed is True
+
+
+async def test_bring_online_start_failure_does_not_claim_the_workspace_is_down(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-zero from ``start_fn`` — which now includes an already-open workspace
+    whose in-place bridge restart failed while the broker/agents stay UP — must not
+    be misreported as 'the workspace didn't come up' (§12.6 — never misattribute).
+    ``start`` has already printed the specific cause; init points at it, not a
+    guessed teardown, and never proceeds to agent start."""
+
+    async def _start_fn(home, *, server_urls, launcher):
+        print("error: the bridge didn't come back ready — check `disco logs bridge`.")
+        return 1
+
+    async def _agent_start_fn(home, *, name, server_urls):
+        raise AssertionError("agent start must not run after a substrate/bridge failure")
+
+    rc = await init._bring_online(
+        name="scribe",
+        home=tmp_path,
+        server_urls="localhost:9092",
+        start_fn=_start_fn,
+        agent_start_fn=_agent_start_fn,
+    )
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "didn't come up" not in out  # no misattribution: the workspace may still be up
+    assert "re-run `disco init`" in out

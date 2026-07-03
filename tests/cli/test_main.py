@@ -1923,3 +1923,79 @@ def test_main_tools_start_still_dispatches_to_component(
     monkeypatch.setattr(main_mod, "_run_component", _run_component)
     assert main(["tools", "start"]) == 0
     assert captured == {"comp": "tools", "verb": "start"}
+
+
+# --- bridge: `disco bridge restart` ----------------------------------------
+
+
+def test_main_bridge_requires_subcommand() -> None:
+    """A bare ``disco bridge`` prints help and exits non-zero (required verb)."""
+    with pytest.raises(SystemExit) as exc:
+        main(["bridge"])
+    assert exc.value.code != 0
+
+
+def test_main_bridge_restart_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``disco bridge restart`` routes to ``_run_bridge`` with the verb."""
+    captured: dict[str, str] = {}
+
+    def _run_bridge(verb):
+        captured["verb"] = verb
+        return 0
+
+    monkeypatch.setattr(main_mod, "_run_bridge", _run_bridge)
+    assert main(["bridge", "restart"]) == 0
+    assert captured == {"verb": "restart"}
+
+
+def test_main_bridge_restart_native_calls_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On a native install, ``_run_bridge`` resolves the home and delegates to
+    :func:`lifecycle.restart_bridge`, returning its exit code."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    calls: list[object] = []
+
+    async def _restart(passed_home):
+        calls.append(passed_home)
+        return 0
+
+    monkeypatch.setattr(lifecycle, "restart_bridge", _restart)
+    assert main(["bridge", "restart"]) == 0
+    assert calls == [home]
+
+
+def test_main_bridge_restart_propagates_a_nonzero_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-zero from ``lifecycle.restart_bridge`` (e.g. the bridge didn't come back
+    ready) flows out through ``_run_bridge`` → ``main`` unchanged — the PR's honest
+    exit codes reach the shell."""
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
+
+    async def _restart(passed_home):
+        return 2
+
+    monkeypatch.setattr(lifecycle, "restart_bridge", _restart)
+    assert main(["bridge", "restart"]) == 2
+
+
+def test_main_bridge_restart_dev_run_refuses(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dev run (no CALFCORD_HOME) refuses with the shared native-install message
+    and never reaches the supervisor."""
+    monkeypatch.delenv("CALFCORD_HOME", raising=False)
+    called = False
+
+    async def _restart(passed_home):
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr(lifecycle, "restart_bridge", _restart)
+    assert main(["bridge", "restart"]) == 1
+    assert not called
+    assert "needs a native install" in capsys.readouterr().out

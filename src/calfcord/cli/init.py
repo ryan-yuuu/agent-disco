@@ -763,7 +763,10 @@ async def _bring_online(
     """Phase 1: start the substrate, then the agent.
 
     Returns 0 once both are up, or the first non-zero code (substrate or agent
-    start). ``start`` has already torn the substrate back down on its own failure.
+    start). On a cold start ``start`` tears the substrate back down on its own
+    failure; on an ALREADY-OPEN workspace it can instead fail the in-place bridge
+    restart with the substrate (broker + agents) still up. Either way ``start``
+    prints the specific cause first.
     """
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
@@ -776,13 +779,15 @@ async def _bring_online(
     launcher = str(home / "shims" / "disco")
     rc = await start_fn(home, server_urls=server_urls, launcher=launcher)
     if rc != 0:
-        # start() already tore the substrate down and printed the specific cause;
-        # point at the diagnostics rather than guessing one (§12.6 — never
-        # misattribute: a cold-start broker failure, a Discord-intents gap, and a
-        # bad config all land here, so name the tools that show which it was).
+        # start() has already printed the specific cause (§12.6 — never
+        # misattribute). Several failures land here: a cold-start broker failure
+        # that tore the substrate down, a Discord-intents gap, a bad config, OR — on
+        # a re-run over an already-open workspace — a bridge that didn't come back
+        # from its in-place restart while the broker/agents stay up. So don't claim
+        # the workspace is down; point at the error above + the diagnostics.
         print(
-            "  the workspace didn't come up. Check `disco logs` for the details or "
-            "run `disco doctor` to diagnose, then re-run `disco init`."
+            "  couldn't finish bringing the workspace online — see the error above "
+            "(or run `disco logs` / `disco doctor`), then re-run `disco init`."
         )
         return rc
 

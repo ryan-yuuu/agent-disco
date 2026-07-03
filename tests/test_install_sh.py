@@ -295,6 +295,17 @@ def test_shim_dispatches_lifecycle_verbs_to_calfcord_cli(tmp_path: Path, argv: l
     assert _run_shim_argv(home, argv) == expected
 
 
+def test_shim_dispatches_bridge_restart_to_calfcord_cli(tmp_path: Path) -> None:
+    """``disco bridge restart`` is a management verb and must land on the
+    calfcord-cli argparse entry point (``calfcord-cli bridge restart``) — distinct
+    from ``disco run bridge`` (the raw ``calfkit-bridge`` runner), which must keep
+    working after ``bridge`` joins the management whitelist."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["bridge", "restart"]) == "calfcord-cli bridge restart"
+    assert _run_shim_argv(home, ["run", "bridge"]) == "calfkit-bridge"
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [

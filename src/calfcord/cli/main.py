@@ -175,6 +175,18 @@ def _build_parser() -> argparse.ArgumentParser:
     _arm.add_argument("dst", help="The alias (new name) to remove.")
     _arm.add_argument("--restart", action="store_true", help=_restart_help)
 
+    # ``bridge`` is the always-on substrate slot (Process Compose), NOT a pidfile
+    # roster component — so it restarts through the supervisor REST API, not the
+    # detached-procspawn path ``tools``/agents use. Only ``restart`` for now (start
+    # and stop are ``disco start`` / ``disco stop``); ``required=True`` makes a bare
+    # ``disco bridge`` print help + exit non-zero, and leaves room for later verbs.
+    bridge_p = sub.add_parser("bridge", help="Manage the bridge (the always-on Discord connector).")
+    bridge_sub = bridge_p.add_subparsers(dest="bridge_command", required=True)
+    bridge_sub.add_parser(
+        "restart",
+        help="Restart the bridge in place (recover a wedged reader or apply a new build/config).",
+    )
+
     # MCP servers (design: docs/design/mcp-reintroduction.md). Each mcp.json
     # server is its own roster slot (mcp-<server>), so the lifecycle verbs take
     # a server name OR --all like the agent roster. `start --all` sweeps every
@@ -652,6 +664,24 @@ def _run_component(name: str, verb: str) -> int:
     return asyncio.run(component.component_stop(home, name=name))
 
 
+def _run_bridge(verb: str) -> int:
+    """Dispatch ``disco bridge restart`` — restart the substrate's bridge slot.
+
+    The bridge is a Process Compose SUBSTRATE slot (not a pidfile roster member
+    like ``tools``/agents), so this drives the install-scoped supervisor over its
+    REST API via :func:`~calfcord.supervisor.lifecycle.restart_bridge` — the SAME
+    per-``$CALFCORD_HOME`` supervisor the substrate/roster verbs use, so it passes
+    that home itself. A dev run (no ``CALFCORD_HOME``) has no stable supervisor
+    home and refuses with the shared native-install message. Only ``restart`` is
+    defined (start/stop are ``disco start`` / ``disco stop``); the coroutine's exit
+    code is propagated unchanged.
+    """
+    home = _require_home(f"bridge {verb}")
+    if home is None:
+        return 1
+    return asyncio.run(lifecycle.restart_bridge(home))
+
+
 def _run_logs(component: str | None, *, follow: bool) -> int:
     """Dispatch ``disco logs [component] [-f]`` to the log-tail module.
 
@@ -814,6 +844,9 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if args.tools_command == "alias":
             return _run_tool_alias(args)
         return _run_component("tools", args.tools_command)
+
+    if args.command == "bridge":
+        return _run_bridge(args.bridge_command)
 
     if args.command == "mcp":
         return _run_mcp(parser, args)
