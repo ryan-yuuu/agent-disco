@@ -788,17 +788,25 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None) 
 
     Both the celebrate and the presence-timeout degrade converge here, so the
     "add a teammate" signpost (and where to learn more) shows on either. ``postable``
-    is the Discord-step postability preflight verdict (``False`` == the bot can post in
-    no channel): even when the agent is seen online, a ``False`` downgrades the 🎉 to an honest
-    "online but can't post yet" so onboarding never ends on a green light that lies
-    (§12.6); ``None`` (unknown) still celebrates — we can't assert a failure we didn't
-    observe.
+    is the Discord-step postability preflight verdict. A ``False`` (the bot can post in
+    no channel) is a proven, fixable problem handled INDEPENDENTLY of detection: it
+    always surfaces the permission remedy — never the "try `@name hello`" errand that
+    can't get a reply — whether or not the agent was also seen online (§12.6, no green
+    light that lies). ``None`` (unknown) is not asserted as a failure, so a detected
+    agent still celebrates.
     """
-    if detected and postable is False:
-        # Online on the mesh, but the preflight proved the bot can post in no channel:
-        # don't celebrate a bot that will never reply in Discord (§12.6).
-        print(f"{name} is online, but it can't post in any Discord channel yet.")
+    if postable is False:
+        # The preflight PROVED the bot can post in no channel — a known, fixable problem
+        # independent of detection. Lead with the remedy rather than the generic "try
+        # `@name hello`" (it can't get a reply) or a bare `disco doctor` (it won't
+        # diagnose Discord permissions) (§12.6). Whether or not it also came online.
+        if detected:
+            print(f"{name} is online, but it can't post in any Discord channel yet.")
+        else:
+            print(f"{name} can't post in any Discord channel yet — and it isn't online in Discord either.")
         print(f"  Grant it View Channel + Send Messages + Manage Webhooks, then say `@{name} hello`.")
+        if not detected:
+            print("  If it stays quiet after that, run `disco doctor`.")
     elif detected:
         print(f"🎉 {name} is online — your organization is live!")
     else:

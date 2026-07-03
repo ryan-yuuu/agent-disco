@@ -1039,6 +1039,20 @@ def test_epilogue_celebrates_when_postability_undetermined(capsys: pytest.Captur
     assert "can't post in any Discord channel" not in out
 
 
+def test_epilogue_surfaces_post_permission_fix_even_when_offline(capsys: pytest.CaptureFixture[str]) -> None:
+    """When the preflight PROVED the bot can post nowhere (``postable is False``), the
+    permission remedy must be shown even if the agent also wasn't seen online — the
+    can't-post problem is known independently of detection. Otherwise the operator is
+    sent to `@name hello` (which can't get a reply) and the one actionable fix is
+    withheld, so this case is strictly less helpful than the detected one with the
+    identical permissions gap. The 'Grant it …' remedy must appear here too, and we
+    must not celebrate."""
+    init._print_finish_epilogue("scribe", detected=False, postable=False)
+    out = capsys.readouterr().out
+    assert "Grant it View Channel + Send Messages + Manage Webhooks" in out
+    assert "🎉" not in out
+
+
 def test_substrate_start_failure_does_not_start_agent_or_watch(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
