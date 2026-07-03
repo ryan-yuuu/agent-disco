@@ -51,7 +51,7 @@
 | src/calfcord/cli/explain.py                   |       17 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/cli/init.py                      |      273 |        0 |       62 |        1 |     99% |649-\>exit |
 | src/calfcord/cli/logs.py                      |       77 |        0 |       28 |        0 |    100% |           |
-| src/calfcord/cli/main.py                      |      338 |       11 |      140 |        5 |     97% |450, 470, 496, 786-788, 830-831, 848-849, 874 |
+| src/calfcord/cli/main.py                      |      348 |       11 |      144 |        5 |     97% |462, 482, 508, 816-818, 863-864, 881-882, 907 |
 | src/calfcord/cli/mcp\_admin.py                |      182 |       16 |       74 |        4 |     91% |92, 98-\>100, 198, 276-278, 303-321 |
 | src/calfcord/cli/setup\_state.py              |       44 |        0 |        4 |        0 |    100% |           |
 | src/calfcord/cli/tool\_aliases.py             |       60 |        0 |        8 |        0 |    100% |           |
@@ -85,13 +85,13 @@
 | src/calfcord/supervisor/client.py             |       59 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/supervisor/component.py          |       47 |        0 |       14 |        0 |    100% |           |
 | src/calfcord/supervisor/compose.py            |       66 |        0 |       14 |        2 |     98% |135-\>137, 219-\>221 |
-| src/calfcord/supervisor/lifecycle.py          |      345 |        2 |       92 |        3 |     99% |231-\>236, 581, 995 |
+| src/calfcord/supervisor/lifecycle.py          |      388 |        1 |      104 |        2 |     99% |231-\>236, 1141 |
 | src/calfcord/supervisor/mcp\_roster.py        |      140 |        3 |       52 |        2 |     97% |330-331, 335 |
 | src/calfcord/supervisor/procspawn.py          |      239 |       15 |       60 |        5 |     93% |302, 442-443, 524, 533-534, 540, 543, 562-563, 565, 661-662, 709-710 |
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7667** |  **528** | **2052** |  **102** | **93%** |           |
+| **TOTAL**                                     | **7720** |  **527** | **2068** |  **101** | **93%** |           |
 
 
 ## Setup coverage badge
