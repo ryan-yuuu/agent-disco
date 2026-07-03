@@ -27,9 +27,9 @@ Distributed by design: agents and tools are independently deployable anywhere. A
 
 You'll need a Discord server. No Docker required.
 
-**1. Set up the Discord app** (~5 min, one time) — follow
-[`docs/discord-setup.md`](./docs/discord-setup.md). All you need from it is the
-bot **token**; the CLI setup wizard discovers your server for you.
+**1. Set up the Discord app.** 
+
+Follow [`docs/discord-setup.md`](./docs/discord-setup.md).
 
 **2. Install.**
 
