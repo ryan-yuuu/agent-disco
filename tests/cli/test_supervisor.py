@@ -35,3 +35,13 @@ def test_non_runtimeerror_propagates() -> None:
 
     with pytest.raises(OSError):
         _supervisor.supervisor_unavailable_reason(_permission_fault)
+
+
+def test_default_pc_binary_delegates_to_supervisor_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``default_pc_binary`` delegates to the supervisor's own resolver, imported lazily
+    so this module stays import-light (the monkeypatch on the module attribute is honored
+    because the import happens at call time, not import time)."""
+    from calfcord.supervisor import lifecycle
+
+    monkeypatch.setattr(lifecycle, "resolve_pc_binary", lambda: "/opt/pc")
+    assert _supervisor.default_pc_binary() == "/opt/pc"
