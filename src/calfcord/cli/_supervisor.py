@@ -67,7 +67,10 @@ async def start_tools_host(
     workspace, never gated on an agent's tool list. Shared here so those paths can't drift
     on either the ``name="tools"`` slot or the failure wording.
 
-    The outcome is **advisory**: this never raises. ``component_start`` signals its
+    The outcome is **advisory**: a tools-host *spawn* fault never escapes here — it is
+    degraded, not raised (the lazy ``component`` import below sits OUTSIDE the guard on
+    purpose, so an ``ImportError`` — a real install defect — still surfaces rather than
+    masquerading as a missing tools host). ``component_start`` signals its
     *expected* failures with a non-zero RETURN (workspace down, broker unreachable,
     spawn crash) — already printing the specific cause — but a raw ``OSError`` (a
     lockfile/rundir ``PermissionError``, ``ENOSPC`` while spawning) can still escape it.
