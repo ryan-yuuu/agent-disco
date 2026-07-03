@@ -147,7 +147,9 @@ class _DiscordStub:
         channels: ChannelListing | Exception | None = None,
         join_result: list[Guild] | Exception | None = None,
     ) -> None:
-        self._identity = identity if identity is not None else BotIdentity(id="botid", username="MyBot")
+        self._identity = (
+            identity if identity is not None else BotIdentity(id="botid", username="MyBot", application_id="appid-1")
+        )
         self._guilds = (
             guilds if guilds is not None else [Guild(id="g1", name="My Server", owner=True, base_permissions=0)]
         )
@@ -269,7 +271,6 @@ def _prompter(
     name: str = "scribe",
     description: str = "d",
     discord_token: str = "tok-abc",
-    app_id: str = "12345",
     guild: str = "g1",
     broker: str = "native",
     broker_url: str = "broker:9092",
@@ -288,13 +289,15 @@ def _prompter(
       select(guild),
       select(broker) [+ text(broker_url) on the ``url`` branch],
       confirm(say-hello-now).
-    ``app_id`` is a text prompt for the application id (needed for the invite URL).
-    There is no channel prompt: channel selection was removed — the bot listens
-    to every channel, so the wizard only reports postability after the guild pick.
-    ``cls`` swaps in a :class:`FakePrompter` subclass (same script) so a test can
-    vary only the prompt *mechanics* — e.g. the nested-``asyncio.run`` reproduction.
+    There is no application-id prompt: it is derived from the bot token (via the
+    injected ``verify_identity_fn``), so a bare name+description is all the text()
+    this scripts. There is no channel prompt either: channel selection was removed —
+    the bot listens to every channel, so the wizard only reports postability after
+    the guild pick. ``cls`` swaps in a :class:`FakePrompter` subclass (same script)
+    so a test can vary only the prompt *mechanics* — e.g. the nested-``asyncio.run``
+    reproduction.
     """
-    texts = [name, description, app_id]
+    texts = [name, description]
     if broker == "url":
         texts.append(broker_url)
     texts += extra_texts or []
@@ -366,10 +369,13 @@ def test_live_finish_syncs_collected_discord_settings_into_environment(tmp_path:
             seen["app"] = os.environ.get("DISCORD_APPLICATION_ID")
             return await super().start(home, **kwargs)
 
+    # The application id is derived from the token (identity.application_id), not prompted.
+    discord = _DiscordStub(identity=BotIdentity(id="b", username="Bot", application_id="778899"))
     rc = _run(
-        _prompter(guild="g1", app_id="778899"),
+        _prompter(guild="g1"),
         tmp_path,
         home=tmp_path,
+        discord=discord,
         finish=_CapturingFinish(),
     )
 
@@ -402,7 +408,7 @@ def test_agent_write_failure_aborts_before_discord(
 
 
 def test_token_verified_and_identity_echoed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    discord = _DiscordStub(identity=BotIdentity(id="42", username="ScribeBot"))
+    discord = _DiscordStub(identity=BotIdentity(id="42", username="ScribeBot", application_id="app-42"))
     assert _run(_prompter(), tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
     assert discord.verify_calls >= 1
@@ -412,10 +418,10 @@ def test_token_verified_and_identity_echoed(tmp_path: Path, capsys: pytest.Captu
 def test_invite_url_and_intents_reminder_and_ctrlc_banner_printed_before_wait(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    discord = _DiscordStub()
-    assert _run(_prompter(app_id="999"), tmp_path, home=tmp_path, discord=discord) == 0
+    # The invite URL is built from the application id derived from the token.
+    discord = _DiscordStub(identity=BotIdentity(id="b", username="Bot", application_id="999"))
+    assert _run(_prompter(), tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
-    # The invite URL is built from the application id.
     assert "client_id=999" in out
     # The two privileged intents are named inline (§12.6).
     assert discord_discovery.INTENTS_REMINDER in out
@@ -433,9 +439,9 @@ def test_invite_step_opens_browser_and_still_prints_url(
     URL, and the URL is printed regardless so a wrong platform guess can never
     hide the link."""
     opened: list[str] = []
-    discord = _DiscordStub()
+    discord = _DiscordStub(identity=BotIdentity(id="b", username="Bot", application_id="999"))
     rc = _run(
-        _prompter(app_id="999"), tmp_path, home=tmp_path, discord=discord, open_url=opened.append
+        _prompter(), tmp_path, home=tmp_path, discord=discord, open_url=opened.append
     )
     assert rc == 0
     assert opened == [discord_discovery.invite_url("999")]
@@ -451,8 +457,8 @@ def test_invite_step_browser_open_failure_is_swallowed(
     def boom(url: str) -> None:
         raise RuntimeError("no browser here")
 
-    discord = _DiscordStub()
-    assert _run(_prompter(app_id="999"), tmp_path, home=tmp_path, discord=discord, open_url=boom) == 0
+    discord = _DiscordStub(identity=BotIdentity(id="b", username="Bot", application_id="999"))
+    assert _run(_prompter(), tmp_path, home=tmp_path, discord=discord, open_url=boom) == 0
     assert discord_discovery.invite_url("999") in capsys.readouterr().out
 
 
@@ -558,7 +564,7 @@ def test_bad_token_reprompts_for_a_new_token(tmp_path: Path, capsys: pytest.Capt
         calls["n"] += 1
         if calls["n"] == 1:
             raise discord_discovery.DiscordAuthError("token rejected by Discord (401)")
-        return BotIdentity(id="1", username="OK")
+        return BotIdentity(id="1", username="OK", application_id="app-1")
 
     discord = _DiscordStub()
     discord.verify = verify  # type: ignore[assignment]
@@ -566,8 +572,12 @@ def test_bad_token_reprompts_for_a_new_token(tmp_path: Path, capsys: pytest.Capt
     p = _prompter(extra_secrets=["tok-good"])
     assert _run(p, tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
-    assert "rejected" in out.lower() or "token" in out.lower()
+    assert "rejected" in out.lower()  # the specific rejection notice, not just any "token" mention
     assert calls["n"] == 2
+    # After the successful re-verify, both the fresh token and its derived app id are persisted.
+    env = read_env(tmp_path / ".env")
+    assert env["DISCORD_BOT_TOKEN"] == "tok-good"
+    assert env["DISCORD_APPLICATION_ID"] == "app-1"
 
 
 def test_join_timeout_surfaces_common_causes_and_no_server_hint(
@@ -581,7 +591,7 @@ def test_join_timeout_surfaces_common_causes_and_no_server_hint(
     # the Discord step but still runs the (Discord-independent) live finish.
     p = FakePrompter(
         selects=["native"],  # no guild pick after the timeout
-        texts=["scribe", "d", "12345"],
+        texts=["scribe", "d"],
         secrets=["tok-abc"],
         confirms=[True],  # the in-flow say-hello prompt
     )
@@ -611,19 +621,112 @@ def test_zero_postable_channels_surfaced_explicitly(tmp_path: Path, capsys: pyte
     assert cp is not None and cp.discord_done is True and cp.guild_id == "g1"
 
 
-def test_transient_token_verify_error_continues(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A transient Discord error verifying the token must not block setup — the
-    token is accepted (the bridge re-validates at boot) and the flow continues."""
+def test_transient_token_verify_error_without_app_id_degrades(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A transient Discord error verifying the token must not block setup, but with the
+    application id now DERIVED from that same call, a failed verify (and no cached id) means
+    there's no id to build the invite from — so the Discord step degrades honestly (token still
+    persisted, re-run hint), and the rest of the wizard continues."""
     discord = _DiscordStub()
     discord.verify = lambda token, **_: (_ for _ in ()).throw(  # type: ignore[assignment]
-        discord_discovery.DiscordUnavailableError("could not reach Discord (/users/@me)")
+        discord_discovery.DiscordUnavailableError("could not reach Discord (/applications/@me)")
     )
-    rc = _run(_prompter(), tmp_path, home=tmp_path, discord=discord)
+    p = FakePrompter(
+        selects=["native"],  # no guild/channel pick — discovery degraded before the poll
+        texts=["scribe", "d"],
+        secrets=["tok-abc"],
+        confirms=[True],
+    )
+    rc = _run(p, tmp_path, home=tmp_path, discord=discord)
     out = capsys.readouterr().out
     assert rc == 0
     assert "could not verify token" in out
-    # The token was still persisted despite the verify blip.
+    assert "application id" in out.lower()  # the honest "couldn't determine the app id" degrade
+    assert discord.poll_calls == 0  # degraded before polling for the join
+    assert "client_id=" not in out  # degrade honestly — never emit a broken/half-built invite link
+    # The token was still persisted despite the verify blip (a re-run finishes Discord).
     assert read_env(tmp_path / ".env")["DISCORD_BOT_TOKEN"] == "tok-abc"
+
+
+def test_transient_verify_with_freshly_pasted_token_ignores_stale_cache_and_degrades(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The cached ``DISCORD_APPLICATION_ID`` must be trusted on a transient verify blip ONLY when the
+    token is unchanged. If the operator pastes a NEW, different token (e.g. rotating to a different
+    bot/application) and verify transiently fails, the cache belongs to the OLD application — building
+    an invite from it would add the WRONG bot while the poll watches the new token's guilds. So the
+    wizard must ignore the stale cache and degrade honestly, not emit a wrong-app invite."""
+    env_path = tmp_path / ".env"
+    # A prior install for application A (its token + app id on disk).
+    upsert(env_path, {"DISCORD_BOT_TOKEN": "tok-A", "DISCORD_APPLICATION_ID": "appA"})
+    discord = _DiscordStub()
+    discord.verify = lambda token, **_: (_ for _ in ()).throw(  # type: ignore[assignment]
+        discord_discovery.DiscordUnavailableError("could not reach Discord (/applications/@me)")
+    )
+    # Paste a DIFFERENT token (bot B) while Discord is transiently down.
+    p = FakePrompter(
+        selects=["native"],  # degraded before the guild pick
+        texts=["scribe", "d"],
+        secrets=["tok-B"],
+        confirms=[True],
+    )
+    rc = _run(p, tmp_path, env_path=env_path, home=tmp_path, discord=discord)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "could not verify token" in out
+    assert "client_id=appA" not in out  # never invite application A with application B's token
+    assert "client_id=" not in out  # in fact, no invite at all — degrade honestly
+    assert discord.poll_calls == 0
+    # The freshly pasted token is still saved (a re-run once Discord is up finishes Discord).
+    assert read_env(env_path)["DISCORD_BOT_TOKEN"] == "tok-B"
+
+
+def test_transient_verify_with_different_token_clears_stale_cached_app_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Persisting a freshly pasted DIFFERENT token on a transient failure must NOT leave a mismatched
+    (new token, old app id) pair on disk. The stale app id is cleared so a LATER kept-token re-run —
+    which would satisfy ``token == existing`` — can't resurrect it and build a wrong-bot invite. This
+    closes the cross-run variant of the wrong-application hole (not just the first-paste case)."""
+    env_path = tmp_path / ".env"
+    # A prior install for application A (its token + app id on disk).
+    upsert(env_path, {"DISCORD_BOT_TOKEN": "tok-A", "DISCORD_APPLICATION_ID": "appA"})
+    discord = _DiscordStub()
+    discord.verify = lambda token, **_: (_ for _ in ()).throw(  # type: ignore[assignment]
+        discord_discovery.DiscordUnavailableError("could not reach Discord (/applications/@me)")
+    )
+    p = FakePrompter(
+        selects=["native"],
+        texts=["scribe", "d"],
+        secrets=["tok-B"],  # a different token — rotating to a different application
+        confirms=[True],
+    )
+    assert _run(p, tmp_path, env_path=env_path, home=tmp_path, discord=discord) == 0
+    env = read_env(env_path)
+    assert env["DISCORD_BOT_TOKEN"] == "tok-B"  # the new token is persisted
+    # The stale appA is cleared — disk never holds a mismatched pair for a later re-run to trust.
+    assert env.get("DISCORD_APPLICATION_ID", "") == ""
+
+
+def test_transient_verify_on_kept_token_preserves_token_and_cached_app_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A re-run that KEEPS the existing token (empty paste) and hits a transient verify blip must
+    neither clobber the kept token nor lose the cached app id — it re-uses both so a network hiccup
+    on re-run can't destroy a working Discord binding."""
+    env_path = tmp_path / ".env"
+    upsert(env_path, {"DISCORD_BOT_TOKEN": "tok-kept", "DISCORD_APPLICATION_ID": "cached-77"})
+    discord = _DiscordStub()
+    discord.verify = lambda token, **_: (_ for _ in ()).throw(  # type: ignore[assignment]
+        discord_discovery.DiscordUnavailableError("could not reach Discord (/applications/@me)")
+    )
+    rc = _run(_prompter(discord_token=""), tmp_path, env_path=env_path, home=tmp_path, discord=discord)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert read_env(env_path)["DISCORD_BOT_TOKEN"] == "tok-kept"  # kept token not clobbered
+    assert "client_id=cached-77" in out  # cached app id still used for the invite
+    assert discord.poll_calls == 1
 
 
 def test_poll_transient_error_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -632,7 +735,7 @@ def test_poll_transient_error_degrades(tmp_path: Path, capsys: pytest.CaptureFix
     discord = _DiscordStub(join_result=discord_discovery.DiscordUnavailableError("could not reach Discord"))
     p = FakePrompter(
         selects=["native"],  # no guild pick after the poll error
-        texts=["scribe", "d", "12345"],
+        texts=["scribe", "d"],
         secrets=["tok-abc"],
         confirms=[True],
     )
@@ -647,7 +750,7 @@ def test_zero_guilds_surfaced(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     discord = _DiscordStub(join_result=[])
     p = FakePrompter(
         selects=["native"],  # no guild pick possible
-        texts=["scribe", "d", "12345"],
+        texts=["scribe", "d"],
         secrets=["tok-abc"],
         confirms=[True],
     )
@@ -731,13 +834,37 @@ def test_owner_guild_labelled_in_pick_list(tmp_path: Path) -> None:
     assert any("(owner)" in label for label in guild_labels)
 
 
-def test_empty_app_id_keeps_existing(tmp_path: Path) -> None:
-    """An empty application-id answer keeps the existing one (re-run safe)."""
+def test_application_id_derived_from_token_and_persisted(tmp_path: Path) -> None:
+    """The application id is derived from the bot token (identity.application_id) and persisted to
+    ``DISCORD_APPLICATION_ID`` — with no app-id prompt at all. The prompter scripts only
+    name+description text(), so any attempt to prompt for the app id would raise 'unexpected text()'."""
+    discord = _DiscordStub(identity=BotIdentity(id="bot", username="Bot", application_id="778899"))
+    assert _run(_prompter(), tmp_path, home=tmp_path, discord=discord) == 0
+    assert read_env(tmp_path / ".env")["DISCORD_APPLICATION_ID"] == "778899"
+
+
+def test_application_id_rederived_overwrites_stale_cached_value(tmp_path: Path) -> None:
+    """A re-run re-derives the app id from the (re-verified) token and overwrites a stale cached
+    value — the token is the single source of truth, so init self-heals a wrong DISCORD_APPLICATION_ID."""
     env_path = tmp_path / ".env"
-    upsert(env_path, {"DISCORD_APPLICATION_ID": "55555"})
-    p = _prompter(app_id="")  # blank → keep existing
-    assert _run(p, tmp_path, env_path=env_path, home=tmp_path) == 0
-    assert read_env(env_path)["DISCORD_APPLICATION_ID"] == "55555"
+    upsert(env_path, {"DISCORD_APPLICATION_ID": "stale-000"})
+    discord = _DiscordStub(identity=BotIdentity(id="bot", username="Bot", application_id="fresh-778899"))
+    assert _run(_prompter(), tmp_path, env_path=env_path, home=tmp_path, discord=discord) == 0
+    assert read_env(env_path)["DISCORD_APPLICATION_ID"] == "fresh-778899"
+
+
+def test_application_id_self_heals_on_kept_token_rerun(tmp_path: Path) -> None:
+    """The self-heal must fire even when the token is KEPT (empty paste) — the most common re-run
+    flow (hit Enter to keep the token). A successful re-verify re-derives the app id and persists it
+    over the stale cached value, WITHOUT clobbering the kept token. Guards against moving the app-id
+    upsert inside the ``if pasted:`` block, which would silently skip the heal on the keep path."""
+    env_path = tmp_path / ".env"
+    upsert(env_path, {"DISCORD_BOT_TOKEN": "tok-keep", "DISCORD_APPLICATION_ID": "stale-app"})
+    discord = _DiscordStub(identity=BotIdentity(id="bot", username="Bot", application_id="fresh-app"))
+    assert _run(_prompter(discord_token=""), tmp_path, env_path=env_path, home=tmp_path, discord=discord) == 0
+    env = read_env(env_path)
+    assert env["DISCORD_APPLICATION_ID"] == "fresh-app"  # healed on the keep path
+    assert env["DISCORD_BOT_TOKEN"] == "tok-keep"  # kept token not clobbered
 
 
 def test_no_token_skips_discovery(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -779,16 +906,6 @@ def test_broker_url_empty_on_fresh_install_warns(tmp_path: Path, capsys: pytest.
     assert rc == 0
     assert f"warning: no {init._BROKER_VAR} is set" in out
     assert init._BROKER_VAR not in read_env(tmp_path / ".env")
-
-
-def test_non_numeric_application_id_warns_without_blocking(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A non-numeric DISCORD_APPLICATION_ID is flagged but still written + used for
-    the invite URL (the typo is surfaced, not blocking)."""
-    rc = _run(_prompter(app_id="not-a-number"), tmp_path, home=tmp_path)
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "DISCORD_APPLICATION_ID should be numeric" in out
-    assert read_env(tmp_path / ".env")["DISCORD_APPLICATION_ID"] == "not-a-number"
 
 
 # --------------------------------------------------------------------------- #

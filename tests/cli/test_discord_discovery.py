@@ -62,8 +62,11 @@ def _route(responses: dict[str, httpx.Response | list[httpx.Response]]):
     return handler
 
 
-def _me(user_id=BOT_USER_ID, username="TestBot"):
-    return httpx.Response(200, json={"id": user_id, "username": username})
+def _app(app_id="app-1", user_id=BOT_USER_ID, username="TestBot"):
+    """The ``GET /applications/@me`` payload: the application object (its ``id`` is the application
+    id used as the invite ``client_id``) carrying the bot's partial user under ``bot`` (whose ``id``
+    is the bot USER id used for the member-overwrite lookup)."""
+    return httpx.Response(200, json={"id": app_id, "name": "TestApp", "bot": {"id": user_id, "username": username}})
 
 
 def _guilds(*guilds):
@@ -77,11 +80,49 @@ def _guild(gid=GUILD_ID, name="My Server", owner=False, permissions="0"):
 # ============================================================= (a) verify_bot_identity
 
 
-def test_verify_bot_identity_returns_id_and_username():
-    handler = _route({"/api/v10/users/@me": _me(user_id="42", username="Calf")})
+def test_verify_bot_identity_returns_id_username_and_application_id():
+    # One /applications/@me call yields BOTH the bot identity (bot.id / bot.username) AND the
+    # application id (top-level id) — the invite client_id and the required DISCORD_APPLICATION_ID.
+    handler = _route({"/api/v10/applications/@me": _app(app_id="7", user_id="42", username="Calf")})
     identity = dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
-    assert identity.id == "42"
+    assert identity.id == "42"  # the bot USER id (from bot.id)
     assert identity.username == "Calf"
+    assert identity.application_id == "7"  # the application id — derived, no separate prompt
+
+
+def test_verify_bot_identity_falls_back_when_bot_object_absent():
+    # Defensive: a payload without the partial `bot` object still yields a usable identity — the bot
+    # user id falls back to the application id (they coincide for modern bots) and the username to the
+    # app name — rather than an empty id/username.
+    handler = _route({"/api/v10/applications/@me": httpx.Response(200, json={"id": "99", "name": "SoloApp"})})
+    identity = dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
+    assert identity.id == "99"
+    assert identity.username == "SoloApp"
+    assert identity.application_id == "99"
+
+
+def test_verify_bot_identity_non_dict_body_raises_unavailable():
+    # A 200 whose body isn't a JSON object (edge proxy / interstitial) is unusable as an identity.
+    handler = _route({"/api/v10/applications/@me": httpx.Response(200, json=["not", "an", "object"])})
+    with pytest.raises(dd.DiscordUnavailableError):
+        dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
+
+
+def test_verify_bot_identity_raises_when_top_level_id_missing():
+    # A 200 dict lacking the top-level application id is as unusable as a non-dict body — the whole
+    # feature derives the app id from that field, so fabricating an empty identity (which then lies
+    # "Connected as ?" and mis-degrades as "Discord unreachable") is wrong; it must raise.
+    handler = _route({"/api/v10/applications/@me": httpx.Response(200, json={"name": "NoId"})})
+    with pytest.raises(dd.DiscordUnavailableError):
+        dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
+
+
+def test_verify_bot_identity_raises_when_id_is_null():
+    # ``"id": null`` must NOT stringify to the truthy "None" and slip through as a poisoned app id
+    # (which would defeat the caller's no-clobber guard and write DISCORD_APPLICATION_ID=None).
+    handler = _route({"/api/v10/applications/@me": httpx.Response(200, json={"id": None, "name": "X"})})
+    with pytest.raises(dd.DiscordUnavailableError):
+        dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
 
 
 def test_verify_bot_identity_sends_token_only_in_header():
@@ -89,7 +130,7 @@ def test_verify_bot_identity_sends_token_only_in_header():
 
     def handler(request):
         seen.append(request)
-        return _me()
+        return _app()
 
     dd.verify_bot_identity(TOKEN, client_factory=_factory(lambda r: handler(r)))
     assert seen[0].headers["Authorization"] == f"Bot {TOKEN}"
@@ -99,14 +140,14 @@ def test_verify_bot_identity_sends_token_only_in_header():
 
 @pytest.mark.parametrize("code", [401, 403])
 def test_verify_bot_identity_rejected_raises_auth_error(code):
-    handler = _route({"/api/v10/users/@me": httpx.Response(code, json={"message": "no"})})
+    handler = _route({"/api/v10/applications/@me": httpx.Response(code, json={"message": "no"})})
     with pytest.raises(dd.DiscordAuthError) as exc:
         dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
     assert TOKEN not in str(exc.value)
 
 
 def test_verify_bot_identity_rate_limited_raises_rate_limited():
-    handler = _route({"/api/v10/users/@me": httpx.Response(429, json={"retry_after": 1.0})})
+    handler = _route({"/api/v10/applications/@me": httpx.Response(429, json={"retry_after": 1.0})})
     with pytest.raises(dd.DiscordRateLimitedError):
         dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
 
@@ -120,7 +161,7 @@ def test_verify_bot_identity_transport_error_raises_unavailable():
 
 
 def test_verify_bot_identity_5xx_raises_unavailable():
-    handler = _route({"/api/v10/users/@me": httpx.Response(500, text="boom")})
+    handler = _route({"/api/v10/applications/@me": httpx.Response(500, text="boom")})
     with pytest.raises(dd.DiscordUnavailableError):
         dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
 
@@ -346,7 +387,8 @@ def _overwrite(oid, otype, allow=0, deny=0):
 def _routes_for_channels(*, guild, member, channels):
     return _route(
         {
-            "/api/v10/users/@me": _me(),
+            # verify_bot_identity (called for the bot user id) now hits /applications/@me.
+            "/api/v10/applications/@me": _app(),
             "/api/v10/users/@me/guilds": _guilds(guild),
             # Bot tokens must use /members/{bot_user_id}; /members/@me is 400 for bots.
             f"/api/v10/guilds/{GUILD_ID}/members/{BOT_USER_ID}": member,
@@ -529,10 +571,10 @@ def test_postable_channels_unknown_guild_raises_unavailable():
 def test_token_never_leaks_through_any_error_path():
     paths = [
         lambda: dd.verify_bot_identity(
-            TOKEN, client_factory=_factory(_route({"/api/v10/users/@me": httpx.Response(401, json={})}))
+            TOKEN, client_factory=_factory(_route({"/api/v10/applications/@me": httpx.Response(401, json={})}))
         ),
         lambda: dd.verify_bot_identity(
-            TOKEN, client_factory=_factory(_route({"/api/v10/users/@me": httpx.Response(500, text="x")}))
+            TOKEN, client_factory=_factory(_route({"/api/v10/applications/@me": httpx.Response(500, text="x")}))
         ),
         lambda: dd.list_postable_channels(
             TOKEN,

@@ -36,10 +36,10 @@ disco init
   of every built-in with **all pre-selected**; deselect any you don't want, or
   keep them all.
 - Your **Discord bot token** (verified the instant you paste it — you'll see
-  `✓ Connected as <bot>`) **and application ID**. It then shows the invite link,
-  **waits while you authorize the bot, and auto-detects your server and channel**
+  `✓ Connected as <bot>`). It then shows the invite link, **waits while you
+  authorize the bot, and auto-detects your server** (confirming the bot can post)
   — no numeric IDs to copy. See [`discord-setup.md`](discord-setup.md) for the
-  token + app-ID prerequisites.
+  bot-token prerequisite.
 
 It writes `~/.calfcord/config/.env` plus the agent at
 `~/.calfcord/agents/<name>.md` (provider, model, and tools baked in). Because the

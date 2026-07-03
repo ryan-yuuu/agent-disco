@@ -413,17 +413,26 @@ def _run_discord(
     current = _envfile.read_env(env_path)
     print("Discord setup (the wizard discovers your server — no IDs to paste).")
 
-    token = _capture_token(prompter, env_path, current, verify_identity_fn)
+    token, app_id = _capture_token(prompter, env_path, current, verify_identity_fn)
     if not token:
         # No token at all (fresh run, skipped): nothing to discover. The bridge
         # will fail-fast later; we surface it but keep going so the rest of the
         # config still lands and a re-run can finish Discord.
         print("  no Discord token set — skipping discovery; re-run init to finish Discord.")
         return checkpoint, None
+    if not app_id:
+        # The application id is DERIVED from the token's /applications/@me call, so a transient verify
+        # failure (unreachable / rate-limited / unreadable) — or a freshly pasted token whose
+        # application couldn't be confirmed — leaves no id to build the invite from. Degrade honestly
+        # rather than emit a broken link; a re-run once Discord is reachable finishes it.
+        print(
+            "  couldn't determine the application id from the token — "
+            "re-run `disco init` once Discord is reachable."
+        )
+        return checkpoint, None
 
     # Invite step: print the ready-made link + the privileged-intents reminder +
     # the resumability banner BEFORE the wait (§12.6 — Ctrl-C is safe here).
-    app_id = _capture_app_id(prompter, env_path, current)
     invite = discord_discovery.invite_url(app_id)
     print()
     print("Invite the bot to your server — opening this link in your browser:")
@@ -472,21 +481,29 @@ def _capture_token(
     env_path: Path,
     current: dict[str, str],
     verify_identity_fn: Callable[..., BotIdentity],
-) -> str:
-    """Prompt for the bot token (keep-existing-on-empty) and verify it on paste.
+) -> tuple[str, str]:
+    """Prompt for the bot token (keep-existing-on-empty), verify it, and DERIVE the application id.
 
-    Returns the token in effect (the freshly pasted one, or the kept existing
-    one). A rejected token is fatal for *that* value, so we re-prompt for a fresh
-    one (re-prompting the same token would be pointless, §12.6); a transient
-    Discord error is surfaced but the token is still accepted so the rest of init
-    can proceed (the bridge re-validates at boot anyway).
+    Returns ``(token, application_id)``. The token comes from the prompt (freshly pasted or kept); the
+    application id comes from the same single ``verify_identity_fn`` call (``GET /applications/@me``)
+    that validates the token — so the operator never pastes the id by hand (§4.5). On a successful
+    verify the token (fresh paste only, keep-on-empty otherwise) and ``DISCORD_APPLICATION_ID``
+    (always, so a re-run self-heals a stale cached id) are persisted.
+
+    A rejected token is fatal for *that* value, so we re-prompt for a fresh one (re-prompting the same
+    token would be pointless, §12.6); a transient Discord error is surfaced but the token is still
+    accepted so the rest of init can proceed (the bridge re-validates at boot anyway). On that
+    transient path the id can't be derived, so we fall back to the cached ``DISCORD_APPLICATION_ID``
+    ONLY when the token is unchanged — a freshly pasted, *different* token may belong to a different
+    application, so we return no id and let the caller degrade rather than invite the wrong bot.
     """
     existing = current.get("DISCORD_BOT_TOKEN", "")
+    cached_app_id = current.get("DISCORD_APPLICATION_ID", "")
     while True:
         pasted = prompter.secret(f"DISCORD_BOT_TOKEN {_set_label(existing)} — paste to set, enter to keep:")
         token = pasted or existing
         if not token:
-            return ""
+            return "", ""
         try:
             identity = verify_identity_fn(token)
         except discord_discovery.DiscordAuthError:
@@ -496,34 +513,31 @@ def _capture_token(
             existing = ""
             continue
         except discord_discovery.DiscordDiscoveryError as e:
-            # Couldn't reach Discord / rate-limited: don't block setup on a blip.
+            # Couldn't reach Discord / rate-limited: don't block setup on a blip. The app id can't be
+            # derived here, so fall back to the cached DISCORD_APPLICATION_ID — but ONLY when the token
+            # is unchanged. A freshly pasted, DIFFERENT token may belong to a different application, so
+            # trusting the old app's cached id would add the WRONG bot; drop it and degrade instead.
             print(f"  could not verify token right now ({e}); continuing — the bridge will re-check.")
+            app_id = cached_app_id if token == existing else ""
+            updates: dict[str, str] = {}
             if pasted:
-                _envfile.upsert(env_path, {"DISCORD_BOT_TOKEN": pasted})
-            return token
+                updates["DISCORD_BOT_TOKEN"] = pasted
+            if not app_id and cached_app_id:
+                # Also clear the now-stale cached id so disk never holds a mismatched (new token, old
+                # app id) pair that a later kept-token re-run would satisfy ``token == existing`` on
+                # and wrongly trust — closing the cross-run variant of the wrong-application hole.
+                updates["DISCORD_APPLICATION_ID"] = ""
+            _envfile.upsert(env_path, updates)
+            return token, app_id
         print(f"  Connected as {identity.username} (id {identity.id}).")
+        # A successful verify always yields the app id (verify_bot_identity raises otherwise), so
+        # persist it unconditionally — self-healing a stale cached value — and the token only when
+        # freshly pasted (an empty answer keeps the existing one).
+        updates = {"DISCORD_APPLICATION_ID": identity.application_id}
         if pasted:
-            _envfile.upsert(env_path, {"DISCORD_BOT_TOKEN": pasted})
-        return token
-
-
-def _capture_app_id(prompter: Prompter, env_path: Path, current: dict[str, str]) -> str:
-    """Prompt for the application id (needed for the invite URL); keep-on-empty.
-
-    The id is not a secret and the invite link cannot be built without it, so we
-    show + default to the current value and flag a non-numeric typo without
-    blocking (matching the bridge's later validation).
-    """
-    app_id = prompter.text(
-        "DISCORD_APPLICATION_ID (numeric — from the Developer Portal):",
-        default=current.get("DISCORD_APPLICATION_ID", ""),
-    )
-    if app_id:
-        if not app_id.isdigit():
-            print(f"  warning: DISCORD_APPLICATION_ID should be numeric, got {app_id!r}")
-        _envfile.upsert(env_path, {"DISCORD_APPLICATION_ID": app_id})
-        return app_id
-    return current.get("DISCORD_APPLICATION_ID", "")
+            updates["DISCORD_BOT_TOKEN"] = pasted
+        _envfile.upsert(env_path, updates)
+        return token, identity.application_id
 
 
 def _pick_guild(prompter: Prompter, guilds: list[Guild], *, default: str | None) -> str | None:

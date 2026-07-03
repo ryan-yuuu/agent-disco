@@ -29,8 +29,7 @@ You'll need a Discord server. No Docker required.
 
 **1. Set up the Discord app** (~5 min, one time) — follow
 [`docs/discord-setup.md`](./docs/discord-setup.md). All you need from it is the
-bot **token** and **application ID**; the CLI setup wizard discovers your server
-for you.
+bot **token**; the CLI setup wizard discovers your server for you.
 
 **2. Install.**
 
