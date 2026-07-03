@@ -536,6 +536,22 @@ async def test_restart_bridge_to_ready_diagnoses_a_config_failure_from_the_bridg
     assert "didn't come back ready" not in reason
 
 
+async def test_restart_bridge_to_ready_degrades_to_plain_gate_when_pre_pid_unreadable(tmp_path) -> None:
+    """If the pre-restart pid can't be read (get_process raises), the gate degrades
+    to a plain readiness check and still SUCCEEDS on the next Ready — it must not
+    hang waiting for a pid change it can never compute against a None baseline."""
+    clock = _FakeClock()
+    # The pre-restart pid read raises; then the bridge reports Ready.
+    client = _StubClient(bridge_states=[RuntimeError("get_process: refused"), {"is_ready": "Ready", "pid": 200}])
+
+    reason = await lifecycle._restart_bridge_to_ready(
+        client, _home(tmp_path), ready_timeout_s=90, clock=clock, sleep=clock.sleep
+    )
+
+    assert reason is None  # accepted the first Ready despite an unknown pre-restart pid
+    assert client.restart_process_calls == ["bridge"]
+
+
 async def test_restart_bridge_reports_ok_when_the_bridge_comes_back_ready(tmp_path, capsys) -> None:
     """``disco bridge restart`` on an open workspace restarts the bridge, waits for
     Ready, and returns 0 with a plain confirmation."""
