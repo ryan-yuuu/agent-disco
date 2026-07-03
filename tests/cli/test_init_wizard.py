@@ -1124,10 +1124,11 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
 
 def test_default_pc_binary_delegates_to_supervisor_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
     """The default process-compose probe delegates to the supervisor's resolver."""
+    from calfcord.cli import _supervisor
     from calfcord.supervisor import lifecycle
 
     monkeypatch.setattr(lifecycle, "resolve_pc_binary", lambda: "/opt/pc")
-    assert init._default_pc_binary() == "/opt/pc"
+    assert _supervisor.default_pc_binary() == "/opt/pc"
 
 
 # --------------------------------------------------------------------------- #
@@ -1151,18 +1152,24 @@ def test_dev_mode_degrades_to_manual_next_steps(tmp_path: Path, capsys: pytest.C
     # The honest manual path is named.
     assert "disco start" in out
     assert "disco agent start scribe" in out
+    # A dev run is a benign, expected degrade — NOT an install defect — so it must stay
+    # silent: no "can't be started automatically" reason (that's for a missing binary).
+    assert "can't be started automatically" not in out
 
 
 def test_missing_process_compose_binary_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A native install missing the process-compose binary also degrades to the
-    manual next-steps rather than crashing (§12.6 honest-failure-path)."""
-    finish = _FinishStub(pc_binary=RuntimeError("process-compose binary not found"))
+    """A native install missing the process-compose binary degrades to the manual
+    next-steps rather than crashing (§12.6) — and NAMES the actionable reason instead
+    of swallowing it, so the operator learns why and how to fix it."""
+    finish = _FinishStub(pc_binary=RuntimeError("process-compose binary not found; re-run the installer"))
     p = _prompter()
     rc = _run(p, tmp_path, home=tmp_path, finish=finish)
     out = capsys.readouterr().out
     assert rc == 0
     assert finish.start_calls == []
     assert "disco start" in out
+    # The actionable reason is surfaced, not discarded.
+    assert "process-compose binary not found; re-run the installer" in out
 
 
 def test_manual_finish_signposts_adding_a_teammate(

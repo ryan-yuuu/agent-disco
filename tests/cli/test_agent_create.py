@@ -760,3 +760,23 @@ def test_run_dev_run_degrades_without_prompting_start(
     out = capsys.readouterr().out
     assert "Bring scribe online:" in out
     assert "disco start" in out
+
+
+def test_run_missing_process_compose_binary_names_the_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A native install missing the process-compose binary degrades to the manual
+    next-steps and NAMES the actionable reason instead of swallowing it (mirrors init;
+    §12.6). Nothing is orchestrated and no 'Start now?' is prompted."""
+
+    class _MissingBinary(_FinishRecorder):
+        def pc_binary(self) -> str:
+            raise RuntimeError("process-compose binary not found; re-run the installer")
+
+    finish = _MissingBinary()
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert finish.calls == []  # nothing orchestrated — degraded before the finish
+    assert "process-compose binary not found; re-run the installer" in out
