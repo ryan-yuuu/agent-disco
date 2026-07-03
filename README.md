@@ -39,7 +39,8 @@
 | src/calfcord/cli/\_mcp.py                     |        8 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/cli/\_prompts.py                 |       33 |       12 |        0 |        0 |     64% |81-84, 91-93, 96-101, 104-106, 109-114 |
 | src/calfcord/cli/\_providers.py               |      137 |        6 |       42 |        4 |     94% |215-216, 221-222, 224, 295-\>299, 357, 393-\>395 |
-| src/calfcord/cli/agent\_create.py             |      127 |       15 |       34 |        2 |     89% |321-322, 398-404, 496-499, 526-527, 537-539 |
+| src/calfcord/cli/\_supervisor.py              |       11 |        0 |        0 |        0 |    100% |           |
+| src/calfcord/cli/agent\_create.py             |      125 |       11 |       36 |        2 |     92% |322-323, 408-414, 506-509 |
 | src/calfcord/cli/agent\_edit.py               |      125 |       15 |       34 |        2 |     89% |86-90, 116-120, 144-146, 239-240, 269, 296-300 |
 | src/calfcord/cli/agent\_inspect.py            |       71 |        2 |       20 |        2 |     96% |   75, 137 |
 | src/calfcord/cli/agent\_lifecycle.py          |      109 |        2 |       34 |        1 |     98% |249-250, 264-\>266 |
@@ -48,7 +49,7 @@
 | src/calfcord/cli/discord\_discovery.py        |      187 |       17 |       48 |        8 |     89% |206-207, 231-233, 252, 354, 358, 465-\>463, 490-491, 510, 517, 525-526, 534-536 |
 | src/calfcord/cli/doctor.py                    |      164 |        5 |       66 |        0 |     98% |    99-103 |
 | src/calfcord/cli/explain.py                   |       17 |        0 |        2 |        0 |    100% |           |
-| src/calfcord/cli/init.py                      |      274 |        0 |       60 |        2 |     99% |501-\>503, 627-\>exit |
+| src/calfcord/cli/init.py                      |      271 |        0 |       62 |        2 |     99% |501-\>503, 627-\>exit |
 | src/calfcord/cli/logs.py                      |       77 |        0 |       28 |        0 |    100% |           |
 | src/calfcord/cli/main.py                      |      338 |       11 |      140 |        5 |     97% |450, 470, 496, 786-788, 830-831, 848-849, 874 |
 | src/calfcord/cli/mcp\_admin.py                |      182 |       16 |       74 |        4 |     91% |92, 98-\>100, 198, 276-278, 303-321 |
@@ -90,7 +91,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7652** |  **537** | **2046** |  **104** | **92%** |           |
+| **TOTAL**                                     | **7658** |  **533** | **2050** |  **104** | **92%** |           |
 
 
 ## Setup coverage badge
