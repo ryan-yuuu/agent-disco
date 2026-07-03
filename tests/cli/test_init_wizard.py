@@ -960,6 +960,8 @@ def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
     assert rc == 0  # clean return — the org is live, detection is advisory
     assert "@scribe hello" in out
     assert "disco doctor" in out
+    # …and the cause is named, not silently swallowed — a re-silenced handler must fail here.
+    assert "couldn't confirm scribe came online" in out
 
 
 def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
@@ -1399,6 +1401,23 @@ def _patch_wait_client(monkeypatch, fake: _WaitFakeClient) -> None:
 
 async def test_wait_returns_true_when_present(monkeypatch):
     fake = _WaitFakeClient(get_agents_seq=[{"assistant": SimpleNamespace(name="assistant")}])
+    _patch_wait_client(monkeypatch, fake)
+    ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=5.0)
+    assert ok is True
+    assert fake.aclosed is True
+
+
+async def test_wait_returns_true_even_if_aclose_raises(monkeypatch):
+    """A confirmed presence must survive a close that raises: the ``finally`` close is
+    suppressed so a cleanup hiccup can't turn ``True`` into the exception the caller
+    degrades to ``False``. Without the ``suppress`` this raises out instead of returning."""
+
+    class _RaisingCloseClient(_WaitFakeClient):
+        async def aclose(self) -> None:
+            self.aclosed = True
+            raise RuntimeError("broker dropped during close")
+
+    fake = _RaisingCloseClient(get_agents_seq=[{"assistant": SimpleNamespace(name="assistant")}])
     _patch_wait_client(monkeypatch, fake)
     ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=5.0)
     assert ok is True
