@@ -682,6 +682,33 @@ def test_transient_verify_with_freshly_pasted_token_ignores_stale_cache_and_degr
     assert read_env(env_path)["DISCORD_BOT_TOKEN"] == "tok-B"
 
 
+def test_transient_verify_with_different_token_clears_stale_cached_app_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Persisting a freshly pasted DIFFERENT token on a transient failure must NOT leave a mismatched
+    (new token, old app id) pair on disk. The stale app id is cleared so a LATER kept-token re-run —
+    which would satisfy ``token == existing`` — can't resurrect it and build a wrong-bot invite. This
+    closes the cross-run variant of the wrong-application hole (not just the first-paste case)."""
+    env_path = tmp_path / ".env"
+    # A prior install for application A (its token + app id on disk).
+    upsert(env_path, {"DISCORD_BOT_TOKEN": "tok-A", "DISCORD_APPLICATION_ID": "appA"})
+    discord = _DiscordStub()
+    discord.verify = lambda token, **_: (_ for _ in ()).throw(  # type: ignore[assignment]
+        discord_discovery.DiscordUnavailableError("could not reach Discord (/applications/@me)")
+    )
+    p = FakePrompter(
+        selects=["native"],
+        texts=["scribe", "d"],
+        secrets=["tok-B"],  # a different token — rotating to a different application
+        confirms=[True],
+    )
+    assert _run(p, tmp_path, env_path=env_path, home=tmp_path, discord=discord) == 0
+    env = read_env(env_path)
+    assert env["DISCORD_BOT_TOKEN"] == "tok-B"  # the new token is persisted
+    # The stale appA is cleared — disk never holds a mismatched pair for a later re-run to trust.
+    assert env.get("DISCORD_APPLICATION_ID", "") == ""
+
+
 def test_transient_verify_on_kept_token_preserves_token_and_cached_app_id(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

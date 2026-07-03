@@ -515,13 +515,20 @@ def _capture_token(
         except discord_discovery.DiscordDiscoveryError as e:
             # Couldn't reach Discord / rate-limited: don't block setup on a blip. The app id can't be
             # derived here, so fall back to the cached DISCORD_APPLICATION_ID — but ONLY when the token
-            # is unchanged. A freshly pasted, DIFFERENT token may belong to a different application, and
-            # an invite built from the old app's cached id would add the WRONG bot; return "" so the
-            # caller degrades honestly instead.
+            # is unchanged. A freshly pasted, DIFFERENT token may belong to a different application, so
+            # trusting the old app's cached id would add the WRONG bot; drop it and degrade instead.
             print(f"  could not verify token right now ({e}); continuing — the bridge will re-check.")
+            app_id = cached_app_id if token == existing else ""
+            updates: dict[str, str] = {}
             if pasted:
-                _envfile.upsert(env_path, {"DISCORD_BOT_TOKEN": pasted})
-            return token, (cached_app_id if token == existing else "")
+                updates["DISCORD_BOT_TOKEN"] = pasted
+            if not app_id and cached_app_id:
+                # Also clear the now-stale cached id so disk never holds a mismatched (new token, old
+                # app id) pair that a later kept-token re-run would satisfy ``token == existing`` on
+                # and wrongly trust — closing the cross-run variant of the wrong-application hole.
+                updates["DISCORD_APPLICATION_ID"] = ""
+            _envfile.upsert(env_path, updates)
+            return token, app_id
         print(f"  Connected as {identity.username} (id {identity.id}).")
         # A successful verify always yields the app id (verify_bot_identity raises otherwise), so
         # persist it unconditionally — self-healing a stale cached value — and the token only when
