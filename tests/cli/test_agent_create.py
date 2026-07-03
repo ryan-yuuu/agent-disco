@@ -390,6 +390,55 @@ def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
     assert by_value["terminal"].checked is True
 
 
+def test_create_agent_forwards_live_tools_fn_to_pick_tools(tmp_path: Path) -> None:
+    """``create_agent`` threads an injected ``live_tools_fn`` into the tools
+    checkbox, so a caller (``init``) can supply the live MCP view — or suppress
+    it — instead of always probing the broker's default capability view."""
+    agents_dir = tmp_path / "agents"
+    prompter = _prompter(name="scout")
+
+    agent_create.create_agent(
+        prompter,
+        agents_dir=agents_dir,
+        env_path=tmp_path / ".env",
+        prune_seed=False,
+        offer_prompt=False,
+        live_tools_fn=lambda: {"github": ["search"]},
+    )
+
+    # The injected view is the ONLY source of an mcp row here (conftest stubs
+    # _default_mcp_servers -> []), so its presence proves the fn was forwarded.
+    by_value = {c.value: c for c in prompter.last_checkbox_choices}
+    assert "mcp/github/search" in by_value
+
+
+def test_standalone_create_agent_probes_live_view_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no injected ``live_tools_fn`` (standalone ``agent create``), the
+    tools step still resolves the live capability view — only ``init``
+    suppresses it. Guards against the default silently going no-op."""
+    from calfcord.cli import agent_tools
+
+    calls: list[object] = []
+
+    def _spy() -> dict[str, list[str]]:
+        calls.append(())
+        return {}
+
+    monkeypatch.setattr(agent_tools, "_default_live_tools", _spy)
+
+    agent_create.create_agent(
+        _prompter(name="scout"),
+        agents_dir=tmp_path / "agents",
+        env_path=tmp_path / ".env",
+        prune_seed=False,
+        offer_prompt=False,
+    )
+
+    assert calls == [()]
+
+
 # ---------------------------------------------------------------------------
 # Change B — standalone create requires an explicit name (no silent default,
 # no silent overwrite of an existing agent).
