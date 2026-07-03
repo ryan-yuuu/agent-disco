@@ -948,6 +948,10 @@ def test_live_finish_starts_tools_host_after_substrate_before_agent(tmp_path: Pa
     assert rc == 0
     assert len(finish.tools_calls) == 1
     assert finish.tools_calls[0]["name"] == "tools"
+    # The host is spawned at the install home under the shim launcher `_bring_online`
+    # computes itself (a distinct wire from the `disco start` path).
+    assert finish.tools_calls[0]["home"] == tmp_path
+    assert finish.tools_calls[0]["launcher"] == str(tmp_path / "shims" / "disco")
     assert finish.order == ["substrate", "tools", "agent"]
 
 
@@ -955,9 +959,15 @@ def test_tools_host_started_even_when_agent_selects_no_tools(tmp_path: Path) -> 
     """The tools host serves ALL builtins regardless of any one agent's selection, so
     it is started UNCONDITIONALLY — even when the created agent picked zero tools
     (deselecting every pre-checked builtin at the tools checkbox)."""
+    agents_dir = tmp_path / "agents"
     finish = _FinishStub(reply=True)
-    rc = _run(_prompter(name="scribe", checkboxes=[[]]), tmp_path, home=tmp_path, finish=finish)
+    rc = _run(
+        _prompter(name="scribe", checkboxes=[[]]), tmp_path, agents_dir=agents_dir, home=tmp_path, finish=finish
+    )
     assert rc == 0
+    # Precondition pinned: the created agent really has NO tools, so this genuinely
+    # exercises the "regardless of selection" path (not a silent fallback to defaults).
+    assert not parse_agent_md(agents_dir / "scribe.md").tools
     assert len(finish.tools_calls) == 1
 
 
@@ -1205,6 +1215,47 @@ def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> 
     assert events == ["prompted", "watcher_started"]
 
 
+def test_epilogue_degrades_banner_when_tools_host_is_down(capsys: pytest.CaptureFixture[str]) -> None:
+    """When the tools host failed (``tools_ok=False``), the finish must NOT print the
+    unqualified ``🎉 …live`` banner — a tool-using agent's calls will hang. It degrades
+    honestly and points at ``disco tools start`` (no green light that lies), even for an
+    agent that was seen online."""
+    init._print_finish_epilogue("scribe", detected=True, postable=None, tools_ok=False)
+    out = capsys.readouterr().out
+    assert "🎉" not in out
+    assert "tools host" in out
+    assert "disco tools start" in out
+
+
+def test_epilogue_celebrates_when_tools_host_up_and_detected(capsys: pytest.CaptureFixture[str]) -> None:
+    """The 🎉 banner is unchanged on the all-good path (``tools_ok`` defaults True)."""
+    init._print_finish_epilogue("scribe", detected=True, postable=None, tools_ok=True)
+    assert "🎉" in capsys.readouterr().out
+
+
+def test_epilogue_degrades_when_tools_host_down_and_not_detected(capsys: pytest.CaptureFixture[str]) -> None:
+    """Tools host down AND the agent wasn't seen online: still degrade honestly (no 🎉),
+    surface the tools-host consequence, and name the `disco tools start` remedy."""
+    init._print_finish_epilogue("scribe", detected=False, postable=None, tools_ok=False)
+    out = capsys.readouterr().out
+    assert "🎉" not in out
+    assert "tools host isn't up" in out
+    assert "disco tools start" in out
+
+
+def test_live_finish_tools_host_failure_degrades_the_final_banner(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End-to-end: a tools-host failure during the finish degrades the final banner (no
+    🎉) even though the agent came online — the org is not fully live for tool use."""
+    finish = _FinishStub(reply=True, tools_rc=1)
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "🎉" not in out
+    assert "disco tools start" in out
+
+
 def test_epilogue_celebrates_when_postability_undetermined(capsys: pytest.CaptureFixture[str]) -> None:
     """A detected agent whose postability is UNKNOWN (``postable is None`` — the
     preflight couldn't determine it, e.g. a channel-list error) still gets the 🎉: an
@@ -1283,10 +1334,13 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
     first-reply seam now resolves to that module function."""
     from calfcord.supervisor import component, lifecycle, roster
 
+    tools_calls: list[dict] = []
+
     async def _ok_start(home, **_):
         return 0
 
-    async def _ok_tools(home, **_):
+    async def _ok_tools(home, **kwargs):
+        tools_calls.append({"home": home, **kwargs})
         return 0
 
     async def _ok_agent(home, **_):
@@ -1316,6 +1370,10 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
         pc_binary_fn=lambda: "/usr/bin/process-compose",
     )
     assert rc == 0
+    # The default resolution actually reached the real ``component.component_start`` at
+    # the ``tools`` slot — not silently skipped (the advisory rc would make ``rc == 0``
+    # hold even if the resolution/call were dropped, so pin the call itself).
+    assert tools_calls and tools_calls[0]["name"] == "tools"
 
 
 # --------------------------------------------------------------------------- #
@@ -1337,8 +1395,10 @@ def test_dev_mode_degrades_to_manual_next_steps(tmp_path: Path, capsys: pytest.C
     rc = _run(p, tmp_path, home=None, finish=finish)
     out = capsys.readouterr().out
     assert rc == 0
-    # Nothing was orchestrated.
+    # Nothing was orchestrated — including the tools host, which must NOT be hoisted
+    # above the dev-run degrade gate (a dev run has no shim to spawn it under).
     assert finish.start_calls == []
+    assert finish.tools_calls == []
     assert finish.agent_calls == []
     # The honest manual path is named.
     assert "disco start" in out
@@ -1358,6 +1418,7 @@ def test_missing_process_compose_binary_degrades(tmp_path: Path, capsys: pytest.
     out = capsys.readouterr().out
     assert rc == 0
     assert finish.start_calls == []
+    assert finish.tools_calls == []  # the missing-binary degrade never spawns the tools host either
     assert "disco start" in out
     # The defect banner + the actionable reason are surfaced, not discarded. Asserting
     # the banner phrase positively anchors it so the dev-run test's "not in out" (which
@@ -1679,7 +1740,7 @@ async def test_bring_online_start_failure_does_not_claim_the_workspace_is_down(
     async def _agent_start_fn(home, *, name, server_urls):
         raise AssertionError("agent start must not run after a substrate/bridge failure")
 
-    rc = await init._bring_online(
+    rc, _tools_ok = await init._bring_online(
         name="scribe",
         home=tmp_path,
         server_urls="localhost:9092",

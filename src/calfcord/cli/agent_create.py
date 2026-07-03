@@ -49,7 +49,7 @@ from calfcord.cli._agents import (
 )
 from calfcord.cli._envfile import read_env
 from calfcord.cli._providers import configure_provider
-from calfcord.cli._supervisor import default_pc_binary, supervisor_unavailable_reason
+from calfcord.cli._supervisor import default_pc_binary, open_workspace, supervisor_unavailable_reason
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -290,6 +290,7 @@ def run(
     server_urls: str = _ENV_DEFAULT,
     # --- injected world-touching seams (default to the real thing) ----------
     start_fn: Callable[..., Awaitable[int]] | None = None,
+    tools_start_fn: Callable[..., Awaitable[int]] | None = None,
     agent_start_fn: Callable[..., Awaitable[int]] | None = None,
     presence_fn: Callable[..., Awaitable[bool]] | None = None,
     workspace_running_fn: Callable[[Path], Awaitable[bool]] | None = None,
@@ -354,6 +355,7 @@ def run(
         home=home,
         server_urls=server_urls,
         start_fn=start_fn,
+        tools_start_fn=tools_start_fn,
         agent_start_fn=agent_start_fn,
         presence_fn=presence_fn,
         workspace_running_fn=workspace_running_fn,
@@ -368,6 +370,7 @@ def _finish_create(
     home: Path | None,
     server_urls: str,
     start_fn: Callable[..., Awaitable[int]] | None,
+    tools_start_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]] | None,
     presence_fn: Callable[..., Awaitable[bool]] | None,
     workspace_running_fn: Callable[[Path], Awaitable[bool]] | None,
@@ -425,6 +428,7 @@ def _finish_create(
             home=home,
             server_urls=server_urls,
             start_fn=start_fn,
+            tools_start_fn=tools_start_fn,
             agent_start_fn=agent_start_fn,
             presence_fn=presence_fn,
             workspace_running_fn=workspace_running_fn,
@@ -439,6 +443,7 @@ async def _start_now(
     home: Path,
     server_urls: str,
     start_fn: Callable[..., Awaitable[int]],
+    tools_start_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]],
     presence_fn: Callable[..., Awaitable[bool]],
     workspace_running_fn: Callable[[Path], Awaitable[bool]],
@@ -447,11 +452,14 @@ async def _start_now(
 
     Branches on the REAL workspace state (a local supervisor-REST probe):
 
-    * **not running** → ``lifecycle.start`` opens the substrate (broker + bridge),
-      then ``roster.agent_start`` spawns the agent;
-    * **running** → nothing to reopen: the roster lives off Process Compose, so a
-      brand-new agent spawns straight into the live workspace via
-      ``roster.agent_start`` — no reload, no in-flight work lost.
+    * **not running** → :func:`_supervisor.open_workspace` opens the substrate
+      (broker + bridge) AND the tools host — the same "open the workspace" ``disco
+      start`` runs, so the brand-new agent's first tool call has a live host — then
+      ``roster.agent_start`` spawns the agent;
+    * **running** → nothing to reopen: the roster (agent + tools host) lives off
+      Process Compose, so a brand-new agent spawns straight into the live workspace via
+      ``roster.agent_start`` — no reload, no in-flight work lost, and the already-up
+      tools host is left untouched.
 
     After a successful start it reuses the presence watcher and only claims the
     agent is online once it is SEEN on the mesh; a timeout (or a broker blip
@@ -466,11 +474,19 @@ async def _start_now(
         return 0
 
     if not running:
-        # Mirror main.py's `_run_lifecycle` wiring (DRY): the shim launcher every
-        # supervised process execs under, and the broker URL. The rendered project
-        # is substrate-only, so nothing about the new agent is threaded in.
+        # Open the workspace the SAME way `disco start` does — substrate THEN the tools
+        # host — via the one shared `open_workspace`, so a cold-open `agent create` can't
+        # leave the new agent's first tool call hanging on an un-started host. The
+        # launcher is the install shim every supervised process execs under; the
+        # tools-host start inside `open_workspace` is advisory (warn-and-continue).
         launcher = str(home / "shims" / "disco")
-        rc = await start_fn(home, server_urls=server_urls, launcher=launcher)
+        rc = await open_workspace(
+            home,
+            server_urls=server_urls,
+            launcher=launcher,
+            start_fn=start_fn,
+            tools_start_fn=tools_start_fn,
+        )
         if rc != 0:
             return rc
 

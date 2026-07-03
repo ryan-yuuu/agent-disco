@@ -36,7 +36,7 @@ from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._mcp import configured_mcp_servers_or_none
 from calfcord.cli._prompts import make_prompter
-from calfcord.cli._supervisor import start_tools_host
+from calfcord.cli._supervisor import open_workspace
 from calfcord.health.check import default_broker_probe, healthcheck
 from calfcord.mcp.config import resolve_config_path
 from calfcord.supervisor import component, lifecycle, mcp_roster, roster
@@ -249,7 +249,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # detached launch flags, the #494 priming reconcile, the readiness gate) lives
     # there. They take no flags today — the lifecycle entry points are nullary
     # beyond the resolved install paths.
-    sub.add_parser("start", help="Open the workspace: broker + bridge + tools host, detached, health-gated.")
+    sub.add_parser("start", help="Open the workspace: broker + bridge (health-gated) + tools host, detached.")
     sub.add_parser("stop", help="Close the whole workspace (substrate and every roster process).")
     sub.add_parser("status", help="Show the org board: substrate + roster health.")
 
@@ -631,21 +631,12 @@ def _run_lifecycle(command: str) -> int:
     if configured_mcp_servers_or_none() is None:
         return 1
 
-    async def _open_workspace() -> int:
-        # Open the substrate (broker + bridge), then bring the tools host up as part
-        # of the workspace. The tools host is identity-agnostic infra — it serves
-        # every builtin tool for any agent — so it belongs with the substrate, not the
-        # per-agent roster (matching `disco init`'s finish). A substrate failure
-        # short-circuits (don't spawn the host against a workspace that never opened);
-        # the tools-host start is advisory (warn-and-continue), so its non-zero never
-        # fails an otherwise-open workspace — the substrate's code is what propagates.
-        rc = await lifecycle.start(home, server_urls=server_urls, launcher=launcher)
-        if rc != 0:
-            return rc
-        await start_tools_host(home, launcher=launcher)
-        return rc
-
-    return asyncio.run(_open_workspace())
+    # Open the substrate (broker + bridge) THEN the tools host — the one shared
+    # `open_workspace` every cold-open path uses (init, start, agent-create start-now),
+    # so a freshly-opened workspace can serve tool calls without a separate
+    # `disco tools start`. Substrate failure short-circuits; the tools-host start is
+    # advisory, so its outcome never fails an otherwise-open workspace.
+    return asyncio.run(open_workspace(home, server_urls=server_urls, launcher=launcher))
 
 
 def _run_component(name: str, verb: str) -> int:
