@@ -186,10 +186,7 @@ class _FinishStub:
 
     ``events`` (optional) is a shared ordered log: each orchestration call appends
     its name so a test can assert relative ordering against the prompter's prompts
-    (used to prove the first-reply watcher joins BEFORE the human is prompted).
-    The injected ``ready`` :class:`asyncio.Event` (the watcher-joined signal) is
-    set the instant ``first_reply`` is entered, mirroring how the real watcher
-    signals readiness after ``worker.start()`` joins the consumer group.
+    (used to prove the human is prompted BEFORE the presence watcher starts).
     """
 
     def __init__(
@@ -218,13 +215,9 @@ class _FinishStub:
         self.agent_calls.append({"home": home, **kwargs})
         return self._agent_rc
 
-    async def first_reply(self, server_urls, *, ready=None, **kwargs) -> bool:
+    async def first_reply(self, server_urls, **kwargs) -> bool:
         if self._events is not None:
             self._events.append("watcher_started")
-        # The real watcher sets this after ``worker.start()`` joins the group; the
-        # stub signals readiness immediately so the caller can proceed to prompt.
-        if ready is not None:
-            ready.set()
         self.reply_calls.append({"server_urls": server_urls, **kwargs})
         return self._reply
 
@@ -285,6 +278,7 @@ def _prompter(
     extra_selects: list[str] | None = None,
     extra_texts: list[str] | None = None,
     extra_secrets: list[str] | None = None,
+    cls: type[FakePrompter] = FakePrompter,
 ) -> FakePrompter:
     """Build a prompter scripting one full native happy-path pass.
 
@@ -297,6 +291,8 @@ def _prompter(
     ``app_id`` is a text prompt for the application id (needed for the invite URL).
     There is no channel prompt: channel selection was removed — the bot listens
     to every channel, so the wizard only reports postability after the guild pick.
+    ``cls`` swaps in a :class:`FakePrompter` subclass (same script) so a test can
+    vary only the prompt *mechanics* — e.g. the nested-``asyncio.run`` reproduction.
     """
     texts = [name, description, app_id]
     if broker == "url":
@@ -307,7 +303,7 @@ def _prompter(
     secrets = [discord_token]
     secrets += extra_secrets or []
     confirms = [say_hello]
-    return FakePrompter(
+    return cls(
         selects=selects,
         texts=texts,
         secrets=secrets,
@@ -952,11 +948,9 @@ def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
     nothing run doctor" downgrade a clean timeout takes, and the run returns 0."""
 
     class _RaisingFinish(_FinishStub):
-        async def first_reply(self, server_urls, *, ready=None, **kwargs) -> bool:
-            # Signal readiness so the wizard proceeds to the prompt, then fail the
-            # detection itself — exactly a broker drop mid-watch after a live org.
-            if ready is not None:
-                ready.set()
+        async def first_reply(self, server_urls, **kwargs) -> bool:
+            # Fail the detection itself — exactly a broker drop mid-watch after a
+            # live org — to prove it degrades instead of crashing the wizard.
             self.reply_calls.append({"server_urls": server_urls, **kwargs})
             raise RuntimeError("broker connection dropped while watching")
 
@@ -978,47 +972,56 @@ def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
     assert len(finish.reply_calls) == 1
 
 
-def test_first_reply_watcher_joins_before_user_is_prompted(tmp_path: Path) -> None:
-    """The first-reply watcher (a ``latest``-offset consumer) must START — and be
-    READY (group joined) — BEFORE the human is asked to send ``@agent hello``.
+class _NestedLoopPrompter(FakePrompter):
+    """A :class:`FakePrompter` whose ``confirm`` faithfully reproduces InquirerPy.
 
-    Otherwise a fast human can post the message before the consumer group joins
-    at ``latest`` offset, so the reply lands before the watcher is listening and
-    is missed (a false negative → the wizard wrongly downgrades on a live org).
-    The shared ``events`` log records the relative order: ``watcher_started`` must
-    precede ``prompted``."""
+    The real prompt path is ``inquirer.confirm(...).execute()`` → prompt_toolkit
+    ``Application.run()`` → ``asyncio.run(coro)``. Invoked from inside a running
+    event loop, that last step raised ``RuntimeError: asyncio.run() cannot be called
+    from a running event loop`` and aborted ``disco init`` right after the broker
+    started. This double drives its own loop the same way, so it raises that
+    identical error if — and only if — the finish flow prompts inside a running loop.
+    """
+
+    def confirm(self, message: str, *, default: bool = False) -> bool:
+        answer = FakePrompter.confirm(self, message, default=default)
+
+        async def _drive_own_loop() -> bool:
+            return answer
+
+        # Exactly what prompt_toolkit's Application.run() does under the hood.
+        return asyncio.run(_drive_own_loop())
+
+
+def test_live_finish_prompt_runs_outside_event_loop(tmp_path: Path) -> None:
+    """Regression (the reported crash): the in-flow ``@agent hello`` confirm must run
+    with NO event loop running. InquirerPy's real prompt drives its own loop via
+    ``asyncio.run()``; prompting inside the finish flow's own running loop raised
+    'asyncio.run() cannot be called from a running event loop' and aborted init just
+    after the broker came up. A prompter reproducing that nested ``asyncio.run()``
+    must complete the finish cleanly and still reach the presence watch."""
+    finish = _FinishStub(reply=True)
+    p = _prompter(name="scribe", cls=_NestedLoopPrompter)
+    assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
+    assert len(finish.reply_calls) == 1  # the flow reached the presence watch
+
+
+def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> None:
+    """The human is prompted to send ``@agent hello`` FIRST, then the presence
+    watcher runs — the two no longer overlap.
+
+    This ordering is safe because ``_wait_for_agent_online`` reads the *current* mesh
+    (a compacted-topic ktable via ``get_agents()``), not a ``latest``-offset tail: the
+    agent registered at ``agent_start`` — before the prompt — so a level-triggered
+    read detects it whenever the watcher opens, with no lost-registration race. The
+    shared ``events`` log records the order: ``prompted`` must precede
+    ``watcher_started``."""
     events: list[str] = []
     finish = _FinishStub(reply=True, events=events)
     p = _prompter(name="scribe", say_hello=True)
     p._events = events  # share the ordering log with the finish stub
     assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
-    assert events == ["watcher_started", "prompted"]
-
-
-def test_finish_does_not_hang_when_watcher_completes_without_readiness(tmp_path: Path) -> None:
-    """If the watcher coroutine finishes WITHOUT ever signalling readiness (an
-    early return / broker-unreachable error), the wizard must still proceed to the
-    prompt instead of blocking on a readiness that will never come — it races the
-    readiness signal against task completion. We supply a ``first_reply`` that
-    returns immediately and never sets ``ready``; the run must finish promptly."""
-
-    class _NoReadyFinish(_FinishStub):
-        async def first_reply(self, server_urls, *, ready=None, **kwargs) -> bool:
-            # Deliberately ignore ``ready`` (never set it) and return at once.
-            self.reply_calls.append({"server_urls": server_urls, **kwargs})
-            return self._reply
-
-    finish = _NoReadyFinish(reply=True)
-    # A generous-but-bounded wall-clock guard: if the wizard regressed to waiting
-    # on the never-set readiness it would block for the full _FIRST_REPLY_TIMEOUT_S.
-    import time
-
-    t0 = time.monotonic()
-    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
-    elapsed = time.monotonic() - t0
-    assert rc == 0
-    assert len(finish.reply_calls) == 1
-    assert elapsed < init._FIRST_REPLY_TIMEOUT_S / 2  # did not block on readiness
+    assert events == ["prompted", "watcher_started"]
 
 
 def test_substrate_start_failure_does_not_start_agent_or_watch(
@@ -1377,13 +1380,11 @@ def _patch_wait_client(monkeypatch, fake: _WaitFakeClient) -> None:
     monkeypatch.setattr(init, "_ONLINE_POLL_INTERVAL_S", 0)
 
 
-async def test_wait_returns_true_when_present_and_sets_ready(monkeypatch):
+async def test_wait_returns_true_when_present(monkeypatch):
     fake = _WaitFakeClient(get_agents_seq=[{"assistant": SimpleNamespace(name="assistant")}])
     _patch_wait_client(monkeypatch, fake)
-    ready = asyncio.Event()
-    ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=5.0, ready=ready)
+    ok = await init._wait_for_agent_online("localhost", agent_id="assistant", timeout_s=5.0)
     assert ok is True
-    assert ready.is_set()  # the watcher-joined signal fired
     assert fake.aclosed is True
 
 

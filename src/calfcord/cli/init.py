@@ -97,7 +97,6 @@ async def _wait_for_agent_online(
     *,
     agent_id: str,
     timeout_s: float,
-    ready: asyncio.Event | None = None,
 ) -> bool:
     """Poll calfkit's mesh until ``agent_id`` is online, or ``timeout_s`` elapses.
 
@@ -106,17 +105,18 @@ async def _wait_for_agent_online(
     mesh at startup — not an end-to-end message reply; the org is already live once
     the agent is online, so presence is the honest "it worked" signal.
 
-    Opens a short-lived observer :class:`~calfkit.client.Client`, signals ``ready``
-    once it is watching, then reads ``client.mesh.get_agents()`` on a small interval
-    until the name appears (-> ``True``) or the window elapses (-> ``False``). No
-    broker pre-flight — the read raises at call time if the mesh can't be reached; a
+    Opens a short-lived observer :class:`~calfkit.client.Client`, then reads
+    ``client.mesh.get_agents()`` on a small interval until the name appears
+    (-> ``True``) or the window elapses (-> ``False``). No broker pre-flight — the
+    read raises at call time if the mesh can't be reached; a
     :class:`~calfkit.exceptions.MeshUnavailableError` (most often the ``calf.agents``
     topic not existing until the first agent registers, or the broker being down) is
     treated as "not online yet" and retried until ``timeout_s`` elapses, at which
     point the caller downgrades a ``False`` to the honest fallback. The mesh view is
-    a compacted-topic (ktable) reader, so it catches up to the agent's registration
-    even if it opens slightly after the agent came online — ``ready`` can fire before
-    the first read without a lost-registration race.
+    a compacted-topic (ktable) reader — a *level-triggered* read of who is currently
+    online — so it detects the agent (registered back at ``agent_start``) no matter
+    when this opens, with no lost-registration race. That is why the caller can run
+    this AFTER the human prompt rather than concurrently with it.
     """
     from calfkit import MeshViewConfig
     from calfkit.client import Client
@@ -124,8 +124,6 @@ async def _wait_for_agent_online(
 
     client = Client.connect(server_urls, mesh_config=MeshViewConfig(catchup_timeout=_ONLINE_CATCHUP_TIMEOUT_S))
     try:
-        if ready is not None:
-            ready.set()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         while True:
@@ -647,10 +645,10 @@ def _run_finish(
     process-compose binary is missing, this DEGRADES to honest manual next-steps
     instead of orchestrating something it cannot (no green light that lies).
 
-    On the native happy path it composes :func:`lifecycle.start` →
-    :func:`roster.agent_start` → :func:`_wait_for_agent_online` (started FIRST so
-    it is already watching the mesh) → an in-flow ``@<name> hello`` prompt once the
-    watcher is listening, mapping each failure to its specific hint:
+    On the native happy path it runs three correctly-layered phases:
+    :func:`_bring_online` (async) → an in-flow ``@<name> hello`` prompt (synchronous,
+    no event loop running) → :func:`_await_presence` (async), mapping each failure to
+    its specific hint:
 
     * substrate not ready → tear-down already happened in ``start``; point at
       ``disco logs`` / ``disco doctor`` (don't misattribute the cause) and stop
@@ -659,6 +657,14 @@ def _run_finish(
     * agent seen online → 🎉 (unless the ``postable`` preflight already proved the
       bot can post nowhere, which downgrades to an honest "online but can't post");
       timed out → the bounded "org is live — try it yourself / run ``disco doctor``".
+
+    The prompt is a blocking, synchronous terminal interaction — prompt_toolkit
+    drives its OWN event loop (``Application.run()`` → ``asyncio.run()``) — so it must
+    never run inside a loop of ours. Keeping it BETWEEN two independent
+    ``asyncio.run`` calls (rather than awaited inside one) makes the nested-loop crash
+    impossible by construction. The ordering is safe because presence detection is a
+    level-triggered mesh read: the agent registered at ``agent_start``, so the watcher
+    detects it whether it opens before or after the human posts.
     """
     pc_binary_fn = pc_binary_fn or _default_pc_binary
 
@@ -678,38 +684,46 @@ def _run_finish(
         agent_start_fn = agent_start_fn or roster.agent_start
         first_reply_fn = first_reply_fn or _wait_for_agent_online
 
-    return asyncio.run(
-        _finish_live(
-            prompter,
+    # Phase 1 — bring the org live (async). The substrate and agent are DETACHED
+    # external processes, so this loop can close afterward without touching them.
+    rc = asyncio.run(
+        _bring_online(
             name=name,
             home=home,
             server_urls=server_urls,
-            postable=postable,
             start_fn=start_fn,
             agent_start_fn=agent_start_fn,
-            first_reply_fn=first_reply_fn,
         )
     )
+    if rc != 0:
+        return rc
+
+    # Phase 2 — the human nudge (§12.6: prompt the @mention INSIDE init). Runs
+    # synchronously with NO event loop running, so the real InquirerPy prompt (which
+    # drives its own loop) works exactly as it does everywhere else in the wizard.
+    prompter.confirm(f"In Discord, say:  @{name} hello   — press enter once you've sent it.", default=True)
+    print(f"Waiting for {name} to come online…")
+
+    # Phase 3 — confirm presence (async, level-triggered read). The org is already
+    # live; detection is advisory, so a failure degrades to the honest fallback.
+    detected = asyncio.run(_await_presence(first_reply_fn, name=name, server_urls=server_urls))
+    _print_finish_epilogue(name, detected=detected, postable=postable)
+    return 0
 
 
-async def _finish_live(
-    prompter: Prompter,
+async def _bring_online(
     *,
     name: str,
     home: Path,
     server_urls: str,
-    postable: bool | None,
     start_fn: Callable[..., Awaitable[int]],
     agent_start_fn: Callable[..., Awaitable[int]],
-    first_reply_fn: Callable[..., Awaitable[bool]],
 ) -> int:
-    """Run the native live finish; returns 0 on a live org, non-zero on a failure
-    *before* the org could be reached (substrate / agent start).
+    """Phase 1: start the substrate, then the agent.
 
-    ``postable`` is the Phase-2 preflight verdict (``False`` == the bot can post in
-    no channel): even when the agent is seen online, a ``False`` here downgrades the
-    🎉 to an honest "online but can't post yet" so onboarding never ends on a green
-    light that lies (§12.6)."""
+    Returns 0 once both are up, or the first non-zero code (substrate or agent
+    start). ``start`` has already torn the substrate back down on its own failure.
+    """
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
     # supervised process execs under, and the broker URL. The project is
@@ -732,59 +746,45 @@ async def _finish_live(
         return rc
 
     print(f"Bringing {name} online…")
-    rc = await agent_start_fn(home, name=name, server_urls=server_urls)
-    if rc != 0:
-        return rc
+    return await agent_start_fn(home, name=name, server_urls=server_urls)
 
-    # In-flow "try it" prompt (§12.6: prompt the @mention INSIDE init). Presence
-    # detection is independent of the human's post — the agent registers on the
-    # mesh at startup regardless — so the prompt is a genuine "go say hi" nudge
-    # while the watcher confirms in the background that the agent came online.
-    #
-    # Start the watcher FIRST and wait until it is watching (its ``ready`` event,
-    # set once the broker is up) before prompting, so the confirmation can fire as
-    # soon as the agent registers. The watcher runs as a task that makes progress
-    # while we await its readiness; ``_FIRST_REPLY_TIMEOUT_S`` still bounds the
-    # whole wait.
-    watcher_ready = asyncio.Event()
-    watch_task = asyncio.ensure_future(
-        first_reply_fn(server_urls, agent_id=name, timeout_s=_FIRST_REPLY_TIMEOUT_S, ready=watcher_ready)
-    )
-    # Proceed to the prompt the instant EITHER the watcher reports joined OR the
-    # task finishes first. Racing against task completion means a watcher that
-    # returns/raises before ever signalling ready (broker unreachable, an early
-    # error) does not hang the wizard waiting for a readiness that will never
-    # come — we fall through to the prompt and let ``await watch_task`` surface
-    # the (already-resolved) result or exception.
-    ready_wait = asyncio.ensure_future(watcher_ready.wait())
+
+async def _await_presence(
+    first_reply_fn: Callable[..., Awaitable[bool]],
+    *,
+    name: str,
+    server_urls: str,
+) -> bool:
+    """Phase 3: confirm the agent registered on the mesh; ``True`` if seen online.
+
+    The org is ALREADY live (substrate + agent both started), so presence detection
+    is advisory: the watcher opens its OWN ``Client.connect`` and a broker drop or a
+    transient connect blip mid-watch could raise out of it. Degrade any such failure
+    to ``False`` — the same bounded "org is live — try it yourself / run ``doctor``"
+    fallback a clean timeout takes — rather than crash the wizard after the org came
+    up. ``except Exception`` (not bare) deliberately lets ``asyncio.CancelledError``
+    propagate: the failure is in detection, not in the (already-live) org.
+    """
     try:
-        await asyncio.wait({ready_wait, watch_task}, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        # Cancel and drain the readiness waiter (it may still be pending if the
-        # task completed first) so it is never left as an un-retrieved pending
-        # task — its CancelledError is expected and swallowed.
-        ready_wait.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await ready_wait
-    prompter.confirm(f"In Discord, say:  @{name} hello   — press enter once you've sent it.", default=True)
-    print(f"Waiting for {name} to come online…")
-    # The org is ALREADY live (substrate + agent both started). Presence detection
-    # is advisory, and the watcher opens its OWN Client.connect — a broker drop or
-    # transient connect blip mid-watch could raise out of it. Don't let that crash
-    # the wizard after the org came up: degrade any failure into the same bounded
-    # "org is live — try it yourself / run doctor" fallback below.
-    # ``except Exception`` (not bare) deliberately lets asyncio.CancelledError
-    # propagate — swallowing the rest is correct here: the failure is in detection,
-    # not in the (already-live) org.
-    try:
-        detected = await watch_task
+        return await first_reply_fn(server_urls, agent_id=name, timeout_s=_FIRST_REPLY_TIMEOUT_S)
     except Exception:
-        detected = False
+        return False
+
+
+def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None) -> None:
+    """Celebrate or honestly degrade, then signpost the next step.
+
+    Both the celebrate and the presence-timeout degrade converge here, so the
+    "add a teammate" signpost (and where to learn more) shows on either. ``postable``
+    is the Phase-2 preflight verdict (``False`` == the bot can post in no channel):
+    even when the agent is seen online, a ``False`` downgrades the 🎉 to an honest
+    "online but can't post yet" so onboarding never ends on a green light that lies
+    (§12.6); ``None`` (unknown) still celebrates — we can't assert a failure we didn't
+    observe.
+    """
     if detected and postable is False:
         # Online on the mesh, but the preflight proved the bot can post in no channel:
-        # don't celebrate a bot that will never reply in Discord (§12.6). ``None``
-        # (postability unknown) still celebrates — we can't assert a failure we didn't
-        # observe.
+        # don't celebrate a bot that will never reply in Discord (§12.6).
         print(f"{name} is online, but it can't post in any Discord channel yet.")
         print(f"  Grant it View Channel + Send Messages + Manage Webhooks, then say `@{name} hello`.")
     elif detected:
@@ -794,9 +794,7 @@ async def _finish_live(
         print(
             f"  your organization is live — try `@{name} hello` in Discord. If nothing replies, run `disco doctor`."
         )
-    # The next step nobody teaches: a one-agent org is step one, not the finish
-    # line. Both the celebrate and the presence-timeout degrade converge here, so
-    # the "add a teammate" signpost (and where to learn more) shows on either.
+    # The next step nobody teaches: a one-agent org is step one, not the finish line.
     print()
     print("Add a teammate any time:")
     print("    disco agent create <name>")
@@ -808,7 +806,6 @@ async def _finish_live(
         f"({_REBOOT_NOTE} `disco start` reopens it, then `disco agent start --all` "
         "brings the agents back; `disco status` shows who's online.)"
     )
-    return 0
 
 
 def _print_manual_finish(name: str) -> None:
