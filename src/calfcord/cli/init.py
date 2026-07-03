@@ -215,6 +215,7 @@ def run(
     list_guilds_fn: Callable[..., list[Guild]] | None = None,
     list_channels_fn: Callable[..., ChannelListing] | None = None,
     start_fn: Callable[..., Awaitable[int]] | None = None,
+    tools_start_fn: Callable[..., Awaitable[int]] | None = None,
     agent_start_fn: Callable[..., Awaitable[int]] | None = None,
     first_reply_fn: Callable[..., Awaitable[bool]] | None = None,
     pc_binary_fn: Callable[[], str] | None = None,
@@ -364,6 +365,7 @@ def run(
         server_urls=effective_server_urls,
         postable=postable,
         start_fn=start_fn,
+        tools_start_fn=tools_start_fn,
         agent_start_fn=agent_start_fn,
         first_reply_fn=first_reply_fn,
         pc_binary_fn=pc_binary_fn,
@@ -662,6 +664,7 @@ def _run_finish(
     server_urls: str,
     postable: bool | None = None,
     start_fn: Callable[..., Awaitable[int]] | None,
+    tools_start_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]] | None,
     first_reply_fn: Callable[..., Awaitable[bool]] | None,
     pc_binary_fn: Callable[[], str] | None,
@@ -718,21 +721,28 @@ def _run_finish(
     # watcher (:func:`_wait_for_agent_online`) is a local module function whose own
     # calfkit imports are deferred to its body, so referencing it here adds nothing
     # to init's import graph.
-    if start_fn is None or agent_start_fn is None or first_reply_fn is None:
-        from calfcord.supervisor import lifecycle, roster
+    if start_fn is None or tools_start_fn is None or agent_start_fn is None or first_reply_fn is None:
+        from calfcord.supervisor import component, lifecycle, roster
 
         start_fn = start_fn or lifecycle.start
+        # The tools host is the singleton ``tools`` roster component — identity-
+        # agnostic infra that serves every builtin, so it is brought up like any
+        # other slot, via the same ``component_start`` ``disco tools start`` uses.
+        tools_start_fn = tools_start_fn or component.component_start
         agent_start_fn = agent_start_fn or roster.agent_start
         first_reply_fn = first_reply_fn or _wait_for_agent_online
 
-    # Phase 1 — bring the org live (async). The substrate and agent are DETACHED
-    # external processes, so this loop can close afterward without touching them.
-    rc = asyncio.run(
+    # Phase 1 — bring the org live (async). The substrate, tools host, and agent are
+    # DETACHED external processes, so this loop can close afterward without touching them.
+    # ``tools_ok`` rides out separately (NOT the control-flow rc, which stays the agent's)
+    # so the finish banner can be honest when the advisory tools host didn't come up.
+    rc, tools_ok = asyncio.run(
         _bring_online(
             name=name,
             home=home,
             server_urls=server_urls,
             start_fn=start_fn,
+            tools_start_fn=tools_start_fn,
             agent_start_fn=agent_start_fn,
         )
     )
@@ -748,7 +758,7 @@ def _run_finish(
     # Phase 3 — confirm presence (async, level-triggered read). The org is already
     # live; detection is advisory, so a failure degrades to the honest fallback.
     detected = asyncio.run(_await_presence(first_reply_fn, name=name, server_urls=server_urls))
-    _print_finish_epilogue(name, detected=detected, postable=postable)
+    _print_finish_epilogue(name, detected=detected, postable=postable, tools_ok=tools_ok)
     return 0
 
 
@@ -758,15 +768,24 @@ async def _bring_online(
     home: Path,
     server_urls: str,
     start_fn: Callable[..., Awaitable[int]],
+    tools_start_fn: Callable[..., Awaitable[int]],
     agent_start_fn: Callable[..., Awaitable[int]],
-) -> int:
-    """Phase 1: start the substrate, then the agent.
+) -> tuple[int, bool]:
+    """Phase 1: start the substrate, then the tools host, then the agent.
 
-    Returns 0 once both are up, or the first non-zero code (substrate or agent
-    start). On a cold start ``start`` tears the substrate back down on its own
-    failure; on an ALREADY-OPEN workspace it can instead fail the in-place bridge
-    restart with the substrate (broker + agents) still up. Either way ``start``
-    prints the specific cause first.
+    Returns ``(rc, tools_ok)``. ``rc`` is the control-flow code — 0 once the substrate
+    and agent are up, or the first non-zero code (substrate or agent start). On a cold
+    start ``start`` tears the substrate back down on its own failure; on an ALREADY-OPEN
+    workspace it can instead fail the in-place bridge restart with the substrate
+    (broker + agents) still up. Either way ``start`` prints the specific cause first.
+
+    The tools host is spawned BETWEEN the substrate and the agent (a first-turn tool
+    call can't land before its host is up) and is UNCONDITIONAL — it serves every
+    builtin regardless of the created agent's tool selection. Its start is advisory
+    (warn-and-continue, :func:`_supervisor.start_tools_host`): a failure warns but does
+    not block the agent, so it never changes ``rc``. Its outcome rides out as the
+    separate ``tools_ok`` flag so the finish banner can be honest (not a green light
+    that lies) when the host didn't come up — the org isn't fully live for tool use.
     """
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
@@ -789,10 +808,17 @@ async def _bring_online(
             "  couldn't finish bringing the workspace online — see the error above "
             "(or run `disco logs` / `disco doctor`), then re-run `disco init`."
         )
-        return rc
+        return rc, True  # tools_ok is moot — the caller returns on the non-zero rc
+
+    # Infra, not a teammate: bring the singleton tools host up next so a first-turn
+    # tool call has a live host to dispatch to. Advisory (warn-and-continue) — its code
+    # never blocks the agent, but its outcome rides out as ``tools_ok`` so the finish
+    # banner can degrade honestly when the host didn't come up.
+    print("Bringing the tools host online (all builtin tools)…")
+    tools_ok = await _supervisor.start_tools_host(home, launcher=launcher, tools_start_fn=tools_start_fn) == 0
 
     print(f"Bringing {name} online…")
-    return await agent_start_fn(home, name=name, server_urls=server_urls)
+    return await agent_start_fn(home, name=name, server_urls=server_urls), tools_ok
 
 
 async def _await_presence(
@@ -821,7 +847,7 @@ async def _await_presence(
         return False
 
 
-def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None) -> None:
+def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, tools_ok: bool = True) -> None:
     """Celebrate or honestly degrade, then signpost the next step.
 
     Both the celebrate and the presence-timeout degrade converge here, so the
@@ -831,7 +857,9 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None) 
     always surfaces the permission remedy — never the "try `@name hello`" errand that
     can't get a reply — whether or not the agent was also seen online (§12.6, no green
     light that lies). ``None`` (unknown) is not asserted as a failure, so a detected
-    agent still celebrates.
+    agent still celebrates. ``tools_ok`` is the advisory tools-host outcome: ``False``
+    (the host didn't come up) qualifies the banner too, since the agent's tool calls
+    will hang — the org isn't fully live for tool use — even though it may be online.
     """
     if postable is False:
         # The preflight PROVED the bot can post in no channel — a known, fixable problem
@@ -845,6 +873,17 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None) 
         print(f"  Grant it View Channel + Send Messages + Manage Webhooks, then say `@{name} hello`.")
         if not detected:
             print("  If it stays quiet after that, run `disco doctor`.")
+    elif not tools_ok:
+        # The agent came up but the advisory tools host didn't — its tool-using turns
+        # will hang. Degrade honestly rather than the unqualified 🎉 (no green light that
+        # lies); the remedy was printed during bring-up, but the FINAL word must not
+        # overstate readiness. Handled before ``detected`` because a live-but-tool-less
+        # org is exactly the trap the banner must not paper over.
+        if detected:
+            print(f"{name} is online — but the tools host isn't up, so its tool calls will hang.")
+        else:
+            print("  your organization is live — but the tools host isn't up, so tool calls will hang.")
+        print("  Bring it up with `disco tools start` (see `disco logs tools`), then retry a tool.")
     elif detected:
         print(f"🎉 {name} is online — your organization is live!")
     else:

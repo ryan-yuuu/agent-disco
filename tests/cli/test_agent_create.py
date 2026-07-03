@@ -590,14 +590,17 @@ class _FinishRecorder:
         running: bool = False,
         start_rc: int = 0,
         agent_rc: int = 0,
+        tools_rc: int = 0,
         present: bool = True,
     ) -> None:
         self._running = running
         self._start_rc = start_rc
         self._agent_rc = agent_rc
+        self._tools_rc = tools_rc
         self._present = present
         self.calls: list[str] = []
         self.start_kwargs: list[dict] = []
+        self.tools_kwargs: list[dict] = []
         self.agent_kwargs: list[dict] = []
         self.presence_kwargs: list[dict] = []
 
@@ -609,6 +612,11 @@ class _FinishRecorder:
         self.calls.append("start")
         self.start_kwargs.append({"home": home, **kwargs})
         return self._start_rc
+
+    async def tools_start(self, home, **kwargs) -> int:
+        self.calls.append("tools")
+        self.tools_kwargs.append({"home": home, **kwargs})
+        return self._tools_rc
 
     async def agent_start(self, home, **kwargs) -> int:
         self.calls.append("agent_start")
@@ -640,6 +648,7 @@ def _run_live(
         home=tmp_path,
         server_urls="localhost:9092",
         start_fn=finish.start,
+        tools_start_fn=finish.tools_start,
         agent_start_fn=finish.agent_start,
         presence_fn=finish.presence,
         workspace_running_fn=finish.workspace_running,
@@ -657,11 +666,40 @@ def test_run_start_now_yes_workspace_not_running_opens_and_starts(
     prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
     rc = _run_live(prompter, tmp_path, finish, name="scribe")
     assert rc == 0
-    # No stop (workspace wasn't running) — just start -> agent_start -> presence.
-    assert finish.calls == ["workspace_running", "start", "agent_start", "presence"]
+    # No stop (workspace wasn't running) — open the workspace (substrate + tools host),
+    # then bring the agent online. The tools host comes up with the workspace so the
+    # new agent's first tool call has a live host (same as `disco start`).
+    assert finish.calls == ["workspace_running", "start", "tools", "agent_start", "presence"]
     assert finish.agent_kwargs[0]["name"] == "scribe"
+    assert finish.tools_kwargs[0]["name"] == "tools"
     out = capsys.readouterr().out
     assert "scribe is online — say @scribe hello in Discord" in out
+
+
+def test_run_start_now_running_does_not_restart_tools_host(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With the workspace already UP, the new agent spawns straight in — the workspace
+    (and its tools host) is not re-opened, so the tools host is NOT bounced."""
+    finish = _FinishRecorder(running=True, present=True)
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    assert "tools" not in finish.calls  # no re-open of the running workspace
+    assert finish.tools_kwargs == []
+
+
+def test_run_start_now_not_running_tools_host_failure_is_advisory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """On the cold-open path a tools-host failure is advisory: the agent still starts,
+    run still returns 0, and the operator is pointed at `disco tools start`."""
+    finish = _FinishRecorder(running=False, present=True, tools_rc=1)
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    assert "agent_start" in finish.calls  # the agent still clocks in despite the tools failure
+    assert "disco tools start" in capsys.readouterr().out
 
 
 def test_run_start_now_yes_presence_timeout_degrades(
