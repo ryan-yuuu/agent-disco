@@ -1,8 +1,8 @@
 """Agent-path MCP tool selection — schema-free, ``mcp.json``-free.
 
 calfkit resolves an agent's MCP tools per turn by calling each declared
-``ToolSelector`` against the capability view (the ``KafkaTable`` projection
-of the ``mcp.capabilities`` topic the ``Worker`` auto-registers whenever a
+``ToolSelector`` against the capability view (the control-plane projection
+of the ``calf.capabilities`` topic the ``Worker`` auto-registers whenever a
 hosted agent declares selectors). The selector type is calfkit's public
 :class:`~calfkit.mcp.MCPToolbox` — an identity-only handle constructible
 with just the server name, so on a distributed deploy the agent host needs

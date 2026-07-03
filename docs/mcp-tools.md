@@ -29,7 +29,7 @@ the MCP processes sit in the topology, see
   commands and URLs) are the most misconfiguration-prone config in the system,
   so one bad entry must never take down sibling servers.
 - That toolbox connects to the server, lists its tools, and **advertises**
-  them on the compacted `mcp.capabilities` topic — tool names, JSON schemas,
+  them on the compacted `calf.capabilities` topic — tool names, JSON schemas,
   and the dispatch topic `mcp_server.<name>`.
 - An agent grants itself MCP tools with an `mcp/<server>` or
   `mcp/<server>/<tool>` entry in its `tools:` frontmatter. The agent resolves
@@ -235,7 +235,7 @@ Two properties worth internalizing:
 ## Runtime discovery
 
 The toolbox is the source of truth for *which tools exist right now*. It
-publishes a capability record to the compacted `mcp.capabilities` topic on
+publishes a capability record to the compacted `calf.capabilities` topic on
 startup, re-publishes on the server's `tools/list_changed` notification and on
 a heartbeat, and an agent resolves its selectors against that record **on every
 turn**. The consequences:
@@ -321,7 +321,7 @@ multi-host story.
 servers — run those on a native or systemd host alongside a Docker broker, or
 add the services to your compose file by hand.
 
-> The `mcp.capabilities` topic is a compacted control-plane topic
+> The `calf.capabilities` topic is a compacted control-plane topic
 > (`cleanup.policy=compact`). On a native install with provisioning enabled,
 > calfkit's `ensure_topic` creates it. On a production broker that disallows
 > auto-creation, create it out of band with the compact cleanup policy.
