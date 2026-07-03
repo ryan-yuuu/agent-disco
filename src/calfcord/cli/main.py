@@ -36,6 +36,7 @@ from calfcord.cli._agents import detect_agents
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._mcp import configured_mcp_servers_or_none
 from calfcord.cli._prompts import make_prompter
+from calfcord.cli._supervisor import start_tools_host
 from calfcord.health.check import default_broker_probe, healthcheck
 from calfcord.mcp.config import resolve_config_path
 from calfcord.supervisor import component, lifecycle, mcp_roster, roster
@@ -248,7 +249,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # detached launch flags, the #494 priming reconcile, the readiness gate) lives
     # there. They take no flags today — the lifecycle entry points are nullary
     # beyond the resolved install paths.
-    sub.add_parser("start", help="Open the workspace: broker + bridge, detached, health-gated.")
+    sub.add_parser("start", help="Open the workspace: broker + bridge + tools host, detached, health-gated.")
     sub.add_parser("stop", help="Close the whole workspace (substrate and every roster process).")
     sub.add_parser("status", help="Show the org board: substrate + roster health.")
 
@@ -596,9 +597,14 @@ def _run_lifecycle(command: str) -> int:
 
     ``server_urls`` comes from ``CALF_HOST_URL`` (defaulting to ``localhost``,
     the same default the runners and the broker healthcheck use). The generated
-    project is SUBSTRATE-ONLY (broker + bridge; the roster is spawned off Process
-    Compose per slot); ``start`` reads the defined roster itself for its success
-    banner's empty-org signpost. The lifecycle coroutine's POSIX exit code is
+    Process Compose project is SUBSTRATE-ONLY (broker + bridge; the roster is spawned
+    off Process Compose per slot); ``start`` reads the defined roster itself for its
+    success banner's empty-org signpost. After the substrate opens, ``start`` also
+    brings up the singleton **tools host** — identity-agnostic infra every tool-using
+    agent depends on, spawned off Process Compose like any roster slot — so a
+    freshly-opened workspace can serve tool calls without a separate
+    ``disco tools start`` (advisory: a tools-host failure warns but leaves the open
+    workspace's exit code intact). The substrate coroutine's POSIX exit code is
     propagated unchanged.
     """
     home = _require_home(command, detail="the supervisor has a stable home and shim.")
@@ -624,7 +630,22 @@ def _run_lifecycle(command: str) -> int:
     # N doomed `disco mcp start` attempts. Pure validation; nothing is threaded on.
     if configured_mcp_servers_or_none() is None:
         return 1
-    return asyncio.run(lifecycle.start(home, server_urls=server_urls, launcher=launcher))
+
+    async def _open_workspace() -> int:
+        # Open the substrate (broker + bridge), then bring the tools host up as part
+        # of the workspace. The tools host is identity-agnostic infra — it serves
+        # every builtin tool for any agent — so it belongs with the substrate, not the
+        # per-agent roster (matching `disco init`'s finish). A substrate failure
+        # short-circuits (don't spawn the host against a workspace that never opened);
+        # the tools-host start is advisory (warn-and-continue), so its non-zero never
+        # fails an otherwise-open workspace — the substrate's code is what propagates.
+        rc = await lifecycle.start(home, server_urls=server_urls, launcher=launcher)
+        if rc != 0:
+            return rc
+        await start_tools_host(home, launcher=launcher)
+        return rc
+
+    return asyncio.run(_open_workspace())
 
 
 def _run_component(name: str, verb: str) -> int:

@@ -534,6 +534,7 @@ def test_main_start_dispatches_with_resolved_args(monkeypatch: pytest.MonkeyPatc
         return 0
 
     monkeypatch.setattr(lifecycle, "start", _start)
+    monkeypatch.setattr(component, "component_start", _noop_tools_start)
     assert main(["start"]) == 0
     assert captured["home"] == home
     assert captured["server_urls"] == "broker.example:9092"
@@ -584,8 +585,95 @@ def test_main_start_defaults_host_url_to_localhost(monkeypatch: pytest.MonkeyPat
         return 0
 
     monkeypatch.setattr(lifecycle, "start", _start)
+    monkeypatch.setattr(component, "component_start", _noop_tools_start)
     assert main(["start"]) == 0
     assert captured["server_urls"] == "localhost"
+
+
+async def _noop_tools_start(home, **kwargs) -> int:
+    """A component_start double for `disco start` tests that don't care about the
+    tools host — keeps them hermetic (no real supervisor probe) now that `start`
+    brings the tools host up after the substrate."""
+    return 0
+
+
+def test_main_start_also_starts_tools_host_after_substrate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`disco start` opens the workspace = substrate + the tools host (identity-
+    agnostic infra every tool-using agent needs). The tools host is brought up AFTER
+    the substrate, via the same ``component_start`` ``disco tools start`` uses, at the
+    ``tools`` slot and under the install shim launcher."""
+    home = tmp_path / "home"
+    (home / "agents").mkdir(parents=True)
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.setenv("CALF_HOST_URL", "broker.example:9092")
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    order: list[str] = []
+    tools_calls: list[dict] = []
+
+    async def _start(home_arg, *, server_urls, launcher, **kwargs):
+        order.append("substrate")
+        return 0
+
+    async def _tools(home_arg, *, name, launcher, **kwargs):
+        order.append("tools")
+        tools_calls.append({"home": home_arg, "name": name, "launcher": launcher})
+        return 0
+
+    monkeypatch.setattr(lifecycle, "start", _start)
+    monkeypatch.setattr(component, "component_start", _tools)
+    assert main(["start"]) == 0
+    assert order == ["substrate", "tools"]
+    assert tools_calls[0]["name"] == "tools"
+    assert tools_calls[0]["home"] == home
+    assert tools_calls[0]["launcher"] == str(home / "shims" / "disco")
+
+
+def test_main_start_substrate_failure_skips_tools_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A substrate that fails to open short-circuits: the tools host is NOT spawned
+    against a workspace that never came up, and the non-zero code propagates."""
+    home = tmp_path / "home"
+    (home / "agents").mkdir(parents=True)
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _start(*args, **kwargs):
+        return 1
+
+    async def _boom_tools(*args, **kwargs):
+        raise AssertionError("the tools host must not start when the substrate failed")
+
+    monkeypatch.setattr(lifecycle, "start", _start)
+    monkeypatch.setattr(component, "component_start", _boom_tools)
+    assert main(["start"]) == 1
+
+
+def test_main_start_tools_host_failure_warns_but_returns_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The tools-host start is advisory: if the substrate is up but the tools host
+    fails, ``disco start`` still reports the workspace open (exit 0) and warns how to
+    bring the tools host up — it never fails an otherwise-open workspace over it."""
+    home = tmp_path / "home"
+    (home / "agents").mkdir(parents=True)
+    monkeypatch.setenv("CALFCORD_HOME", str(home))
+    monkeypatch.delenv("CALFKIT_AGENTS_DIR", raising=False)
+
+    async def _start(*args, **kwargs):
+        return 0
+
+    async def _tools(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr(lifecycle, "start", _start)
+    monkeypatch.setattr(component, "component_start", _tools)
+    assert main(["start"]) == 0  # workspace is open even if the tools host lagged
+    out = capsys.readouterr().out
+    assert "disco tools start" in out
 
 
 def test_main_stop_dispatches_with_resolved_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

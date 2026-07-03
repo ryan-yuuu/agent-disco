@@ -215,6 +215,7 @@ def run(
     list_guilds_fn: Callable[..., list[Guild]] | None = None,
     list_channels_fn: Callable[..., ChannelListing] | None = None,
     start_fn: Callable[..., Awaitable[int]] | None = None,
+    tools_start_fn: Callable[..., Awaitable[int]] | None = None,
     agent_start_fn: Callable[..., Awaitable[int]] | None = None,
     first_reply_fn: Callable[..., Awaitable[bool]] | None = None,
     pc_binary_fn: Callable[[], str] | None = None,
@@ -364,6 +365,7 @@ def run(
         server_urls=effective_server_urls,
         postable=postable,
         start_fn=start_fn,
+        tools_start_fn=tools_start_fn,
         agent_start_fn=agent_start_fn,
         first_reply_fn=first_reply_fn,
         pc_binary_fn=pc_binary_fn,
@@ -662,6 +664,7 @@ def _run_finish(
     server_urls: str,
     postable: bool | None = None,
     start_fn: Callable[..., Awaitable[int]] | None,
+    tools_start_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]] | None,
     first_reply_fn: Callable[..., Awaitable[bool]] | None,
     pc_binary_fn: Callable[[], str] | None,
@@ -718,21 +721,26 @@ def _run_finish(
     # watcher (:func:`_wait_for_agent_online`) is a local module function whose own
     # calfkit imports are deferred to its body, so referencing it here adds nothing
     # to init's import graph.
-    if start_fn is None or agent_start_fn is None or first_reply_fn is None:
-        from calfcord.supervisor import lifecycle, roster
+    if start_fn is None or tools_start_fn is None or agent_start_fn is None or first_reply_fn is None:
+        from calfcord.supervisor import component, lifecycle, roster
 
         start_fn = start_fn or lifecycle.start
+        # The tools host is the singleton ``tools`` roster component — identity-
+        # agnostic infra that serves every builtin, so it is brought up like any
+        # other slot, via the same ``component_start`` ``disco tools start`` uses.
+        tools_start_fn = tools_start_fn or component.component_start
         agent_start_fn = agent_start_fn or roster.agent_start
         first_reply_fn = first_reply_fn or _wait_for_agent_online
 
-    # Phase 1 — bring the org live (async). The substrate and agent are DETACHED
-    # external processes, so this loop can close afterward without touching them.
+    # Phase 1 — bring the org live (async). The substrate, tools host, and agent are
+    # DETACHED external processes, so this loop can close afterward without touching them.
     rc = asyncio.run(
         _bring_online(
             name=name,
             home=home,
             server_urls=server_urls,
             start_fn=start_fn,
+            tools_start_fn=tools_start_fn,
             agent_start_fn=agent_start_fn,
         )
     )
@@ -758,15 +766,23 @@ async def _bring_online(
     home: Path,
     server_urls: str,
     start_fn: Callable[..., Awaitable[int]],
+    tools_start_fn: Callable[..., Awaitable[int]],
     agent_start_fn: Callable[..., Awaitable[int]],
 ) -> int:
-    """Phase 1: start the substrate, then the agent.
+    """Phase 1: start the substrate, then the tools host, then the agent.
 
-    Returns 0 once both are up, or the first non-zero code (substrate or agent
-    start). On a cold start ``start`` tears the substrate back down on its own
-    failure; on an ALREADY-OPEN workspace it can instead fail the in-place bridge
-    restart with the substrate (broker + agents) still up. Either way ``start``
-    prints the specific cause first.
+    Returns 0 once the substrate and agent are up, or the first non-zero code
+    (substrate or agent start). On a cold start ``start`` tears the substrate back
+    down on its own failure; on an ALREADY-OPEN workspace it can instead fail the
+    in-place bridge restart with the substrate (broker + agents) still up. Either way
+    ``start`` prints the specific cause first.
+
+    The tools host is spawned BETWEEN the substrate and the agent (a first-turn tool
+    call can't land before its host is up) and is UNCONDITIONAL — it serves every
+    builtin regardless of the created agent's tool selection. Its start is advisory
+    (warn-and-continue, :func:`_supervisor.start_tools_host`): a failure warns but does
+    not block the agent, so it never turns an otherwise-live org into a hard init
+    failure — its code is intentionally not returned.
     """
     print("Opening your workspace (broker + bridge)…")
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
@@ -790,6 +806,12 @@ async def _bring_online(
             "(or run `disco logs` / `disco doctor`), then re-run `disco init`."
         )
         return rc
+
+    # Infra, not a teammate: bring the singleton tools host up next so a first-turn
+    # tool call has a live host to dispatch to. Advisory (warn-and-continue) — its
+    # code is deliberately not returned, so a tools-host hiccup never blocks the agent.
+    print("Bringing the tools host online (all builtin tools)…")
+    await _supervisor.start_tools_host(home, launcher=launcher, tools_start_fn=tools_start_fn)
 
     print(f"Bringing {name} online…")
     return await agent_start_fn(home, name=name, server_urls=server_urls)

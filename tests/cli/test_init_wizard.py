@@ -196,24 +196,37 @@ class _FinishStub:
         *,
         start_rc: int = 0,
         agent_rc: int = 0,
+        tools_rc: int = 0,
         reply: bool = True,
         pc_binary: str | Exception = "/usr/bin/process-compose",
         events: list[str] | None = None,
     ) -> None:
         self._start_rc = start_rc
         self._agent_rc = agent_rc
+        self._tools_rc = tools_rc
         self._reply = reply
         self._pc_binary = pc_binary
         self._events = events
         self.start_calls: list[dict] = []
+        self.tools_calls: list[dict] = []
         self.agent_calls: list[dict] = []
         self.reply_calls: list[dict] = []
+        # Spawn-order log (substrate -> tools host -> agent) for ordering
+        # assertions; distinct from ``events`` (the prompt/watcher ordering log).
+        self.order: list[str] = []
 
     async def start(self, home, **kwargs) -> int:
+        self.order.append("substrate")
         self.start_calls.append({"home": home, **kwargs})
         return self._start_rc
 
+    async def tools_start(self, home, **kwargs) -> int:
+        self.order.append("tools")
+        self.tools_calls.append({"home": home, **kwargs})
+        return self._tools_rc
+
     async def agent_start(self, home, **kwargs) -> int:
+        self.order.append("agent")
         self.agent_calls.append({"home": home, **kwargs})
         return self._agent_rc
 
@@ -260,6 +273,7 @@ def _run(
         list_guilds_fn=discord.guilds,
         list_channels_fn=discord.channels,
         start_fn=finish.start,
+        tools_start_fn=finish.tools_start,
         agent_start_fn=finish.agent_start,
         first_reply_fn=finish.first_reply,
         pc_binary_fn=finish.pc_binary,
@@ -925,6 +939,53 @@ def test_live_finish_starts_substrate_then_agent_then_watches_reply(tmp_path: Pa
     assert finish.reply_calls[0]["agent_id"] == "scribe"
 
 
+def test_live_finish_starts_tools_host_after_substrate_before_agent(tmp_path: Path) -> None:
+    """The singleton tools host is infra every tool-using agent depends on, so the
+    live finish brings it up in order: substrate -> tools host -> agent (a tool call
+    can never land before the host that serves it is up)."""
+    finish = _FinishStub(reply=True)
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    assert rc == 0
+    assert len(finish.tools_calls) == 1
+    assert finish.tools_calls[0]["name"] == "tools"
+    assert finish.order == ["substrate", "tools", "agent"]
+
+
+def test_tools_host_started_even_when_agent_selects_no_tools(tmp_path: Path) -> None:
+    """The tools host serves ALL builtins regardless of any one agent's selection, so
+    it is started UNCONDITIONALLY — even when the created agent picked zero tools
+    (deselecting every pre-checked builtin at the tools checkbox)."""
+    finish = _FinishStub(reply=True)
+    rc = _run(_prompter(name="scribe", checkboxes=[[]]), tmp_path, home=tmp_path, finish=finish)
+    assert rc == 0
+    assert len(finish.tools_calls) == 1
+
+
+def test_tools_host_start_failure_warns_but_still_starts_agent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A tools-host start failure is advisory (warn-and-continue): the agent still
+    clocks in (non-tool chat works), init still returns 0, and the operator is told
+    how to bring the tools host up."""
+    finish = _FinishStub(reply=True, tools_rc=1)
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert len(finish.tools_calls) == 1
+    assert len(finish.agent_calls) == 1  # the agent starts despite the tools-host failure
+    assert "disco tools start" in out
+
+
+def test_substrate_failure_skips_tools_host_and_agent(tmp_path: Path) -> None:
+    """A substrate failure short-circuits before BOTH the tools host and the agent —
+    neither roster slot is spawned against a workspace that never came up."""
+    finish = _FinishStub(start_rc=1)
+    rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    assert rc != 0
+    assert len(finish.tools_calls) == 0
+    assert len(finish.agent_calls) == 0
+
+
 def test_live_finish_reboot_note_says_agents_do_not_auto_start(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1220,9 +1281,12 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
     calfkit 0.12 replaced the deleted control-plane first-reply watcher with the
     local ``init._wait_for_agent_online`` mesh presence-poll, so the default
     first-reply seam now resolves to that module function."""
-    from calfcord.supervisor import lifecycle, roster
+    from calfcord.supervisor import component, lifecycle, roster
 
     async def _ok_start(home, **_):
+        return 0
+
+    async def _ok_tools(home, **_):
         return 0
 
     async def _ok_agent(home, **_):
@@ -1232,6 +1296,7 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
         return True
 
     monkeypatch.setattr(lifecycle, "start", _ok_start)
+    monkeypatch.setattr(component, "component_start", _ok_tools)
     monkeypatch.setattr(roster, "agent_start", _ok_agent)
     monkeypatch.setattr(init, "_wait_for_agent_online", _ok_reply)
 
@@ -1608,6 +1673,9 @@ async def test_bring_online_start_failure_does_not_claim_the_workspace_is_down(
         print("error: the bridge didn't come back ready — check `disco logs bridge`.")
         return 1
 
+    async def _tools_start_fn(home, *, name, launcher):
+        raise AssertionError("the tools host must not start after a substrate/bridge failure")
+
     async def _agent_start_fn(home, *, name, server_urls):
         raise AssertionError("agent start must not run after a substrate/bridge failure")
 
@@ -1616,6 +1684,7 @@ async def test_bring_online_start_failure_does_not_claim_the_workspace_is_down(
         home=tmp_path,
         server_urls="localhost:9092",
         start_fn=_start_fn,
+        tools_start_fn=_tools_start_fn,
         agent_start_fn=_agent_start_fn,
     )
 
