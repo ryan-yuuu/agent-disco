@@ -411,6 +411,36 @@ async def _await_bridge_ready(
         await sleep(_READINESS_POLL_INTERVAL_SECONDS)
 
 
+async def _restart_bridge_process(
+    client: ProcessComposeClient,
+    *,
+    ready_timeout_s: float,
+    clock: Clock,
+    sleep: Sleep,
+) -> bool:
+    """Restart the bridge slot in place and gate on readiness (the shared seam).
+
+    Restarts ONLY the ``bridge`` process inside the already-running supervisor —
+    never relaunches the supervisor, so the §12.4 "no second supervisor"
+    invariant holds for both callers (``disco bridge restart`` and ``start``'s
+    already-open path). Returns ``True`` once the bridge is Ready again; ``False``
+    if the restart REST call fails (a raised :class:`ProcessComposeError`, a
+    ``RuntimeError``) or readiness is not reached within ``ready_timeout_s`` —
+    honest fail-fast, so the caller must not report success on ``False``.
+
+    The caller owns the lifecycle lock (``start`` holds it across its whole body;
+    the ``restart_bridge`` verb takes it): this must NOT re-acquire it — the
+    ``flock`` is non-reentrant and a second acquire would deadlock/refuse.
+    """
+    try:
+        await client.restart_process("bridge")
+    except RuntimeError:
+        # A non-2xx / transport failure restarting the slot — never poll a bridge
+        # we did not restart, and never overclaim success.
+        return False
+    return await _await_bridge_ready(client, timeout_s=ready_timeout_s, clock=clock, sleep=sleep)
+
+
 def _default_spawn(argv: Sequence[str]) -> None:
     """Launch a detached child that outlives this process (the production spawn).
 
@@ -561,11 +591,13 @@ async def start(
             print(f"error: {exc}")
             return 1
         # Idempotency (§12.4): if the office is already open, do NOT launch a
-        # second supervisor — just confirm and point at the next step. But the
-        # port can collide across homes (Fix #11): verify the answering supervisor
-        # is THIS home's before trusting "already open". A DIFFERENT home colliding
-        # on the port must fail loudly, never a false "already open" that silently
-        # skips install B's own launch.
+        # second supervisor. We DO cycle the bridge in place (below) so a re-run of
+        # `start`/`init` picks up a new build/config and clears a wedged mesh reader
+        # — restarting one slot within the existing supervisor keeps the "no second
+        # supervisor" invariant intact. But the port can collide across homes (Fix
+        # #11): verify the answering supervisor is THIS home's before touching it. A
+        # DIFFERENT home colliding on the port must fail loudly — never a false
+        # "already open", and never restart the other install's bridge.
         if await _supervisor_is_up(client):
             belongs = await _supervisor_belongs_to_home(client, home)
             if belongs is False:
@@ -577,14 +609,23 @@ async def start(
                     "`disco start`."
                 )
                 return 1
-            if agents_defined:
+            # Honest fail-fast (§12.6): if the in-place bridge restart doesn't come
+            # back Ready, surface it and return non-zero rather than print a green
+            # "already open" banner that lies. `restart: always` keeps retrying the
+            # bridge underneath; the operator is pointed at its log.
+            if not await _restart_bridge_process(
+                client, ready_timeout_s=ready_timeout_s, clock=clock, sleep=sleep
+            ):
                 print(
-                    "workspace already open (broker + bridge). "
-                    "Next: disco agent start <name>"
+                    "error: workspace was open but the bridge didn't come back ready — "
+                    "check `disco logs bridge`."
                 )
+                return 1
+            if agents_defined:
+                print("workspace already open — bridge restarted. Next: disco agent start <name>")
             else:
                 print(
-                    "workspace already open (broker + bridge). "
+                    "workspace already open — bridge restarted. "
                     "No agents defined yet -> disco agent create <name>"
                 )
             return 0
@@ -749,6 +790,64 @@ async def _sweep_roster_pidfiles(home: str) -> tuple[int, int]:
         elif result is not None and result.process_was_stopped:
             stopped += 1
     return stopped, wedged
+
+
+async def restart_bridge(
+    home: str | os.PathLike[str],
+    *,
+    client: ProcessComposeClient | None = None,
+    clock: Clock | None = None,
+    sleep: Sleep | None = None,
+    ready_timeout_s: float = _DEFAULT_READY_TIMEOUT_SECONDS,
+) -> int:
+    """``disco bridge restart`` — restart the bridge slot in place; honest exit code.
+
+    Restarts ONLY the bridge process within the running supervisor (never the
+    supervisor itself, so the §12.4 invariant holds), then gates on readiness.
+    Refuses cleanly, one error line + exit ``1``, when:
+
+    * the workspace isn't open (nothing to restart → points at ``disco start``);
+    * a DIFFERENT ``$CALFCORD_HOME`` install answers this home's REST port (a Fix
+      #11 collision — never restart the other install's bridge);
+    * the bridge doesn't come back Ready within ``ready_timeout_s`` (§12.6 — no
+      green light that lies);
+    * a concurrent lifecycle verb holds the lock (a domain refusal, not a
+      traceback).
+
+    Returns ``0`` and prints ``bridge restarted.`` on success. ``client`` /
+    ``clock`` / ``sleep`` are injected for testing; production defaults are the
+    per-home REST client, ``time.monotonic``, and ``asyncio.sleep``.
+    """
+    home = os.fspath(home)
+    client = _resolve_client(client, home)
+    clock = clock or time.monotonic
+    sleep = sleep or asyncio.sleep
+
+    try:
+        with lifecycle_lock(home):
+            if not await _supervisor_is_up(client):
+                print("error: the workspace isn't open — run `disco start` first.")
+                return 1
+            # A colliding port could answer for ANOTHER install; never restart its
+            # bridge from here (Fix #11). ``None`` (info route unavailable) keeps the
+            # best-effort "it's ours" behaviour, mirroring ``start``'s idempotency gate.
+            if await _supervisor_belongs_to_home(client, home) is False:
+                print(
+                    f"error: another Agent Disco install is using REST port "
+                    f"{pc_port_for(home)} on this host (a $CALFCORD_HOME port collision). "
+                    "Restart the bridge from that install's home."
+                )
+                return 1
+            if not await _restart_bridge_process(
+                client, ready_timeout_s=ready_timeout_s, clock=clock, sleep=sleep
+            ):
+                print("error: bridge restart didn't reach ready — check `disco logs bridge`.")
+                return 1
+    except _workspace.WorkspaceBusyError as exc:
+        print(f"error: {exc}")
+        return 1
+    print("bridge restarted.")
+    return 0
 
 
 async def stop(

@@ -72,6 +72,7 @@ class _StubClient:
         update_project_raises: Exception | None = None,
         process_info: object = None,
         process_info_raises: Exception | None = None,
+        restart_process_raises: Exception | None = None,
     ) -> None:
         self._project_state_results = list(project_state_results or [])
         self._bridge_states = list(bridge_states or [])
@@ -89,10 +90,14 @@ class _StubClient:
         # unavailable (the verdict is then "cannot determine").
         self._process_info = process_info
         self._process_info_raises = process_info_raises
+        # When set, `restart_process` fails the way the real client signals a
+        # transport / non-2xx error: a raise (ProcessComposeError <: RuntimeError).
+        self._restart_process_raises = restart_process_raises
         self.update_project_calls: list[str] = []
         self.project_state_call_count = 0
         self.get_process_calls: list[str] = []
         self.get_process_info_calls: list[str] = []
+        self.restart_process_calls: list[str] = []
 
     async def project_state(self):
         self.project_state_call_count += 1
@@ -123,6 +128,12 @@ class _StubClient:
         if self._process_info_raises is not None:
             raise self._process_info_raises
         return self._process_info
+
+    async def restart_process(self, name: str):
+        self.restart_process_calls.append(name)
+        if self._restart_process_raises is not None:
+            raise self._restart_process_raises
+        return {}
 
     async def list_processes(self):
         if self._list_processes_raises is not None:
@@ -336,15 +347,20 @@ def test_lock_guard_releases_after_exit(tmp_path) -> None:
 # --- start: idempotency -----------------------------------------------------
 
 
-async def test_start_idempotent_when_already_running(tmp_path, capsys) -> None:
+async def test_start_already_open_restarts_the_bridge(tmp_path, capsys) -> None:
     home = _home(tmp_path)
+    _define_agent(tmp_path)  # a defined roster => the "agent start" next-step signpost
     spawn = _RecordingSpawn()
+    clock = _FakeClock()
     # project_state succeeds on the first probe => supervisor already up, and the
     # declared config embeds THIS home's marker path, so the home-ownership check
-    # (Fix #11) confirms the answering supervisor is ours and short-circuits.
+    # (Fix #11) confirms the answering supervisor is ours. The already-open path
+    # then cycles the bridge in place (picking up a new build/config or clearing a
+    # wedged reader) WITHOUT relaunching the supervisor (§12.4).
     client = _StubClient(
         project_state_results=[{"running": True}],
         process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
+        bridge_states=[{"is_ready": "Ready"}],
     )
 
     code = await lifecycle.start(
@@ -353,13 +369,18 @@ async def test_start_idempotent_when_already_running(tmp_path, capsys) -> None:
         launcher="/h/shims/disco",
         client=client,
         spawn=spawn,
-        clock=_FakeClock(),
+        clock=clock,
+        sleep=clock.sleep,
     )
 
     assert code == 0
-    assert spawn.calls == []  # no second `up`
+    assert spawn.calls == []  # no second `up` — supervisor not relaunched
     assert client.update_project_calls == []  # no reconcile when already open
-    assert "already open" in capsys.readouterr().out.lower()
+    assert client.restart_process_calls == ["bridge"]  # bridge cycled in place
+    out = capsys.readouterr().out.lower()
+    assert "already open" in out
+    assert "restarted" in out
+    assert "disco agent start" in out  # the defined-roster next-step signpost
 
 
 async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
@@ -394,13 +415,156 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
     )
 
     assert code == 1
-    # It must NOT have launched a second supervisor and must NOT claim "already open".
+    # It must NOT have launched a second supervisor, restarted the other install's
+    # bridge, or claimed "already open".
     assert spawn.calls == []
+    assert client.restart_process_calls == []
     out = capsys.readouterr().out.lower()
     assert "already open" not in out
     assert "error" in out
     # Actionable: it names the port collision so the operator can re-home / repick.
     assert "port" in out
+
+
+# --- bridge restart: the shared mechanism + the `disco bridge restart` verb --
+
+
+async def test_restart_bridge_process_restarts_then_confirms_ready() -> None:
+    """The shared mechanism restarts the bridge slot, then gates on readiness:
+    True only once ``get_process('bridge')`` reports Ready."""
+    clock = _FakeClock()
+    client = _StubClient(bridge_states=[{"is_ready": "Ready"}])
+
+    ok = await lifecycle._restart_bridge_process(
+        client, ready_timeout_s=90, clock=clock, sleep=clock.sleep
+    )
+
+    assert ok is True
+    assert client.restart_process_calls == ["bridge"]
+    assert client.get_process_calls == ["bridge"]
+
+
+async def test_restart_bridge_process_false_when_the_restart_call_fails() -> None:
+    """A failed restart REST call (a raised ProcessComposeError) returns False and
+    never polls readiness on a bridge it did not restart."""
+    clock = _FakeClock()
+    client = _StubClient(restart_process_raises=RuntimeError("restart: 500"))
+
+    ok = await lifecycle._restart_bridge_process(
+        client, ready_timeout_s=90, clock=clock, sleep=clock.sleep
+    )
+
+    assert ok is False
+    assert client.restart_process_calls == ["bridge"]
+    assert client.get_process_calls == []  # no readiness poll after a failed restart
+
+
+async def test_restart_bridge_process_false_when_bridge_never_becomes_ready() -> None:
+    """If the bridge never reaches Ready within the budget, the mechanism
+    fail-fasts to False rather than claiming success (§12.6)."""
+    clock = _FakeClock()
+    # get_process signals not-ready (the stub raises once bridge_states is empty,
+    # which the readiness poll treats as "not ready yet").
+    client = _StubClient(bridge_states=[])
+
+    ok = await lifecycle._restart_bridge_process(
+        client, ready_timeout_s=4, clock=clock, sleep=clock.sleep
+    )
+
+    assert ok is False
+    assert client.restart_process_calls == ["bridge"]
+
+
+async def test_restart_bridge_reports_ok_when_the_bridge_comes_back_ready(tmp_path, capsys) -> None:
+    """``disco bridge restart`` on an open workspace restarts the bridge, waits for
+    Ready, and returns 0 with a plain confirmation."""
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
+        bridge_states=[{"is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.restart_bridge(home, client=client, clock=clock, sleep=clock.sleep)
+
+    assert code == 0
+    assert client.restart_process_calls == ["bridge"]
+    assert "bridge restarted" in capsys.readouterr().out.lower()
+
+
+async def test_restart_bridge_refuses_when_the_workspace_is_closed(tmp_path, capsys) -> None:
+    """With no supervisor answering, there is no bridge to restart: refuse with a
+    one-line error that names ``disco start``, and never issue a restart."""
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(project_state_results=[])  # project_state raises => not up
+
+    code = await lifecycle.restart_bridge(home, client=client, clock=clock, sleep=clock.sleep)
+
+    assert code == 1
+    assert client.restart_process_calls == []
+    out = capsys.readouterr().out.lower()
+    assert "error" in out
+    assert "disco start" in out
+
+
+async def test_restart_bridge_rejects_a_different_home_on_a_colliding_port(tmp_path, capsys) -> None:
+    """A supervisor answering this home's REST port but belonging to ANOTHER
+    install must not have its bridge restarted from here — fail loud, no restart."""
+    home = _home(tmp_path / "B")
+    other_home = str(tmp_path / "A")
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info={"log_location": os.path.join(other_home, "state", "logs", "bridge.log")},
+    )
+
+    code = await lifecycle.restart_bridge(home, client=client, clock=clock, sleep=clock.sleep)
+
+    assert code == 1
+    assert client.restart_process_calls == []
+    out = capsys.readouterr().out.lower()
+    assert "error" in out
+    assert "port" in out
+
+
+async def test_restart_bridge_fails_fast_when_the_bridge_does_not_come_back(tmp_path, capsys) -> None:
+    """Honest fail-fast: a restarted bridge that never reaches Ready returns 1 and
+    points at the logs — never a green light that lies (§12.6)."""
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
+        bridge_states=[],  # never ready
+    )
+
+    code = await lifecycle.restart_bridge(
+        home, client=client, clock=clock, sleep=clock.sleep, ready_timeout_s=4
+    )
+
+    assert code == 1
+    assert client.restart_process_calls == ["bridge"]
+    out = capsys.readouterr().out.lower()
+    assert "error" in out
+    assert "logs bridge" in out
+
+
+async def test_restart_bridge_contended_lock_is_a_clean_error_not_a_traceback(tmp_path, capsys) -> None:
+    """A concurrent lifecycle verb holding the lock makes ``disco bridge restart``
+    a clean one-line refusal, not a raw traceback — and nothing is restarted."""
+    home = _home(tmp_path)
+    client = _StubClient(project_state_results=[{"running": True}])
+
+    with _workspace.slot_mutation(home, "assistant"):
+        code = await lifecycle.restart_bridge(home, client=client)
+
+    assert code == 1
+    assert client.restart_process_calls == []
+    out = capsys.readouterr().out
+    assert out.startswith("error:")
+    assert "in progress" in out
 
 
 # --- home-ownership match (Fix #11 + the round-2 anchoring) -----------------
@@ -563,13 +727,16 @@ async def test_start_zero_agents_signposts_create_not_start(tmp_path, capsys, fa
 
 
 async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys) -> None:
-    """The idempotent already-open path also steers to ``disco agent create`` when
-    no agents are defined, instead of the ``agent start`` next-step."""
+    """The already-open path also steers to ``disco agent create`` when no agents
+    are defined, instead of the ``agent start`` next-step — and still restarts the
+    bridge in place."""
     home = _home(tmp_path)
     spawn = _RecordingSpawn()
+    clock = _FakeClock()
     client = _StubClient(
         project_state_results=[{"running": True}],
         process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
+        bridge_states=[{"is_ready": "Ready"}],
     )
 
     code = await lifecycle.start(
@@ -578,15 +745,50 @@ async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys)
         launcher="/h/shims/disco",
         client=client,
         spawn=spawn,
-        clock=_FakeClock(),
+        clock=clock,
+        sleep=clock.sleep,
     )
 
     assert code == 0
     assert spawn.calls == []
+    assert client.restart_process_calls == ["bridge"]
     out = capsys.readouterr().out
     assert "already open" in out.lower()
     assert "disco agent create <name>" in out
     assert "agent start" not in out
+
+
+async def test_start_already_open_fails_fast_when_the_bridge_wont_come_back(tmp_path, capsys) -> None:
+    """Honest fail-fast (§12.6): if the in-place bridge restart doesn't reach Ready,
+    ``start`` returns 1 and points at the logs rather than printing a green "already
+    open" banner — and never relaunches the supervisor."""
+    home = _home(tmp_path)
+    spawn = _RecordingSpawn()
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
+        bridge_states=[],  # restarted, but never reaches Ready
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=spawn,
+        clock=clock,
+        sleep=clock.sleep,
+        ready_timeout_s=4,
+    )
+
+    assert code == 1
+    assert spawn.calls == []  # supervisor NOT relaunched
+    assert client.restart_process_calls == ["bridge"]
+    out = capsys.readouterr().out.lower()
+    assert "already open" not in out
+    assert "didn't come back ready" in out
+    assert "logs bridge" in out
 
 
 async def test_start_signpost_honours_agents_dir_env_override(

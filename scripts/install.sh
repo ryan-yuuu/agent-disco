@@ -460,6 +460,7 @@ usage:
                               clock an agent (or every agent on this host) in/out/reload
   disco tools <start|stop|restart> [--all]
                               bring the tools host online / offline / reload
+  disco bridge restart        restart the bridge in place (recover a wedged reader / apply a new build)
   disco mcp <add|list|remove> [<server>]
                               manage MCP servers in mcp.json
   disco mcp <start|stop|restart> <server>|--all
@@ -520,7 +521,10 @@ case "${1:-}" in
   # The graduation-tier verbs (`explain` / `logs` /
   # `deploy`) are calfcord-cli subcommands too — listed here so their sub-args
   # forward verbatim to the argparse entry point instead of the `uv run` passthrough.
-  init|agent|tools|mcp|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
+  # `bridge` (the substrate slot's `bridge restart`) is a management verb here — it
+  # is distinct from `disco run bridge` (the raw `calfkit-bridge` runner) handled by
+  # the `run` arm below, so both forms coexist.
+  init|agent|tools|mcp|bridge|doctor|_healthcheck|start|stop|status|logs|explain|deploy) set -- calfcord-cli "$@" ;;
   run)
     shift
     case "${1:-}" in

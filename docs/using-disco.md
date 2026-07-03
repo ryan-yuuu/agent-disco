@@ -36,6 +36,18 @@ actually ready, and returns. No agents run yet — you start those on demand (ne
 it keeps running in the background after the command exits; it does **not** survive a reboot, so re-run
 `disco start` after one.
 
+Running `disco start` (or `disco init`) again while the workspace is **already open** restarts the bridge in
+place — picking up a new build or config, and clearing a bridge that has stopped answering — without
+disturbing the broker or your running agents. If the bridge doesn't come back healthy, the command says so
+and points you at `disco logs bridge` rather than reporting a false success.
+
+You can also restart just the bridge on demand — handy if it stops responding to `@mentions` but everything
+else is fine:
+
+```bash
+disco bridge restart    # restart the bridge in place (broker + agents keep running)
+```
+
 Close everything down with:
 
 ```bash

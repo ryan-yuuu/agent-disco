@@ -585,7 +585,11 @@ strict correlation (else accept any in-window response); the exact first-reply t
 - **Detached `up` is an open spike** — there is no documented whole-supervisor `--detached` flag; likely
   spawn PC headless (`-t=false`) under `setsid`/`nohup` and poll the REST API.
 - **Lock + idempotency:** an exclusive lockfile (flock) under `state/` around `start`/`stop`; `start` probes
-  first and short-circuits to "✓ already open"; `stop` is idempotent and reaps orphans.
+  first and, when the workspace is already open, **restarts the bridge slot in place** (to pick up a new
+  build/config and clear a wedged mesh reader) rather than re-launching the supervisor — the "no second
+  supervisor" invariant holds, and a bridge that fails to come back Ready fails loud rather than printing a
+  green "already open"; `stop` is idempotent and reaps orphans. The bridge is also restartable on demand via
+  `disco bridge restart` (the substrate slot's only lifecycle verb; start/stop are `disco start`/`disco stop`).
 - **Multi-home:** derive the PC REST port (default :8080) and broker port from `$CALFCORD_HOME`; **log
   rotation** on `state/logs/*` (pin a PC version that supports it).
 
