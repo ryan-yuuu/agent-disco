@@ -753,10 +753,44 @@ def test_run_dev_run_degrades_without_prompting_start(
     # Only the edit-prompt confirm is scripted; a 'Start now?' prompt here would
     # dequeue-empty and raise, proving the degrade path never prompts to start.
     prompter = FakePrompter(texts=["scribe", "d"], confirms=[False])
+
+    def _must_not_probe() -> str:
+        # A dev run must NOT probe the binary — it returns before that (probing would
+        # break import-light). This pins that structurally, mirroring init's dev test.
+        raise AssertionError("dev run must not probe the supervisor binary")
+
     rc = agent_create.run(
-        prompter, agents_dir=tmp_path / "agents", env_path=tmp_path / ".env", name="scribe", home=None
+        prompter,
+        agents_dir=tmp_path / "agents",
+        env_path=tmp_path / ".env",
+        name="scribe",
+        home=None,
+        pc_binary_fn=_must_not_probe,
     )
     assert rc == 0
     out = capsys.readouterr().out
     assert "Bring scribe online:" in out
     assert "disco start" in out
+    # Dev run stays silent — no install-defect banner (symmetry with init's dev test).
+    assert "can't be started automatically" not in out
+
+
+def test_run_missing_process_compose_binary_names_the_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A native install missing the process-compose binary degrades to the manual
+    next-steps and NAMES the actionable reason instead of swallowing it (mirrors init;
+    §12.6). Nothing is orchestrated and no 'Start now?' is prompted."""
+
+    class _MissingBinary(_FinishRecorder):
+        def pc_binary(self) -> str:
+            raise RuntimeError("process-compose binary not found; re-run the installer")
+
+    finish = _MissingBinary()
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert finish.calls == []  # nothing orchestrated — degraded before any orchestration seam ran
+    assert "can't be started automatically" in out  # the defect banner (anchors the dev test's "not in")
+    assert "process-compose binary not found; re-run the installer" in out

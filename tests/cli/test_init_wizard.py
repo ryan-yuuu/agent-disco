@@ -1136,16 +1136,8 @@ def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
     assert rc == 0
 
 
-def test_default_pc_binary_delegates_to_supervisor_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default process-compose probe delegates to the supervisor's resolver."""
-    from calfcord.supervisor import lifecycle
-
-    monkeypatch.setattr(lifecycle, "resolve_pc_binary", lambda: "/opt/pc")
-    assert init._default_pc_binary() == "/opt/pc"
-
-
 # --------------------------------------------------------------------------- #
-# Dev-mode degrade (no native install): configure, then print manual next steps
+# Degrade paths: dev run (silent) and native install with a missing binary (named reason)
 # --------------------------------------------------------------------------- #
 
 
@@ -1153,7 +1145,11 @@ def test_dev_mode_degrades_to_manual_next_steps(tmp_path: Path, capsys: pytest.C
     """With ``home=None`` (dev run, no install/shim) the wizard cannot orchestrate
     the supervisor, so it configures everything then prints the honest manual
     next-steps instead of starting the substrate (§12.6)."""
-    finish = _FinishStub()
+    # The binary probe must NEVER run on a dev run (it would break import-light — the
+    # real dev-run passes pc_binary_fn=None -> default_pc_binary imports the supervisor
+    # package). A probe that raises if called pins that structurally, so a refactor that
+    # hoisted the probe above the ``home is None`` check fails here.
+    finish = _FinishStub(pc_binary=AssertionError("dev run must not probe the supervisor binary"))
     # No say-hello confirm in dev mode (nothing was started to reply).
     p = _prompter()
     rc = _run(p, tmp_path, home=None, finish=finish)
@@ -1165,18 +1161,27 @@ def test_dev_mode_degrades_to_manual_next_steps(tmp_path: Path, capsys: pytest.C
     # The honest manual path is named.
     assert "disco start" in out
     assert "disco agent start scribe" in out
+    # A dev run is a benign, expected degrade — NOT an install defect — so it must stay
+    # silent: no "can't be started automatically" reason (that's for a missing binary).
+    assert "can't be started automatically" not in out
 
 
 def test_missing_process_compose_binary_degrades(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A native install missing the process-compose binary also degrades to the
-    manual next-steps rather than crashing (§12.6 honest-failure-path)."""
-    finish = _FinishStub(pc_binary=RuntimeError("process-compose binary not found"))
+    """A native install missing the process-compose binary degrades to the manual
+    next-steps rather than crashing (§12.6) — and NAMES the actionable reason instead
+    of swallowing it, so the operator learns why and how to fix it."""
+    finish = _FinishStub(pc_binary=RuntimeError("process-compose binary not found; re-run the installer"))
     p = _prompter()
     rc = _run(p, tmp_path, home=tmp_path, finish=finish)
     out = capsys.readouterr().out
     assert rc == 0
     assert finish.start_calls == []
     assert "disco start" in out
+    # The defect banner + the actionable reason are surfaced, not discarded. Asserting
+    # the banner phrase positively anchors it so the dev-run test's "not in out" (which
+    # pins the branch split) can't drift vacuous if the banner is ever reworded.
+    assert "can't be started automatically" in out
+    assert "process-compose binary not found; re-run the installer" in out
 
 
 def test_manual_finish_signposts_adding_a_teammate(

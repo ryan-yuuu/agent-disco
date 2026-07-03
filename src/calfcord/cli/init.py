@@ -65,7 +65,7 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from calfcord.cli import _envfile, discord_discovery, setup_state
+from calfcord.cli import _envfile, _supervisor, discord_discovery, setup_state
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli.agent_create import create_agent
 
@@ -674,9 +674,20 @@ def _run_finish(
     it is a level-triggered mesh read backed by a bounded poll, so it detects the agent
     whenever registration lands — before or after the watch opens.
     """
-    pc_binary_fn = pc_binary_fn or _default_pc_binary
+    pc_binary_fn = pc_binary_fn or _supervisor.default_pc_binary
 
-    if home is None or not _supervisor_available(pc_binary_fn):
+    # Two distinct degrades, not one path: a dev run (``home is None`` — no
+    # install-scoped supervisor by design) is benign and degrades silently; a native
+    # install whose supervisor binary won't resolve is a fixable DEFECT, so name the
+    # actionable reason rather than send the operator to `disco start` — which hits the
+    # same wall — without knowing why (§12.6, honest degrade).
+    if home is None:
+        _print_manual_finish(name)
+        return 0
+    reason = _supervisor.supervisor_unavailable_reason(pc_binary_fn)
+    if reason is not None:
+        print("Your agent is configured, but the workspace can't be started automatically. Fix this first:")
+        print(f"  {reason}")
         _print_manual_finish(name)
         return 0
 
@@ -842,28 +853,3 @@ def _print_manual_finish(name: str) -> None:
     print("Add more teammates any time: disco agent create <name>")
     # Agents do not auto-start with the substrate, so the reboot steer names both.
     print(f"({_REBOOT_NOTE} Re-run `disco start`, then `disco agent start --all`, after a reboot.)")
-
-
-def _supervisor_available(pc_binary_fn: Callable[[], str]) -> bool:
-    """Whether the process-compose binary the live finish needs is resolvable.
-
-    A missing binary is a degrade branch (§12.6), not a crash: ``resolve_pc_binary``
-    raises an actionable :class:`RuntimeError`, which we catch here to fall back to
-    the manual next-steps.
-    """
-    try:
-        pc_binary_fn()
-    except RuntimeError:
-        return False
-    return True
-
-
-def _default_pc_binary() -> str:
-    """Resolve the process-compose binary via the supervisor's own resolver.
-
-    Imported lazily so the dev-mode path (which degrades before this is called)
-    never pulls the supervisor package at import time (import-light invariant).
-    """
-    from calfcord.supervisor.lifecycle import resolve_pc_binary
-
-    return resolve_pc_binary()

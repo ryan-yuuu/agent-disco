@@ -49,6 +49,7 @@ from calfcord.cli._agents import (
 )
 from calfcord.cli._envfile import read_env
 from calfcord.cli._providers import configure_provider
+from calfcord.cli._supervisor import default_pc_binary, supervisor_unavailable_reason
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -380,8 +381,17 @@ def _finish_create(
     light; and the presence watcher is REUSED from ``init`` rather than duplicated)
     and runs the async :func:`_start_now`.
     """
-    pc_binary_fn = pc_binary_fn or _default_pc_binary
-    if home is None or not _supervisor_available(pc_binary_fn):
+    pc_binary_fn = pc_binary_fn or default_pc_binary
+    # Dev run (``home is None`` — no install-scoped supervisor by design) degrades
+    # silently; a native install whose supervisor binary won't resolve is a fixable
+    # DEFECT — name the actionable reason rather than swallow it (§12.6). Mirrors init.
+    if home is None:
+        _print_manual_next_steps(name, running=None)
+        return 0
+    reason = supervisor_unavailable_reason(pc_binary_fn)
+    if reason is not None:
+        print("Your agent is created, but the workspace can't be started automatically. Fix this first:")
+        print(f"  {reason}")
         _print_manual_next_steps(name, running=None)
         return 0
 
@@ -512,28 +522,3 @@ def _print_manual_next_steps(name: str, *, running: bool | None) -> None:
     if not running:
         print("    disco start")
     print(f"    disco agent start {name}")
-
-
-def _supervisor_available(pc_binary_fn: Callable[[], str]) -> bool:
-    """Whether the process-compose binary the live finish needs is resolvable.
-
-    A missing binary is a degrade branch (§12.6), not a crash: ``resolve_pc_binary``
-    raises an actionable :class:`RuntimeError`, which we catch to fall back to the
-    manual next-steps. Mirrors ``init._supervisor_available``.
-    """
-    try:
-        pc_binary_fn()
-    except RuntimeError:
-        return False
-    return True
-
-
-def _default_pc_binary() -> str:
-    """Resolve the process-compose binary via the supervisor's own resolver.
-
-    Imported lazily so the dev-mode path (which degrades before this is called)
-    never pulls the supervisor package at import time (import-light invariant).
-    """
-    from calfcord.supervisor.lifecycle import resolve_pc_binary
-
-    return resolve_pc_binary()
