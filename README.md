@@ -67,7 +67,7 @@
 | src/calfcord/health/heartbeat.py              |       37 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/health/refresher.py              |       28 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/mcp/agent\_select.py             |       15 |        0 |        6 |        0 |    100% |           |
-| src/calfcord/mcp/capability\_read.py          |       21 |        4 |        0 |        0 |     81% |     61-65 |
+| src/calfcord/mcp/capability\_read.py          |       22 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/mcp/config.py                    |      132 |        2 |       60 |        1 |     98% |  149, 207 |
 | src/calfcord/mcp/config\_write.py             |       44 |        1 |       14 |        0 |     98% |        82 |
 | src/calfcord/mcp/runner.py                    |       39 |       13 |        2 |        1 |     66% |68-79, 83-92, 96 |
@@ -91,7 +91,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7666** |  **532** | **2052** |  **102** | **93%** |           |
+| **TOTAL**                                     | **7667** |  **528** | **2052** |  **102** | **93%** |           |
 
 
 ## Setup coverage badge
