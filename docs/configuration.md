@@ -18,14 +18,14 @@ starting point.
 ## Discord
 
 These come from the [Discord setup walkthrough](./discord-setup.md) (~5 min). You
-only need the **token + application id** by hand — `disco init` discovers your
-server for you (and checks the bot can actually post there), so `DISCORD_GUILD_ID`
-below is normally written for you, not copied from Discord.
+only need the **token** by hand — `disco init` discovers your server for you (and
+checks the bot can actually post there), so `DISCORD_GUILD_ID` below is normally
+written for you, not copied from Discord.
 
 | Variable | Required | Description |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | **yes** (all deployments) | Bot token from the Developer Portal → your app → Bot tab → *Reset Token*. Treat as a secret; never commit `.env`. |
-| `DISCORD_APPLICATION_ID` | **yes** (all deployments) | Numeric application ID from *General Information*. |
+| `DISCORD_APPLICATION_ID` | **yes** (all deployments) | Numeric application ID. `disco init` derives it from your bot token and writes it — set it by hand (from *General Information*) only when not using the wizard. |
 | `DISCORD_GUILD_ID` | recommended | Server ID for guild-scoped slash-command sync (instant; blank = global sync, ~1 h propagation). `disco init` auto-discovers it — set it by hand only when not using the wizard. |
 | `DISCORD_OWNER_USER_ID` | optional | Your numeric user ID. Tags inbound messages from the owner and unlocks owner-only commands (`/clear`, `/thinking-effort`). |
 

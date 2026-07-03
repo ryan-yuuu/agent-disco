@@ -132,10 +132,18 @@ class DiscordJoinTimeoutError(DiscordDiscoveryError):
 
 @dataclass(frozen=True)
 class BotIdentity:
-    """The bot user behind a token — enough to echo "Connected as <username> (id …)"."""
+    """The bot behind a token: its user identity plus the owning application id.
+
+    All three come from a single ``GET /applications/@me`` call. ``id``/``username`` are the bot
+    USER's (from the payload's partial ``bot`` object) — enough to echo "Connected as <username>" and
+    to key the member-specific channel overwrite. ``application_id`` is the application's own id (the
+    payload's top-level ``id``), used as the invite ``client_id`` and persisted as
+    ``DISCORD_APPLICATION_ID`` so the operator no longer has to paste it by hand.
+    """
 
     id: str
     username: str
+    application_id: str
 
 
 @dataclass(frozen=True)
@@ -241,16 +249,28 @@ def verify_bot_identity(
     *,
     client_factory: Callable[[], httpx.Client] | None = None,
 ) -> BotIdentity:
-    """Validate the token by calling ``GET /users/@me`` and return the bot's id + username.
+    """Validate the token via ``GET /applications/@me`` and return the bot identity + application id.
+
+    One authenticated call yields both the bot user (the payload's partial ``bot`` object) and the
+    owning application id (its top-level ``id``), so the wizard derives ``DISCORD_APPLICATION_ID``
+    from the token rather than prompting for it. Falls back to the top-level id / app name if the
+    ``bot`` object is absent (defensive — it is always present for a bot token).
 
     Raises :class:`DiscordAuthError` if the token is rejected, :class:`DiscordRateLimitedError` on 429,
     :class:`DiscordUnavailableError` if Discord can't be reached or the body is unusable. The token is
     never echoed in any of these (the wizard prints "Connected as <username>" using the return).
     """
-    body = _get("/users/@me", token, client_factory=client_factory)
+    body = _get("/applications/@me", token, client_factory=client_factory)
     if not isinstance(body, dict):
         raise DiscordUnavailableError("unreadable identity from Discord")
-    return BotIdentity(id=str(body.get("id", "")), username=str(body.get("username", "?")))
+    application_id = str(body.get("id", ""))
+    bot = body.get("bot")
+    bot = bot if isinstance(bot, dict) else {}
+    return BotIdentity(
+        id=str(bot.get("id") or application_id),
+        username=str(bot.get("username") or body.get("name") or "?"),
+        application_id=application_id,
+    )
 
 
 # --- (b) invite URL + intents reminder --------------------------------------------------------
@@ -391,7 +411,7 @@ def list_postable_channels(
     guild_id = str(guild_id)
 
     # The bot's user id — needed to apply the member-specific channel overwrite (the highest-
-    # precedence overwrite), and it's the cheapest call that also re-validates the token.
+    # precedence overwrite). verify_bot_identity re-validates the token in the same call.
     bot_user_id = verify_bot_identity(token, client_factory=client_factory).id
 
     # Base (guild-level) permissions + owner flag come from the partial guild object; this is
