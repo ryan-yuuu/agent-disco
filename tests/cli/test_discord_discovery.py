@@ -108,6 +108,23 @@ def test_verify_bot_identity_non_dict_body_raises_unavailable():
         dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
 
 
+def test_verify_bot_identity_raises_when_top_level_id_missing():
+    # A 200 dict lacking the top-level application id is as unusable as a non-dict body — the whole
+    # feature derives the app id from that field, so fabricating an empty identity (which then lies
+    # "Connected as ?" and mis-degrades as "Discord unreachable") is wrong; it must raise.
+    handler = _route({"/api/v10/applications/@me": httpx.Response(200, json={"name": "NoId"})})
+    with pytest.raises(dd.DiscordUnavailableError):
+        dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
+
+
+def test_verify_bot_identity_raises_when_id_is_null():
+    # ``"id": null`` must NOT stringify to the truthy "None" and slip through as a poisoned app id
+    # (which would defeat the caller's no-clobber guard and write DISCORD_APPLICATION_ID=None).
+    handler = _route({"/api/v10/applications/@me": httpx.Response(200, json={"id": None, "name": "X"})})
+    with pytest.raises(dd.DiscordUnavailableError):
+        dd.verify_bot_identity(TOKEN, client_factory=_factory(handler))
+
+
 def test_verify_bot_identity_sends_token_only_in_header():
     seen: list[httpx.Request] = []
 

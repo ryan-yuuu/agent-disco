@@ -421,12 +421,13 @@ def _run_discord(
         print("  no Discord token set — skipping discovery; re-run init to finish Discord.")
         return checkpoint, None
     if not app_id:
-        # The application id is DERIVED from the token's /applications/@me call, so a transient
-        # verify failure with nothing cached on disk leaves no id to build the invite from. Degrade
-        # honestly rather than emit a broken link — a re-run once Discord is reachable finishes it.
+        # The application id is DERIVED from the token's /applications/@me call, so a transient verify
+        # failure (unreachable / rate-limited / unreadable) — or a freshly pasted token whose
+        # application couldn't be confirmed — leaves no id to build the invite from. Degrade honestly
+        # rather than emit a broken link; a re-run once Discord is reachable finishes it.
         print(
-            "  couldn't determine the application id (Discord was unreachable) — "
-            "re-run `disco init` to finish Discord."
+            "  couldn't determine the application id from the token — "
+            "re-run `disco init` once Discord is reachable."
         )
         return checkpoint, None
 
@@ -483,17 +484,18 @@ def _capture_token(
 ) -> tuple[str, str]:
     """Prompt for the bot token (keep-existing-on-empty), verify it, and DERIVE the application id.
 
-    Returns ``(token, application_id)``. Both come from the single ``verify_identity_fn`` call
-    (``GET /applications/@me``), which validates the token *and* yields the owning application id — so
-    the operator never pastes the id by hand (§4.5). On a successful verify the token (fresh paste
-    only, keep-on-empty otherwise) and ``DISCORD_APPLICATION_ID`` (always, so a re-run self-heals a
-    stale cached id) are persisted.
+    Returns ``(token, application_id)``. The token comes from the prompt (freshly pasted or kept); the
+    application id comes from the same single ``verify_identity_fn`` call (``GET /applications/@me``)
+    that validates the token — so the operator never pastes the id by hand (§4.5). On a successful
+    verify the token (fresh paste only, keep-on-empty otherwise) and ``DISCORD_APPLICATION_ID``
+    (always, so a re-run self-heals a stale cached id) are persisted.
 
     A rejected token is fatal for *that* value, so we re-prompt for a fresh one (re-prompting the same
     token would be pointless, §12.6); a transient Discord error is surfaced but the token is still
     accepted so the rest of init can proceed (the bridge re-validates at boot anyway). On that
-    transient path the id can't be derived, so we fall back to any ``DISCORD_APPLICATION_ID`` already
-    on disk — empty if none, which the caller degrades on rather than emit a broken invite link.
+    transient path the id can't be derived, so we fall back to the cached ``DISCORD_APPLICATION_ID``
+    ONLY when the token is unchanged — a freshly pasted, *different* token may belong to a different
+    application, so we return no id and let the caller degrade rather than invite the wrong bot.
     """
     existing = current.get("DISCORD_BOT_TOKEN", "")
     cached_app_id = current.get("DISCORD_APPLICATION_ID", "")
@@ -512,20 +514,23 @@ def _capture_token(
             continue
         except discord_discovery.DiscordDiscoveryError as e:
             # Couldn't reach Discord / rate-limited: don't block setup on a blip. The app id can't be
-            # derived here, so fall back to whatever is already on disk (empty -> caller degrades).
+            # derived here, so fall back to the cached DISCORD_APPLICATION_ID — but ONLY when the token
+            # is unchanged. A freshly pasted, DIFFERENT token may belong to a different application, and
+            # an invite built from the old app's cached id would add the WRONG bot; return "" so the
+            # caller degrades honestly instead.
             print(f"  could not verify token right now ({e}); continuing — the bridge will re-check.")
             if pasted:
                 _envfile.upsert(env_path, {"DISCORD_BOT_TOKEN": pasted})
-            return token, cached_app_id
+            return token, (cached_app_id if token == existing else "")
         print(f"  Connected as {identity.username} (id {identity.id}).")
-        # Persist the derived app id on every successful verify (self-heals a stale cached value);
-        # persist the token only when freshly pasted (an empty answer keeps the existing one). An
-        # empty derived id keeps the cached value rather than clobbering it; upsert no-ops on {}.
-        updates = {"DISCORD_APPLICATION_ID": identity.application_id} if identity.application_id else {}
+        # A successful verify always yields the app id (verify_bot_identity raises otherwise), so
+        # persist it unconditionally — self-healing a stale cached value — and the token only when
+        # freshly pasted (an empty answer keeps the existing one).
+        updates = {"DISCORD_APPLICATION_ID": identity.application_id}
         if pasted:
             updates["DISCORD_BOT_TOKEN"] = pasted
         _envfile.upsert(env_path, updates)
-        return token, identity.application_id or cached_app_id
+        return token, identity.application_id
 
 
 def _pick_guild(prompter: Prompter, guilds: list[Guild], *, default: str | None) -> str | None:

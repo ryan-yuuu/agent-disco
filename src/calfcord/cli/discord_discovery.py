@@ -253,17 +253,26 @@ def verify_bot_identity(
 
     One authenticated call yields both the bot user (the payload's partial ``bot`` object) and the
     owning application id (its top-level ``id``), so the wizard derives ``DISCORD_APPLICATION_ID``
-    from the token rather than prompting for it. Falls back to the top-level id / app name if the
-    ``bot`` object is absent (defensive — it is always present for a bot token).
+    from the token rather than prompting for it. Falls back per-field to the top-level id / app name
+    when the ``bot`` object is missing or partial (present in practice for bot tokens, but optional in
+    Discord's application-object schema — hence the fallback).
 
     Raises :class:`DiscordAuthError` if the token is rejected, :class:`DiscordRateLimitedError` on 429,
-    :class:`DiscordUnavailableError` if Discord can't be reached or the body is unusable. The token is
-    never echoed in any of these (the wizard prints "Connected as <username>" using the return).
+    :class:`DiscordUnavailableError` if Discord can't be reached OR the body is unusable — including a
+    2xx whose payload lacks a usable top-level ``id`` (empty / ``null``), which is as useless as a
+    non-dict body. The token is never echoed in any of these (the wizard prints "Connected as
+    <username>" using the return).
     """
     body = _get("/applications/@me", token, client_factory=client_factory)
     if not isinstance(body, dict):
         raise DiscordUnavailableError("unreadable identity from Discord")
-    application_id = str(body.get("id", ""))
+    # ``or ""`` BEFORE str() so a ``null`` id can't stringify to the truthy "None" and slip through as
+    # a poisoned app id. A 2xx that lacks a usable id is as unusable as a non-dict body — the whole
+    # feature derives the app id from this field — so raise rather than fabricate an empty identity
+    # that would lie "Connected as ?" and mis-degrade as "Discord unreachable" downstream.
+    application_id = str(body.get("id") or "")
+    if not application_id:
+        raise DiscordUnavailableError("unreadable identity from Discord")
     bot = body.get("bot")
     bot = bot if isinstance(bot, dict) else {}
     return BotIdentity(

@@ -572,8 +572,12 @@ def test_bad_token_reprompts_for_a_new_token(tmp_path: Path, capsys: pytest.Capt
     p = _prompter(extra_secrets=["tok-good"])
     assert _run(p, tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
-    assert "rejected" in out.lower() or "token" in out.lower()
+    assert "rejected" in out.lower()  # the specific rejection notice, not just any "token" mention
     assert calls["n"] == 2
+    # After the successful re-verify, both the fresh token and its derived app id are persisted.
+    env = read_env(tmp_path / ".env")
+    assert env["DISCORD_BOT_TOKEN"] == "tok-good"
+    assert env["DISCORD_APPLICATION_ID"] == "app-1"
 
 
 def test_join_timeout_surfaces_common_causes_and_no_server_hint(
@@ -640,28 +644,42 @@ def test_transient_token_verify_error_without_app_id_degrades(
     assert "could not verify token" in out
     assert "application id" in out.lower()  # the honest "couldn't determine the app id" degrade
     assert discord.poll_calls == 0  # degraded before polling for the join
+    assert "client_id=" not in out  # degrade honestly — never emit a broken/half-built invite link
     # The token was still persisted despite the verify blip (a re-run finishes Discord).
     assert read_env(tmp_path / ".env")["DISCORD_BOT_TOKEN"] == "tok-abc"
 
 
-def test_transient_token_verify_error_with_cached_app_id_still_invites(
+def test_transient_verify_with_freshly_pasted_token_ignores_stale_cache_and_degrades(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """On a re-run, a transient verify error falls back to the ``DISCORD_APPLICATION_ID`` already
-    on disk — so the invite link is still built and the join poll proceeds (the cached id makes the
-    derivation failure non-fatal)."""
+    """The cached ``DISCORD_APPLICATION_ID`` must be trusted on a transient verify blip ONLY when the
+    token is unchanged. If the operator pastes a NEW, different token (e.g. rotating to a different
+    bot/application) and verify transiently fails, the cache belongs to the OLD application — building
+    an invite from it would add the WRONG bot while the poll watches the new token's guilds. So the
+    wizard must ignore the stale cache and degrade honestly, not emit a wrong-app invite."""
     env_path = tmp_path / ".env"
-    upsert(env_path, {"DISCORD_APPLICATION_ID": "cached-99"})
+    # A prior install for application A (its token + app id on disk).
+    upsert(env_path, {"DISCORD_BOT_TOKEN": "tok-A", "DISCORD_APPLICATION_ID": "appA"})
     discord = _DiscordStub()
     discord.verify = lambda token, **_: (_ for _ in ()).throw(  # type: ignore[assignment]
         discord_discovery.DiscordUnavailableError("could not reach Discord (/applications/@me)")
     )
-    rc = _run(_prompter(), tmp_path, env_path=env_path, home=tmp_path, discord=discord)
+    # Paste a DIFFERENT token (bot B) while Discord is transiently down.
+    p = FakePrompter(
+        selects=["native"],  # degraded before the guild pick
+        texts=["scribe", "d"],
+        secrets=["tok-B"],
+        confirms=[True],
+    )
+    rc = _run(p, tmp_path, env_path=env_path, home=tmp_path, discord=discord)
     out = capsys.readouterr().out
     assert rc == 0
     assert "could not verify token" in out
-    assert "client_id=cached-99" in out  # invite built from the cached id
-    assert discord.poll_calls == 1  # discovery proceeded to the join poll
+    assert "client_id=appA" not in out  # never invite application A with application B's token
+    assert "client_id=" not in out  # in fact, no invite at all — degrade honestly
+    assert discord.poll_calls == 0
+    # The freshly pasted token is still saved (a re-run once Discord is up finishes Discord).
+    assert read_env(env_path)["DISCORD_BOT_TOKEN"] == "tok-B"
 
 
 def test_transient_verify_on_kept_token_preserves_token_and_cached_app_id(
@@ -806,6 +824,20 @@ def test_application_id_rederived_overwrites_stale_cached_value(tmp_path: Path) 
     discord = _DiscordStub(identity=BotIdentity(id="bot", username="Bot", application_id="fresh-778899"))
     assert _run(_prompter(), tmp_path, env_path=env_path, home=tmp_path, discord=discord) == 0
     assert read_env(env_path)["DISCORD_APPLICATION_ID"] == "fresh-778899"
+
+
+def test_application_id_self_heals_on_kept_token_rerun(tmp_path: Path) -> None:
+    """The self-heal must fire even when the token is KEPT (empty paste) — the most common re-run
+    flow (hit Enter to keep the token). A successful re-verify re-derives the app id and persists it
+    over the stale cached value, WITHOUT clobbering the kept token. Guards against moving the app-id
+    upsert inside the ``if pasted:`` block, which would silently skip the heal on the keep path."""
+    env_path = tmp_path / ".env"
+    upsert(env_path, {"DISCORD_BOT_TOKEN": "tok-keep", "DISCORD_APPLICATION_ID": "stale-app"})
+    discord = _DiscordStub(identity=BotIdentity(id="bot", username="Bot", application_id="fresh-app"))
+    assert _run(_prompter(discord_token=""), tmp_path, env_path=env_path, home=tmp_path, discord=discord) == 0
+    env = read_env(env_path)
+    assert env["DISCORD_APPLICATION_ID"] == "fresh-app"  # healed on the keep path
+    assert env["DISCORD_BOT_TOKEN"] == "tok-keep"  # kept token not clobbered
 
 
 def test_no_token_skips_discovery(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
