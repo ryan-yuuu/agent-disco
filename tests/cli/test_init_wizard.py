@@ -984,7 +984,7 @@ class _NestedLoopPrompter(FakePrompter):
     """
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
-        answer = FakePrompter.confirm(self, message, default=default)
+        answer = super().confirm(message, default=default)
 
         async def _drive_own_loop() -> bool:
             return answer
@@ -1004,6 +1004,7 @@ def test_live_finish_prompt_runs_outside_event_loop(tmp_path: Path) -> None:
     p = _prompter(name="scribe", cls=_NestedLoopPrompter)
     assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
     assert len(finish.reply_calls) == 1  # the flow reached the presence watch
+    assert not p._confirms  # the confirm was actually invoked (guards against a vacuous pass)
 
 
 def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> None:
@@ -1011,11 +1012,11 @@ def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> 
     watcher runs — the two no longer overlap.
 
     This ordering is safe because ``_wait_for_agent_online`` reads the *current* mesh
-    (a compacted-topic ktable via ``get_agents()``), not a ``latest``-offset tail: the
-    agent registered at ``agent_start`` — before the prompt — so a level-triggered
-    read detects it whenever the watcher opens, with no lost-registration race. The
-    shared ``events`` log records the order: ``prompted`` must precede
-    ``watcher_started``."""
+    (a compacted-topic ktable via ``get_agents()``) backed by a bounded poll, not a
+    ``latest``-offset tail: it detects the agent whenever registration lands — before
+    or after the watcher opens — with no lost-registration race (``agent_start`` only
+    spawns the process; registration completes asynchronously). The shared ``events``
+    log records the order: ``prompted`` must precede ``watcher_started``."""
     events: list[str] = []
     finish = _FinishStub(reply=True, events=events)
     p = _prompter(name="scribe", say_hello=True)
@@ -1024,17 +1025,31 @@ def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> 
     assert events == ["prompted", "watcher_started"]
 
 
+def test_epilogue_celebrates_when_postability_undetermined(capsys: pytest.CaptureFixture[str]) -> None:
+    """A detected agent whose postability is UNKNOWN (``postable is None`` — the
+    preflight couldn't determine it, e.g. a channel-list error) still gets the 🎉: an
+    unobserved "can't post" must not be asserted (§12.6). Guards the ``postable is
+    False`` check against being loosened to ``not postable`` — which would wrongly
+    downgrade every run where postability was merely undetermined."""
+    init._print_finish_epilogue("scribe", detected=True, postable=None)
+    out = capsys.readouterr().out
+    assert "🎉" in out
+    assert "can't post in any Discord channel" not in out
+
+
 def test_substrate_start_failure_does_not_start_agent_or_watch(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """If the substrate fails its readiness gate, the wizard stops there — it does
     not clock the agent in against a substrate that never came up."""
     finish = _FinishStub(start_rc=1)
-    rc = _run(_prompter(), tmp_path, home=tmp_path, finish=finish)
+    p = _prompter()
+    rc = _run(p, tmp_path, home=tmp_path, finish=finish)
     assert rc != 0
     assert len(finish.start_calls) == 1
     assert len(finish.agent_calls) == 0
     assert len(finish.reply_calls) == 0
+    assert p._confirms  # the hello prompt is suppressed — never nudge into a dead workspace
 
 
 def test_substrate_start_failure_points_at_logs_and_doctor(
@@ -1052,11 +1067,13 @@ def test_substrate_start_failure_points_at_logs_and_doctor(
 
 def test_agent_start_failure_skips_reply_watch(tmp_path: Path) -> None:
     finish = _FinishStub(agent_rc=1)
-    rc = _run(_prompter(), tmp_path, home=tmp_path, finish=finish)
+    p = _prompter()
+    rc = _run(p, tmp_path, home=tmp_path, finish=finish)
     assert rc != 0
     assert len(finish.start_calls) == 1
     assert len(finish.agent_calls) == 1
     assert len(finish.reply_calls) == 0
+    assert p._confirms  # the hello prompt is suppressed — never nudge toward an agent that failed to start
 
 
 def test_live_finish_resolves_real_orchestration_when_seams_not_injected(

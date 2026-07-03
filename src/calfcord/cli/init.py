@@ -114,9 +114,13 @@ async def _wait_for_agent_online(
     treated as "not online yet" and retried until ``timeout_s`` elapses, at which
     point the caller downgrades a ``False`` to the honest fallback. The mesh view is
     a compacted-topic (ktable) reader — a *level-triggered* read of who is currently
-    online — so it detects the agent (registered back at ``agent_start``) no matter
-    when this opens, with no lost-registration race. That is why the caller can run
-    this AFTER the human prompt rather than concurrently with it.
+    online. ``agent_start`` only confirms the agent's process spawned; registration on
+    the mesh completes asynchronously afterward (it may land after this opens), so the
+    safety here is two-part: the read catches a registration that already landed, and
+    the bounded poll (up to ``timeout_s``) catches one still in flight. Either way
+    there is no lost-registration race — which is why the caller can run this AFTER the
+    human prompt rather than concurrently with it. (Don't drop the poll for a single
+    snapshot: a slow-booting agent would then be missed.)
     """
     from calfkit import MeshViewConfig
     from calfkit.client import Client
@@ -137,7 +141,10 @@ async def _wait_for_agent_online(
                 return False
             await asyncio.sleep(_ONLINE_POLL_INTERVAL_S)
     finally:
-        await client.aclose()
+        # A close that raises must not turn a confirmed ``True`` into the exception the
+        # caller degrades to ``False`` — a cleanup hiccup is not a presence failure.
+        with contextlib.suppress(Exception):
+            await client.aclose()
 
 
 # The reboot-non-survival fact, stated honestly (§12.6: the daemon is
@@ -637,7 +644,7 @@ def _run_finish(
     first_reply_fn: Callable[..., Awaitable[bool]] | None,
     pc_binary_fn: Callable[[], str] | None,
 ) -> int:
-    """The ends-live finish (§4.6 / §12.6): start substrate → agent → watch reply.
+    """The ends-live finish (§4.6 / §12.6): start substrate → agent → prompt hello → confirm presence.
 
     Only possible on a **native install** (the supervisor is install-scoped — its
     lock, derived REST port, generated YAML, logs, and shim launcher all live
@@ -662,9 +669,10 @@ def _run_finish(
     drives its OWN event loop (``Application.run()`` → ``asyncio.run()``) — so it must
     never run inside a loop of ours. Keeping it BETWEEN two independent
     ``asyncio.run`` calls (rather than awaited inside one) makes the nested-loop crash
-    impossible by construction. The ordering is safe because presence detection is a
-    level-triggered mesh read: the agent registered at ``agent_start``, so the watcher
-    detects it whether it opens before or after the human posts.
+    impossible by construction. Running the presence watch AFTER the prompt (rather
+    than concurrently) is safe for the reason :func:`_wait_for_agent_online` documents:
+    it is a level-triggered mesh read backed by a bounded poll, so it detects the agent
+    whenever registration lands — before or after the watch opens.
     """
     pc_binary_fn = pc_binary_fn or _default_pc_binary
 
@@ -762,12 +770,16 @@ async def _await_presence(
     transient connect blip mid-watch could raise out of it. Degrade any such failure
     to ``False`` — the same bounded "org is live — try it yourself / run ``doctor``"
     fallback a clean timeout takes — rather than crash the wizard after the org came
-    up. ``except Exception`` (not bare) deliberately lets ``asyncio.CancelledError``
+    up. But don't do it silently: a clean timeout and a permanently broken detector
+    (a calfkit import/signature drift, a malformed ``server_urls``) both degrade here,
+    so name the cause rather than let a hard failure masquerade as a slow agent.
+    ``except Exception`` (not bare) deliberately lets ``asyncio.CancelledError``
     propagate: the failure is in detection, not in the (already-live) org.
     """
     try:
         return await first_reply_fn(server_urls, agent_id=name, timeout_s=_FIRST_REPLY_TIMEOUT_S)
-    except Exception:
+    except Exception as exc:
+        print(f"  (couldn't confirm {name} came online: {exc!r})")
         return False
 
 
@@ -776,8 +788,8 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None) 
 
     Both the celebrate and the presence-timeout degrade converge here, so the
     "add a teammate" signpost (and where to learn more) shows on either. ``postable``
-    is the Phase-2 preflight verdict (``False`` == the bot can post in no channel):
-    even when the agent is seen online, a ``False`` downgrades the 🎉 to an honest
+    is the Discord-step postability preflight verdict (``False`` == the bot can post in
+    no channel): even when the agent is seen online, a ``False`` downgrades the 🎉 to an honest
     "online but can't post yet" so onboarding never ends on a green light that lies
     (§12.6); ``None`` (unknown) still celebrates — we can't assert a failure we didn't
     observe.
