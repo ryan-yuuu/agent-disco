@@ -34,7 +34,7 @@ running underneath.
   Each server in `mcp.json` becomes its own process (slot `mcp-<server>`) that
   connects to that external
   [Model Context Protocol](https://modelcontextprotocol.io) server, lists its
-  tools, and advertises them on the compacted `mcp.capabilities` topic. One
+  tools, and advertises them on the compacted `calf.capabilities` topic. One
   process per server is deliberate: a toolbox whose server is unreachable fails
   its own worker at boot, so one bad entry can't take down sibling servers.
   Agents pick the tools up from the advertisement, never the config — see
@@ -93,7 +93,7 @@ pattern, and broker auth/TLS), see
 boundary the table above shows: **only the `mcp-<server>` processes read
 `mcp.json`** (the commands, URLs, and credentials). Each toolbox advertises its
 tools — names, JSON schemas, and a dispatch topic — onto the compacted
-`mcp.capabilities` control-plane topic. Agents resolve their `mcp/...`
+`calf.capabilities` control-plane topic. Agents resolve their `mcp/...`
 selectors against that capability view **per turn**, never against the config
 file, so:
 

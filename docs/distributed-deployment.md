@@ -390,7 +390,7 @@ same broker.
 
 MCP servers split cleanly because of their **secrets boundary**: only the
 `mcp-<server>` processes read `mcp.json` and hold the credentials. Agents
-resolve their `mcp/...` selectors from the broker's `mcp.capabilities` view, so
+resolve their `mcp/...` selectors from the broker's `calf.capabilities` view, so
 an agent host needs **no `mcp.json` and no MCP secrets** — just the selector
 string in the agent's `.md`. A common shape is one host that owns all the MCP
 servers (and their tokens) and agents anywhere else.
@@ -406,7 +406,7 @@ disco mcp start github                       # spawns as its own detached proces
 ```
 
 Set `GITHUB_TOKEN` in *this* host's `config/.env` only. The toolbox advertises
-the github server's tools onto `mcp.capabilities`, reachable org-wide.
+the github server's tools onto `calf.capabilities`, reachable org-wide.
 
 **Agent host** — no `mcp.json`, no `GITHUB_TOKEN`:
 
