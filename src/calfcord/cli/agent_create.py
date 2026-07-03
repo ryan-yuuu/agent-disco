@@ -179,6 +179,7 @@ def create_agent(
     prune_seed: bool = False,
     offer_prompt: bool = True,
     require_name: bool = False,
+    live_tools_fn: Callable[[], dict[str, list[str]]] | None = None,
 ) -> CreatedAgent:
     """Run the shared create flow and return the created agent's ``name`` + ``provider``.
 
@@ -205,7 +206,11 @@ def create_agent(
        choice; ``current_model`` pre-selects an existing agent's model on a
        re-run.
     4. **Tools.** The pre-checked builtin-tool checkbox via
-       :func:`~calfcord.cli._agents.pick_tools`.
+       :func:`~calfcord.cli._agents.pick_tools`. ``live_tools_fn`` is passed
+       through to it: standalone ``agent create`` leaves it ``None`` (probe the
+       broker's capability view for live ``mcp/<server>/<tool>`` rows), while
+       ``init`` injects a no-op so first-run setup never dials a broker it has
+       not chosen yet (the live rows come later via ``disco agent tools``).
     5. **Write.** :func:`~calfcord.cli._agents.write_agent` (validate before
        write; ``prune_seed`` only when the caller opted in).
     6. **Optional prompt edit.** When ``offer_prompt`` and the operator
@@ -249,7 +254,7 @@ def create_agent(
     )
 
     # 4. Tools.
-    tools = pick_tools(prompter, name)
+    tools = pick_tools(prompter, name, live_tools_fn=live_tools_fn)
 
     # 5. Write (validate-before-write; prune only when the caller opted in).
     md_path = write_agent(

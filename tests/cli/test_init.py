@@ -189,6 +189,26 @@ def test_blank_description_uses_default(tmp_path: Path) -> None:
 # --- tools checkbox ---------------------------------------------------------
 
 
+def test_init_does_not_probe_broker_for_live_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """During ``init`` the tools step must NOT open the live capability view:
+    the broker isn't chosen/running yet, so a probe would dial the wrong (or a
+    stale) broker. The live ``mcp/<server>/<tool>`` rows are deferred to
+    ``disco agent tools`` post-setup."""
+    from calfcord.mcp import capability_read
+
+    calls: list[object] = []
+
+    def _spy(*a: object, **k: object) -> dict[str, list[str]]:
+        calls.append((a, k))
+        return {}
+
+    monkeypatch.setattr(capability_read, "snapshot_capability_tools", _spy)
+
+    prompter = _fresh_run_prompter(name="scribe", description="d")
+    assert _run(prompter, tmp_path, agents_dir=tmp_path / "agents") == 0
+    assert calls == []
+
+
 def test_tools_checkbox_offers_all_builtins_prechecked(tmp_path: Path) -> None:
     from calfcord.tools import TOOL_REGISTRY
 

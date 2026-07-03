@@ -294,6 +294,14 @@ def run(
             name_default=checkpoint.agent_name if resuming else None,
             prune_seed=True,
             offer_prompt=False,
+            # Suppress the live-capability probe during setup: the broker phase
+            # (§3) hasn't run yet, so a probe would dial the default/stale broker
+            # — one the operator hasn't chosen — and could hang on a leftover
+            # local broker. The tools editor still offers server-level
+            # ``mcp/<server>`` rows from mcp.json (no broker); the live per-tool
+            # rows come later via ``disco agent tools``, against the broker the
+            # install actually configured.
+            live_tools_fn=lambda: {},
         )
     except (ValueError, OSError) as e:
         print(f"error: could not create agent: {e}")
