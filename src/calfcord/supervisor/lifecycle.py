@@ -372,6 +372,17 @@ def _bridge_is_ready(state: object) -> bool:
     return isinstance(state, dict) and state.get("is_ready") == "Ready"
 
 
+def _process_pid(state: object) -> int | None:
+    """The OS pid Process Compose reports for a process, or ``None`` if absent/malformed.
+
+    Used by the in-place restart gate to tell the NEW bridge instance apart from the
+    pre-restart one (a restart always yields a fresh pid): see :func:`_await_bridge_ready`.
+    """
+    if isinstance(state, dict) and isinstance(state.get("pid"), int):
+        return state["pid"]
+    return None
+
+
 async def _await_supervisor_up(
     client: ProcessComposeClient, *, clock: Clock, sleep: Sleep
 ) -> bool:
@@ -391,12 +402,22 @@ async def _await_bridge_ready(
     timeout_s: float,
     clock: Clock,
     sleep: Sleep,
+    restarted_from_pid: int | None = None,
 ) -> bool:
     """Poll the bridge until it is ready, bounded by ``timeout_s`` (§13.3).
 
     A transport error mid-poll (the supervisor restarting the bridge under
     ``restart: always``) is treated as "not ready yet", not a fatal error, so a
     transient bounce does not abort the gate before the budget is spent.
+
+    ``restarted_from_pid`` gates the in-place restart path (:func:`_restart_bridge_to_ready`):
+    when set, ``Ready`` is accepted only once the reported pid DIFFERS from it, so a
+    poll that races Process Compose cannot latch the pre-restart instance's stale
+    ``Ready`` and lie (§12.6 — the bridge is ``Ready`` right up until it bounces, and
+    its heartbeat-freshness probe can keep reading ``Ready`` off the old beat for a
+    beat). The cold-start path leaves it ``None`` — there is no prior instance, and
+    the bridge begins not-``Ready`` there anyway. A restarted bridge that never
+    reports a pid degrades to the plain readiness gate rather than hanging.
     """
     deadline = clock() + timeout_s
     while True:
@@ -404,41 +425,68 @@ async def _await_bridge_ready(
             state = await client.get_process("bridge")
         except RuntimeError:
             state = None
-        if _bridge_is_ready(state):
+        if _bridge_is_ready(state) and (restarted_from_pid is None or _process_pid(state) != restarted_from_pid):
             return True
         if clock() >= deadline:
             return False
         await sleep(_READINESS_POLL_INTERVAL_SECONDS)
 
 
-async def _restart_bridge_process(
+async def _restart_bridge_to_ready(
     client: ProcessComposeClient,
+    home: str,
     *,
     ready_timeout_s: float,
     clock: Clock,
     sleep: Sleep,
-) -> bool:
-    """Restart the bridge slot in place and gate on readiness (the shared seam).
+) -> str | None:
+    """Restart the bridge slot in place and wait until the NEW instance is Ready.
 
-    Restarts ONLY the ``bridge`` process inside the already-running supervisor —
-    never relaunches the supervisor, so the §12.4 "no second supervisor"
-    invariant holds for both callers (``disco bridge restart`` and ``start``'s
-    already-open path). Returns ``True`` once the bridge is Ready again; ``False``
-    if the restart REST call fails (a raised :class:`ProcessComposeError`, a
-    ``RuntimeError``) or readiness is not reached within ``ready_timeout_s`` —
-    honest fail-fast, so the caller must not report success on ``False``.
+    The shared seam behind ``disco bridge restart`` and ``start``'s already-open
+    path. Restarts ONLY the ``bridge`` process inside the running supervisor —
+    never relaunches the supervisor, so the §12.4 "no second supervisor" invariant
+    holds for both callers.
 
-    The caller owns the lifecycle lock (``start`` holds it across its whole body;
-    the ``restart_bridge`` verb takes it): this must NOT re-acquire it — the
-    ``flock`` is non-reentrant and a second acquire would deadlock/refuse.
+    Returns ``None`` on success (the restarted bridge reached Ready). On failure it
+    returns a ready-to-print operator message; the caller prints ``error: <msg>``
+    and returns non-zero. §12.6 honest fail-fast: the caller must NOT report success
+    on a non-``None`` return. Two failure modes are distinguished because they need
+    different guidance:
+
+    * the restart REST call itself failed (the bridge never bounced) — surface the
+      :class:`ProcessComposeError` (its HTTP status + Process Compose's reason), the
+      way ``stop`` echoes its teardown error, instead of a misleading "not ready";
+    * the bridge bounced but never reached Ready within ``ready_timeout_s`` —
+      diagnose the cause from ``bridge.log`` (a rejected token / disabled intent /
+      missing ``DISCORD_*`` field is the likely culprit exactly when a restart is
+      picking up new config), reusing :func:`_diagnose_start_failure`, else a
+      generic "check the log".
+
+    Readiness is gated on the reported pid CHANGING from the pre-restart value (via
+    :func:`_await_bridge_ready`), so a poll racing Process Compose cannot latch the
+    old instance's stale ``Ready``. The caller owns the lifecycle lock; this must
+    NOT re-acquire it — the ``flock`` is non-reentrant, so a second acquire refuses.
     """
     try:
-        await client.restart_process("bridge")
+        pid_before = _process_pid(await client.get_process("bridge"))
     except RuntimeError:
-        # A non-2xx / transport failure restarting the slot — never poll a bridge
-        # we did not restart, and never overclaim success.
-        return False
-    return await _await_bridge_ready(client, timeout_s=ready_timeout_s, clock=clock, sleep=sleep)
+        pid_before = None  # can't read it (e.g. slot not declared yet) → plain readiness gate
+    try:
+        await client.restart_process("bridge")
+    except RuntimeError as exc:
+        # The restart request itself failed — the bridge never bounced, so "not
+        # ready — check the bridge log" would misdirect. Surface the actual cause
+        # (HTTP status + PC's reason) the way stop() echoes its teardown error.
+        return f"the bridge restart request failed ({exc})."
+    if await _await_bridge_ready(
+        client, timeout_s=ready_timeout_s, clock=clock, sleep=sleep, restarted_from_pid=pid_before
+    ):
+        return None
+    # Bounced but never became Ready: prefer the cause-specific diagnosis the
+    # cold-start path gives (bad token / disabled intent / bad DISCORD_* field) —
+    # the restart path is where a freshly-edited config most often breaks.
+    diagnosis = _diagnose_start_failure(os.path.join(home, "state", "logs"))
+    return diagnosis or "the bridge didn't come back ready — check `disco logs bridge`."
 
 
 def _default_spawn(argv: Sequence[str]) -> None:
@@ -610,16 +658,14 @@ async def start(
                 )
                 return 1
             # Honest fail-fast (§12.6): if the in-place bridge restart doesn't come
-            # back Ready, surface it and return non-zero rather than print a green
-            # "already open" banner that lies. `restart: always` keeps retrying the
-            # bridge underneath; the operator is pointed at its log.
-            if not await _restart_bridge_process(
-                client, ready_timeout_s=ready_timeout_s, clock=clock, sleep=sleep
-            ):
-                print(
-                    "error: workspace was open but the bridge didn't come back ready — "
-                    "check `disco logs bridge`."
-                )
+            # back Ready, surface the specific cause and return non-zero rather than
+            # print a green "already open" banner that lies. `restart: always` keeps
+            # retrying the bridge underneath.
+            reason = await _restart_bridge_to_ready(
+                client, home, ready_timeout_s=ready_timeout_s, clock=clock, sleep=sleep
+            )
+            if reason is not None:
+                print(f"error: {reason}")
                 return 1
             if agents_defined:
                 print("workspace already open — bridge restarted. Next: disco agent start <name>")
@@ -838,10 +884,11 @@ async def restart_bridge(
                     "Restart the bridge from that install's home."
                 )
                 return 1
-            if not await _restart_bridge_process(
-                client, ready_timeout_s=ready_timeout_s, clock=clock, sleep=sleep
-            ):
-                print("error: bridge restart didn't reach ready — check `disco logs bridge`.")
+            reason = await _restart_bridge_to_ready(
+                client, home, ready_timeout_s=ready_timeout_s, clock=clock, sleep=sleep
+            )
+            if reason is not None:
+                print(f"error: {reason}")
                 return 1
     except _workspace.WorkspaceBusyError as exc:
         print(f"error: {exc}")

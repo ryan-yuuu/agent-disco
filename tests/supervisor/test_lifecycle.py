@@ -360,7 +360,7 @@ async def test_start_already_open_restarts_the_bridge(tmp_path, capsys) -> None:
     client = _StubClient(
         project_state_results=[{"running": True}],
         process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
-        bridge_states=[{"is_ready": "Ready"}],
+        bridge_states=[{"is_ready": "Ready", "pid": 100}, {"is_ready": "Ready", "pid": 200}],
     )
 
     code = await lifecycle.start(
@@ -429,50 +429,111 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
 # --- bridge restart: the shared mechanism + the `disco bridge restart` verb --
 
 
-async def test_restart_bridge_process_restarts_then_confirms_ready() -> None:
-    """The shared mechanism restarts the bridge slot, then gates on readiness:
-    True only once ``get_process('bridge')`` reports Ready."""
-    clock = _FakeClock()
-    client = _StubClient(bridge_states=[{"is_ready": "Ready"}])
+def test_process_pid_extracts_int_pid_or_none() -> None:
+    """The pid extractor used by the restart gate: an int pid, or None for a state
+    that lacks one / is malformed (which degrades the gate to a plain readiness check)."""
+    assert lifecycle._process_pid({"pid": 42, "is_ready": "Ready"}) == 42
+    assert lifecycle._process_pid({"is_ready": "Ready"}) is None  # no pid key
+    assert lifecycle._process_pid({"pid": "42"}) is None  # non-int pid
+    assert lifecycle._process_pid(None) is None  # not a dict
 
-    ok = await lifecycle._restart_bridge_process(
-        client, ready_timeout_s=90, clock=clock, sleep=clock.sleep
+
+async def test_restart_bridge_to_ready_restarts_then_confirms_new_instance_ready(tmp_path) -> None:
+    """The shared mechanism restarts the bridge then returns None once the NEW
+    instance (a CHANGED pid) reports Ready."""
+    clock = _FakeClock()
+    # pre-restart pid read (pid 100), then the new instance is Ready under pid 200.
+    client = _StubClient(bridge_states=[{"is_ready": "Ready", "pid": 100}, {"is_ready": "Ready", "pid": 200}])
+
+    reason = await lifecycle._restart_bridge_to_ready(
+        client, _home(tmp_path), ready_timeout_s=90, clock=clock, sleep=clock.sleep
     )
 
-    assert ok is True
+    assert reason is None
     assert client.restart_process_calls == ["bridge"]
+    # one pre-restart read (to capture the old pid) + one readiness poll.
+    assert client.get_process_calls == ["bridge", "bridge"]
+
+
+async def test_restart_bridge_to_ready_surfaces_the_restart_call_failure(tmp_path) -> None:
+    """A failed restart REST call returns a message naming the ACTUAL cause (HTTP
+    status + PC reason), not a misleading 'not ready', and never polls a bridge it
+    did not restart."""
+    clock = _FakeClock()
+    client = _StubClient(
+        bridge_states=[{"is_ready": "Ready", "pid": 100}],  # the pre-restart pid read
+        restart_process_raises=RuntimeError("restart: HTTP 503 process not running"),
+    )
+
+    reason = await lifecycle._restart_bridge_to_ready(
+        client, _home(tmp_path), ready_timeout_s=90, clock=clock, sleep=clock.sleep
+    )
+
+    assert reason is not None
+    assert "restart request failed" in reason
+    assert "503" in reason  # the ProcessComposeError detail is surfaced, not dropped
+    assert client.restart_process_calls == ["bridge"]
+    # only the pre-restart pid read; NO readiness poll after a failed restart.
     assert client.get_process_calls == ["bridge"]
 
 
-async def test_restart_bridge_process_false_when_the_restart_call_fails() -> None:
-    """A failed restart REST call (a raised ProcessComposeError) returns False and
-    never polls readiness on a bridge it did not restart."""
+async def test_restart_bridge_to_ready_times_out_when_bridge_never_becomes_ready(tmp_path) -> None:
+    """Restart succeeds but the new instance never reaches Ready → a non-None
+    'didn't come back ready' message, only AFTER the readiness budget is spent."""
     clock = _FakeClock()
-    client = _StubClient(restart_process_raises=RuntimeError("restart: 500"))
+    # one pre-restart pid read, then every readiness poll signals not-ready.
+    client = _StubClient(bridge_states=[{"is_ready": "Ready", "pid": 100}])
 
-    ok = await lifecycle._restart_bridge_process(
-        client, ready_timeout_s=90, clock=clock, sleep=clock.sleep
+    reason = await lifecycle._restart_bridge_to_ready(
+        client, _home(tmp_path), ready_timeout_s=4, clock=clock, sleep=clock.sleep
     )
 
-    assert ok is False
+    assert reason is not None
+    assert "didn't come back ready" in reason
     assert client.restart_process_calls == ["bridge"]
-    assert client.get_process_calls == []  # no readiness poll after a failed restart
+    assert clock() >= 4  # the budget was actually spent polling, not a premature give-up
 
 
-async def test_restart_bridge_process_false_when_bridge_never_becomes_ready() -> None:
-    """If the bridge never reaches Ready within the budget, the mechanism
-    fail-fasts to False rather than claiming success (§12.6)."""
+async def test_restart_bridge_to_ready_waits_past_a_stale_pre_restart_ready(tmp_path) -> None:
+    """The gate must not latch the pre-restart instance's stale Ready: it waits until
+    a CHANGED pid reports Ready — guarding the §12.6 stale-Ready race (a real Process
+    Compose behaviour: after POST /restart the old pid can keep reading Ready for a
+    beat off a not-yet-stale heartbeat)."""
     clock = _FakeClock()
-    # get_process signals not-ready (the stub raises once bridge_states is empty,
-    # which the readiness poll treats as "not ready yet").
-    client = _StubClient(bridge_states=[])
-
-    ok = await lifecycle._restart_bridge_process(
-        client, ready_timeout_s=4, clock=clock, sleep=clock.sleep
+    client = _StubClient(
+        bridge_states=[
+            {"is_ready": "Ready", "pid": 100},  # pre-restart pid read
+            {"is_ready": "Ready", "pid": 100},  # stale: same pid still shows Ready
+            {"is_ready": "Ready", "pid": 200},  # the NEW instance is finally Ready
+        ]
     )
 
-    assert ok is False
-    assert client.restart_process_calls == ["bridge"]
+    reason = await lifecycle._restart_bridge_to_ready(
+        client, _home(tmp_path), ready_timeout_s=90, clock=clock, sleep=clock.sleep
+    )
+
+    assert reason is None
+    # pid read + the stale poll (rejected) + the fresh poll (accepted): it did NOT
+    # return on the stale Ready.
+    assert client.get_process_calls == ["bridge", "bridge", "bridge"]
+
+
+async def test_restart_bridge_to_ready_diagnoses_a_config_failure_from_the_bridge_log(tmp_path) -> None:
+    """On a readiness timeout the mechanism reuses the cold-start diagnosis: a known
+    bridge.log signature yields a cause-specific message (here: a rejected token →
+    'disco init'), not the generic 'check disco logs bridge'."""
+    home = _home(tmp_path)
+    _write_bridge_log(home, _LOGIN_FAILURE_TRACEBACK)
+    clock = _FakeClock()
+    client = _StubClient(bridge_states=[{"is_ready": "Ready", "pid": 100}])  # never a new-pid Ready
+
+    reason = await lifecycle._restart_bridge_to_ready(
+        client, home, ready_timeout_s=4, clock=clock, sleep=clock.sleep
+    )
+
+    assert reason is not None
+    assert "disco init" in reason  # the cause-specific diagnosis, not the generic hint
+    assert "didn't come back ready" not in reason
 
 
 async def test_restart_bridge_reports_ok_when_the_bridge_comes_back_ready(tmp_path, capsys) -> None:
@@ -483,7 +544,27 @@ async def test_restart_bridge_reports_ok_when_the_bridge_comes_back_ready(tmp_pa
     client = _StubClient(
         project_state_results=[{"running": True}],
         process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
-        bridge_states=[{"is_ready": "Ready"}],
+        bridge_states=[{"is_ready": "Ready", "pid": 100}, {"is_ready": "Ready", "pid": 200}],
+    )
+
+    code = await lifecycle.restart_bridge(home, client=client, clock=clock, sleep=clock.sleep)
+
+    assert code == 0
+    assert client.restart_process_calls == ["bridge"]
+    assert "bridge restarted" in capsys.readouterr().out.lower()
+
+
+async def test_restart_bridge_proceeds_when_ownership_is_undeterminable(tmp_path, capsys) -> None:
+    """When the info route is unavailable (``_supervisor_belongs_to_home`` -> None),
+    the verb keeps the best-effort 'it's ours' behaviour and DOES restart. Guards
+    the documented transient: a refactor flipping ``is False`` to a falsy/``not True``
+    check would silently turn the info-route-unavailable case into a refusal."""
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info=None,  # info route unavailable => belongs_to_home returns None
+        bridge_states=[{"is_ready": "Ready", "pid": 100}, {"is_ready": "Ready", "pid": 200}],
     )
 
     code = await lifecycle.restart_bridge(home, client=client, clock=clock, sleep=clock.sleep)
@@ -555,10 +636,14 @@ async def test_restart_bridge_contended_lock_is_a_clean_error_not_a_traceback(tm
     """A concurrent lifecycle verb holding the lock makes ``disco bridge restart``
     a clean one-line refusal, not a raw traceback — and nothing is restarted."""
     home = _home(tmp_path)
+    clock = _FakeClock()
     client = _StubClient(project_state_results=[{"running": True}])
 
     with _workspace.slot_mutation(home, "assistant"):
-        code = await lifecycle.restart_bridge(home, client=client)
+        # Inject the fake clock/sleep so that if the lock ever failed to contend, the
+        # flow would fall through to the readiness wait and fail FAST here rather than
+        # hang ~90s of real time before the assertion catches the regression.
+        code = await lifecycle.restart_bridge(home, client=client, clock=clock, sleep=clock.sleep)
 
     assert code == 1
     assert client.restart_process_calls == []
@@ -736,7 +821,7 @@ async def test_start_already_open_zero_agents_signposts_create(tmp_path, capsys)
     client = _StubClient(
         project_state_results=[{"running": True}],
         process_info={"log_location": os.path.join(home, "state", "logs", "bridge.log")},
-        bridge_states=[{"is_ready": "Ready"}],
+        bridge_states=[{"is_ready": "Ready", "pid": 100}, {"is_ready": "Ready", "pid": 200}],
     )
 
     code = await lifecycle.start(
@@ -789,6 +874,36 @@ async def test_start_already_open_fails_fast_when_the_bridge_wont_come_back(tmp_
     assert "already open" not in out
     assert "didn't come back ready" in out
     assert "logs bridge" in out
+
+
+async def test_start_already_open_restarts_when_ownership_is_undeterminable(tmp_path, capsys) -> None:
+    """The start already-open branch mirrors restart_bridge: an undeterminable owner
+    (``_supervisor_belongs_to_home`` -> None, the info route unavailable) proceeds to
+    restart the bridge in place, not refuse — the same best-effort 'it's ours' path."""
+    home = _home(tmp_path)
+    _define_agent(tmp_path)
+    spawn = _RecordingSpawn()
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[{"running": True}],
+        process_info=None,  # belongs_to_home -> None (info route unavailable)
+        bridge_states=[{"is_ready": "Ready", "pid": 100}, {"is_ready": "Ready", "pid": 200}],
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=spawn,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert code == 0
+    assert spawn.calls == []
+    assert client.restart_process_calls == ["bridge"]
+    assert "bridge restarted" in capsys.readouterr().out.lower()
 
 
 async def test_start_signpost_honours_agents_dir_env_override(

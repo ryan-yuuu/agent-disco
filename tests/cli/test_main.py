@@ -1967,6 +1967,21 @@ def test_main_bridge_restart_native_calls_lifecycle(
     assert calls == [home]
 
 
+def test_main_bridge_restart_propagates_a_nonzero_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-zero from ``lifecycle.restart_bridge`` (e.g. the bridge didn't come back
+    ready) flows out through ``_run_bridge`` → ``main`` unchanged — the PR's honest
+    exit codes reach the shell."""
+    monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
+
+    async def _restart(passed_home):
+        return 2
+
+    monkeypatch.setattr(lifecycle, "restart_bridge", _restart)
+    assert main(["bridge", "restart"]) == 2
+
+
 def test_main_bridge_restart_dev_run_refuses(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
