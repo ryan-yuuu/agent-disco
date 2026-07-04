@@ -133,7 +133,7 @@ tools: []
 # explicit — the operator chose to disable extended thinking.
 #
 # The /thinking-effort Discord slash command rewrites this field at
-# runtime. Slash and @-mention paths pick up the new value on the next
+# runtime. Slash and mention paths pick up the new value on the next
 # message; ambient channel messages need an agent restart to see it
 # (the tier is baked into the calfkit Agent constructor at agent boot).
 thinking_effort: medium

@@ -68,7 +68,7 @@ sentences) to whatever the user says.
 ```
 
 Drop the file at `agents/example-bot.md`, bring it online with `disco
-agent start example-bot`, then `@example-bot hi` in any Discord channel the
+agent start example-bot`, then `!example-bot hi` in any Discord channel the
 bot can see. The webhook reply appears under the `example-bot` persona (the
 webhook username is the agent's `name`; the avatar is a deterministic
 [DiceBear](https://www.dicebear.com) image seeded by the name).
