@@ -59,7 +59,7 @@ _SEND_MESSAGES_IN_THREADS = 1 << 38  # posting into those threads
 # it postable would be a green light that lies.
 #
 # Thread bits (Create Public Threads / Send Messages in Threads) are deliberately NOT in this gate.
-# Postability answers "can the bot reply to an @mention here", the default agent's core function;
+# Postability answers "can the bot reply to an !mention here", the default agent's core function;
 # thread creation (/task, A2A audit projection) is an additive capability the invite grants
 # server-wide (see INVITE_PERMISSIONS). Folding thread perms in here would reclassify a channel that
 # hosts normal replies but has a thread override as "unpostable" — a *worse* lie than the current
@@ -71,7 +71,7 @@ _OVERWRITE_ROLE = 0
 _OVERWRITE_MEMBER = 1
 
 # Channel types we treat as message targets. Only standard guild text (0) is checked; voice,
-# categories, threads, forums, etc. are not @mention-reply targets.
+# categories, threads, forums, etc. are not !mention-reply targets.
 _TEXT_CHANNEL = 0
 
 # The invite bitmask granted by the canonical invite link. This is the single source of truth for

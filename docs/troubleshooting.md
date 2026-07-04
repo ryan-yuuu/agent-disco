@@ -46,7 +46,7 @@ the config and that the bridge daemon is truly alive (not a wedged zombie), and
 
 **Symptom.** `disco start` printed its success banner, `disco status`
 shows the broker and bridge healthy, the bot shows **online** in Discord — but
-`@assistant hello` gets no answer. `disco status` shows an **empty roster**
+`!assistant hello` gets no answer. `disco status` shows an **empty roster**
 (no agents online).
 
 **What it means.** This is working as designed, not a fault. `disco start`
@@ -62,7 +62,7 @@ disco agent start assistant   # use any name from `disco agent list`
 disco status                  # the agent now shows under the roster
 ```
 
-Then `@assistant hello` will get a reply. `start`'s own success banner names
+Then `!assistant hello` will get a reply. `start`'s own success banner names
 this next step for you (`→ disco agent start assistant`); if you arrived here
 by reopening the workspace, that banner is the prompt you skipped.
 
@@ -144,12 +144,12 @@ its PID is alive.
 ### Everything's green but the agent still doesn't reply
 
 **Symptom.** `disco status` is all green — broker healthy, bridge connected,
-the agent shows online in the roster — yet `@assistant hello` still gets no
+the agent shows online in the roster — yet `!assistant hello` still gets no
 reply.
 
 **What it means.** `status` and `agent ps` read **heartbeats and the live mesh**:
 they prove each process is alive and that the agent is registered/online. They do
-*not* prove that a specific `@mention` turn ran to completion — a run can still
+*not* prove that a specific mention turn ran to completion — a run can still
 fault, time out, or hit a broker path that isn't flowing (e.g. the agent points
 at a different broker than the bridge).
 
@@ -159,11 +159,11 @@ turn:
 
 ```bash
 disco doctor                   # confirm config + that the bridge daemon is truly alive (not a zombie)
-disco logs bridge -f           # watch the bridge accept the @mention and start the run
+disco logs bridge -f           # watch the bridge accept the mention and start the run
 disco logs <agent> -f          # watch the agent receive the call and reply
 ```
 
-The bridge logs each `@mention` with a `correlation_id`; the agent logs the LLM
+The bridge logs each mention with a `correlation_id`; the agent logs the LLM
 call under the same id. If the bridge starts the run but the agent never logs it,
 the two are on different brokers or the agent is wedged (see the next entry). If
 the agent replies but nothing reaches Discord, check the bridge's reply-post log

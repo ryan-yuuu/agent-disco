@@ -29,7 +29,7 @@ written for you, not copied from Discord.
 | `DISCORD_GUILD_ID` | recommended | Server ID for guild-scoped slash-command sync (instant; blank = global sync, ~1 h propagation). `disco init` auto-discovers it — set it by hand only when not using the wizard. |
 | `DISCORD_OWNER_USER_ID` | optional | Your numeric user ID. Tags inbound messages from the owner and unlocks owner-only commands (`/clear`, `/thinking-effort`). |
 
-There is no channel binding to configure: an agent answers `@mention`s in **any
+There is no channel binding to configure: an agent answers mentions in **any
 channel the bot can see**. Scope it, if you need to, with Discord's own channel
 permissions (deny the bot *View Channel* where it shouldn't listen).
 

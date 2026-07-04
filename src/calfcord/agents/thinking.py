@@ -8,7 +8,7 @@ Two consumers share this mapper:
   governs runs the bridge doesn't intercept — native A2A peer consults and
   handoffs.
 * :class:`calfcord.bridge.mention_handler.MentionHandler` — forwards
-  the same effort as a per-call override (tier 3) on ``@<agent_id>``
+  the same effort as a per-call override (tier 3) on ``!<agent_id>``
   mentions, so a runtime ``/thinking-effort`` change takes effect on the
   next message without restarting the agent process.
 
@@ -25,7 +25,7 @@ the per-provider tables below for exact values.
 Per-call override scope
 -----------------------
 Per-call (tier 3) overrides apply to every message the bridge answers.
-The bridge only answers ``@<agent_id>`` mentions (ambient, un-mentioned
+The bridge only answers ``!<agent_id>`` mentions (ambient, un-mentioned
 channel messages are no longer answered under the 0.12 caller surface), so
 it always knows the target agent ahead of time and applies the current
 override when one is set (no override → the run uses the boot-baked tier-2).

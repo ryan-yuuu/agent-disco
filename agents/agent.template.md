@@ -30,7 +30,7 @@
 # Internal identifier. Must match the filename stem (so `name: scribe`
 # means the file is `agents/scribe.md`). Format: [a-z0-9_-]{1,32}.
 # The Discord slash command is always `/<name>` — there is no separate
-# slash field. The bridge currently uses @<name> text-prefix invocation
+# slash field. The bridge currently uses !<name> text-prefix invocation
 # by default and only registers /thinking-effort; per-agent invocation
 # slashes are wired in code but disabled.
 name: example
@@ -133,7 +133,7 @@ tools: []
 # explicit — the operator chose to disable extended thinking.
 #
 # The /thinking-effort Discord slash command rewrites this field at
-# runtime. Slash and @-mention paths pick up the new value on the next
+# runtime. Slash and mention paths pick up the new value on the next
 # message; ambient channel messages need an agent restart to see it
 # (the tier is baked into the calfkit Agent constructor at agent boot).
 thinking_effort: medium

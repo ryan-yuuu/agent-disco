@@ -83,7 +83,7 @@ tree, `agents/*.md`, `state/`, and `.env`.
 
 The boundary the model trusts is the **deployment**: every agent the
 operator deployed, every tool wired into the registry, every Discord
-user with `@mention` access. The boundary the model does *not* trust is
+user with mention access. The boundary the model does *not* trust is
 **content** flowing through Discord messages.
 
 ### 1.1 Per-agent tool-state isolation
@@ -267,7 +267,7 @@ Compose merges this on top of the base file. Now any agent with `terminal`,
 
 That is a deliberate trade: full repo access in exchange for the
 exposure above. Only widen the mount on a deployment where you trust
-every agent definition and every Discord user with `@mention` access.
+every agent definition and every Discord user with mention access.
 For something in between — e.g. exactly one subdirectory — point the
 override at that path (`- ./some/subdir:/workspace`) instead of `.`.
 
@@ -304,7 +304,7 @@ the workspace inside a project dir gives every agent the same blast
 radius as Claude Code on that machine over that project. Open the
 workspace from the narrowest directory the agents actually need, and
 keep the deployment off public Discord (§ 3.4) — anyone who can
-`@mention` an agent drives that surface.
+mention an agent drives that surface.
 
 Note that this is *less* isolated than 3.1 in absolute terms (the
 process can now reach `$HOME`, `/etc`, and so on), but *more*
@@ -317,7 +317,7 @@ default.** Its tools step pre-checks every tool — including `terminal`,
 freshly-configured agent has the full terminal + code-execution +
 file-write + web reach described above,
 running in the directory the workspace (`disco start`) was launched
-from and drivable by anyone who can `@mention` it. The wizard prints a
+from and drivable by anyone who can mention it. The wizard prints a
 caution when those tools are kept. Deselect what the agent doesn't need
 (or trim later with `disco agent tools`), and keep the deployment on
 a trusted/private server, never public Discord (§ 3.4). (The
@@ -329,7 +329,7 @@ installer-seeded `assistant.md` is text-only until you run
 **Best for:** Any deployment where you don't want every Discord user
 who shares a guild with your bot to be able to invoke its tools.
 
-Anyone who can `@mention` an agent can drive its tool surface. There is
+Anyone who can mention an agent can drive its tool surface. There is
 no per-user rate limit, no per-user permission gate, no command
 allowlist beyond what each tool's own validation enforces. **Do not
 invite the bot to public guilds.** Restrict the bot's guild list to
@@ -419,7 +419,7 @@ matters in practice.
   guild the bot is in, including ones where you didn't intend to.
 - **There is no per-agent channel allowlist any more.** Name-addressing
   (the calfkit-012 migration) removed per-agent channel subscriptions and
-  the `state/agents/<name>.json` seed, so an agent replies to any `@mention`
+  the `state/agents/<name>.json` seed, so an agent replies to any mention
   in any channel the bot can see. The controls that remain are keeping the
   bot off public guilds (§ 3.4) and — on a split deploy — broker access
   control (§ 7.2), since anyone who can write to the broker can invoke an

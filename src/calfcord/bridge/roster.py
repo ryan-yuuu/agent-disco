@@ -6,7 +6,7 @@ control-plane topic) with a snapshot of calfkit's public ``client.mesh``
 so the roster is the bridge's source of truth for "which agents can I reach
 right now".
 
-R-A2 (fail-fast). The ``@mention`` path treats the mesh as authoritative:
+R-A2 (fail-fast). The ``!mention`` path treats the mesh as authoritative:
 
 * mesh available, the mentioned agent online → route to it;
 * mesh available, none of the mentioned agents online → user-facing
@@ -19,7 +19,7 @@ R-A2 (fail-fast). The ``@mention`` path treats the mesh as authoritative:
 
 :meth:`online` returns ``None`` until the first successful :meth:`refresh`
 (a cold roster is "unknown", not "empty") and whenever the last refresh hit a
-:class:`MeshUnavailableError`, so the (synchronous) ``@mention`` resolution can
+:class:`MeshUnavailableError`, so the (synchronous) ``!mention`` resolution can
 distinguish "nobody online" (an empty ``frozenset``) from "can't tell"
 (``None`` → fail-fast).
 """
@@ -41,7 +41,7 @@ _PERMANENT_REASONS = frozenset({"reader_dead"})
 
 class MeshRoster:
     """A short-lived snapshot of ``client.mesh.get_agents()`` for the sync
-    ``@mention`` path.
+    ``!mention`` path.
 
     :meth:`refresh` is awaited (once per turn, or on a small loop) to keep the
     snapshot current; the resolution that reads it is synchronous.
@@ -68,7 +68,7 @@ class MeshRoster:
             permanent = exc.reason in _PERMANENT_REASONS
             logger.log(
                 logging.ERROR if permanent else logging.WARNING,
-                "agent roster unavailable (mesh reason=%s); @mentions answered "
+                "agent roster unavailable (mesh reason=%s); !mentions answered "
                 "'roster unavailable' until it recovers%s",
                 exc.reason,
                 " — reader_dead is permanent for this process; RESTART the bridge"

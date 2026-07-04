@@ -1,6 +1,6 @@
 """Discord ingress gateway daemon and CLI entry point.
 
-Holds the long-lived gateway WebSocket and wires the per-``@mention`` orchestration
+Holds the long-lived gateway WebSocket and wires the per-``!mention`` orchestration
 together on the calfkit 0.12 **caller surface**. Run via::
 
     uv run calfkit-bridge
@@ -10,11 +10,11 @@ The daemon depends on a running Kafka broker reachable at ``CALF_HOST_URL``
 environment variables (see ``.env.example``).
 
 The bridge is a pure calfkit :class:`~calfkit.client.Client` (no embedded Worker,
-no consumers). For each ``@mention`` it builds a :class:`MentionRequest` and runs
+no consumers). For each ``!mention`` it builds a :class:`MentionRequest` and runs
 :class:`~calfcord.bridge.mention_handler.MentionHandler.handle` as a tracked task:
 the handler resolves the target against the live mesh roster, ``start()``s the
 agent, drains its run ``stream()`` (live progress + A2A projection), and posts the
-terminal reply under the responding agent's persona. Non-``@mention`` ("ambient")
+terminal reply under the responding agent's persona. Non-``!mention`` ("ambient")
 messages go unanswered (C2). The bridge owns SIGINT/SIGTERM for its foreground
 (the Discord gateway) and tears down by cancelling in-flight handler tasks then
 closing the client.
@@ -160,7 +160,7 @@ async def _prune_on_startup(store: TranscriptStoreLike, settings: DiscordSetting
 
 
 class DiscordIngressGateway:
-    """Long-lived gateway daemon. Translates Discord ``@mention``s into agent runs."""
+    """Long-lived gateway daemon. Translates Discord ``!mention``s into agent runs."""
 
     def __init__(
         self,
@@ -308,7 +308,7 @@ class DiscordIngressGateway:
             logger.debug("ignoring redelivered message id=%s", message.id)
             return
 
-        # Ambient (non-@mention) messages go unanswered (C2): skip them before any
+        # Ambient (non-!mention) messages go unanswered (C2): skip them before any
         # work. The handler also no-ops on an empty mention list, but skipping here
         # avoids a needless task + mesh read per ambient message.
         mention_ids = extract_mention_ids(message.content)
@@ -334,7 +334,7 @@ class DiscordIngressGateway:
         self._spawn_handle(req)
 
     def _spawn_handle(self, req: MentionRequest) -> None:
-        """Run one ``@mention`` as a tracked background task.
+        """Run one ``!mention`` as a tracked background task.
 
         Each mention is independent and may be long-running (an agent run + A2A
         consults), so it must not block the Discord event loop. The task is tracked

@@ -28,13 +28,13 @@ At boot, the **agent runner** (`calfkit-agent`) scans `agents/` via
 `src/calfcord/agents/definition.py`); the factory turns that definition
 into a calfkit `Agent` node addressed **by name** (no per-channel topic
 subscriptions). The **bridge no longer reads `agents/*.md`** — it resolves
-`@mention`s against calfkit's live agent **mesh** and derives each agent's
+mentions against calfkit's live agent **mesh** and derives each agent's
 Discord persona from its `name`. So a brand-new `.md` is brought online
 with `disco agent start <name>` directly — the agent runs as its own
 supervised process, so there is no workspace reload (see
 [`using-disco.md`](using-disco.md#build-your-team-of-agents)); there
 is **no bridge restart and no per-agent slash command** — agents are
-invoked by `@<name>` mention, not `/<name>`.
+invoked by `!<name>` mention, not `/<name>`.
 
 Agent Disco runs as four process types (`calfkit-bridge`, `calfkit-agent`,
 `calfkit-tools`, and one `calfkit-mcp` per configured MCP server). The
@@ -68,7 +68,7 @@ sentences) to whatever the user says.
 ```
 
 Drop the file at `agents/example-bot.md`, bring it online with `disco
-agent start example-bot`, then `@example-bot hi` in any Discord channel the
+agent start example-bot`, then `!example-bot hi` in any Discord channel the
 bot can see. The webhook reply appears under the `example-bot` persona (the
 webhook username is the agent's `name`; the avatar is a deterministic
 [DiceBear](https://www.dicebear.com) image seeded by the name).
@@ -90,12 +90,12 @@ than silently falling back to defaults.
 
 These two fields define what humans and other agents see. The agent's
 `name` is its whole identity: it is the persona/webhook name, the
-`@mention` target, and the key the runtime addresses it by. There is no
+mention target, and the key the runtime addresses it by. There is no
 separate `display_name`, no per-agent slash command, and no `slash` field.
 
 | Field          | Type   | Constraint                                                                 |
 | -------------- | ------ | -------------------------------------------------------------------------- |
-| `name`         | string | Matches `[a-z0-9_-]{1,32}` and the filename stem. The persona/webhook name and `@mention` target. |
+| `name`         | string | Matches `[a-z0-9_-]{1,32}` and the filename stem. The persona/webhook name and mention target. |
 | `description`  | string | 1-100 characters. The Discord slash-picker blurb *and* the agent's `AgentCard` blurb — the LLM-facing pitch peers read when choosing whom to consult. |
 
 The YAML key is `name` for Claude Code parity. Internally, the parsed
@@ -355,12 +355,12 @@ into the body.
 Agents are **name-addressed**. Each calfkit `Agent` is reachable on a
 private input topic derived from its `name` — there are no per-channel
 topic subscriptions and no addressing gate. The bridge owns all Discord
-I/O: it sees every channel the bot is in, and when a message `@mention`s
+I/O: it sees every channel the bot is in, and when a message mentions
 an agent that is **online on the mesh**, it invokes that agent by name and
 posts the reply. Consequences:
 
 - **There is no per-agent channel allowlist.** An agent answers
-  `@mention`s in any channel the bot can see; scope where it can be
+  mentions in any channel the bot can see; scope where it can be
   reached with Discord's own channel permissions, not with Agent Disco
   config.
 - **There is no `state/agents/<name>.json` and no bootstrap-channel env
@@ -368,12 +368,12 @@ posts the reply. Consequences:
   router. Adding an agent to a channel is just a matter of the bot having
   access to that channel — nothing to configure and no restart to pick up
   a new channel.
-- **Ambient (non-`@mention`) messages go unanswered.** There is no
-  automatic agent selection — an agent replies only when `@mention`ed, or
+- **Ambient (non-mention) messages go unanswered.** There is no
+  automatic agent selection — an agent replies only when mentioned, or
   when a peer consults or hands off to it (§8).
 
-An `@mention` of an agent that is **not online** gets a plain reply — "No
-agent matching `@name` is online right now." — so a typo or a
+A mention of an agent that is **not online** gets a plain reply — "No
+agent matching `!name` is online right now." — so a typo or a
 not-yet-started agent is never silently dropped.
 
 ## 6. Thinking-effort tiers
@@ -425,7 +425,7 @@ Two scopes to keep straight:
   **native A2A consults and handoffs use** — they run inside the agent
   runtime with its own settings.
 - The **`/thinking-effort` override** rides only the bridge's own
-  `@mention` invocations. It does **not** apply to A2A consults/handoffs.
+  mention invocations. It does **not** apply to A2A consults/handoffs.
 
 ### 6.2 Field-ordering note
 
@@ -567,7 +567,7 @@ directory is calfkit's.
 
 A2A activity is projected to a unified Discord audit channel (default
 `private-a2a-chats`, overridable via `CALFKIT_A2A_CHANNEL_NAME`), now
-**hosted by the bridge**. The bridge watches each `@mention` run's event
+**hosted by the bridge**. The bridge watches each mention run's event
 stream and renders the consult request, the peer's reply, and any handoff
 into a per-turn thread. Kafka is the system of record; Discord is the
 human-readable audit. See [`a2a-threads.md`](a2a-threads.md) for the full
@@ -629,7 +629,7 @@ notes in §3.3 and §6). So **run `disco agent restart <name>`** after any
 edit to apply it. A *newly created* agent is brought online directly with
 `disco agent start <name>` — the agent runs as its own supervised process, so
 there is no workspace reload — and there is **no bridge slash-command
-re-sync**, since agents are invoked by `@mention`, not `/<name>`. Each command
+re-sync**, since agents are invoked by `!<name>` mention, not `/<name>`. Each command
 prints the matching restart hint on success.
 
 The same boot-time rule covers credentials and `.env`: a changed API key,

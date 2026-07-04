@@ -190,7 +190,7 @@ class TestAgentDefinitionValidators:
         assert _make_definition(a2a=["scribe", "conan"]).a2a == ("scribe", "conan")
 
     def test_handoff_defaults_to_true(self) -> None:
-        """Native handoff is on by default (replaces the in-channel @<agent>
+        """Native handoff is on by default (replaces the in-channel !<agent>
         convention); opt out with `handoff: false` or restrict with a list."""
         assert _make_definition().handoff is True
 

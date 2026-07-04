@@ -1,4 +1,4 @@
-"""Unit tests for the per-@mention orchestration (spec §5.2).
+"""Unit tests for the per-!mention orchestration (spec §5.2).
 
 Drives :class:`MentionHandler` through a ``FakeHandle`` (scripted ``stream()`` +
 ``result()``) and recording collaborator fakes — no Kafka, no Discord, no LLM.
@@ -312,7 +312,9 @@ class TestRouting:
         await handler.handle(_req(mentions=("ghost",)))
         assert client.requested_agent is None
         assert fakes["reply"].replies == []
-        assert len(fakes["reply"].notices) == 1 and "ghost" in fakes["reply"].notices[0]
+        # The notice echoes the mention with the live trigger prefix (``!ghost``),
+        # so a prefix change can't silently desync the user-facing wording.
+        assert len(fakes["reply"].notices) == 1 and "`!ghost`" in fakes["reply"].notices[0]
 
     async def test_first_online_mention_wins(self) -> None:
         handler, client, _fakes = _make(online=frozenset({"conan"}))

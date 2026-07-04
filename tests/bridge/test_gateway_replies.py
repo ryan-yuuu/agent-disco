@@ -1,17 +1,17 @@
 """Unit tests for the gateway's ``_on_message`` intake and handler-task lifecycle.
 
-Post-0.12 the gateway is a pure caller surface: for each ``@mention`` it builds a
+Post-0.12 the gateway is a pure caller surface: for each ``!mention`` it builds a
 :class:`MentionRequest` and runs :meth:`MentionHandler.handle` as a tracked
 asyncio task. There is no ingress/outbox/Worker anymore. These tests pin the
 intake seam and the task machinery, all offline (no Discord, no broker):
 
 * **Filtering** — DMs, wrong-guild, pre-ready, the bot's own non-webhook posts
-  (e.g. ``/clear`` markers, notices), and ambient (non-``@mention``) messages are
+  (e.g. ``/clear`` markers, notices), and ambient (non-``!mention``) messages are
   dropped before a handler task is ever spawned (C2). A webhook post carrying the
   bot's user id (an agent persona) is NOT self-filtered.
 * **Dedupe** — a redelivered ``MESSAGE_CREATE`` (same ``message.id``) spawns the
   handler only once.
-* **Spawn** — a real ``@mention`` reaches ``handler.handle`` with a correctly
+* **Spawn** — a real ``!mention`` reaches ``handler.handle`` with a correctly
   populated :class:`MentionRequest` (mention ids, author label, channel flattening,
   reply target, the serialized wire).
 * **Crash isolation** — an *unexpected* handler exception posts a generic notice
@@ -101,7 +101,7 @@ async def _settle(gateway: DiscordIngressGateway) -> None:
 def _req() -> MentionRequest:
     """A minimal request for driving ``_run_handler`` / ``_spawn_handle`` directly."""
     return MentionRequest(
-        content="@scribe hi",
+        content="!scribe hi",
         mention_ids=("scribe",),
         author_label="alice",
         message_id=1,
@@ -114,7 +114,7 @@ def _req() -> MentionRequest:
             channel_id=10,
             source_channel_id=10,
             guild_id=1,
-            content="@scribe hi",
+            content="!scribe hi",
             author=WireAuthor(discord_user_id=1, display_name="alice", is_bot=False, is_webhook=False),
             created_at=datetime.now(UTC),
         ),
@@ -134,7 +134,7 @@ class _FakeBotUser:
 
 
 class TestOnMessageSpawnsHandler:
-    """A real ``@mention`` reaches ``handler.handle`` with a correct request."""
+    """A real ``!mention`` reaches ``handler.handle`` with a correct request."""
 
     async def test_mention_spawns_handler_with_populated_request(self, fake_message) -> None:
         gateway = _gateway()
@@ -147,7 +147,7 @@ class TestOnMessageSpawnsHandler:
             channel_id=200,
             guild_id=_GUILD_ID,
             author_display_name="Alice",
-            content="@scribe help me",
+            content="!scribe help me",
         )
         await gateway._on_message(msg)
         await _settle(gateway)
@@ -155,7 +155,7 @@ class TestOnMessageSpawnsHandler:
         assert len(handler.calls) == 1
         req = handler.calls[0]
         assert req.mention_ids == ("scribe",)
-        assert req.content == "@scribe help me"
+        assert req.content == "!scribe help me"
         assert req.author_label == "Alice"
         assert req.message_id == 42
         assert req.channel_id == 200
@@ -163,7 +163,7 @@ class TestOnMessageSpawnsHandler:
         assert req.reply_target is msg
         # The typed WireMessage rides along (the handler serializes it into
         # ``deps["discord"]``; the reply poster reads its typed fields).
-        assert req.wire.content == "@scribe help me"
+        assert req.wire.content == "!scribe help me"
         assert req.wire.slash_target == "scribe"
 
     async def test_thread_message_flattens_parent_but_keeps_thread_source(self, fake_message) -> None:
@@ -172,7 +172,7 @@ class TestOnMessageSpawnsHandler:
         gateway._handler = handler  # type: ignore[assignment]
         _ready(gateway)
 
-        msg = fake_message(channel_id=500, thread_parent_id=200, guild_id=_GUILD_ID, content="@scribe hi")
+        msg = fake_message(channel_id=500, thread_parent_id=200, guild_id=_GUILD_ID, content="!scribe hi")
         await gateway._on_message(msg)
         await _settle(gateway)
 
@@ -186,7 +186,7 @@ class TestOnMessageSpawnsHandler:
         gateway._handler = handler  # type: ignore[assignment]
         _ready(gateway)
 
-        msg = fake_message(guild_id=_GUILD_ID, content="@scribe loop in @echo")
+        msg = fake_message(guild_id=_GUILD_ID, content="!scribe loop in !echo")
         await gateway._on_message(msg)
         await _settle(gateway)
 
@@ -214,7 +214,7 @@ class TestOnMessageFilters:
         # posts; re-ingesting them would fan the bot's own text back out to agents.
         gateway = _gateway()
         _ready(gateway)
-        msg = fake_message(author_id=_BOT_USER_ID, webhook_id=None, guild_id=_GUILD_ID, content="@scribe hi")
+        msg = fake_message(author_id=_BOT_USER_ID, webhook_id=None, guild_id=_GUILD_ID, content="!scribe hi")
         handler = await self._dropped(gateway, msg)
         assert handler.calls == []
 
@@ -226,7 +226,7 @@ class TestOnMessageFilters:
         handler = _RecordingHandler()
         gateway._handler = handler  # type: ignore[assignment]
         _ready(gateway)
-        msg = fake_message(author_id=_BOT_USER_ID, webhook_id=777, guild_id=_GUILD_ID, content="@scribe hi")
+        msg = fake_message(author_id=_BOT_USER_ID, webhook_id=777, guild_id=_GUILD_ID, content="!scribe hi")
         await gateway._on_message(msg)
         await _settle(gateway)
         assert len(handler.calls) == 1
@@ -234,13 +234,13 @@ class TestOnMessageFilters:
     async def test_dm_is_ignored(self, fake_message) -> None:
         gateway = _gateway()
         _ready(gateway)
-        handler = await self._dropped(gateway, fake_message(guild_id=None, content="@scribe hi"))
+        handler = await self._dropped(gateway, fake_message(guild_id=None, content="!scribe hi"))
         assert handler.calls == []
 
     async def test_wrong_guild_is_ignored(self, fake_message) -> None:
         gateway = _gateway()
         _ready(gateway)
-        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID + 1, content="@scribe hi"))
+        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID + 1, content="!scribe hi"))
         assert handler.calls == []
 
     async def test_pre_ready_message_is_ignored(self, fake_message) -> None:
@@ -248,7 +248,7 @@ class TestOnMessageFilters:
         gateway = _gateway()
         gateway._message_normalizer = None
         gateway._bot_user_id = None
-        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID, content="@scribe hi"))
+        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID, content="!scribe hi"))
         assert handler.calls == []
 
 
@@ -261,7 +261,7 @@ class TestOnMessageDedup:
         gateway._handler = handler  # type: ignore[assignment]
         _ready(gateway)
 
-        msg = fake_message(message_id=42, guild_id=_GUILD_ID, content="@scribe hi")
+        msg = fake_message(message_id=42, guild_id=_GUILD_ID, content="!scribe hi")
         await gateway._on_message(msg)
         await gateway._on_message(msg)  # redelivery of the SAME id
         await _settle(gateway)

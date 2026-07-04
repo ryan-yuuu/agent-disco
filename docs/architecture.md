@@ -15,7 +15,7 @@ running underneath.
 
 - **`calfkit-bridge`** — the single Discord gateway, a **pure calfkit
   `Client`** (the caller surface — no embedded Worker, no consumers). It owns
-  all Discord I/O: it normalizes inbound events, resolves each `@mention`
+  all Discord I/O: it normalizes inbound events, resolves each mention
   against calfkit's live agent **mesh**, invokes the agent by name
   (`client.agent(<name>).start(...)`), drains that run's event `stream()` for
   live progress and the A2A audit projection, and posts the reply back as a
@@ -310,7 +310,7 @@ SIGINT/SIGTERM, and — because it hosts no nodes — **owns the broker lifecycl
 itself**. On a no-auto-create broker (Tansu) it provisions its own durable inbox
 topic so terminal replies and intermediate step events (both publish to that
 inbox) can land, and it closes the broker on an ordered shutdown after draining
-in-flight `@mention` handlers.
+in-flight mention handlers.
 
 The historical analysis of the gaps that forced the old hand-rolled loops — and
 the upstream feature requests that closed them
@@ -332,7 +332,7 @@ are declared in frontmatter — see
 Consults are **stateless** — the peer answers on a fresh conversation, with no
 replay of prior A2A turns. Kafka is the system of record; Discord is a
 human-readable audit log, and the **bridge** (not a tool) renders it: it watches
-each `@mention` run's event `stream()`, pairs each `message_agent` call with its
+each mention run's event `stream()`, pairs each `message_agent` call with its
 reply by `tool_call_id`, and projects consults into per-turn threads in the
 unified A2A channel. (Handoffs are **not** projected here — a handoff transfers
 conversation control, so it renders inline in the main step stream instead; see

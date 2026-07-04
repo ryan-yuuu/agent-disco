@@ -55,7 +55,7 @@ DEFAULT_DESCRIPTION = "General-purpose AI teammate — answers questions and hel
 
 # Tools that grant code-execution or filesystem-write reach into the
 # ``calfkit-tools`` host. Selecting any of them drives the one-line security
-# caution, because anyone who can @mention the agent can then drive them.
+# caution, because anyone who can !mention the agent can then drive them.
 # ``terminal`` and ``execute_code`` run arbitrary code on the host (see
 # docs/adr/0005); ``write_file``/``patch`` mutate the shared workspace.
 _DANGEROUS_TOOLS = frozenset(
@@ -278,7 +278,7 @@ def pick_tools(
     explicit grant that never rides that default. Row building is shared with
     the ``agent tools`` editor (:func:`calfcord.cli.agent_tools._build_choices`)
     so the two surfaces can't drift. If a write/shell tool ends up selected we
-    print the security caution, because anyone who can @mention the agent can
+    print the security caution, because anyone who can !mention the agent can
     then drive it.
     """
     from calfcord.cli.agent_tools import (
@@ -303,7 +303,7 @@ def pick_tools(
     if _DANGEROUS_TOOLS.intersection(selected):
         print(
             "note: these tools include code execution + file write access in the "
-            "calfkit-tools launch dir, drivable by anyone who can @mention this agent "
+            "calfkit-tools launch dir, drivable by anyone who can !mention this agent "
             "— keep the bot off public Discord (docs/security.md §3.4)."
         )
 
