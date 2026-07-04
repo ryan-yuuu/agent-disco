@@ -267,6 +267,15 @@ def test_shim_auth_maps_to_calfkit_auth(tmp_path: Path) -> None:
     assert _run_shim_argv(home, ["auth", "codex", "login"]) == "calfkit-auth codex login"
 
 
+def test_shim_broker_maps_to_calfcord_broker(tmp_path: Path) -> None:
+    """``disco broker`` routes to the ``calfcord-broker`` launcher in the venv,
+    forwarding passthrough args. (The bash installer suite additionally asserts
+    the broker arm omits ``--env-file`` so the broker never reads config/.env.)"""
+    home = tmp_path / "home"
+    _install_shims(home)
+    assert _run_shim_argv(home, ["broker", "--kafka-cluster-id", "demo"]) == "calfcord-broker --kafka-cluster-id demo"
+
+
 def test_shim_dispatches_doctor_to_calfcord_cli(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _install_shims(home)

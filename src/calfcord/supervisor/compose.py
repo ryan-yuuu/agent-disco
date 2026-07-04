@@ -47,16 +47,29 @@ COMPOSE_SCHEMA_VERSION = "0.5"
 
 # Readiness-probe cadence — the §13.2 pinned values. An exec probe (the bridge
 # exposes no HTTP endpoint) shells out to the launcher's internal healthcheck.
+# The timeout is deliberately generous: the probe is a heavyweight `uv run` cold
+# start (a fresh Python interpreter + imports), so under a transient CPU-load
+# spike it can take several seconds. A tight 5s budget let load-driven probe
+# timeouts (`signal: killed`) trip a FALSE "unhealthy" verdict and bounce the
+# substrate — the readiness-spiral incident — so 10s buys ~6x headroom over the
+# ~1.5s a warm probe takes, without masking a genuinely wedged process for long
+# (still 3 consecutive failures before "unhealthy").
 _PROBE_INITIAL_DELAY_SECONDS = 2
 _PROBE_PERIOD_SECONDS = 3
-_PROBE_TIMEOUT_SECONDS = 5
+_PROBE_TIMEOUT_SECONDS = 10
 _PROBE_SUCCESS_THRESHOLD = 1
 _PROBE_FAILURE_THRESHOLD = 3
 
 # Autorestart backoff for the substrate's `always` policy (the only processes
 # declared here — the roster is detached, off PC, with NO auto-respawn);
-# max_restarts 0 == unlimited retries in Process Compose.
-_RESTART_BACKOFF_SECONDS = 2
+# max_restarts 0 == unlimited retries in Process Compose. The backoff is a
+# GENEROUS fixed delay (Process Compose has no exponential backoff): a persistent
+# failure — a bad config, a wedged broker, a saturated host — must restart SLOWLY
+# instead of hammering the machine. A 2s backoff turned a probe-timeout loop into
+# a CPU-saturating restart spiral (broker + bridge each bouncing every few
+# seconds, each a fresh heavyweight boot); at 15s the same loop restarts ~4x/min
+# — negligible load — while still recovering a genuine transient blip within 15s.
+_RESTART_BACKOFF_SECONDS = 15
 _RESTART_MAX_RESTARTS = 0
 
 # Per-host log rotation (project-level); §13.2.

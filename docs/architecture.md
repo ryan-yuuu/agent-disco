@@ -147,9 +147,10 @@ unified or per-component logs.
 
 On a single host the **substrate** (broker + bridge) is managed by
 **[Process Compose](https://f1bonacc1.github.io/process-compose)**, a
-cross-platform single-binary supervisor that Agent Disco bootstraps the same way it
-bootstraps the Tansu broker (a pinned binary under `$CALFCORD_HOME/bin`, kept out
-of the agent Python path). Its configuration is **derived state**: Agent Disco
+cross-platform single-binary supervisor the installer downloads to a pinned
+binary under `$CALFCORD_HOME/bin`, kept out of the agent Python path. (The Tansu
+broker, by contrast, ships as the `calfkit-mesh` dependency inside the locked
+environment.) Its configuration is **derived state**: Agent Disco
 generates a **substrate-only** `$CALFCORD_HOME/state/process-compose.yaml` (broker
 + bridge) from your config — you never hand-edit it — and the CLI verbs are a thin
 veneer over the supervisor's REST API. Process Compose absorbs the substrate
@@ -262,10 +263,12 @@ uv run calfkit-mcp <server>                          # one MCP server from mcp.j
 
 `localhost:9092` is the default Kafka port the native Tansu broker listens on.
 Skip `disco broker` if you have Kafka elsewhere — just point `CALF_HOST_URL`
-at it. Tansu's default storage is ephemeral memory, so topics/messages reset on
-broker restart and Agent Disco re-creates the topics it needs on startup. Writing
-the value to `.env` rather than `export`ing it means every `uv run` terminal
-picks it up via `python-dotenv` without a per-shell re-export.
+at it. The bundled broker (from the `calfkit-mesh` dependency) is memory-only, so
+topics/messages reset on broker restart and Agent Disco re-creates the topics it
+needs on startup; for a persistent store, point `CALF_TANSU_BIN` at a full Tansu
+binary or use the Docker broker. Writing `CALF_HOST_URL` to `.env` rather than
+`export`ing it means every `uv run` terminal picks it up via `python-dotenv`
+without a per-shell re-export.
 
 > The `disco broker` and `disco run <bridge|agent|tools|mcp>` shim
 > verbs are the same low-level escape hatches surfaced for when you want one

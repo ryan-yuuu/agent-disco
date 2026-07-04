@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, get_args
 
+from calfkit_mesh import TansuBinaryNotFound, resolve_broker_bin
+
 from calfcord.cli._envfile import read_env
 
 if TYPE_CHECKING:
@@ -144,6 +146,24 @@ def _check_broker() -> Result:
     return Result("broker", "fail", f"set but unreachable at {host}:{port}")
 
 
+def _check_broker_binary() -> Result:
+    """Whether the local Tansu broker binary (shipped by the calfkit-mesh
+    dependency) resolves — and, as a side effect, warm its one-time extraction
+    cache so a healthy host never extracts inside the supervised broker's
+    restart loop.
+
+    ``warn`` (not ``fail``) when it doesn't resolve: the binary is only needed on
+    a host that actually runs the broker (``disco start`` / ``disco broker``); a
+    host pointed at a remote ``CALF_HOST_URL`` never runs it, so a resolution
+    problem must not break doctor's scriptable exit code for that host.
+    """
+    try:
+        path = resolve_broker_bin()
+    except (TansuBinaryNotFound, OSError) as exc:
+        return Result("broker binary", "warn", f"unavailable: {str(exc) or type(exc).__name__}")
+    return Result("broker binary", "ok", path)
+
+
 def _check_token(*, offline: bool, client_factory: Callable[[], httpx.Client] | None) -> Result:
     token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     if not token:
@@ -192,7 +212,7 @@ def _check_agents(agents_dir: Path) -> Result:
 
 # --------------------------------------------------------------------- runtime checks
 #
-# The five checks above are STATIC — they answer "will the processes boot?" from
+# The six checks above are STATIC — they answer "will the processes boot?" from
 # config alone, with no running daemon. When the workspace IS open (the substrate
 # started detached via ``disco start``) doctor adds a RUNTIME section that proves
 # the daemon is actually alive — the "green light that lies" the design (§12.1)
@@ -284,18 +304,23 @@ def run(
 ) -> int:
     """Run every preflight check, print the report, and return the exit code (1 iff any check fails).
 
-    The five STATIC checks (config / broker / token / app id / agents) always run.
+    The six STATIC checks (config / broker / broker binary / token / app id /
+    agents) always run.
     When ``home`` is supplied (a native install) doctor additionally runs the
     RUNTIME section — daemon liveness plus a pointer to the native mesh roster view
     — but only if the daemon is actually up (a fresh bridge heartbeat exists); a
-    closed workspace prints a next-step hint and adds no findings. doctor stays
-    **read-only**: the runtime seams (``read_beat_fn`` / ``now``) are injected so
-    tests need no real beat file, and default in production to the heartbeat reader
-    and the system clock.
+    closed workspace prints a next-step hint and adds no findings. doctor is
+    **read-only** apart from one benign, idempotent side effect: the broker-binary
+    check calls ``resolve_broker_bin()``, which materializes the calfkit-mesh
+    binary into ``~/.calfkit/bin`` on first run (a deliberate cache-warm). The
+    runtime seams (``read_beat_fn`` / ``now``) are injected so tests need no real
+    beat file, and default in production to the heartbeat reader and the system
+    clock.
     """
     results = [
         _check_config(env_path),
         _check_broker(),
+        _check_broker_binary(),
         _check_token(offline=offline, client_factory=client_factory),
         _check_appid(),
         _check_agents(agents_dir),

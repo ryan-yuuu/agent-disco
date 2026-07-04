@@ -75,7 +75,10 @@ def test_substrate_readiness_probes_are_exec_only() -> None:
         assert "http_get" not in probe
         assert probe["initial_delay_seconds"] == 2
         assert probe["period_seconds"] == 3
-        assert probe["timeout_seconds"] == 5
+        # Generous timeout: the exec probe is a heavyweight `uv run` cold start, so
+        # a transient CPU-load spike must not trip a false "unhealthy" and bounce
+        # the substrate (the readiness-spiral incident) — see compose._PROBE_TIMEOUT_SECONDS.
+        assert probe["timeout_seconds"] == 10
         assert probe["success_threshold"] == 1
         assert probe["failure_threshold"] == 3
 
@@ -93,7 +96,10 @@ def test_substrate_restart_always() -> None:
     for name in ("broker", "bridge"):
         availability = procs[name]["availability"]
         assert availability["restart"] == "always"
-        assert availability["backoff_seconds"] == 2
+        # Generous fixed backoff (process-compose has no exponential backoff): a
+        # persistent failure restarts SLOWLY instead of hammering the host — a 2s
+        # backoff turned a probe-timeout loop into a CPU-saturating restart spiral.
+        assert availability["backoff_seconds"] == 15
         assert availability["max_restarts"] == 0
 
 

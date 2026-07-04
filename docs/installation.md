@@ -67,9 +67,8 @@ $EDITOR ~/.calfcord/config/.env
 `init` leaves you with a running **workspace**: a local Kafka broker plus the
 Discord bridge, kept alive in the background by a process supervisor the
 installer bootstraps ([Process Compose](https://f1bonacc1.github.io/process-compose),
-a single static binary, downloaded to `~/.calfcord/bin/process-compose` — the
-same way the Tansu broker binary is). You never edit the supervisor's config;
-Agent Disco generates it from your config.
+a single static binary, downloaded to `~/.calfcord/bin/process-compose`). You
+never edit the supervisor's config; Agent Disco generates it from your config.
 
 Two layers are worth keeping straight:
 
@@ -91,16 +90,18 @@ Two layers are worth keeping straight:
 ### The workspace runs the broker for you
 
 Agent Disco's processes talk to each other through a **Kafka broker**. You don't
-have to run one yourself: the installer bootstraps a single Tansu binary to
-`~/.calfcord/bin/tansu`, `disco init` selects `CALF_HOST_URL=localhost:9092`,
-and `disco start` launches the broker as part of the substrate. There is no
-separate "start the broker" step.
+have to run one yourself: the broker ships as the `calfkit-mesh` dependency (a
+Tansu binary bundled in the locked environment), so there is no binary to fetch
+by hand — `disco init` selects `CALF_HOST_URL=localhost:9092` and `disco start`
+launches the broker as part of the substrate. There is no separate "start the
+broker" step. On first use the bundled binary is cached under `~/.calfkit/bin/`.
 
-Tansu's default storage is **ephemeral memory** — topics and messages reset when
-the broker restarts, and Agent Disco re-creates the topics it needs on startup. For
-persistence across restarts, configure the broker with a libsql/SQLite or
-postgres store via the `STORAGE_ENGINE` env var; see
-[Tansu's docs](https://docs.tansu.io/).
+The bundled broker uses **ephemeral memory** storage — topics and messages reset
+when the broker restarts, and Agent Disco re-creates the topics it needs on
+startup. The bundled build is **memory-only**; for a persistent store
+(libsql/SQLite, postgres) point `CALF_TANSU_BIN` at a full Tansu binary, or run
+the broker under Docker (`docker compose up tansu`), which uses the full image.
+See [Tansu's docs](https://docs.tansu.io/).
 
 **Bring your own / a shared broker.** Choose "I have a broker URL (advanced)" in
 `disco init`, or point an existing install at one later:

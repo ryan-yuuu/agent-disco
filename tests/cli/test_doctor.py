@@ -117,6 +117,9 @@ def _setup(
             monkeypatch.setenv(key, val)
 
     monkeypatch.setattr(doctor, "_tcp_reachable", lambda host, port, timeout=2.0: reachable)
+    # A healthy install resolves the calfkit-mesh broker binary; stub it so unit
+    # tests never perform the real one-time extraction to ~/.calfkit/bin.
+    monkeypatch.setattr(doctor, "resolve_broker_bin", lambda: "/stub/bin/tansu-v0.6.0")
     return env_path, agents_dir
 
 
@@ -152,6 +155,54 @@ def test_broker_unreachable_fails(monkeypatch, tmp_path, capsys):
     rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
     assert rc == 1
     assert "✗" in capsys.readouterr().out
+
+
+def test_broker_binary_ok_shows_resolved_path(monkeypatch, tmp_path, capsys):
+    """The broker-binary check reports the resolved calfkit-mesh path as ok."""
+    env_path, agents_dir = _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(doctor, "resolve_broker_bin", lambda: "/opt/tansu")
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "broker binary" in out
+    assert "/opt/tansu" in out
+    assert "⚠" not in out and "✗" not in out  # the check is ok, not warn/fail
+
+
+def test_broker_binary_unresolvable_warns_not_fails(monkeypatch, tmp_path, capsys):
+    """An unresolvable/unextractable binary is a diagnostic warning, not a hard
+    fail — a host pointed at a remote broker never runs the local binary, so this
+    must not break doctor's scriptable exit code for it."""
+    from calfkit_mesh import TansuBinaryNotFound
+
+    env_path, agents_dir = _setup(monkeypatch, tmp_path)
+
+    def _raise():
+        raise TansuBinaryNotFound("no wheel for this platform")
+
+    monkeypatch.setattr(doctor, "resolve_broker_bin", _raise)
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "⚠" in out
+    assert "no wheel for this platform" in out
+
+
+def test_broker_binary_empty_message_names_the_type(monkeypatch, tmp_path, capsys):
+    """A dependency exception with no message still names a cause in the detail
+    line, rather than leaving a bare ``unavailable:``."""
+    from calfkit_mesh import TansuBinaryNotFound
+
+    env_path, agents_dir = _setup(monkeypatch, tmp_path)
+
+    def _raise():
+        raise TansuBinaryNotFound("")
+
+    monkeypatch.setattr(doctor, "resolve_broker_bin", _raise)
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "TansuBinaryNotFound" in out
 
 
 @pytest.mark.parametrize(

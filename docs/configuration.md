@@ -57,11 +57,15 @@ supervisor runs the bundled native Tansu broker on `localhost:9092`), so you
 normally leave `CALF_HOST_URL` at its default. Set it only to point the roster at
 a broker that isn't the one `start` manages — most commonly a shared broker on
 another host (see [`distributed-deployment.md`](./distributed-deployment.md)).
-`disco self set-broker <host:port>` writes this var for you.
+`disco self set-broker <host:port>` writes this var for you. The bundled broker
+(from the `calfkit-mesh` dependency) is **memory-only** (ephemeral); for a
+persistent store, set `CALF_TANSU_BIN` (below) to a full Tansu binary, or run the
+Docker broker, whose image retains the libsql/postgres/S3 storage engines.
 
 | Variable | Required | Description |
 |---|---|---|
 | `CALF_HOST_URL` | optional (defaults to local) | Kafka bootstrap URL(s). Default `localhost:9092` matches the substrate broker `disco start` runs. Bring-your-own / remote Kafka: point it at that broker. Full Docker Compose: leave unset; compose sets `tansu:9092` per-service. (Broker-in-Docker, processes-native: `TANSU_ADVERTISE=localhost docker compose up tansu`, then `localhost:9092`.) |
+| `CALF_TANSU_BIN` | optional | Absolute path to a Tansu binary for `disco broker` to run **instead of** the memory-only one bundled by `calfkit-mesh` — e.g. a full build with libsql/postgres/S3 storage. With it set, `disco broker` honors a non-memory `STORAGE_ENGINE`; unset, the bundled broker forces memory storage. If set but not an executable file, `disco broker` **fails loudly** rather than silently falling back. |
 
 ## Agents, tools & A2A
 
