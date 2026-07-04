@@ -14,7 +14,7 @@ roster-driven re-sync):
   truncates at, so agents stop seeing messages above the line. No agent involved.
 
 Per-agent invocation slashes (``/echo`` …) are gone — agents are invoked by
-``@<id>`` mention parsed in the gateway.
+``!<id>`` mention parsed in the gateway.
 """
 
 from __future__ import annotations

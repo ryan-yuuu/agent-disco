@@ -28,14 +28,14 @@ capabilities replace it, both declared in agent frontmatter and both
 
 The bridge is no longer the A2A *transport* — the consult or handoff
 already happened inside the agent runtime. Instead the bridge **observes**
-each `@mention` run's event stream, and renders the `message_agent` calls,
+each mention run's event stream, and renders the `message_agent` calls,
 peer replies, and handoffs it sees into a unified Discord audit channel.
 Kafka is the system of record; Discord is a human-readable audit log.
 
 ## Architecture at a glance
 
 ```
-human @mentions an agent
+human mentions an agent
    │
    ▼
 bridge  client.agent(<name>).start(...)  ──►  agent runtime
@@ -71,7 +71,7 @@ is observable (it carries the same `correlation_id`, `emitter=C`,
 ## Anchoring and personas
 
 - **One thread per human turn.** The projector keys threads by
-  `correlation_id` (one per top-level `@mention`), created lazily on the
+  `correlation_id` (one per top-level mention), created lazily on the
   first A2A projection for that turn — that first post is the thread's
   starter message. Every later request / reply / reject / handoff / fault
   for the same turn posts into that thread.

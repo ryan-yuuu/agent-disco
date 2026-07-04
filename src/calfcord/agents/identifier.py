@@ -2,7 +2,7 @@
 
 The pattern ``[a-z0-9_-]{1,32}`` appears in several places across the
 codebase (notably :class:`AgentDefinition.agent_id` and the bridge
-normalizer's @-mention scanner). This module is the canonical
+normalizer's mention scanner). This module is the canonical
 definition; importers should reach for :data:`AGENT_ID_PATTERN` rather
 than re-declaring the regex.
 
@@ -16,16 +16,25 @@ import re
 
 AGENT_ID_CHARSET = "a-z0-9_-"
 """Raw character class (without brackets) for agent_id characters.
-Use for building related regexes (e.g. the bridge's @-mention
+Use for building related regexes (e.g. the bridge's mention
 scanner) where the surrounding pattern shape differs but the
 character set must match."""
+
+MENTION_PREFIX = "!"
+"""The single character that prefixes an agent mention in a Discord message
+(e.g. ``!scribe``). The bridge normalizer builds its mention scanner from this
+constant, so the trigger char has one home and cannot drift between call sites.
+
+Deliberately NOT a member of :data:`AGENT_ID_CHARSET`: the prefix must never be
+a legal agent-id character, or the scanner could not tell where the prefix ends
+and the id begins."""
 
 _AGENT_ID_REGEX_STR = rf"[{AGENT_ID_CHARSET}]{{1,32}}"
 
 AGENT_ID_PATTERN = re.compile(_AGENT_ID_REGEX_STR)
 """Compiled regex matching the canonical agent_id format. Use
 ``.fullmatch(value)`` for membership checks; the character class
-also appears verbatim inside the bridge normalizer's @-mention scanner."""
+also appears verbatim inside the bridge normalizer's mention scanner."""
 
 RESERVED_AGENT_IDS = frozenset({"broker", "bridge", "tools", "process-compose"})
 """Workspace slot names an agent id may never take.

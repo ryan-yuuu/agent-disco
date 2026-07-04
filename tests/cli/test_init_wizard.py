@@ -1132,7 +1132,7 @@ def test_live_finish_reply_timeout_downgrades_to_try_yourself(
     rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "@scribe hello" in out
+    assert "!scribe hello" in out
     assert "disco doctor" in out
 
 
@@ -1170,7 +1170,7 @@ def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
 
     The substrate and agent already started successfully — the org IS live — so a
     first-reply detection error is advisory: the watcher's ``RuntimeError`` is
-    caught and mapped to the same honest "org is live; try @agent hello; if
+    caught and mapped to the same honest "org is live; try !agent hello; if
     nothing run doctor" downgrade a clean timeout takes, and the run returns 0."""
 
     class _RaisingFinish(_FinishStub):
@@ -1184,14 +1184,14 @@ def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
     rc = _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
     out = capsys.readouterr().out
     assert rc == 0  # clean return — the org is live, detection is advisory
-    assert "@scribe hello" in out
+    assert "!scribe hello" in out
     assert "disco doctor" in out
     # …and the cause is named, not silently swallowed — a re-silenced handler must fail here.
     assert "couldn't confirm scribe came online" in out
 
 
 def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
-    """The ``@agent hello`` nudge happens INSIDE init (fixes the §12.6 step3/4
+    """The ``!agent hello`` nudge happens INSIDE init (fixes the §12.6 step3/4
     contradiction) as a press-Enter pause — not a Y/n confirm, since there is no
     choice to make — then we watch the outbox."""
     finish = _FinishStub(reply=True)
@@ -1204,7 +1204,7 @@ def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
 class _LoopAssertingPrompter(FakePrompter):
     """A :class:`FakePrompter` whose ``pause`` asserts it runs with NO event loop.
 
-    The reported crash was ``disco init`` prompting the ``@agent hello`` nudge from
+    The reported crash was ``disco init`` prompting the ``!agent hello`` nudge from
     inside a running event loop: InquirerPy's old ``confirm`` drove its own
     ``asyncio.run()`` and raised ``RuntimeError: asyncio.run() cannot be called from
     a running event loop``, aborting init right after the broker started. The nudge
@@ -1224,7 +1224,7 @@ class _LoopAssertingPrompter(FakePrompter):
 
 
 def test_live_finish_prompt_runs_outside_event_loop(tmp_path: Path) -> None:
-    """Regression (the reported crash): the in-flow ``@agent hello`` nudge must run
+    """Regression (the reported crash): the in-flow ``!agent hello`` nudge must run
     with NO event loop running. It sits BETWEEN two independent ``asyncio.run``
     phases (bring-online, then presence-watch), so a blocking ``input()`` can neither
     stall nor crash a loop of ours. A prompter asserting the no-loop invariant must
@@ -1237,7 +1237,7 @@ def test_live_finish_prompt_runs_outside_event_loop(tmp_path: Path) -> None:
 
 
 def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> None:
-    """The human is prompted to send ``@agent hello`` FIRST, then the presence
+    """The human is prompted to send ``!agent hello`` FIRST, then the presence
     watcher runs — the two no longer overlap.
 
     This ordering is safe because ``_wait_for_agent_online`` reads the *current* mesh
@@ -1311,7 +1311,7 @@ def test_epilogue_surfaces_post_permission_fix_even_when_offline(capsys: pytest.
     """When the preflight PROVED the bot can post nowhere (``postable is False``), the
     permission remedy must be shown even if the agent also wasn't seen online — the
     can't-post problem is known independently of detection. Otherwise the operator is
-    sent to `@name hello` (which can't get a reply) and the one actionable fix is
+    sent to `!name hello` (which can't get a reply) and the one actionable fix is
     withheld, so this case is strictly less helpful than the detected one with the
     identical permissions gap. The 'Grant it …' remedy must appear here too, and we
     must not celebrate."""

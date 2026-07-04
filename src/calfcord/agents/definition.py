@@ -138,7 +138,7 @@ class AgentDefinition(BaseModel):
     - ``False`` — no handoff.
     - ``[name, ...]`` — restrict to those targets (``Handoff(*names)``).
 
-    Replaces the in-channel ``@<agent_id>`` handoff convention (C7)."""
+    Replaces the in-channel ``!<agent_id>`` handoff convention (C7)."""
     system_prompt: str
     source_path: Path | None = Field(default=None, exclude=True, repr=False)
     """Path to the ``.md`` file this definition was parsed from. Set by

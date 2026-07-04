@@ -1,10 +1,10 @@
 """Unit tests for :class:`MessageNormalizer` and :func:`extract_mention_ids`.
 
 Post-0.12 the normalizer is pure of any agent roster (C6): it PARSES a Discord
-message into a :class:`WireMessage` and extracts the ordered ``@<id>`` mention
+message into a :class:`WireMessage` and extracts the ordered ``!<id>`` mention
 tokens, but never validates them against a registry — that resolution moved to
 the live mesh at dispatch time. So there is no ``SlashNormalizer`` and no
-``UnknownAgentMentionError`` here anymore; an unknown ``@mention`` is a valid
+``UnknownAgentMentionError`` here anymore; an unknown ``!mention`` is a valid
 wire, not an error.
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from calfcord.agents.identifier import MENTION_PREFIX
 from calfcord.bridge.normalizer import MessageNormalizer, extract_mention_ids
 
 _BOT_USER_ID = 99
@@ -19,63 +20,80 @@ _OWNER_USER_ID = 1234
 
 
 class TestExtractMentionIds:
-    """The standalone ``@<id>`` token scanner the gateway gates ambient
+    """The standalone ``!<id>`` token scanner the gateway gates ambient
     messages on and the normalizer derives ``slash_target`` from."""
 
     def test_no_mention_returns_empty(self) -> None:
         assert extract_mention_ids("hello world") == ()
 
     def test_single_mention(self) -> None:
-        assert extract_mention_ids("@scribe do the thing") == ("scribe",)
+        assert extract_mention_ids("!scribe do the thing") == ("scribe",)
+
+    def test_scanner_is_built_from_the_mention_prefix_constant(self) -> None:
+        # The regex is derived from ``identifier.MENTION_PREFIX`` so the trigger
+        # char cannot silently drift from the constant (mirrors the charset-drift
+        # guard in ``tests/agents/test_identifier.py``).
+        assert extract_mention_ids(f"{MENTION_PREFIX}scribe hi") == ("scribe",)
+
+    def test_old_at_prefix_no_longer_triggers(self) -> None:
+        # Hard cutover: ``@name`` is inert now; only ``!name`` addresses an agent.
+        assert extract_mention_ids("@scribe do the thing") == ()
 
     def test_mention_need_not_lead(self) -> None:
-        # ``@<id>`` need not be the first token; it just has to START a
+        # ``!<id>`` need not be the first token; it just has to START a
         # whitespace-delimited token.
-        assert extract_mention_ids("hey @scribe what's up") == ("scribe",)
+        assert extract_mention_ids("hey !scribe what's up") == ("scribe",)
 
     def test_leading_whitespace_allowed(self) -> None:
-        assert extract_mention_ids("   @scribe hi") == ("scribe",)
+        assert extract_mention_ids("   !scribe hi") == ("scribe",)
 
     def test_lower_cases_tokens(self) -> None:
         # Agent ids are lower-case, so tokens are normalized to match the mesh.
-        assert extract_mention_ids("@SCRIBE and @Echo") == ("scribe", "echo")
+        assert extract_mention_ids("!SCRIBE and !Echo") == ("scribe", "echo")
 
     def test_order_is_preserved(self) -> None:
         # The handler invokes the FIRST online mention (R-A2), so order matters.
-        assert extract_mention_ids("@bravo then @alpha then @charlie") == ("bravo", "alpha", "charlie")
+        assert extract_mention_ids("!bravo then !alpha then !charlie") == ("bravo", "alpha", "charlie")
 
     def test_duplicates_are_collapsed_preserving_first_position(self) -> None:
         # A double-mention must not distort the "no agent online" notice, and a
         # case-variant duplicate collapses to one lower-cased entry at its first
         # position.
-        assert extract_mention_ids("@echo @scribe @Echo again") == ("echo", "scribe")
+        assert extract_mention_ids("!echo !scribe !Echo again") == ("echo", "scribe")
 
-    def test_email_embedded_at_is_not_a_mention(self) -> None:
-        # An embedded ``@`` (email, URL, markdown) does not start a token, so it
-        # is excluded.
-        assert extract_mention_ids("mail me at foo@bar.com thanks") == ()
+    def test_embedded_bang_is_not_a_mention(self) -> None:
+        # A ``!`` mid-token (e.g. ``wait5!echo``) is preceded by a non-whitespace
+        # char, so it does not START a token and is excluded — the same
+        # token-boundary rule that kept ``foo@bar.com`` from matching under ``@``.
+        assert extract_mention_ids("that is wait5!echo though") == ()
 
-    def test_bare_at_sign_is_not_a_mention(self) -> None:
-        # ``@`` followed by whitespace has no id characters to capture.
-        assert extract_mention_ids("@ hi") == ()
+    def test_trailing_exclamation_is_not_a_mention(self) -> None:
+        # Ordinary exclamation punctuation (``nice work! thanks``) is a ``!``
+        # followed by whitespace, so there are no id characters to capture — this
+        # guards the most common false-positive risk of the ``!`` prefix.
+        assert extract_mention_ids("nice work! thanks everyone") == ()
+
+    def test_bare_bang_is_not_a_mention(self) -> None:
+        # ``!`` followed by whitespace has no id characters to capture.
+        assert extract_mention_ids("! hi") == ()
 
     def test_id_charset_hyphen_underscore_digits(self) -> None:
         # The capture uses the canonical agent-id charset ``[a-z0-9_-]``.
-        assert extract_mention_ids("@agent-1_x go") == ("agent-1_x",)
+        assert extract_mention_ids("!agent-1_x go") == ("agent-1_x",)
 
     def test_trailing_punctuation_stops_the_capture(self) -> None:
         # A ``:`` (or any non-id char) terminates the token but keeps what precedes.
-        assert extract_mention_ids("@scribe: please help") == ("scribe",)
+        assert extract_mention_ids("!scribe: please help") == ("scribe",)
 
     def test_reserved_router_name_is_just_a_token_now(self) -> None:
-        # No registry means no special-casing: ``@_router`` is an ordinary token.
+        # No registry means no special-casing: ``!_router`` is an ordinary token.
         # (Whether such an agent is online is decided by the mesh, not here.)
-        assert extract_mention_ids("@_router hello") == ("_router",)
+        assert extract_mention_ids("!_router hello") == ("_router",)
 
 
 class TestNormalizeMentionAndKind:
     """``normalize`` sets ``kind``/``slash_target`` from the mention scan and
-    keeps the original content verbatim (the ``@`` prefix is NOT stripped)."""
+    keeps the original content verbatim (the ``!`` prefix is NOT stripped)."""
 
     def test_plain_message_is_kind_message(self, fake_message) -> None:
         normalizer = MessageNormalizer(_OWNER_USER_ID)
@@ -86,28 +104,28 @@ class TestNormalizeMentionAndKind:
 
     def test_mention_is_kind_slash_with_first_target(self, fake_message) -> None:
         normalizer = MessageNormalizer(_OWNER_USER_ID)
-        wire = normalizer.normalize(fake_message(content="@scribe book a haircut"))
+        wire = normalizer.normalize(fake_message(content="!scribe book a haircut"))
         assert wire.kind == "slash"
         assert wire.slash_target == "scribe"
         # The prefix is intentionally retained so the agent sees the full text.
-        assert wire.content == "@scribe book a haircut"
+        assert wire.content == "!scribe book a haircut"
 
     def test_slash_target_is_lower_cased(self, fake_message) -> None:
         normalizer = MessageNormalizer(_OWNER_USER_ID)
-        wire = normalizer.normalize(fake_message(content="@SCRIBE hi"))
+        wire = normalizer.normalize(fake_message(content="!SCRIBE hi"))
         assert wire.slash_target == "scribe"
 
     def test_first_of_multiple_mentions_is_the_target(self, fake_message) -> None:
         normalizer = MessageNormalizer(_OWNER_USER_ID)
-        wire = normalizer.normalize(fake_message(content="@scribe please loop in @echo"))
+        wire = normalizer.normalize(fake_message(content="!scribe please loop in !echo"))
         assert wire.kind == "slash"
         assert wire.slash_target == "scribe"
 
     def test_unknown_mention_is_a_valid_wire_not_an_error(self, fake_message) -> None:
-        # The registry gate is gone (C6): an unrecognized ``@mention`` normalizes
+        # The registry gate is gone (C6): an unrecognized ``!mention`` normalizes
         # cleanly; the mesh roster decides at dispatch whether it is reachable.
         normalizer = MessageNormalizer(_OWNER_USER_ID)
-        wire = normalizer.normalize(fake_message(content="@nobody_here hi"))
+        wire = normalizer.normalize(fake_message(content="!nobody_here hi"))
         assert wire.kind == "slash"
         assert wire.slash_target == "nobody_here"
 

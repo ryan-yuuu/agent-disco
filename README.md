@@ -50,7 +50,7 @@ It walks you through picking a provider + model, setting up your first agent, an
 **4. Say hello.** After finishing the guided setup flow, send a message to your first agent:
 
 ```
-@<agent_name> hello
+!<agent_name> hello
 ```
 
 A reply should appear. Your first agent is up and running! 🎉

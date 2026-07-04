@@ -1,12 +1,12 @@
 """Discord ``MESSAGE_CREATE`` → :class:`WireMessage` translation.
 
 Pure of any agent roster: under the 0.12 caller surface the bridge resolves which
-agent an ``@mention`` targets against the live **mesh** at dispatch time (see
+agent a ``!mention`` targets against the live **mesh** at dispatch time (see
 :class:`~calfcord.bridge.roster.MeshRoster` / the ``MentionHandler``), not against
 a registry here. So this module only PARSES a Discord message into a
 :class:`WireMessage` (the ``deps["discord"]`` payload the agent receives, and the
 typed wire the reply poster / history reconstruct) and extracts the ordered list
-of ``@<id>`` mention tokens — it never validates them.
+of ``!<id>`` mention tokens — it never validates them.
 
 Thread handling: a message posted inside a Discord thread carries the parent
 channel's id as ``channel_id`` (via the thread's ``parent_id``); ``source_channel_id``
@@ -22,20 +22,23 @@ from typing import Any, Literal
 
 import uuid_utils
 
-from calfcord.agents.identifier import AGENT_ID_CHARSET
+from calfcord.agents.identifier import AGENT_ID_CHARSET, MENTION_PREFIX
 from calfcord.bridge.wire import WireAuthor, WireMessage
 
 logger = logging.getLogger(__name__)
 
-# Matches "@<agent_id>" where @ starts a whitespace-delimited token — i.e.
-# preceded by start-of-string or whitespace. This excludes embedded @s in
-# things like email addresses ("foo@bar.com"), URLs, or markdown. The character
-# class is the canonical agent-id set; case-insensitive so "@Echo" also matches.
-_MENTION_RE = re.compile(rf"(?:^|\s)@([{AGENT_ID_CHARSET}]+)", re.IGNORECASE)
+# Matches "!<agent_id>" where the prefix starts a whitespace-delimited token —
+# i.e. preceded by start-of-string or whitespace. This excludes an embedded
+# prefix (e.g. "wait5!echo") and ordinary trailing punctuation ("nice work!"),
+# which are the "!"-analogues of an "@" inside "foo@bar.com". The prefix comes
+# from MENTION_PREFIX (re.escape'd so a regex-special prefix stays literal); the
+# character class is the canonical agent-id set; case-insensitive so "!Echo"
+# also matches.
+_MENTION_RE = re.compile(rf"(?:^|\s){re.escape(MENTION_PREFIX)}([{AGENT_ID_CHARSET}]+)", re.IGNORECASE)
 
 
 def extract_mention_ids(content: str) -> tuple[str, ...]:
-    """Return the ordered, de-duplicated, lower-cased ``@<id>`` mention tokens.
+    """Return the ordered, de-duplicated, lower-cased ``!<id>`` mention tokens.
 
     Order is preserved (the ``MentionHandler`` invokes the first *online* mention,
     R-A2); duplicates are collapsed so a double-mention doesn't distort the
@@ -83,11 +86,11 @@ class MessageNormalizer:
     def normalize(self, message: Any) -> WireMessage:
         """Build a :class:`WireMessage` from a ``discord.Message``.
 
-        ``kind`` is ``"slash"`` when the message carries any ``@<id>`` mention,
+        ``kind`` is ``"slash"`` when the message carries any ``!<id>`` mention,
         else ``"message"``; ``slash_target`` is the first mention (lower-cased) or
         ``None``. Neither field gates anything on the caller surface (the addressing
         gate is gone — C6); they remain for wire-schema stability. The agent
-        receives the full original ``content`` (the ``@`` prefix is not stripped).
+        receives the full original ``content`` (the ``!`` prefix is not stripped).
 
         Raises:
             ValueError: If the message has no guild (DM). Callers should filter
