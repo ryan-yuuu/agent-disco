@@ -3,9 +3,10 @@
 The flows in :mod:`calfcord.cli.init` and the ``agent tools`` editor
 (:mod:`calfcord.cli.agent_tools`) must be unit-testable without a TTY, so they
 never touch a prompting library directly. Instead they take a
-:class:`Prompter` — a small Protocol covering the five prompt shapes we use
-(single-select, free text, masked secret, yes/no, multi-select checkbox).
-Tests inject a scripted fake; production injects :class:`InquirerPrompter`.
+:class:`Prompter` — a small Protocol covering the six prompt shapes we use
+(single-select, free text, masked secret, yes/no, multi-select checkbox, and a
+press-Enter-to-continue pause). Tests inject a scripted fake; production injects
+:class:`InquirerPrompter`.
 
 :class:`InquirerPrompter` imports InquirerPy **lazily inside each method** so
 that merely importing this module (which the argparse entry point does at
@@ -63,6 +64,15 @@ class Prompter(Protocol):
         """Yes/no prompt. Returns the boolean answer."""
         ...
 
+    def pause(self, message: str) -> None:
+        """Blocking press-Enter-to-continue gate — an acknowledgment, not a choice.
+
+        Use this (not :meth:`confirm`) when the flow just needs the operator to do
+        something out-of-band and signal ready; there is no yes/no to record, so a
+        ``(Y/n)`` would imply a decision that does not exist. Returns nothing.
+        """
+        ...
+
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
         """Multi-select; returns the selected :attr:`Choice.value`s (``checked`` pre-checks a row)."""
         ...
@@ -104,6 +114,13 @@ class InquirerPrompter:
         from InquirerPy import inquirer
 
         return inquirer.confirm(message=message, default=default).execute()
+
+    def pause(self, message: str) -> None:
+        # A plain blocking ``input()`` — NOT an InquirerPy widget — is deliberate: a
+        # press-Enter gate needs no prompt_toolkit ``Application.run()`` (→ its own
+        # ``asyncio.run()``), so it cannot raise "asyncio.run() cannot be called from
+        # a running event loop" the way ``confirm`` could. The typed line is discarded.
+        input(message)
 
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
         from InquirerPy import inquirer

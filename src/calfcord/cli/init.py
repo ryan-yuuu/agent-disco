@@ -551,16 +551,25 @@ def _capture_token(
 
 
 def _pick_guild(prompter: Prompter, guilds: list[Guild], *, default: str | None) -> str | None:
-    """Present a guild pick-list; return the chosen id, or ``None`` if none exist.
+    """Bind a guild; return its id, or ``None`` if the bot is in none.
 
     Zero guilds is a legitimate surfaced outcome (the bot joined nowhere the API
-    reports yet); we explain it rather than offering an empty menu. ``default``
-    pre-selects a previously-saved binding so a re-run keeps the working guild
-    (don't clobber it, §12.7).
+    reports yet); we explain it rather than offering an empty menu. Exactly one
+    guild is not a choice, so we bind it without a prompt (auto-advance) and only
+    echo its name. The pick-list is shown solely when there are two or more, where
+    ``default`` pre-selects a previously-saved binding so a re-run keeps the
+    working guild (don't clobber it, §12.7).
     """
     if not guilds:
         print("  the bot isn't in any server the API reports yet — re-run init once it has joined one.")
         return None
+    if len(guilds) == 1:
+        # One guild is not a choice — bind it without a prompt (auto-advance), but
+        # name it so the operator still sees which server is in play; that echo is
+        # the only thing a single-option pick-list would have added.
+        only = guilds[0]
+        print(f"  Using the only server the bot is in: {only.name}.")
+        return only.id
     choices = [Choice(g.id, f"{g.name}{' (owner)' if g.owner else ''}") for g in guilds]
     return prompter.select(
         "Which server should the agent live in?",
@@ -678,9 +687,9 @@ def _run_finish(
     instead of orchestrating something it cannot (no green light that lies).
 
     On the native happy path it runs three correctly-layered phases:
-    :func:`_bring_online` (async) → an in-flow ``@<name> hello`` prompt (synchronous,
-    no event loop running) → :func:`_await_presence` (async), mapping each failure to
-    its specific hint:
+    :func:`_bring_online` (async) → an in-flow ``@<name> hello`` press-Enter pause
+    (synchronous, no event loop running) → :func:`_await_presence` (async), mapping
+    each failure to its specific hint:
 
     * substrate not ready → tear-down already happened in ``start``; point at
       ``disco logs`` / ``disco doctor`` (don't misattribute the cause) and stop
@@ -690,13 +699,14 @@ def _run_finish(
       bot can post nowhere, which downgrades to an honest "online but can't post");
       timed out → the bounded "org is live — try it yourself / run ``disco doctor``".
 
-    The prompt is a blocking, synchronous terminal interaction — prompt_toolkit
-    drives its OWN event loop (``Application.run()`` → ``asyncio.run()``) — so it must
-    never run inside a loop of ours. Keeping it BETWEEN two independent
-    ``asyncio.run`` calls (rather than awaited inside one) makes the nested-loop crash
-    impossible by construction. Running the presence watch AFTER the prompt (rather
-    than concurrently) is safe for the reason :func:`_wait_for_agent_online` documents:
-    it is a level-triggered mesh read backed by a bounded poll, so it detects the agent
+    The pause is a blocking, synchronous terminal read (:meth:`Prompter.pause` →
+    ``input()``) — so it must never run inside a loop of ours, which it would block.
+    Keeping it BETWEEN two independent ``asyncio.run`` calls (rather than awaited
+    inside one) satisfies that by construction; it also sidesteps the historical
+    crash where an InquirerPy ``confirm`` here drove its own ``asyncio.run()`` from
+    inside our loop. Running the presence watch AFTER the pause (rather than
+    concurrently) is safe for the reason :func:`_wait_for_agent_online` documents: it
+    is a level-triggered mesh read backed by a bounded poll, so it detects the agent
     whenever registration lands — before or after the watch opens.
     """
     pc_binary_fn = pc_binary_fn or _supervisor.default_pc_binary
@@ -749,10 +759,12 @@ def _run_finish(
     if rc != 0:
         return rc
 
-    # Phase 2 — the human nudge (§12.6: prompt the @mention INSIDE init). Runs
-    # synchronously with NO event loop running, so the real InquirerPy prompt (which
-    # drives its own loop) works exactly as it does everywhere else in the wizard.
-    prompter.confirm(f"In Discord, say:  @{name} hello   — press enter once you've sent it.", default=True)
+    # Phase 2 — the human nudge (§12.6: prompt the @mention INSIDE init). A
+    # press-Enter pause, not a Y/n confirm: there is no choice to record, only an
+    # acknowledgment that the operator has sent the hello. Runs synchronously with NO
+    # event loop of ours running (between the two ``asyncio.run`` phases), so the
+    # blocking read can neither stall nor crash a loop.
+    prompter.pause(f"\nSay  @{name} hello  in Discord, then press Enter to continue…")
     print(f"Waiting for {name} to come online…")
 
     # Phase 3 — confirm presence (async, level-triggered read). The org is already

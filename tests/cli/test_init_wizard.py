@@ -69,9 +69,12 @@ class FakePrompter:
         self._events = events
         self.last_checkbox_choices: list[Choice] = []
         self.select_choices_log: list[list[Choice]] = []
+        self.select_defaults_log: list[str | None] = []
+        self.pauses: list[str] = []
 
     def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
         self.select_choices_log.append(choices)
+        self.select_defaults_log.append(default)
         if not self._selects:
             raise AssertionError(f"unexpected select(): {message!r}")
         return self._selects.popleft()
@@ -87,11 +90,16 @@ class FakePrompter:
         return self._secrets.popleft()
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
-        if self._events is not None:
-            self._events.append("prompted")
         if not self._confirms:
             raise AssertionError(f"unexpected confirm(): {message!r}")
         return self._confirms.popleft()
+
+    def pause(self, message: str) -> None:
+        # The "say hello, then press Enter" nudge — an acknowledgment gate, not a
+        # choice; it records the ordering event the old confirm used to.
+        if self._events is not None:
+            self._events.append("prompted")
+        self.pauses.append(message)
 
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
         self.last_checkbox_choices = choices
@@ -285,10 +293,9 @@ def _prompter(
     name: str = "scribe",
     description: str = "d",
     discord_token: str = "tok-abc",
-    guild: str = "g1",
+    guild_select: str | None = None,
     broker: str = "native",
     broker_url: str = "broker:9092",
-    say_hello: bool = True,
     checkboxes: list[list[str]] | None = None,
     extra_selects: list[str] | None = None,
     extra_texts: list[str] | None = None,
@@ -300,31 +307,32 @@ def _prompter(
     Consumed prompts (provider sub-flow stubbed out):
       text(name), text(description), checkbox(tools),
       secret(discord token),
-      select(guild),
+      [select(guild) ONLY when ``guild_select`` is set],
       select(broker) [+ text(broker_url) on the ``url`` branch],
-      confirm(say-hello-now).
-    There is no application-id prompt: it is derived from the bot token (via the
-    injected ``verify_identity_fn``), so a bare name+description is all the text()
-    this scripts. There is no channel prompt either: channel selection was removed —
-    the bot listens to every channel, so the wizard only reports postability after
-    the guild pick. ``cls`` swaps in a :class:`FakePrompter` subclass (same script)
-    so a test can vary only the prompt *mechanics* — e.g. the nested-``asyncio.run``
-    reproduction.
+      pause(say-hello-now).
+    The single-guild happy path auto-advances the guild pick (the default
+    ``_DiscordStub`` reports exactly one guild), so no guild ``select`` fires and
+    the script omits it; pass ``guild_select`` (with a >1-guild stub) to script the
+    pick-list answer for the multi-guild path. There is no application-id prompt: it
+    is derived from the bot token (via the injected ``verify_identity_fn``), so a
+    bare name+description is all the text() this scripts. There is no channel prompt
+    either: channel selection was removed — the bot listens to every channel, so the
+    wizard only reports postability after the guild is bound. ``cls`` swaps in a
+    :class:`FakePrompter` subclass (same script) so a test can vary only the prompt
+    *mechanics* — e.g. the nested-``asyncio.run`` reproduction.
     """
     texts = [name, description]
     if broker == "url":
         texts.append(broker_url)
     texts += extra_texts or []
-    selects = [guild, broker]
+    selects = ([guild_select] if guild_select is not None else []) + [broker]
     selects += extra_selects or []
     secrets = [discord_token]
     secrets += extra_secrets or []
-    confirms = [say_hello]
     return cls(
         selects=selects,
         texts=texts,
         secrets=secrets,
-        confirms=confirms,
         checkboxes=checkboxes,
     )
 
@@ -336,6 +344,26 @@ def _prompter(
 
 def test_fake_prompter_satisfies_protocol() -> None:
     assert isinstance(FakePrompter(), Prompter)
+
+
+# --------------------------------------------------------------------------- #
+# Guild picker: auto-advance when there is nothing to choose
+# --------------------------------------------------------------------------- #
+
+
+def test_pick_guild_single_guild_auto_binds_without_prompting(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One guild is not a choice — the picker binds it without a prompt and names
+    the server it bound, so the operator still sees which guild is in play."""
+    p = FakePrompter()  # nothing queued: a select() here would raise
+    only = Guild(id="g1", name="My Server", owner=True, base_permissions=0)
+
+    chosen = init._pick_guild(p, [only], default=None)
+
+    assert chosen == "g1"
+    assert p.select_choices_log == []  # the pick-list was never shown
+    assert "My Server" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
@@ -386,7 +414,7 @@ def test_live_finish_syncs_collected_discord_settings_into_environment(tmp_path:
     # The application id is derived from the token (identity.application_id), not prompted.
     discord = _DiscordStub(identity=BotIdentity(id="b", username="Bot", application_id="778899"))
     rc = _run(
-        _prompter(guild="g1"),
+        _prompter(),
         tmp_path,
         home=tmp_path,
         discord=discord,
@@ -538,12 +566,14 @@ def test_try_open_browser_swallows_webbrowser_errors(monkeypatch: pytest.MonkeyP
     init._try_open_browser("https://example.test")  # must not raise
 
 
-def test_guild_persisted_from_pick_list(tmp_path: Path) -> None:
+def test_single_guild_persisted_without_pick_list(tmp_path: Path) -> None:
+    """The auto-bound single guild is still persisted to ``DISCORD_GUILD_ID`` — the
+    binding does not depend on a pick-list having been shown."""
     discord = _DiscordStub(
         guilds=[Guild(id="g7", name="Server7", owner=True, base_permissions=0)],
         channels=ChannelListing(postable=[PostableChannel(id="c9", name="lobby")], unpostable=[]),
     )
-    assert _run(_prompter(guild="g7"), tmp_path, home=tmp_path, discord=discord) == 0
+    assert _run(_prompter(), tmp_path, home=tmp_path, discord=discord) == 0
     env = read_env(tmp_path / ".env")
     assert env["DISCORD_BOT_TOKEN"] == "tok-abc"
     assert env["DISCORD_GUILD_ID"] == "g7"
@@ -563,7 +593,7 @@ def test_postable_channels_reported_after_guild_pick(
             unpostable=[],
         )
     )
-    assert _run(_prompter(guild="g1"), tmp_path, home=tmp_path, discord=discord) == 0
+    assert _run(_prompter(), tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
     assert "can post in 2 channel" in out
     assert "#general" in out and "#dev" in out
@@ -817,7 +847,7 @@ def test_unpostable_channels_noted_alongside_postable(tmp_path: Path, capsys: py
             unpostable=[PostableChannel(id="c2", name="locked")],
         )
     )
-    assert _run(_prompter(guild="g1"), tmp_path, home=tmp_path, discord=discord) == 0
+    assert _run(_prompter(), tmp_path, home=tmp_path, discord=discord) == 0
     out = capsys.readouterr().out
     assert "can't post in" in out
     assert "#locked" in out
@@ -839,9 +869,17 @@ def test_zero_postable_downgrades_online_celebration(tmp_path: Path, capsys: pyt
 
 
 def test_owner_guild_labelled_in_pick_list(tmp_path: Path) -> None:
-    """An owned guild is labelled '(owner)' in the pick-list (cosmetic but real)."""
-    discord = _DiscordStub(guilds=[Guild(id="g1", name="Mine", owner=True, base_permissions=0)])
-    p = _prompter(guild="g1")
+    """An owned guild is labelled '(owner)' in the pick-list (cosmetic but real).
+
+    The pick-list only renders when there is an actual choice, so this uses two
+    guilds and scripts the pick — a single guild auto-advances with no list."""
+    discord = _DiscordStub(
+        guilds=[
+            Guild(id="g1", name="Mine", owner=True, base_permissions=0),
+            Guild(id="g2", name="Theirs", owner=False, base_permissions=0),
+        ]
+    )
+    p = _prompter(guild_select="g1")
     assert _run(p, tmp_path, home=tmp_path, discord=discord) == 0
     # The guild select (the first select) offered the owner-labelled choice.
     guild_labels = [c.label for c in p.select_choices_log[0]]
@@ -1153,48 +1191,49 @@ def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
 
 
 def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
-    """The ``@agent hello`` prompt happens INSIDE init (fixes the §12.6 step3/4
-    contradiction) — the human is asked to send it, then we watch the outbox."""
+    """The ``@agent hello`` nudge happens INSIDE init (fixes the §12.6 step3/4
+    contradiction) as a press-Enter pause — not a Y/n confirm, since there is no
+    choice to make — then we watch the outbox."""
     finish = _FinishStub(reply=True)
-    p = _prompter(name="scribe", say_hello=True)
+    p = _prompter(name="scribe")
     assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
-    # The confirm was consumed (the in-flow "say hello" gate).
+    assert len(p.pauses) == 1  # the in-flow "say hello" pause fired
     assert len(finish.reply_calls) == 1
 
 
-class _NestedLoopPrompter(FakePrompter):
-    """A :class:`FakePrompter` whose ``confirm`` faithfully reproduces InquirerPy.
+class _LoopAssertingPrompter(FakePrompter):
+    """A :class:`FakePrompter` whose ``pause`` asserts it runs with NO event loop.
 
-    The real prompt path is ``inquirer.confirm(...).execute()`` → prompt_toolkit
-    ``Application.run()`` → ``asyncio.run(coro)``. Invoked from inside a running
-    event loop, that last step raised ``RuntimeError: asyncio.run() cannot be called
-    from a running event loop`` and aborted ``disco init`` right after the broker
-    started. This double drives its own loop the same way, so it raises that
-    identical error if — and only if — the finish flow prompts inside a running loop.
+    The reported crash was ``disco init`` prompting the ``@agent hello`` nudge from
+    inside a running event loop: InquirerPy's old ``confirm`` drove its own
+    ``asyncio.run()`` and raised ``RuntimeError: asyncio.run() cannot be called from
+    a running event loop``, aborting init right after the broker started. The nudge
+    is now :meth:`Prompter.pause` (a blocking ``input()``), which must likewise run
+    outside any loop of ours — between the two ``asyncio.run`` phases, never awaited
+    inside one. This asserts exactly that invariant, primitive-agnostically.
     """
 
-    def confirm(self, message: str, *, default: bool = False) -> bool:
-        answer = super().confirm(message, default=default)
-
-        async def _drive_own_loop() -> bool:
-            return answer
-
-        # Exactly what prompt_toolkit's Application.run() does under the hood.
-        return asyncio.run(_drive_own_loop())
+    def pause(self, message: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # good: no running loop, as required
+        else:
+            raise AssertionError("pause() ran inside a running event loop")
+        super().pause(message)
 
 
 def test_live_finish_prompt_runs_outside_event_loop(tmp_path: Path) -> None:
-    """Regression (the reported crash): the in-flow ``@agent hello`` confirm must run
-    with NO event loop running. InquirerPy's real prompt drives its own loop via
-    ``asyncio.run()``; prompting inside the finish flow's own running loop raised
-    'asyncio.run() cannot be called from a running event loop' and aborted init just
-    after the broker came up. A prompter reproducing that nested ``asyncio.run()``
-    must complete the finish cleanly and still reach the presence watch."""
+    """Regression (the reported crash): the in-flow ``@agent hello`` nudge must run
+    with NO event loop running. It sits BETWEEN two independent ``asyncio.run``
+    phases (bring-online, then presence-watch), so a blocking ``input()`` can neither
+    stall nor crash a loop of ours. A prompter asserting the no-loop invariant must
+    complete the finish cleanly and still reach the presence watch."""
     finish = _FinishStub(reply=True)
-    p = _prompter(name="scribe", cls=_NestedLoopPrompter)
+    p = _prompter(name="scribe", cls=_LoopAssertingPrompter)
     assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
     assert len(finish.reply_calls) == 1  # the flow reached the presence watch
-    assert not p._confirms  # the confirm was actually invoked (guards against a vacuous pass)
+    assert p.pauses  # the pause was actually invoked (guards against a vacuous pass)
 
 
 def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> None:
@@ -1209,7 +1248,7 @@ def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> 
     log records the order: ``prompted`` must precede ``watcher_started``."""
     events: list[str] = []
     finish = _FinishStub(reply=True, events=events)
-    p = _prompter(name="scribe", say_hello=True)
+    p = _prompter(name="scribe")
     p._events = events  # share the ordering log with the finish stub
     assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
     assert events == ["prompted", "watcher_started"]
@@ -1294,7 +1333,7 @@ def test_substrate_start_failure_does_not_start_agent_or_watch(
     assert len(finish.start_calls) == 1
     assert len(finish.agent_calls) == 0
     assert len(finish.reply_calls) == 0
-    assert p._confirms  # the hello prompt is suppressed — never nudge into a dead workspace
+    assert not p.pauses  # the hello nudge is suppressed — never nudge into a dead workspace
 
 
 def test_substrate_start_failure_points_at_logs_and_doctor(
@@ -1318,7 +1357,7 @@ def test_agent_start_failure_skips_reply_watch(tmp_path: Path) -> None:
     assert len(finish.start_calls) == 1
     assert len(finish.agent_calls) == 1
     assert len(finish.reply_calls) == 0
-    assert p._confirms  # the hello prompt is suppressed — never nudge toward an agent that failed to start
+    assert not p.pauses  # the hello nudge is suppressed — never nudge toward an agent that failed to start
 
 
 def test_live_finish_resolves_real_orchestration_when_seams_not_injected(
@@ -1453,7 +1492,7 @@ def test_dev_mode_states_reboot_non_survival(tmp_path: Path, capsys: pytest.Capt
 
 def test_checkpoint_persisted_after_native_run(tmp_path: Path) -> None:
     """A completed run leaves a checkpoint recording the steps + non-secret guild ID."""
-    assert _run(_prompter(name="scribe", guild="g1"), tmp_path, home=tmp_path) == 0
+    assert _run(_prompter(name="scribe"), tmp_path, home=tmp_path) == 0
     cp = setup_state.load(setup_state.checkpoint_path(tmp_path))
     assert cp is not None
     assert cp.provider_done is True
@@ -1580,16 +1619,26 @@ def test_resume_with_corrupt_agent_md_does_not_greet_welcome_back(
 
 
 def test_resume_defaults_to_kept_guild_binding(tmp_path: Path) -> None:
-    """A re-run must not clobber a working guild — it defaults to keep (§12.7)."""
-    # First full run binds g1.
-    assert _run(_prompter(name="scribe", guild="g1"), tmp_path, home=tmp_path) == 0
-    env_first = read_env(tmp_path / ".env")
-    assert env_first["DISCORD_GUILD_ID"] == "g1"
+    """A re-run must not clobber a working guild — the pick-list defaults to the
+    saved binding (§12.7). Only meaningful when there IS a choice (>1 guild); a
+    single guild auto-advances and has no default to keep. Binding g2 (NOT
+    ``guilds[0]``) is what makes the default assertion prove *saved*, not first."""
+    discord = _DiscordStub(
+        guilds=[
+            Guild(id="g1", name="First", owner=True, base_permissions=0),
+            Guild(id="g2", name="Second", owner=False, base_permissions=0),
+        ]
+    )
+    # First full run picks g2 out of the two-guild list.
+    assert _run(_prompter(name="scribe", guild_select="g2"), tmp_path, home=tmp_path, discord=discord) == 0
+    assert read_env(tmp_path / ".env")["DISCORD_GUILD_ID"] == "g2"
 
-    # Second run keeps the binding (the select defaults to the saved guild).
-    assert _run(_prompter(name="scribe", guild="g1"), tmp_path, home=tmp_path) == 0
+    # Second run: the pick-list must pre-select the SAVED g2 rather than guilds[0].
+    p = _prompter(name="scribe", guild_select="g2")
+    assert _run(p, tmp_path, home=tmp_path, discord=discord) == 0
     env_second = read_env(tmp_path / ".env")
-    assert env_second["DISCORD_GUILD_ID"] == "g1"
+    assert env_second["DISCORD_GUILD_ID"] == "g2"
+    assert p.select_defaults_log[0] == "g2"  # defaulted to the saved binding, not guilds[0]
     # Channel selection was removed — nothing more to keep.
     assert "DISCORD_DEFAULT_CHANNEL_ID" not in env_second
 
