@@ -1,22 +1,24 @@
 """Unit tests for the PURE step renderers in :mod:`calfcord.bridge.steps_render`.
 
-After the calfkit-0.12 migration the live progress surface is driven by
+The live step surface is driven by
 :class:`~calfcord.bridge.progress.ProgressRenderer` off the normalized
-``StepEvent`` stream (its lifecycle is covered in ``test_progress.py``), not by
-a Kafka steps consumer. What remains here are the renderer's pure functions,
-which take an input and return a string with no Discord, Kafka, or state:
+``StepEvent`` stream (its posting lifecycle is covered in ``test_progress.py``).
+What remains here are the renderer's pure functions, which take an input and
+return a value with no Discord, Kafka, or state:
 
-* the compact LIVE renderer — :func:`render_step_line` over one ``StepEvent``
-  (prose for ``agent_message``, an inline-code ``tool_name(args)`` line for
-  ``tool_call``, a short fenced ``⎿`` block for ``tool_result``) plus the
-  tail-window / progress-body shaping (``TestLiveRender``);
-* the full ``⤵ steps`` transcript tree renderer over ``Sequence[ModelMessage]``
+* the Components-V2 step renderer — :func:`render_step_message` over one
+  ``StepEvent`` (a monospace ``tool_call`` / ``tool_result`` line, a handoff
+  note, or the full ``agent_message`` prose chunked to the v2 cap)
+  (``TestRenderStepMessage``);
+* the full transcript tree renderer over ``Sequence[ModelMessage]``
   (``TestTreeRender``) — byte-for-byte stable so persisted transcripts keep
   rendering identically;
 * the backtick-fence neutralizer (``TestFenceSafe``).
 """
 
 from __future__ import annotations
+
+import logging
 
 from calfkit._vendor.pydantic_ai.messages import (
     ModelRequest,
@@ -38,9 +40,12 @@ def _step(
     text: str = "",
     name: str | None = None,
     args: dict[str, object] | None = None,
+    is_error: bool = False,
+    target: str | None = None,
 ) -> StepEvent:
     """Build a StepEvent for the renderer. correlation_id/depth/emitter are
-    fixed — the pure renderer reads only ``kind``/``text``/``name``/``args``."""
+    fixed — the pure renderer reads only ``kind``/``text``/``name``/``args``/
+    ``is_error``/``target``."""
     return StepEvent(
         kind=kind,  # type: ignore[arg-type]
         correlation_id="corr-1",
@@ -49,143 +54,9 @@ def _step(
         text=text,
         name=name,
         args=args,
+        is_error=is_error,
+        target=target,
     )
-
-
-class TestLiveRender:
-    """The compact live renderer (:func:`render_step_line`): prose text, an
-    inline-code ``tool_name(args)`` call line, and a short fenced ``⎿`` result
-    block of up to a few lines, plus the tail-window cap that keeps the in-place
-    edit under Discord's 2000-char limit."""
-
-    def test_agent_message_kept_as_prose(self) -> None:
-        assert steps_render.render_step_line(_step("agent_message", text="On it — checking now.")) == (
-            "On it — checking now."
-        )
-
-    def test_agent_message_is_stripped(self) -> None:
-        # Leading/trailing whitespace is trimmed before truncation.
-        assert steps_render.render_step_line(_step("agent_message", text="  hi there  ")) == "hi there"
-
-    def test_whitespace_only_agent_message_renders_none(self) -> None:
-        # An empty preamble (model emitted a tool call with no narrative) shows
-        # nothing — the line is dropped, not posted blank.
-        assert steps_render.render_step_line(_step("agent_message", text="   \n  ")) is None
-
-    def test_long_agent_message_truncated_with_marker(self) -> None:
-        rendered = steps_render.render_step_line(_step("agent_message", text="a" * 5000))
-        assert rendered is not None
-        assert len(rendered) == steps_render._LIVE_TEXT_MAX_CHARS
-        assert rendered.endswith(steps_render.TRUNCATION_MARKER)
-
-    def test_tool_call_renders_keyword_args_as_inline_code(self) -> None:
-        rendered = steps_render.render_step_line(_step("tool_call", name="weather", args={"city": "Tokyo", "n": 5}))
-        assert rendered == '`weather(city="Tokyo", n=5)`'
-
-    def test_empty_args_render_bare_parens(self) -> None:
-        assert steps_render.render_step_line(_step("tool_call", name="ping", args={})) == "`ping()`"
-
-    def test_non_object_and_none_args_render_bare_parens(self) -> None:
-        # The step seam coerces a non-object arg (a bare list/scalar/unparseable
-        # JSON) to ``{}`` before it reaches the renderer, so by here a tool call
-        # with no usable args is just an empty dict (or None) → ``name()``. This
-        # replaces the old raw-JSON fallback ladder, which the seam made dead.
-        assert steps_render.render_step_line(_step("tool_call", name="f", args={})) == "`f()`"
-        assert steps_render.render_step_line(_step("tool_call", name="f", args=None)) == "`f()`"
-
-    def test_nested_object_arg_values_render_as_compact_json(self) -> None:
-        # Non-scalar arg VALUES are JSON-encoded with compact separators (no
-        # space after ':'/','), keeping the call line tight.
-        rendered = steps_render.render_step_line(
-            _step("tool_call", name="q", args={"filter": {"gte": 5, "lt": 10}, "tags": [1, 2]})
-        )
-        assert rendered == '`q(filter={"gte":5,"lt":10}, tags=[1,2])`'
-
-    def test_long_tool_call_line_truncated_inline(self) -> None:
-        # A very long call line is cut on one line (no newline marker) so it
-        # stays safe inside the inline-code span.
-        rendered = steps_render.render_step_line(_step("tool_call", name="t", args={"pad": "x" * 5000}))
-        assert rendered is not None
-        assert len(rendered) <= steps_render._LIVE_TOOL_MAX_CHARS + 2  # + the wrapping backticks
-        assert rendered.endswith("…`")
-
-    def test_tool_result_renders_short_result_in_fenced_block(self) -> None:
-        # ``⎿`` first line, wrapped in a fence so a stray ``` can't break out.
-        assert steps_render.render_step_line(_step("tool_result", text="18C")) == "```\n⎿ 18C\n```"
-
-    def test_tool_result_preserves_real_lines(self) -> None:
-        # Real lines are PRESERVED (not collapsed): ⎿ first, continuation
-        # aligned two spaces under it.
-        rendered = steps_render.render_step_line(_step("tool_result", text="line1\nline2\nline3"))
-        assert rendered == "```\n⎿ line1\n  line2\n  line3\n```"
-
-    def test_tool_result_keeps_first_lines_and_marks_dropped_lines(self) -> None:
-        content = "\n".join(f"line{i}" for i in range(5))
-        rendered = steps_render.render_step_line(_step("tool_result", text=content))
-        assert rendered is not None
-        # Only the first _LIVE_RETURN_MAX_LINES survive; the DROPPED-lines marker
-        # rides the last kept line, and the full result stays on the ⤵ view.
-        assert "⎿ line0" in rendered
-        assert "line2 … (truncated)" in rendered
-        assert "line3" not in rendered
-
-    def test_exactly_max_lines_is_not_marked_truncated(self) -> None:
-        # A result of exactly _LIVE_RETURN_MAX_LINES short lines is complete —
-        # no spurious "(truncated)" marker (guards the > vs >= edge).
-        content = "\n".join(f"line{i}" for i in range(steps_render._LIVE_RETURN_MAX_LINES))
-        rendered = steps_render.render_step_line(_step("tool_result", text=content))
-        assert rendered is not None
-        assert "(truncated)" not in rendered
-        assert "…" not in rendered
-
-    def test_single_backticks_in_result_preserved_in_fence(self) -> None:
-        # Inside a code fence single/double backticks render literally — no need
-        # to mangle them the way the old inline-code span did.
-        assert steps_render.render_step_line(_step("tool_result", text="use `code` now")) == (
-            "```\n⎿ use `code` now\n```"
-        )
-
-    def test_triple_backticks_in_result_neutralized(self) -> None:
-        # A run of 3+ backticks would close the fence early; it is woven with
-        # zero-width spaces so only the wrapping fence survives as a raw run.
-        rendered = steps_render.render_step_line(_step("tool_result", text="```py"))
-        assert rendered is not None
-        assert rendered.count("```") == 2  # the wrapping fence only
-        assert "\u200b" in rendered
-
-    def test_oversized_tool_result_line_is_cut_on_that_line(self) -> None:
-        rendered = steps_render.render_step_line(_step("tool_result", text="x" * 5000))
-        assert rendered is not None
-        # A single over-long line is cut with a trailing "…" ON that line; no
-        # whole lines were dropped, so there is NO "(truncated)" marker.
-        assert rendered.count("x") <= steps_render._LIVE_RETURN_LINE_MAX_CHARS
-        assert rendered.rstrip("`\n").endswith("…")
-        assert "(truncated)" not in rendered
-
-    def test_handoff_renders_none(self) -> None:
-        # Handoffs are claimed by the A2A dispatcher upstream and never reach the
-        # live renderer; defensively, render_step_line shows nothing for one.
-        assert steps_render.render_step_line(_step("handoff")) is None
-
-    def test_tail_window_drops_oldest_and_marks_elision(self) -> None:
-        lines = [f"line{i}" for i in range(100)]
-        body = steps_render._tail_window(lines, max_chars=40)
-        assert body.startswith(steps_render._HIDDEN_STEPS_MARKER)
-        assert "line99" in body  # most recent survives
-        assert "line0\n" not in body  # oldest dropped
-
-    def test_tail_window_no_marker_when_everything_fits(self) -> None:
-        body = steps_render._tail_window(["a", "b", "c"], max_chars=1000)
-        assert body == "a\nb\nc"
-        assert steps_render._HIDDEN_STEPS_MARKER not in body
-
-    def test_progress_content_is_body_only_and_hard_clamped(self) -> None:
-        lines = [f"`⎿ {'x' * 150}`" for _ in range(200)]
-        content = steps_render._progress_content(lines)
-        # No header line; the message IS the (tail-windowed) trace, never over
-        # Discord's hard cap.
-        assert not content.startswith("⚙ running…")
-        assert len(content) <= steps_render._DISCORD_MESSAGE_LIMIT
 
 
 class TestTreeRender:
@@ -256,8 +127,9 @@ class TestTreeRender:
             ModelRequest(parts=[ToolReturnPart(tool_name="dump", content=big, tool_call_id="t1")]),
         ]
         rendered = steps_render._render_tree_blocks(delta)[0]
-        # The full payload survives — the only bound is the overall message cap
-        # (enforced by steps_toggle's file-attachment path), not a per-part cap.
+        # The full payload survives — no per-part cap. The tree render now feeds
+        # the persisted transcript (tool-call replay) and the step count, not a
+        # size-bounded display, so it is deliberately unbounded here.
         assert rendered.count("y") == 9000
 
     def test_triple_backticks_in_result_cannot_break_the_fence(self) -> None:
@@ -270,6 +142,11 @@ class TestTreeRender:
         # embedded fences are woven with zero-width spaces.
         assert rendered.count("```") == 2
         assert "\u200b" in rendered
+
+    def test_whitespace_only_text_part_is_skipped(self) -> None:
+        # An empty/whitespace-only preamble TextPart produces no prose block.
+        delta = [ModelResponse(parts=[TextPart(content="   \n  ")])]
+        assert steps_render._render_tree_blocks(delta) == []
 
     def test_skips_prompt_parts(self) -> None:
         delta = [
@@ -314,6 +191,100 @@ class TestTreeRender:
         # byte-for-byte (the live preview would collapse "a  b" -> "a b").
         delta = [ModelResponse(parts=[ToolCallPart(tool_name="run", args={"cmd": "a  b"}, tool_call_id="t1")])]
         assert steps_render._render_tree_blocks(delta) == ['```\n● run(cmd="a  b")\n```']
+
+
+class TestRenderStepMessage:
+    """The Components-V2 step renderer (:func:`render_step_message`): a list of
+    message bodies for one step. Tool calls/results are short-form with the name
+    in monospace; an ``agent_message`` carries the FULL prose (chunked to the v2
+    cap); a ``handoff`` shows the bare target; unknown kinds are a safe no-op."""
+
+    def test_tool_call_renders_monospace_name(self) -> None:
+        assert steps_render.render_step_message(_step("tool_call", name="read_file")) == ["🔧 `read_file` called"]
+
+    def test_tool_result_renders_returned(self) -> None:
+        assert steps_render.render_step_message(_step("tool_result", name="read_file")) == ["✅ `read_file` returned"]
+
+    def test_tool_result_error_renders_errored(self) -> None:
+        assert steps_render.render_step_message(_step("tool_result", name="read_file", is_error=True)) == [
+            "❌ `read_file` errored"
+        ]
+
+    def test_handoff_renders_bare_target(self) -> None:
+        assert steps_render.render_step_message(_step("handoff", target="billing")) == ["➡️ handed off to `billing`"]
+
+    def test_handoff_strips_leading_slash_from_target(self) -> None:
+        # An agent name may arrive slash-prefixed; render just the bare name.
+        assert steps_render.render_step_message(_step("handoff", target="/billing")) == ["➡️ handed off to `billing`"]
+
+    def test_agent_message_short_is_one_full_body(self) -> None:
+        assert steps_render.render_step_message(_step("agent_message", text="Let me check the config.")) == [
+            "Let me check the config."
+        ]
+
+    def test_agent_message_is_outer_stripped(self) -> None:
+        assert steps_render.render_step_message(_step("agent_message", text="  hello  ")) == ["hello"]
+
+    def test_whitespace_only_agent_message_renders_nothing(self) -> None:
+        assert steps_render.render_step_message(_step("agent_message", text="   \n  ")) == []
+
+    def test_agent_message_chunks_on_line_boundaries_nothing_lost(self) -> None:
+        limit = steps_render._V2_CHUNK
+        lines = [f"line{i} " + "y" * 50 for i in range(200)]  # well over the cap
+        text = "\n".join(lines)
+        bodies = steps_render.render_step_message(_step("agent_message", text=text))
+        assert len(bodies) >= 2
+        assert all(0 < len(b) <= limit for b in bodies)  # every body fits and is non-empty
+        assert "\n".join(bodies) == text  # split only at newlines — nothing dropped
+
+    def test_agent_message_hard_splits_an_over_long_line(self) -> None:
+        limit = steps_render._V2_CHUNK
+        text = "z" * (limit * 2 + 100)  # a single line with no split points, way over the cap
+        bodies = steps_render.render_step_message(_step("agent_message", text=text))
+        assert len(bodies) == 3  # two full pieces + the remainder
+        assert all(0 < len(b) <= limit for b in bodies)
+        assert "".join(bodies) == text  # a hard-split line rejoins with no separator — nothing lost
+
+    def test_agent_message_flushes_accumulated_line_before_hard_split(self) -> None:
+        # A short line followed by an over-long line: the short line is flushed
+        # as its own chunk BEFORE the long line is hard-split (nothing merged).
+        limit = steps_render._V2_CHUNK
+        short = "short line"
+        long = "z" * (limit * 2)
+        bodies = steps_render.render_step_message(_step("agent_message", text=f"{short}\n{long}"))
+        assert all(0 < len(b) <= limit for b in bodies)
+        assert bodies[0] == short
+        assert "".join(bodies[1:]) == long  # the hard-split pieces rejoin to the long line
+
+    def test_agent_message_preserves_blank_lines_across_a_split(self) -> None:
+        limit = steps_render._V2_CHUNK
+        para = "w" * (limit - 100)
+        text = f"{para}\n\n{para}"  # two paragraphs; the blank line must survive the split
+        bodies = steps_render.render_step_message(_step("agent_message", text=text))
+        assert len(bodies) >= 2
+        assert all(0 < len(b) <= limit for b in bodies)
+        assert "\n".join(bodies) == text  # blank line preserved, nothing lost
+
+    def test_agent_message_never_emits_an_empty_body(self) -> None:
+        # A line exactly at the cap, then a blank line, then more text: the blank
+        # line must NOT surface as an empty body — Discord rejects an empty
+        # TextDisplay (min length 1) with a 400.
+        limit = steps_render._V2_CHUNK
+        bodies = steps_render.render_step_message(_step("agent_message", text="a" * limit + "\n\n" + "b" * limit))
+        assert bodies and all(0 < len(b) <= limit for b in bodies)
+
+    def test_chunk_target_stays_under_the_hard_v2_cap(self) -> None:
+        # The chunk target must stay <= Discord's real per-message cap, or posts
+        # would 400 in production while these _V2_CHUNK-bound tests stayed green.
+        assert steps_render._V2_CHUNK <= steps_render._V2_TEXT_LIMIT
+
+    def test_unknown_kind_is_a_safe_noop_that_logs(self, caplog) -> None:
+        # A future/unknown calfkit kind must never crash the drain: render nothing,
+        # but log so the gap is visible (e.g. agent_thinking if it ever surfaces).
+        with caplog.at_level(logging.WARNING, logger="calfcord.bridge.steps_render"):
+            result = steps_render.render_step_message(_step("agent_thinking"))
+        assert result == []
+        assert any("agent_thinking" in r.getMessage() for r in caplog.records)
 
 
 class TestFenceSafe:

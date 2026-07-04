@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from calfcord.bridge.a2a_dispatch import (
     A2ADispatcher,
-    A2AHandoff,
     A2AReject,
     A2AReply,
     A2ARequest,
@@ -97,15 +96,25 @@ class TestA2ADispatcher:
         assert rej.peer == "ghost"
         assert "offline" in rej.text
 
-    def test_handoff_event_renders_as_handoff(self) -> None:
+    def test_handoff_is_not_classified_as_a2a(self) -> None:
+        # A handoff transfers conversation control (the peer replies in the
+        # caller's place), unlike a ``message_agent`` consult — it is rendered
+        # inline in the MAIN step stream, so the dispatcher must NOT claim it:
+        # classify → None means the step falls through to the progress renderer.
         d = A2ADispatcher()
-        h = d.classify(
-            StepEvent(
-                kind="handoff", correlation_id="c1", depth=0, emitter="alice", target="scribe", reason="prose is yours"
+        assert (
+            d.classify(
+                StepEvent(
+                    kind="handoff",
+                    correlation_id="c1",
+                    depth=0,
+                    emitter="alice",
+                    target="scribe",
+                    reason="prose is yours",
+                )
             )
+            is None
         )
-        assert isinstance(h, A2AHandoff)
-        assert (h.target, h.reason, h.emitter) == ("scribe", "prose is yours", "alice")
 
     def test_agent_message_step_is_live_progress(self) -> None:
         d = A2ADispatcher()

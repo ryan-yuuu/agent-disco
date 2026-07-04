@@ -6,16 +6,16 @@ step-transcript feature (see
 each completed agent turn that used tools writes ONE row holding the
 serialized structured slice of that turn's ``message_history`` (the
 ``delta_json`` blob produced by pydantic-ai's
-``ModelMessagesTypeAdapter``). The toggle UI and the next-turn replay
-hydration both read those rows back.
+``ModelMessagesTypeAdapter``). The next-turn tool-call replay hydration
+reads those rows back.
 
 **Single connection, single process.** The bridge runs on a single
 asyncio event loop and is a hard singleton (the design doc spells out
 why: ``container_name`` pins it, and one gateway connection per shard
 funnels every event and button interaction to the one bridge). So this
 store holds exactly ONE long-lived :class:`aiosqlite.Connection` for its
-lifetime. The reply poster is the sole writer; the toggle callback
-and the replay post-pass are readers — all in the same process. There is
+lifetime. The reply poster is the sole writer; the history replay
+post-pass is the reader — all in the same process. There is
 no cross-process or cross-thread contention to guard against.
 
 **Pragmas.** WAL journaling + ``synchronous=NORMAL`` keep the single
@@ -95,7 +95,7 @@ class TranscriptRow:
       (``wire.source_channel_id``).
     * ``agent_id`` — the reply-poster-resolved real emitter.
     * ``final_message_id`` — the posted reply's id; the replay join key
-      and the toggle host message id (UNIQUE).
+      (UNIQUE).
     * ``delta_json`` — ``ModelMessagesTypeAdapter.dump_json`` of the
       turn's structured slice.
     * ``created_at`` — epoch seconds at write time (retention key).
@@ -134,14 +134,13 @@ class TranscriptStore:
     :class:`RuntimeError`.
     """
 
-    # A live, persistent store: transcripts, replay, and the expand toggle
-    # are all active. The :class:`NullTranscriptStore` substitute reports
-    # ``False`` so the WRITER (the reply poster) can gate the toggle-attach +
-    # the transcript write off when the real store failed to open. READERS
-    # (steps_toggle, history replay) do NOT check this flag — they call the
-    # read methods unconditionally and rely on the Null store's no-op
-    # returns. A class attribute (not a property) since it is a fixed truth
-    # for every real instance.
+    # A live, persistent store: transcripts and tool-call replay are active.
+    # The :class:`NullTranscriptStore` substitute reports ``False`` so the
+    # WRITER (the reply poster) can gate the transcript write off when the real
+    # store failed to open. READERS (history replay) do NOT check this flag —
+    # they call the read methods unconditionally and rely on the Null store's
+    # no-op returns. A class attribute (not a property) since it is a fixed
+    # truth for every real instance.
     enabled = True
 
     def __init__(self, db_path: pathlib.Path) -> None:
@@ -354,24 +353,22 @@ class NullTranscriptStore:
 
     A failed store open must NOT abort the bridge (which would kill all
     Discord routing). The gateway degrades to this Null-Object so the
-    bridge keeps running with transcripts, tool-call replay, and the
-    expand toggle DISABLED for the run: ``enabled`` is ``False``, writes
-    are dropped, and reads return empty. Mirrors the read/write surface
-    callers use against :class:`TranscriptStore` so no caller needs to
-    branch on which store it holds.
+    bridge keeps running with transcripts and tool-call replay DISABLED
+    for the run: ``enabled`` is ``False``, writes are dropped, and reads
+    return empty. Mirrors the read/write surface callers use against
+    :class:`TranscriptStore` so no caller needs to branch on which store
+    it holds.
 
     **The contract is NOT "every caller gates on ``enabled``".** It is
     split by role:
 
-    * **Writers** (the reply poster) gate the toggle-attach + the
-      :meth:`write_turn` call on :attr:`enabled` — so a disabled run never
-      shows a dead toggle with no row behind it.
-    * **Readers** (steps_toggle's click callback, history's replay
-      hydration) do NOT check :attr:`enabled`. They call the read methods
-      unconditionally and rely on this store's no-op returns —
-      :meth:`get_by_final_message_id` ⇒ ``None`` and
-      :meth:`get_by_final_message_ids` ⇒ ``{}`` — to degrade to "nothing
-      to show / nothing to replay" without a per-call branch.
+    * **Writers** (the reply poster) gate the :meth:`write_turn` call on
+      :attr:`enabled` — so a disabled run simply persists no rows.
+    * **Readers** (history's replay hydration) do NOT check :attr:`enabled`.
+      They call the read methods unconditionally and rely on this store's
+      no-op returns — :meth:`get_by_final_message_id` ⇒ ``None`` and
+      :meth:`get_by_final_message_ids` ⇒ ``{}`` — to degrade to "nothing to
+      replay" without a per-call branch.
     """
 
     enabled = False
@@ -420,7 +417,7 @@ class NullTranscriptStore:
 # Either the real store or its no-op substitute. Callers type their
 # transcript-store parameters/fields as this union rather than branching on
 # which concrete class they hold. The ``enabled`` flag is consulted only by
-# WRITERS (the reply poster gates the toggle-attach + write on it); READERS
-# (steps_toggle, history replay) call the read methods unconditionally and
-# lean on the Null store's no-op ``None`` / ``{}`` returns.
+# WRITERS (the reply poster gates the write on it); READERS (history replay)
+# call the read methods unconditionally and lean on the Null store's no-op
+# ``None`` / ``{}`` returns.
 TranscriptStoreLike = TranscriptStore | NullTranscriptStore

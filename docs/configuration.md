@@ -72,7 +72,7 @@ Docker broker, whose image retains the libsql/postgres/S3 storage engines.
 | Variable | Required | Description |
 |---|---|---|
 | `CALFKIT_AGENTS_DIR` | optional | Directory the **agent runner** (and the CLI) scan for agent `.md` files — the bridge does not read it. On a native install the `disco` shim defaults it to `~/.calfcord/agents` (so definitions survive `disco self update`); dev (`uv run`) and Docker keep the CWD-relative `agents/`. Override via shell env or `~/.calfcord/config/.env`. |
-| `DISCORD_TRANSCRIPT_DB_PATH` | optional | Bridge-local SQLite store (default `state/transcripts.sqlite3`). Holds the per-turn transcripts behind the ⤵ expand toggle **and** the persisted per-agent `/thinking-effort` overrides (the `agent_overrides` table), so an override survives a bridge restart. Read only by the bridge. |
+| `DISCORD_TRANSCRIPT_DB_PATH` | optional | Bridge-local SQLite store (default `state/transcripts.sqlite3`). Holds the per-turn transcripts used for tool-call replay across turns **and** the persisted per-agent `/thinking-effort` overrides (the `agent_overrides` table), so an override survives a bridge restart. Read only by the bridge. |
 | `CALFKIT_A2A_CHANNEL_NAME` | optional | Name of the unified A2A audit channel, **read by the bridge** (the A2A projection moved from the tools process to the bridge in the calfkit 0.12 migration). Code default `private-a2a-chats`; lazy-created on the first A2A projection. |
 | `CALFKIT_A2A_CHANNEL_CATEGORY` | optional | Discord category to group the A2A audit channel under, created lazily on first use. Read by the bridge. Edit the category's permission overwrites once to lock down audit visibility — the channel and its threads inherit them. Non-disruptive to enable on a running deployment. |
 | `CALFCORD_WORKSPACE_DIR` | optional | Host path the terminal/filesystem/search tools resolve against. The tools runner resolves it once at boot and exports it as `TERMINAL_CWD`, the working directory the vendored hermes terminal starts each agent's shell session in. Native install: the `disco` shim defaults it to **the directory the workspace (`disco start`) was launched from** (`$PWD`, the Claude-Code model — not a hidden dir). Bare `uv run` keeps the CWD-relative `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the dedicated `./workspace` scratch dir, **not** the project root). All agents share this dir — see [`security.md`](./security.md) § 3.3. |
@@ -125,7 +125,7 @@ Everything the running workspace writes lives under `$CALFCORD_HOME/state/`:
 |---|---|
 | `$CALFCORD_HOME/state/logs/<name>.log` | Per-component stdout/stderr (`broker`, `bridge`, each agent, `tools`, each `mcp-<server>`), plus the supervisor's own `process-compose.log`. Tail with `disco logs [component] [-f]`. |
 | `$CALFCORD_HOME/state/health/<component>.json` | Heartbeat files each long-lived component refreshes; `disco doctor` and the supervisor's readiness probes read these. |
-| `$CALFCORD_HOME/state/transcripts.sqlite3` | Bridge-local SQLite store: per-turn transcripts (⤵ expand toggle) and persisted `/thinking-effort` overrides. See `DISCORD_TRANSCRIPT_DB_PATH` above. |
+| `$CALFCORD_HOME/state/transcripts.sqlite3` | Bridge-local SQLite store: per-turn transcripts (tool-call replay) and persisted `/thinking-effort` overrides. See `DISCORD_TRANSCRIPT_DB_PATH` above. |
 | `$CALFCORD_HOME/state/process-compose.yaml` | The generated supervisor project — derived state, regenerated on every `start`. Don't edit it. |
 
 ## Applying changes

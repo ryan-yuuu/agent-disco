@@ -49,7 +49,6 @@ from calfcord.bridge.progress import ProgressRenderer
 from calfcord.bridge.reply_poster import ReplyPoster
 from calfcord.bridge.roster import MeshRoster
 from calfcord.bridge.slash import SlashCommandManager
-from calfcord.bridge.steps_toggle import StepsToggleView
 from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptStore,
@@ -119,7 +118,7 @@ async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[Tra
     fails (bad path, disk error, corrupt DB, …) the bridge MUST NOT abort — a
     crash here would take down all Discord routing, not just transcripts. Instead
     we log a loud ERROR and substitute a :class:`NullTranscriptStore` so the run
-    continues with transcripts, tool-call replay, and the expand toggle disabled.
+    continues with transcripts and tool-call replay disabled.
     Yields whichever store is in effect; the real store's connection (if any) is
     closed on exit, and ``NullTranscriptStore.close`` is a harmless no-op.
     """
@@ -130,8 +129,8 @@ async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[Tra
             await store.connect()
         except Exception:
             logger.error(
-                "transcript store failed to open at %s — step transcripts, "
-                "tool-call replay, and the expand toggle are DISABLED for this run",
+                "transcript store failed to open at %s — step transcripts and "
+                "tool-call replay are DISABLED for this run",
                 settings.transcript_db_path,
                 exc_info=True,
             )
@@ -282,11 +281,6 @@ class DiscordIngressGateway:
             logger.exception("failed to write initial bridge heartbeat; continuing boot")
 
         await self._slash.sync(self._settings.guild_id)
-
-        # Persistent view for the step-transcript expand toggle: one instance
-        # handles every click carrying ``steps:toggle`` on any agent reply,
-        # including replies posted before this restart (matched by custom_id).
-        self._client.add_view(StepsToggleView(self._transcript_store))
 
     async def _on_disconnect(self) -> None:
         """Mark the bridge disconnected when the Discord gateway drops (§12.1)."""

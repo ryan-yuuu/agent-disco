@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from calfkit.client import AgentMessageEvent, RunCompleted, RunFailed, ToolCallEvent, ToolResultEvent
+from calfkit.client import AgentMessageEvent, HandoffEvent, RunCompleted, RunFailed, ToolCallEvent, ToolResultEvent
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.error_report import ErrorReport
 from calfkit.models.node_result import InvocationResult
@@ -214,6 +214,10 @@ def _consult_reply(tcid: str, peer: str, text: str) -> ToolResultEvent:
     )
 
 
+def _handoff(target: str, reason: str = "", emitter: str = "scribe") -> HandoffEvent:
+    return HandoffEvent(correlation_id="c1", depth=0, frame_id="f", emitter=emitter, target=target, reason=reason)
+
+
 def _wire(content: str = "hello") -> WireMessage:
     return WireMessage(
         event_id="e1",
@@ -338,6 +342,17 @@ class TestStreamDrain:
         )
         await handler.handle(_req())
         assert len(fakes["progress"].steps) == 1
+        assert fakes["a2a"].projected == []
+
+    async def test_handoff_goes_to_progress_not_a2a(self) -> None:
+        # A handoff transfers conversation control (ADR-0019) — distinct from a
+        # message_agent consult — so it renders inline via the progress renderer
+        # (the dispatcher no longer claims it), not the A2A audit channel.
+        handler, _client, fakes = _make(
+            handle=_FakeHandle(steps=(_handoff("dot", "prose is yours"),), result=_result("done", "scribe"))
+        )
+        await handler.handle(_req())
+        assert [s.kind for s in fakes["progress"].steps] == ["handoff"]
         assert fakes["a2a"].projected == []
 
     async def test_render_fault_in_drain_does_not_lose_terminal_reply(self) -> None:

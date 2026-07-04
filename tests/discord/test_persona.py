@@ -12,16 +12,34 @@ and check membership without touching Discord.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
+import discord
+import pytest
 from pydantic import SecretStr
 
-from calfcord.discord.persona import DiscordPersonaSender
+from calfcord.discord.messages import SentMessage
+from calfcord.discord.persona import DiscordPersonaSender, Persona
 from calfcord.discord.settings import DiscordSettings
 
 
 def _settings() -> DiscordSettings:
     """Minimal valid settings (only the two required fields)."""
     return DiscordSettings(bot_token=SecretStr("test-bot-token"), application_id=1234)
+
+
+class _FakeWebhook:
+    """Minimal stand-in for a ``discord.Webhook``: records each ``send`` call's
+    kwargs and returns an object carrying a message id (as a real ``wait=True``
+    send does)."""
+
+    def __init__(self, message_id: int) -> None:
+        self.message_id = message_id
+        self.send_calls: list[dict[str, Any]] = []
+
+    async def send(self, **kwargs: Any) -> SimpleNamespace:
+        self.send_calls.append(kwargs)
+        return SimpleNamespace(id=self.message_id)
 
 
 class TestOwnsWebhook:
@@ -53,3 +71,55 @@ class TestOwnsWebhook:
         human-attributed until the first persona send there)."""
         sender = DiscordPersonaSender(_settings())
         assert sender.owns_webhook(999) is False
+
+
+class TestSendComponents:
+    """:meth:`DiscordPersonaSender.send_components` posts a Components-V2
+    ``LayoutView`` under a persona identity — no content/embeds (v2 forbids
+    them), silent, and returning where the message actually lives."""
+
+    async def test_posts_layout_view_under_persona_silently(self) -> None:
+        sender = DiscordPersonaSender(_settings())
+        sender._client = object()  # non-None: satisfy the "started" guard
+        hook = _FakeWebhook(message_id=777)
+        sender._webhooks = {123: hook}  # pre-cache so no Discord round-trip
+        view = object()  # opaque LayoutView stand-in — forwarded verbatim
+        persona = Persona(name="Astra", avatar_url="https://cdn/a.png")
+
+        sent = await sender.send_components(persona, channel_id=123, view=view)
+
+        assert sent == SentMessage(id=777, channel_id=123)
+        assert len(hook.send_calls) == 1
+        call = hook.send_calls[0]
+        assert call["view"] is view
+        assert call["username"] == "Astra"
+        assert call["avatar_url"] == "https://cdn/a.png"
+        assert call["wait"] is True
+        assert call["silent"] is True
+        assert call["thread"] is discord.utils.MISSING
+        # v2 messages carry no content/embeds — they must not be sent.
+        assert "content" not in call
+        assert "embeds" not in call
+
+    async def test_routes_into_thread_and_omits_avatar_when_unset(self) -> None:
+        sender = DiscordPersonaSender(_settings())
+        sender._client = object()
+        hook = _FakeWebhook(message_id=42)
+        sender._webhooks = {100: hook}
+        persona = Persona(name="Bo")  # no avatar override
+
+        sent = await sender.send_components(persona, channel_id=100, view=object(), thread_id=200)
+
+        # The message lives in the thread, not the parent channel.
+        assert sent == SentMessage(id=42, channel_id=200)
+        call = hook.send_calls[0]
+        # avatar unset → MISSING (use the webhook default), never None (which clears).
+        assert call["avatar_url"] is discord.utils.MISSING
+        # thread targeted via a snowflake Object carrying the thread id.
+        assert isinstance(call["thread"], discord.Object)
+        assert call["thread"].id == 200
+
+    async def test_raises_when_not_started(self) -> None:
+        sender = DiscordPersonaSender(_settings())  # _client is None
+        with pytest.raises(RuntimeError):
+            await sender.send_components(Persona(name="X"), channel_id=1, view=object())

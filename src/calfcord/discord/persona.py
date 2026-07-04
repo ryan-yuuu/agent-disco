@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, Self
@@ -301,7 +300,6 @@ class DiscordPersonaSender:
         *,
         thread_id: int | None = None,
         reply_to: ReplyContext | None = None,
-        extra_buttons: Sequence[discord.ui.Button[Any]] | None = None,
     ) -> SentMessage:
         """Send a message rendered under ``persona``'s identity.
 
@@ -318,19 +316,6 @@ class DiscordPersonaSender:
                 cannot produce real ``type: 19`` reply messages, so this
                 embed (author + snippet + jump link) is the closest
                 possible UX. See :class:`ReplyContext`.
-            extra_buttons: Additional interactive buttons to attach to the
-                message (e.g. the step-transcript expand toggle). They are
-                appended to the ``reply_to`` button view when one exists,
-                otherwise carried on a fresh view. Clicks dispatch via the
-                SEPARATE persistent view registered on the gateway client
-                (matched by ``custom_id``), NOT by the throwaway view created
-                here. That throwaway view emits the component JSON and is
-                itself registered into this persona client's view store on
-                every send; it is auto-evicted by discord.py once its
-                ~180-second default timeout elapses (it is not merely emitted
-                and immediately garbage-collected). Persistence of the button
-                across the throwaway view's expiry is what makes the
-                gateway-side persistent view the actual click handler.
 
         Returns:
             :class:`SentMessage`. Its ``channel_id`` field is ``thread_id``
@@ -364,11 +349,6 @@ class DiscordPersonaSender:
                 embeds = [_build_reply_embed(reply_to)]
             else:  # "button"
                 view_obj = _build_reply_button(reply_to)
-        if extra_buttons:
-            if view_obj is None:
-                view_obj = discord.ui.View()
-            for button in extra_buttons:
-                view_obj.add_item(button)
         if view_obj is not None:
             view = view_obj
 
@@ -392,56 +372,66 @@ class DiscordPersonaSender:
         )
         return SentMessage(id=sent.id, channel_id=message_channel)
 
-    async def edit_message(
-        self, channel_id: int, message_id: int, *, content: str, thread_id: int | None = None
-    ) -> None:
-        """Edit the ``content`` of a persona message previously sent to ``channel_id``.
+    async def send_components(
+        self,
+        persona: Persona,
+        channel_id: int,
+        view: discord.ui.LayoutView,
+        *,
+        thread_id: int | None = None,
+    ) -> SentMessage:
+        """Post a Components-V2 ``LayoutView`` under ``persona``'s identity.
 
-        Used for the live step-progress message, which is edited in place as
-        steps stream in. Only the text changes; the message's components and
-        embeds are left untouched (``view`` omitted ⇒ retained). The webhook
-        owns the message because this sender created it.
+        Used for the persistent live step messages. A v2 message carries its
+        text inside the view's components, so — unlike :meth:`send` — it sends
+        NO ``content`` or ``embeds``: discord.py sets Discord's ``components_v2``
+        message flag from the ``LayoutView``, and that flag forbids both.
+        ``silent=True`` suppresses the push notification so a chatty tool loop
+        never pings the channel.
 
-        ``thread_id`` must be supplied when the message lives inside a thread:
-        the webhook still hosts on ``channel_id`` (the parent), but Discord
-        requires the owning thread to locate the message for the edit.
+        Args:
+            persona: Display name and avatar to render the message under.
+            channel_id: ID of the *parent* text channel that hosts the webhook.
+            view: The Components-V2 ``LayoutView`` to post (its ``TextDisplay``
+                content is the message body).
+            thread_id: When set, posts into this thread inside ``channel_id``
+                (the webhook still hosts on the parent channel).
+
+        Returns:
+            :class:`SentMessage` whose ``channel_id`` is ``thread_id`` when set,
+            otherwise ``channel_id`` — i.e. where the message actually lives.
 
         Raises:
             RuntimeError: If :meth:`start` has not been called.
-            discord.NotFound: If the message no longer exists.
+            TypeError: If ``channel_id`` does not refer to a text channel.
             discord.Forbidden: If the bot lacks ``Manage Webhooks`` and a
                 webhook does not yet exist in the channel.
             discord.HTTPException: For other Discord-side failures.
         """
         if self._client is None:
             raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
+
         webhook = await self._get_or_create_webhook(channel_id)
         thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
-        await webhook.edit_message(message_id, content=content, thread=thread)
+        avatar = persona.avatar_url if persona.avatar_url is not None else discord.utils.MISSING
 
-    async def delete_message(self, channel_id: int, message_id: int, *, thread_id: int | None = None) -> None:
-        """Delete a persona message previously sent to ``channel_id``.
+        sent = await webhook.send(
+            view=view,
+            username=persona.name,
+            avatar_url=avatar,
+            thread=thread,
+            wait=True,  # required so the response carries the message ID
+            silent=True,  # step traces must not fire a push notification
+        )
 
-        Used to remove the transient step-progress message once the final
-        reply (which carries the expand toggle) is posted. The webhook owns
-        the message because this sender created it.
-
-        ``thread_id`` must be supplied when the message lives inside a thread
-        (see :meth:`edit_message`): the webhook hosts on the parent
-        ``channel_id`` but Discord needs the owning thread to find the message.
-
-        Raises:
-            RuntimeError: If :meth:`start` has not been called.
-            discord.NotFound: If the message was already deleted.
-            discord.Forbidden: If the bot lacks ``Manage Webhooks`` and a
-                webhook does not yet exist in the channel.
-            discord.HTTPException: For other Discord-side failures.
-        """
-        if self._client is None:
-            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
-        webhook = await self._get_or_create_webhook(channel_id)
-        thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
-        await webhook.delete_message(message_id, thread=thread)
+        message_channel = thread_id if thread_id is not None else channel_id
+        logger.debug(
+            "sent persona v2 step message id=%s persona=%s channel=%s",
+            sent.id,
+            persona.name,
+            message_channel,
+        )
+        return SentMessage(id=sent.id, channel_id=message_channel)
 
     def owns_webhook(self, webhook_id: int) -> bool:
         """Return ``True`` iff ``webhook_id`` is one of this sender's persona webhooks.
