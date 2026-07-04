@@ -206,9 +206,10 @@ INFO calfcord.tools: registered tool=pypi_info
 ```
 
 Agents opt into the tool by listing its name in the agent's `.md`
-frontmatter `tools:` array (or via `disco agent tools <name>`). Agent
-boot resolves each name against `TOOL_REGISTRY`; unknown names fail fast
-with a "known tools: ..." error.
+frontmatter `tools:` array (or via `disco agent tools <name>`). The tools
+host advertises the live `TOOL_REGISTRY`; agents bind named tools against
+that live capability view at runtime. CLI write paths still validate names
+against the local registry before writing.
 
 ## 3. The `@agent_tool` contract
 

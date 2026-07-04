@@ -1,16 +1,14 @@
-"""Parsing + validation for ``mcp/...`` tool selectors in agent frontmatter.
+"""Parsing + validation for canonical ``mcp:`` grants in agent frontmatter.
 
 Background
 ----------
 
-Agents declare their tools in ``agents/*.md`` frontmatter under a single
-``tools:`` list. Builtin tools appear there by bare name (``terminal``,
-``web_search``); MCP-server tools appear in the *same* list using a ``mcp/``
-selector syntax so an author never has to learn a second declaration
-mechanism:
+Agents declare MCP grants in ``agents/*.md`` frontmatter under a dedicated
+``mcp:`` list. Builtin tools remain under ``tools:`` by bare name
+(``terminal``, ``web_search``); MCP grants use canonical server paths:
 
-* ``mcp/<server>`` — expose *every* tool the named MCP server publishes.
-* ``mcp/<server>/<tool>`` — expose a single tool of that server.
+* ``<server>`` — expose *every* tool the named MCP server publishes.
+* ``<server>/<tool>`` — expose a single tool of that server.
 
 The agent's LLM sees each tool under the name the MCP server advertises;
 tool calls dispatch to the server's calfkit toolbox over the
@@ -25,7 +23,8 @@ Design choices
 * **Leaf module, zero project imports** — this file imports nothing from
   :mod:`calfcord` or :mod:`calfkit` (only :mod:`re` + stdlib). The agent
   frontmatter parser (``calfcord.agents.definition``) needs to recognize
-  and validate selectors *before* anything decides whether to build the
+  legacy ``mcp/...`` entries in ``tools:`` and validate canonical ``mcp:``
+  grants *before* anything decides whether to build the
   schema-only MCP catalog. Keeping this module a pure leaf lets that
   parser ``from calfcord.mcp.selector import ...`` without dragging in
   the catalog build (which imports :mod:`calfkit`) or risking an import
@@ -51,7 +50,7 @@ Design choices
 
 * **Strict, message-rich ``ValueError``** — every rejection names the
   offending ``entry`` verbatim so a typo in an ``agents/*.md`` file
-  surfaces with the exact bad string, not a generic "invalid selector".
+  surfaces with the exact bad string, not a generic "invalid grant".
 """
 
 from __future__ import annotations
@@ -60,9 +59,12 @@ import re
 from typing import NamedTuple
 
 MCP_SELECTOR_PREFIX = "mcp/"
-"""The literal prefix that marks a ``tools:`` entry as an MCP selector
-rather than a builtin tool name. A bare entry like ``terminal`` is a builtin;
-``mcp/gmail`` or ``mcp/gmail/search`` is an MCP selector."""
+"""The legacy prefix that marks a stale ``tools:`` entry as an MCP grant.
+
+``tools:`` is builtin-only after the hard cutover, so callers use this only to
+reject old ``tools: [mcp/...]`` syntax with migration guidance. Canonical
+``mcp:`` field entries do not include this prefix.
+"""
 
 # Server segment: must double as a Kafka topic segment, an mcp.json key,
 # and a roster process-name suffix, so we restrict to lowercase + digits +
@@ -84,20 +86,20 @@ def is_valid_server_name(name: str) -> bool:
     Single source of truth for "is this a valid MCP server name?" — it
     matches against the *same* module-level :data:`_SERVER_NAME_REGEX`
     (``^[a-z0-9_]{1,64}$``) that :func:`parse_mcp_selector` enforces on the
-    server segment, so a name accepted here is exactly a name a ``mcp/...``
-    selector can reach. Reuses the compiled regex rather than re-spelling
+    server segment, so a name accepted here is exactly a name a canonical
+    ``mcp:`` grant can reach. Reuses the compiled regex rather than re-spelling
     the pattern, so the grammar cannot drift between the two call sites.
 
     The intended consumers are the ``mcp.json`` loader and the
     ``disco mcp add`` writer, which key server config by this name: a
     configured server whose name is not a legal server segment would be
-    unreachable by any valid ``mcp/...`` selector (and could not name a
+    unreachable by any valid ``mcp:`` grant (and could not name a
     Kafka topic segment or roster process). Validating here lets both
     reject that case loudly instead.
 
     Args:
         name: A candidate server name (typically a ``schemas/`` module
-            name). Not a full ``mcp/...`` selector — just the bare server
+            name). Not a full ``mcp:`` grant — just the bare server
             segment.
 
     Returns:
@@ -108,24 +110,19 @@ def is_valid_server_name(name: str) -> bool:
 
 
 def is_mcp_selector(entry: str) -> bool:
-    """Return ``True`` if ``entry`` is an MCP selector (vs. a builtin name).
+    """Return ``True`` if ``entry`` uses the legacy ``mcp/`` prefix.
 
-    A cheap prefix check only — it does *not* validate the rest of the
-    selector. Callers that need a structurally-valid selector should run
-    :func:`validate_mcp_selector` (or :func:`parse_mcp_selector`) after
-    this returns ``True``. Splitting "is it ours?" from "is it valid?"
-    lets the frontmatter parser route a ``mcp/`` entry into MCP handling
-    and *then* report a precise parse error, rather than silently treating
-    a malformed ``mcp/`` entry as an (always-unknown) builtin name.
+    This is a cheap prefix check only. After the hard cutover, callers use it
+    to reject old ``tools: [mcp/...]`` entries with migration guidance.
     """
     return entry.startswith(MCP_SELECTOR_PREFIX)
 
 
 class McpSelector(NamedTuple):
-    """A parsed ``mcp/...`` selector: a server plus an optional single tool.
+    """A parsed canonical ``mcp:`` grant: a server plus an optional single tool.
 
-    ``tool is None`` means "all tools of ``server``" (the bare ``mcp/<server>``
-    form); a concrete ``tool`` selects exactly one (``mcp/<server>/<tool>``).
+    ``tool is None`` means "all tools of ``server``" (the bare ``<server>``
+    form); a concrete ``tool`` selects exactly one (``<server>/<tool>``).
     Prefer reading that distinction through :attr:`selects_all_tools` over
     re-checking ``tool is None`` at each call site.
 
@@ -145,19 +142,18 @@ class McpSelector(NamedTuple):
 
 
 def parse_mcp_selector(entry: str) -> McpSelector:
-    """Decompose an MCP selector into ``(server, tool_or_none)``.
+    """Decompose a canonical MCP grant into ``(server, tool_or_none)``.
 
     Examples::
 
-        parse_mcp_selector("mcp/gmail")         -> ("gmail", None)
-        parse_mcp_selector("mcp/gmail/search")  -> ("gmail", "search")
+        parse_mcp_selector("gmail")         -> ("gmail", None)
+        parse_mcp_selector("gmail/search")  -> ("gmail", "search")
 
     A ``None`` tool means "all tools of this server" (the bare-server
     form); a non-``None`` tool selects exactly one.
 
     Args:
-        entry: The raw ``tools:`` list entry. Must start with
-            :data:`MCP_SELECTOR_PREFIX`.
+        entry: The raw ``mcp:`` list entry.
 
     Returns:
         An :class:`McpSelector` (a ``(server, tool)`` NamedTuple) where
@@ -166,50 +162,37 @@ def parse_mcp_selector(entry: str) -> McpSelector:
         tool)`` tuple it replaced, so existing callers are unaffected.
 
     Raises:
-        ValueError: When ``entry`` does not start with the ``mcp/``
-            prefix, splits into a segment count other than 2 or 3, has an
-            empty server or tool segment, or has a server/tool segment
-            that violates the respective name grammar. The message always
-            names ``entry`` verbatim so the offending frontmatter line is
-            unambiguous.
+        ValueError: When ``entry`` splits into a segment count other than 1
+            or 2, has an empty server or tool segment, or has a server/tool
+            segment that violates the respective name grammar. The message
+            always names ``entry`` verbatim so the offending frontmatter line
+            is unambiguous.
     """
-    if not entry.startswith(MCP_SELECTOR_PREFIX):
-        raise ValueError(
-            f"MCP selector {entry!r} must start with {MCP_SELECTOR_PREFIX!r}"
-        )
-
-    # Split the WHOLE entry (not the post-prefix remainder) so the segment
-    # count is checked against the documented forms directly:
-    #   "mcp/gmail"        -> ["mcp", "gmail"]            (len 2)
-    #   "mcp/gmail/search" -> ["mcp", "gmail", "search"]  (len 3)
-    # Anything else (a trailing slash, an extra path segment, a doubled
-    # slash producing an empty middle) lands outside {2, 3} or trips the
-    # emptiness checks below.
     segments = entry.split("/")
-    if len(segments) not in (2, 3):
+    if len(segments) not in (1, 2):
         raise ValueError(
-            f"MCP selector {entry!r} must be 'mcp/<server>' or "
-            f"'mcp/<server>/<tool>', got {len(segments)} '/'-separated "
+            f"MCP grant {entry!r} must be '<server>' or "
+            f"'<server>/<tool>', got {len(segments)} '/'-separated "
             f"segment(s)"
         )
 
-    server = segments[1]
-    tool = segments[2] if len(segments) == 3 else None
+    server = segments[0]
+    tool = segments[1] if len(segments) == 2 else None
 
     if not server:
-        raise ValueError(f"MCP selector {entry!r} has an empty server segment")
+        raise ValueError(f"MCP grant {entry!r} has an empty server segment")
     if not _SERVER_NAME_REGEX.match(server):
         raise ValueError(
-            f"MCP selector {entry!r} has invalid server name {server!r}; "
+            f"MCP grant {entry!r} has invalid server name {server!r}; "
             f"must match {_SERVER_NAME_REGEX.pattern}"
         )
 
     if tool is not None:
         if not tool:
-            raise ValueError(f"MCP selector {entry!r} has an empty tool segment")
+            raise ValueError(f"MCP grant {entry!r} has an empty tool segment")
         if not _TOOL_NAME_REGEX.match(tool):
             raise ValueError(
-                f"MCP selector {entry!r} has invalid tool name {tool!r}; "
+                f"MCP grant {entry!r} has invalid tool name {tool!r}; "
                 f"must match {_TOOL_NAME_REGEX.pattern}"
             )
 

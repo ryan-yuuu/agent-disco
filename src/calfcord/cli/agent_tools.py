@@ -2,19 +2,18 @@
 
 Picks an agent ``.md`` (by name, or via a prompt over the install's agents
 dir), shows a multi-select checkbox of every builtin tool, pre-checked from the
-agent's current ``tools:`` declaration, and writes the operator's selection
-back through the validated-atomic
-:func:`calfcord.agents.md_writer.update_tools`.
+agent's current ``tools:`` declaration plus MCP rows pre-checked from
+``mcp:``, and writes the operator's selection back through the
+validated-atomic :func:`calfcord.agents.md_writer.update_tool_grants`.
 
 It reads the RAW declaration, not the loader's expansion: it calls
 :func:`calfcord.agents.definition.parse_agent_md` directly (not the loader's
 default-resolving path) so it can distinguish ``tools:`` *omitted* (``None`` →
 implicitly "all builtins") from ``tools: []`` (explicitly none). The
-implicit-all case is converted into explicit checks here, and the write always
-persists an explicit list, so on-disk state stops being ambiguous after the
-first save. Entries the editor cannot enumerate (``mcp/...`` selectors and
-other non-builtin tokens already in the ``.md``) are preserved as pre-checked
-rows so an unrelated edit never silently drops them.
+implicit-all case is converted into checked builtin rows in the UI; if every
+builtin remains selected, the writer omits ``tools:`` to preserve discovery.
+MCP rows use ``mcp/<server>`` UI values, but persist as canonical ``mcp:``
+entries.
 
 Tool edits take effect on the next ``disco calfkit-agent`` boot — the node
 bakes its tool list at construction time (see the onboarding plan's "tools are
@@ -28,8 +27,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from calfcord.agents.definition import parse_agent_md
-from calfcord.agents.md_writer import update_tools
-from calfcord.cli._agents import detect_agents
+from calfcord.agents.md_writer import update_tool_grants
+from calfcord.cli._agents import _split_tool_selection, detect_agents
 from calfcord.cli._prompts import Choice, Prompter
 
 
@@ -199,14 +198,12 @@ def run(
         print(f"error: cannot read agent {agent_name!r}: {e}")
         return 1
 
-    if raw.tools is not None:
-        current = set(raw.tools)
-    else:
-        # ``tools:`` omitted means "all builtins" — pre-check exactly the
-        # builtins, matching the loader's default expansion.
-        from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools import TOOL_REGISTRY
 
-        current = set(TOOL_REGISTRY)
+    # ``tools:`` omitted means "all builtins" — pre-check exactly the
+    # builtins, matching the loader's default expansion.
+    current = set(raw.tools) if raw.tools is not None else set(TOOL_REGISTRY)
+    current.update(f"mcp/{entry}" for entry in raw.mcp)
 
     mcp_servers = (mcp_servers_fn or _default_mcp_servers)()
     live_tools = (live_tools_fn or _default_live_tools)()
@@ -219,7 +216,8 @@ def run(
     )
 
     try:
-        update_tools(md_path, selected)
+        grants = _split_tool_selection(selected, set(TOOL_REGISTRY))
+        update_tool_grants(md_path, tools=grants.tools, mcp=grants.mcp)
     except (ValueError, OSError) as e:
         # The write path: a read-only dir, ENOSPC, a concurrent delete, or a
         # token the writer rejects. Report and exit non-zero; the on-disk file

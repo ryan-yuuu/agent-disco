@@ -86,39 +86,50 @@ class TestAgentDefinitionValidators:
         d = _make_definition(tools=["calendar", "email"])
         assert d.tools == ("calendar", "email")
 
-    @pytest.mark.parametrize(
-        "selector",
-        ["mcp/gmail", "mcp/gmail/search", "mcp/demo/get-x", "mcp/srv_2"],
-    )
-    def test_valid_mcp_selectors_accepted(self, selector: str) -> None:
-        """Well-formed ``mcp/...`` selectors pass the syntactic field check —
-        whether the server is configured/running is a runtime concern (the
-        capability view), not a parse-time one."""
-        d = _make_definition(tools=[selector])
-        assert d.tools == (selector,)
+    def test_mcp_defaults_to_empty_tuple(self) -> None:
+        d = _make_definition()
+        assert d.mcp == ()
 
-    def test_mixed_builtins_and_mcp_selectors_accepted(self) -> None:
-        """One flat ``tools:`` list carries both bare builtin names and
-        ``mcp/...`` selectors — both kinds coexist on the same agent."""
-        d = _make_definition(tools=["shell", "mcp/gmail", "mcp/calendar/list-events"])
-        assert d.tools == ("shell", "mcp/gmail", "mcp/calendar/list-events")
+    @pytest.mark.parametrize(
+        "grant",
+        ["gmail", "gmail/search", "demo/get-x", "srv_2"],
+    )
+    def test_valid_mcp_grants_accepted(self, grant: str) -> None:
+        """MCP grants live in the dedicated ``mcp:`` field, using canonical
+        ``server`` or ``server/tool`` entries without the legacy ``mcp/``
+        prefix."""
+        d = _make_definition(mcp=[grant])
+        assert d.mcp == (grant,)
+
+    def test_mixed_builtins_and_mcp_grants_use_separate_fields(self) -> None:
+        d = _make_definition(tools=["shell"], mcp=["gmail", "calendar/list-events"])
+        assert d.tools == ("shell",)
+        assert d.mcp == ("gmail", "calendar/list-events")
 
     @pytest.mark.parametrize(
         "bad_selector",
-        ["mcp/", "mcp/a/b/c", "mcp//x", "mcp/Gmail", "mcp/gmail/"],
+        ["mcp/gmail", "mcp/gmail/search"],
     )
-    def test_malformed_mcp_selectors_rejected(self, bad_selector: str) -> None:
-        with pytest.raises(ValidationError, match="malformed MCP tool selector"):
+    def test_legacy_mcp_selectors_in_tools_rejected(self, bad_selector: str) -> None:
+        with pytest.raises(ValidationError, match="move MCP grants to mcp"):
             _make_definition(tools=[bad_selector])
 
-    def test_multiple_malformed_selectors_aggregated(self) -> None:
-        """All malformed selectors surface in ONE error so an operator fixes
-        the whole ``tools:`` line in a single pass."""
+    @pytest.mark.parametrize(
+        "bad_grant",
+        ["", "a/b/c", "/x", "Gmail", "gmail/", "gmail/bad tool"],
+    )
+    def test_malformed_mcp_grants_rejected(self, bad_grant: str) -> None:
+        with pytest.raises(ValidationError, match="malformed MCP grant"):
+            _make_definition(mcp=[bad_grant])
+
+    def test_multiple_malformed_mcp_grants_aggregated(self) -> None:
+        """All malformed grants surface in ONE error so an operator fixes the
+        whole ``mcp:`` line in a single pass."""
         with pytest.raises(ValidationError) as exc_info:
-            _make_definition(tools=["mcp/", "mcp/a/b/c"])
+            _make_definition(mcp=["", "a/b/c"])
         msg = str(exc_info.value)
-        assert "'mcp/'" in msg
-        assert "'mcp/a/b/c'" in msg
+        assert "''" in msg
+        assert "'a/b/c'" in msg
 
     def test_arbitrary_bare_names_still_accepted(self) -> None:
         """Bare (non-``mcp/``) names pass through untouched — existence is
@@ -307,21 +318,28 @@ class TestParseAgentMd:
         with pytest.raises(ValueError, match="does not match filename stem"):
             parse_agent_md(path)
 
-    def test_mcp_tool_in_frontmatter_loads(self, tmp_path: Path) -> None:
-        """An on-disk ``.md`` whose ``tools:`` names an ``mcp/...`` entry loads
-        on the real read path (the same one the agent process and the bridge
-        registry use) — selectors are first-class tool declarations again."""
+    def test_mcp_field_in_frontmatter_loads(self, tmp_path: Path) -> None:
+        """An on-disk ``.md`` grants MCP through the dedicated ``mcp:`` field."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, tools="[shell]", mcp="[gmail, docs/search]")
+        definition = parse_agent_md(path)
+        assert definition.tools == ("shell",)
+        assert definition.mcp == ("gmail", "docs/search")
+
+    def test_legacy_mcp_tool_in_tools_frontmatter_rejected(self, tmp_path: Path) -> None:
+        """Legacy flat MCP syntax fails the load with migration guidance, so a
+        hard-cutover repo cannot silently keep old grants in ``tools:``."""
         path = tmp_path / "scheduler.md"
         self._write_md(path, tools="[shell, mcp/gmail]")
-        definition = parse_agent_md(path)
-        assert definition.tools == ("shell", "mcp/gmail")
+        with pytest.raises(ValueError, match="move MCP grants to mcp"):
+            parse_agent_md(path)
 
-    def test_malformed_mcp_tool_in_frontmatter_rejected(self, tmp_path: Path) -> None:
-        """A malformed selector fails the load with the entry named, so a
+    def test_malformed_mcp_field_in_frontmatter_rejected(self, tmp_path: Path) -> None:
+        """A malformed grant fails the load with the entry named, so a
         frontmatter typo never reaches a running worker."""
         path = tmp_path / "scheduler.md"
-        self._write_md(path, tools="[shell, mcp/a/b/c]")
-        with pytest.raises(ValueError, match="malformed MCP tool selector"):
+        self._write_md(path, tools="[shell]", mcp="[a/b/c]")
+        with pytest.raises(ValueError, match="malformed MCP grant"):
             parse_agent_md(path)
 
     def test_missing_frontmatter_rejected(self, tmp_path: Path) -> None:

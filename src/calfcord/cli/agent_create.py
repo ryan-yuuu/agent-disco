@@ -254,7 +254,7 @@ def create_agent(
     )
 
     # 4. Tools.
-    tools = pick_tools(prompter, name, live_tools_fn=live_tools_fn)
+    tool_grants = pick_tools(prompter, name, live_tools_fn=live_tools_fn)
 
     # 5. Write (validate-before-write; prune only when the caller opted in).
     md_path = write_agent(
@@ -263,7 +263,8 @@ def create_agent(
         description=description,
         provider=provider,
         model=model,
-        tools=tools,
+        tools=tool_grants.tools,
+        mcp=tool_grants.mcp,
         prune_seed=prune_seed,
     )
 

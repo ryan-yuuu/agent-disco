@@ -11,6 +11,7 @@ from calfcord.agents.md_writer import (
     _update_fields,
     update_system_prompt,
     update_thinking_effort,
+    update_tool_grants,
     update_tools,
 )
 
@@ -302,6 +303,40 @@ def test_update_tools_empty_writes_empty_list(tmp_path: Path) -> None:
     assert frontmatter.load(md_path).metadata["tools"] == []
 
 
+def test_update_tool_grants_none_tools_removes_key_and_writes_mcp(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path)
+    updated = update_tool_grants(md_path, tools=None, mcp=["gmail", "docs/search"])
+
+    metadata = frontmatter.load(md_path).metadata
+    assert "tools" not in metadata
+    assert metadata["mcp"] == ["gmail", "docs/search"]
+    assert updated.tools is None
+    assert updated.mcp == ("gmail", "docs/search")
+
+
+def test_update_tool_grants_empty_mcp_removes_key(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path)
+    update_tool_grants(md_path, tools=["read_file"], mcp=["gmail"])
+
+    updated = update_tool_grants(md_path, tools=["read_file"], mcp=[])
+
+    metadata = frontmatter.load(md_path).metadata
+    assert metadata["tools"] == ["read_file"]
+    assert "mcp" not in metadata
+    assert updated.mcp == ()
+
+
+def test_update_tool_grants_explicit_empty_tools_writes_empty_list(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path)
+    updated = update_tool_grants(md_path, tools=[], mcp=["gmail"])
+
+    metadata = frontmatter.load(md_path).metadata
+    assert metadata["tools"] == []
+    assert metadata["mcp"] == ["gmail"]
+    assert updated.tools == ()
+    assert updated.mcp == ("gmail",)
+
+
 def test_update_tools_unknown_builtin_raises_and_leaves_file(tmp_path: Path) -> None:
     md_path = _seed_md(tmp_path, thinking_effort="low")
     original = md_path.read_text(encoding="utf-8")
@@ -313,36 +348,30 @@ def test_update_tools_unknown_builtin_raises_and_leaves_file(tmp_path: Path) -> 
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
-def test_update_tools_accepts_well_formed_mcp_selector(tmp_path: Path) -> None:
-    """A syntactically valid ``mcp/...`` selector passes even when the server
-    is not configured anywhere — whether it exists/runs is a deployment
-    concern the writer deliberately does not check, mirroring the
-    frontmatter validator's syntax-only stance."""
+def test_update_tools_rejects_legacy_mcp_selector(tmp_path: Path) -> None:
+    """The builtin-only convenience wrapper refuses legacy flat MCP syntax."""
     md_path = _seed_md(tmp_path)
-    updated = update_tools(md_path, ["read_file", "mcp/gmail", "mcp/gmail/search"])
-    assert updated.tools == ("read_file", "mcp/gmail", "mcp/gmail/search")
+    with pytest.raises(ValueError, match="move MCP grants to mcp"):
+        update_tools(md_path, ["read_file", "mcp/gmail"])
 
 
-def test_update_tools_malformed_mcp_selector_raises_and_leaves_file(tmp_path: Path) -> None:
-    """A malformed selector is rejected naming the entry, and the on-disk
-    file is untouched (validate-before-write)."""
+def test_update_tool_grants_malformed_mcp_grant_raises_and_leaves_file(tmp_path: Path) -> None:
+    """A malformed MCP grant is rejected naming the entry, and the on-disk file
+    is untouched (validate-before-write)."""
     md_path = _seed_md(tmp_path, thinking_effort="low")
     original = md_path.read_text(encoding="utf-8")
 
-    # ``mcp/a/b/c`` has too many segments — rejected by parse_mcp_selector.
-    with pytest.raises(ValueError, match="mcp/a/b/c"):
-        update_tools(md_path, ["mcp/a/b/c"])
+    with pytest.raises(ValueError, match="a/b/c"):
+        update_tool_grants(md_path, tools=["read_file"], mcp=["a/b/c"])
 
     assert md_path.read_text(encoding="utf-8") == original
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
-def test_update_tools_unknown_builtin_error_mentions_mcp_forms(tmp_path: Path) -> None:
-    """The unknown-builtin message teaches both legal shapes — a bare builtin
-    name or an MCP selector — so a user who meant ``mcp/gmail`` but typed
-    ``gmail`` learns the syntax from the error itself."""
+def test_update_tools_unknown_builtin_error_mentions_builtin_only(tmp_path: Path) -> None:
+    """The unknown-builtin message no longer suggests MCP belongs in tools."""
     md_path = _seed_md(tmp_path)
-    with pytest.raises(ValueError, match=r"mcp/<server>"):
+    with pytest.raises(ValueError, match="expected a builtin"):
         update_tools(md_path, ["gmail"])
 
 

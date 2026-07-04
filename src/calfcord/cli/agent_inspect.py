@@ -49,7 +49,7 @@ _DESCRIPTION_TRUNCATE = 48
 _PROMPT_PREVIEW_LEN = 200
 
 
-def _tools_summary(tools: tuple[str, ...] | None) -> str:
+def _tools_summary(tools: tuple[str, ...] | None, mcp: tuple[str, ...] = ()) -> str:
     """Summarize an agent's ``tools`` for the ``list`` table's TOOLS column.
 
     Mirrors the loader's omitted/empty/explicit semantics
@@ -58,9 +58,8 @@ def _tools_summary(tools: tuple[str, ...] | None) -> str:
     no-tools opt-out → ``"0"``; otherwise the count. A scalar the operator can
     scan beats a wrapping comma list in a table cell.
     """
-    if tools is None:
-        return "all"
-    return str(len(tools))
+    base = "all" if tools is None else str(len(tools))
+    return f"{base}+{len(mcp)}mcp" if mcp else base
 
 
 def _provider_model(defn: AgentDefinition) -> str:
@@ -91,6 +90,7 @@ def _list_row(defn: AgentDefinition) -> dict[str, Any]:
         "provider": defn.provider,
         "model": defn.model,
         "tools": list(defn.tools) if defn.tools is not None else None,
+        "mcp": list(defn.mcp),
         "description": defn.description,
     }
 
@@ -156,7 +156,7 @@ def _print_table(agents: list[AgentDefinition]) -> None:
         (
             d.agent_id,
             _provider_model(d),
-            _tools_summary(d.tools),
+            _tools_summary(d.tools, d.mcp),
             truncate(d.description, _DESCRIPTION_TRUNCATE),
         )
         for d in agents
@@ -221,6 +221,7 @@ def _show_object(defn: AgentDefinition) -> dict[str, Any]:
         "provider": defn.provider,
         "model": defn.model,
         "tools": list(defn.tools) if defn.tools is not None else None,
+        "mcp": list(defn.mcp),
         "thinking_effort": defn.thinking_effort,
         "memory": defn.memory,
         "system_prompt": defn.system_prompt,

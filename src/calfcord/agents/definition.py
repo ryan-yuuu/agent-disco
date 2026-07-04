@@ -86,15 +86,15 @@ class AgentDefinition(BaseModel):
     model: str | None = None
     tools: tuple[str, ...] | None = None
     """Tools available to this agent's LLM, resolved against
-    :data:`calfcord.tools.TOOL_REGISTRY`.
+    live builtin tool nodes at runtime.
 
     Semantics:
         - ``tools:`` omitted from frontmatter (default ``None``) — agent
-          gets every registered builtin tool. Convenient default for
+          discovers every live builtin tool. Convenient default for
           general-purpose assistant agents.
         - ``tools: []`` in frontmatter — agent gets NO tools (text-only).
           Explicit opt-out for read-only or routing-style agents.
-        - ``tools: [a, b]`` — agent gets exactly those tools.
+        - ``tools: [a, b]`` — agent gets exactly those builtin tools.
 
     Security note: the "all by default" behaviour means a new
     ``agents/<name>.md`` ships with ``terminal`` / ``execute_code`` /
@@ -103,6 +103,16 @@ class AgentDefinition(BaseModel):
     explicitly. If you need a restricted-tools agent, add the
     ``tools:`` line. See :doc:`docs/authoring-agents` for the security
     model."""
+    mcp: tuple[str, ...] = ()
+    """MCP toolbox grants for this agent.
+
+    Entries use canonical ``mcp:`` field syntax:
+        - ``mcp: [github]`` — all live tools from the named server.
+        - ``mcp: [github/search]`` — exactly one tool from the named server.
+
+    MCP grants are separate from ``tools:`` because they have a different trust
+    boundary and are never part of the omitted-``tools:`` builtin-discovery
+    default."""
     thinking_effort: ThinkingEffort | None = None
     memory: bool = False
     """Opt in to a persistent per-agent notepad. When ``True``, the factory
@@ -199,39 +209,29 @@ class AgentDefinition(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, v: tuple[str, ...] | None) -> tuple[str, ...] | None:
-        """Syntax-check ``mcp/...`` tool entries; let bare builtin names through.
-
-        An ``mcp/...`` entry must be a well-formed selector
-        (``mcp/<server>`` or ``mcp/<server>/<tool>``); all malformed entries
-        are aggregated into ONE :class:`ValueError` naming each offending
-        string, so an operator fixes the whole ``tools:`` line in a single
-        pass. Whether the named server is configured or running is a
-        *runtime* concern (the capability view resolves selectors per turn),
-        deliberately not checked here — this is the authoritative syntactic
-        gate for every read path: the agent process parses each ``.md``
-        through here before booting.
-
-        Bare names (anything not starting with ``mcp/`` — ``terminal``,
-        ``calendar``, …) pass through **untouched**. Whether a bare name
-        actually resolves to a registered builtin is checked later, by
-        :meth:`AgentFactory._resolve_tools` against the factory's tool registry
-        (defaults to :data:`~calfcord.tools.TOOL_REGISTRY`); rejecting
-        arbitrary bare names here would couple this leaf schema to the tool
-        registry and break code-built definitions that name tools the local
-        registry doesn't (yet) hold.
-        """
+        """Reject legacy MCP entries; let builtin names pass through."""
         if v is None:
             return v
+        legacy = [entry for entry in v if is_mcp_selector(entry)]
+        if legacy:
+            raise ValueError(
+                "tools: is builtin-only; move MCP grants to mcp: "
+                + ", ".join(repr(entry) for entry in legacy)
+            )
+        return v
+
+    @field_validator("mcp")
+    @classmethod
+    def _validate_mcp(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        """Syntax-check canonical ``mcp:`` grants."""
         bad: list[str] = []
         for entry in v:
-            if not is_mcp_selector(entry):
-                continue
             try:
                 validate_mcp_selector(entry)
             except ValueError as exc:
                 bad.append(f"{entry!r}: {exc}")
         if bad:
-            raise ValueError("malformed MCP tool selector(s) in tools: " + "; ".join(bad))
+            raise ValueError("malformed MCP grant(s) in mcp: " + "; ".join(bad))
         return v
 
 

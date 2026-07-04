@@ -41,9 +41,9 @@ Agent Disco runs as four process types (`calfkit-bridge`, `calfkit-agent`,
 bridge owns Discord I/O and the two operator slash commands
 (`/thinking-effort`, `/clear`); the agent-runner process loads each
 agent's definition, constructs the calfkit `Agent` node, and dispatches
-LLM calls. Builtin tools advertised in the agent's frontmatter execute in
-the `calfkit-tools` process — the agent process only carries the tool's
-schema — while `mcp/...` tools dispatch to a `calfkit-mcp` toolbox (see
+LLM calls. Builtin tools advertised in `tools:` execute in the
+`calfkit-tools` process and are resolved from the live tools host at runtime.
+MCP grants advertised in `mcp:` dispatch to a `calfkit-mcp` toolbox (see
 [`mcp-tools.md`](mcp-tools.md)). Read `README.md` for the architecture diagram
 before going further.
 
@@ -58,7 +58,8 @@ name: example-bot                       # filename stem; [a-z0-9_-]{1,32}; the p
 description: A demo agent.              # AgentCard + slash-picker blurb; 1-100 chars
 provider: anthropic                     # "anthropic" | "openai" | "openai-codex"
 model: claude-sonnet-4-5                # provider-specific model name
-tools: [read_file, web_search]          # resolved against TOOL_REGISTRY
+tools: [read_file, web_search]          # builtin tools only
+# mcp: [github/search_issues]           # optional MCP grants
 thinking_effort: medium                 # see §6 for the seven tiers
 # a2a / handoff default to true — this agent can already consult and hand off to peers (§8)
 ---
@@ -146,16 +147,10 @@ through `CALFKIT_AGENT_DEFAULT_MODEL` rather than editing every `.md`.
 tools: [terminal, read_file, web_search]
 ```
 
-`tools` is a list of bare tool names. Each name is resolved against
-`calfcord.tools.TOOL_REGISTRY` at agent build time. An
-unknown name fails fast:
-
-```
-agent 'librarian' declares unknown tool(s) ['web_lookup']; known
-tools: ['execute_code', 'patch', 'process', 'read_file',
-'search_files', 'terminal', 'todo', 'web_extract', 'web_fetch',
-'web_search', 'write_file']
-```
+`tools` is a list of bare builtin tool names. Omitted `tools:` becomes a
+runtime `Tools(discover=True)` selector, so the agent binds every live builtin
+tool node advertised by the tools host. An explicit list becomes a runtime
+`Tools(names=[...])` selector.
 
 The registry is the explicit `ALL_TOOLS` list in
 `src/calfcord/tools/__init__.py`, narrowed/aliased at boot by
@@ -165,9 +160,8 @@ vendored from the `calfkit-tools` package (the former first-party
 §8). To change which tools exist, edit that list — see
 `docs/authoring-tools.md` for the contract.
 
-Each agent only ever carries the `ToolNodeDef` for schema and
-subscribe-topic purposes; the actual tool body runs in the
-`calfkit-tools` process. That means every tool your agent declares is
+Each agent carries only runtime selectors; the actual tool body runs in the
+`calfkit-tools` process. That means every builtin tool your agent declares is
 shared with every other agent on the deployment — there is no
 per-agent sandbox and no per-tool permission grant. The filesystem
 and terminal tools share one workspace (the calfkit-tools host's
@@ -177,24 +171,24 @@ list keyed by the calling agent's identity — see `docs/security.md` for
 the per-agent tenancy model and the operator-facing deployment patterns.
 
 Set `tools: []` for an LLM-only (text-only) agent. **Omitting `tools`
-entirely is the opposite** — it grants every registered tool
+entirely is the opposite** — it grants every live builtin tool
 (including `terminal` / `execute_code` / `write_file` / `patch`), per
 the security note above.
 
 #### MCP-server tools
 
-The `tools:` list can also include tools from [MCP](https://modelcontextprotocol.io)
-servers you've configured in `mcp.json`, using an `mcp/` selector in the *same*
-list as builtins:
+MCP tools from [MCP](https://modelcontextprotocol.io) servers configured in
+`mcp.json` use the separate `mcp:` field:
 
 ```yaml
-tools: [read_file, mcp/github, mcp/docs/search]
+tools: [read_file]
+mcp: [github, docs/search]
 ```
 
-| Selector | Grants |
+| Grant | Grants |
 |---|---|
-| `mcp/<server>` | Every tool the named server currently advertises (a wildcard — a server that later advertises a new tool enlarges the agent's surface). |
-| `mcp/<server>/<tool>` | Exactly that one tool. |
+| `<server>` | Every tool the named server currently advertises (a wildcard — a server that later advertises a new tool enlarges the agent's surface). |
+| `<server>/<tool>` | Exactly that one tool. |
 
 The `<server>` segment matches `[a-z0-9_]{1,64}` (it doubles as a Kafka topic
 segment) and `<tool>` matches `[a-zA-Z0-9_-]{1,128}` (the upstream server's own
@@ -209,8 +203,8 @@ Two rules to remember:
   capability advertisement per turn, so there's no static catalog to check
   against (a down server simply degrades that turn). A server's tool list can
   therefore change with no agent restart — but a change to the agent's *own
-  `mcp/...` lines* still needs a restart (the `tools:` list is baked in at
-  boot, like builtins).
+  `mcp:` field* still needs a restart because the selector set is baked in at
+  boot, like builtins.
 
 The full MCP workflow — `mcp.json` schema, `disco mcp add`, lifecycle — is in
 [`mcp-tools.md`](mcp-tools.md).
@@ -220,11 +214,12 @@ The full MCP workflow — `mcp.json` schema, `disco mcp add`, lifecycle — is i
 Besides hand-editing this array, you can edit a deployed agent's tool
 list interactively with `disco agent tools [<name>]` (an
 InquirerPy multi-select over the builtin tool universe — plus `mcp/<server>`
-rows from `mcp.json` and live `mcp/<server>/<tool>` rows from the broker when
-it's reachable; omit `<name>` to pick from a list). It writes an explicit
-`tools:` list back to the `.md`. The same checkbox is reachable as the *Tools*
-row of `disco agent edit`, and `disco agent set <name> --tools "a,b,c"`
-sets the list non-interactively — see §9. Because the tool set is baked
+UI rows from `mcp.json` and live `mcp/<server>/<tool>` UI rows from the broker
+when it's reachable; omit `<name>` to pick from a list). It writes split
+`tools:` and `mcp:` fields back to the `.md`. The same checkbox is reachable as
+the *Tools* row of `disco agent edit`, and
+`disco agent set <name> --tools "a,b,c"` sets only the builtin list
+non-interactively — see §9. Because the selector set is baked
 into the calfkit `Agent` at boot, the edit takes effect on the next
 `disco agent restart <name>` — there is no live reload.
 
@@ -477,12 +472,13 @@ override if you want this in production.
 
 ### 7.3 Common failure modes
 
-- **Unknown tool at boot.** The factory raises with the full list of
-  known tools:
-  `agent 'foo' declares unknown tool(s) ['my_tool']; known tools: [...]`.
-  Either fix the name or add the tool to the explicit `ALL_TOOLS` list in
-  `src/calfcord/tools/__init__.py` and restart the tools host
-  (`disco tools stop && disco tools start`, or `uv run calfkit-tools` in dev).
+- **Unknown builtin tool.** CLI write paths validate builtin names before
+  writing and reject unknown names. A hand-edited unknown name in `tools:`
+  reaches calfkit as `Tools(names=[...])` and simply does not bind unless a
+  live tools host advertises that name. Either fix the name or add the tool to
+  the explicit `ALL_TOOLS` list in `src/calfcord/tools/__init__.py` and restart
+  the tools host (`disco tools stop && disco tools start`, or
+  `uv run calfkit-tools` in dev).
 - **Removed field in a stale `.md`.** `display_name`, `avatar_url`,
   `history_turns`, and `role` were dropped in the calfkit 0.12 migration.
   Because the model is `extra="forbid"`, any of them (or a typo like

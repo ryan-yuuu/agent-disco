@@ -7,7 +7,7 @@ advertises the tools that server publishes onto the message bus, and lets any
 agent grant itself those tools with one line of frontmatter.
 
 This page is both the how-to (set one up end to end) and the reference
-(`mcp.json` schema, selector grammar, lifecycle and reload rules). For the
+(`mcp.json` schema, grant grammar, lifecycle and reload rules). For the
 *why* behind the design — per-server isolation, the secrets boundary, runtime
 discovery — see the [design note](./design/mcp-reintroduction.md); for where
 the MCP processes sit in the topology, see
@@ -31,9 +31,9 @@ the MCP processes sit in the topology, see
 - That toolbox connects to the server, lists its tools, and **advertises**
   them on the compacted `calf.capabilities` topic — tool names, JSON schemas,
   and the dispatch topic `mcp_server.<name>`.
-- An agent grants itself MCP tools with an `mcp/<server>` or
-  `mcp/<server>/<tool>` entry in its `tools:` frontmatter. The agent resolves
-  those selectors against the advertisement **per turn** — runtime discovery,
+- An agent grants itself MCP tools with a `mcp: [<server>]` or
+  `mcp: [<server>/<tool>]` frontmatter entry. The agent resolves
+  those grants against the advertisement **per turn** — runtime discovery,
   no schemas committed to the repo, no agent restart when a server's tool list
   changes.
 - Only the `mcp-<server>` processes (and the `disco mcp` CLI) ever read
@@ -106,11 +106,11 @@ disco logs mcp-github -f # follow the toolbox's own log
 
 ### 3. Grant the tools to an agent
 
-Add an MCP selector to the agent's `tools:` list. Either edit the `.md`
-directly:
+Add an MCP grant to the agent's `mcp:` list. Either edit the `.md` directly:
 
 ```yaml
-tools: [read_file, mcp/github]          # every tool the github server advertises
+tools: [read_file]
+mcp: [github]                           # every tool the github server advertises
 ```
 
 or use the interactive editor, which offers an `mcp/<server>` row per
@@ -120,13 +120,12 @@ configured server plus live per-tool rows when the broker is reachable:
 disco agent tools scribe
 ```
 
-See [Selector grammar](#selector-grammar) for `mcp/<server>` vs.
-`mcp/<server>/<tool>`.
+See [Grant grammar](#grant-grammar) for `<server>` vs. `<server>/<tool>`.
 
 ### 4. Restart the agent
 
-An agent bakes its `tools:` list into its calfkit node at boot, so a *new
-selector in the `.md`* needs an agent restart to take effect — the same rule as
+An agent bakes its tool selectors into its calfkit node at boot, so a *new
+grant in the `.md`* needs an agent restart to take effect — the same rule as
 adding a builtin tool:
 
 ```bash
@@ -207,18 +206,17 @@ topic segment (`mcp_server.<name>`), the `mcp.json` key, and the slot suffix
 (`mcp-<name>`), so lowercase-plus-underscore is the safe intersection. An
 invalid name is rejected at add time and at load time.
 
-## Selector grammar
+## Grant grammar
 
-Agents declare MCP tools in the *same* `tools:` list as builtins, using an
-`mcp/` prefix:
+Agents declare MCP tools in the separate `mcp:` field:
 
-| Selector | Grants |
+| Grant | Grants |
 |---|---|
-| `mcp/<server>` | **Every** tool the server currently advertises (a wildcard — a server that later advertises new tools enlarges the agent's surface). |
-| `mcp/<server>/<tool>` | **Exactly** that one tool. The tool segment matches `[a-zA-Z0-9_-]{1,128}` (the upstream server's own name, which may be mixed-case or hyphenated). |
+| `<server>` | **Every** tool the server currently advertises (a wildcard — a server that later advertises new tools enlarges the agent's surface). |
+| `<server>/<tool>` | **Exactly** that one tool. The tool segment matches `[a-zA-Z0-9_-]{1,128}` (the upstream server's own name, which may be mixed-case or hyphenated). |
 
-Merge rules when a server appears more than once: a bare `mcp/<server>`
-subsumes that server's explicit `mcp/<server>/<tool>` entries (the wildcard
+Merge rules when a server appears more than once: a bare `<server>`
+subsumes that server's explicit `<server>/<tool>` entries (the wildcard
 wins); explicit-only entries dedupe into a fixed include set.
 
 Two properties worth internalizing:
@@ -228,8 +226,8 @@ Two properties worth internalizing:
   explicit.
 - **Validation at parse/write time is syntax-only.** Whether the named server
   is configured or running is a runtime concern — there is no static catalog to
-  check a selector against (that is the point of runtime discovery). A
-  malformed selector (bad grammar) is rejected immediately, naming the
+  check a grant against (that is the point of runtime discovery). A
+  malformed grant (bad grammar) is rejected immediately, naming the
   offending line.
 
 ## Runtime discovery
@@ -244,12 +242,12 @@ turn**. The consequences:
   files. (The removed MCP support required committing generated schema modules;
   this design has none.)
 - **A server's tool list can change without an agent restart.** If the github
-  server starts advertising a new tool, an agent holding `mcp/github` picks it
-  up on its next turn — no restart. (Changing the agent's *own `.md` selectors*
-  still needs an agent restart, because the `tools:` list is baked in at boot —
+  server starts advertising a new tool, an agent holding `mcp: [github]` picks it
+  up on its next turn — no restart. (Changing the agent's *own `.md` grants*
+  still needs an agent restart, because the selector set is baked in at boot —
   see [step 4](#4-restart-the-agent).)
 - **A down server degrades the turn, it never blocks the agent.** Selection is
-  non-strict by policy: an agent declaring `mcp/github` boots and answers
+  non-strict by policy: an agent declaring `mcp: [github]` boots and answers
   normally even if the github server is down or not yet started — the affected
   tools just drop out of that turn, with the degradation logged. Declaring an
   MCP tool must not hold the agent hostage to the server's uptime.
@@ -304,8 +302,8 @@ host and the agents elsewhere:
 disco mcp add github --command "npx -y @modelcontextprotocol/server-github" --env GITHUB_TOKEN
 disco mcp start github        # spawns as its own detached process — no reload
 
-# On an agent host — no mcp.json, no GITHUB_TOKEN, just the selector in the .md:
-disco agent restart scribe       # scribe's tools: includes mcp/github
+# On an agent host — no mcp.json, no GITHUB_TOKEN, just the grant in the .md:
+disco agent restart scribe       # scribe declares mcp: [github]
 ```
 
 The capability view even surfaces servers *other* hosts run, so
@@ -345,10 +343,10 @@ in `disco status`). The log names the cause; fix it and run `disco mcp start
 1. Is the server running and advertising? `disco mcp list` shows running
    state; `disco logs mcp-<server>` confirms it listed tools and advertised.
    If it's down, the agent degrades that turn silently — start the server.
-2. Does the agent's `.md` actually declare the selector, and did you restart
-   the agent after adding it? A new `mcp/...` line needs
+2. Does the agent's `.md` actually declare the grant, and did you restart
+   the agent after adding it? A new `mcp:` grant needs
    `disco agent restart <name>` ([step 4](#4-restart-the-agent)).
-3. For an `mcp/<server>/<tool>` selector, does the server advertise a tool by
+3. For a `<server>/<tool>` grant, does the server advertise a tool by
    exactly that name? The LLM-facing name is the server's own — check the
    toolbox log's tool listing.
 
@@ -356,7 +354,7 @@ in `disco status`). The log names the cause; fix it and run `disco mcp start
 `mcp.json` has no value in the server process's environment. Set it in
 `config/.env` (the file the runner loads) and restart the server.
 
-**`invalid MCP server name`.** The name (in `mcp.json` or in a selector)
+**`invalid MCP server name`.** The name (in `mcp.json` or in an `mcp:` grant)
 violates `[a-z0-9_]{1,64}`. Rename the server — the name is also a Kafka topic
 segment and a process-slot suffix, so the constraint is hard.
 
@@ -365,7 +363,7 @@ segment and a process-slot suffix, so the constraint is hard.
 - [`design/mcp-reintroduction.md`](./design/mcp-reintroduction.md) — the full
   design and rationale (isolation, secrets boundary, runtime discovery).
 - [`authoring-agents.md`](./authoring-agents.md#33-tools-optional) — the
-  `tools:` frontmatter field, including MCP selectors.
+  `tools:` and `mcp:` frontmatter fields.
 - [`architecture.md`](./architecture.md#the-four-processes) — where the
   `calfkit-mcp` process sits.
 - [`configuration.md`](./configuration.md#mcp-servers-mcpjson) — `mcp.json`

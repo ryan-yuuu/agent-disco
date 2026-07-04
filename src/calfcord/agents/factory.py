@@ -23,13 +23,12 @@ The agent's identity rides on every outbound publish via calfkit's
 agent's persona from the emitter without any application-level identity
 stamping.
 
-Tools declared in the agent's ``.md`` frontmatter under ``tools:`` are
-resolved against :data:`calfcord.tools.TOOL_REGISTRY` and passed to the
-calfkit ``Agent`` constructor; ``mcp/...`` selectors collapse into one
-:class:`~calfkit.mcp.MCPToolbox` per server, resolved per turn against the
-capability view. Each builtin agent only carries the tool's
-:class:`~calfkit.nodes.ToolNodeDef` for schema purposes -- the actual tool
-body runs in the ``calfkit-tools`` deployment.
+Builtin tools declared under ``tools:`` become calfkit runtime
+:class:`~calfkit.nodes.tool.Tools` selectors; MCP grants declared under
+``mcp:`` collapse into one :class:`~calfkit.mcp.MCPToolbox` per server.
+Both are resolved per turn against the capability view. The actual tool body
+runs in the ``calfkit-tools`` or ``calfkit-mcp`` deployment, not in the agent
+process.
 
 Two public entry points:
 
@@ -64,7 +63,7 @@ from calfkit import Handoff, Messaging
 from calfkit.client import Client
 from calfkit.mcp import MCPToolbox
 from calfkit.nodes import Agent
-from calfkit.nodes.tool import ToolNodeDef
+from calfkit.nodes.tool import Tools
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfkit.worker import Worker
@@ -74,13 +73,6 @@ from calfcord.agents.memory import memory_instructions
 from calfcord.agents.thinking import build_model_settings
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.mcp.agent_select import selectors_from_entries
-from calfcord.mcp.selector import is_mcp_selector
-
-# NOTE: ``TOOL_REGISTRY`` is imported lazily inside :meth:`AgentFactory.__init__`.
-# Tool modules transitively import bridge code, and bridge imports agents.factory
-# for DEFAULT_PROVIDER/resolve_provider — a top-level import here would cycle.
-# Lazy import defers the resolution to factory construction time, by which point
-# all modules have finished loading.
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +209,23 @@ def _build_peers(definition: AgentDefinition) -> list[Messaging | Handoff]:
     return peers
 
 
+def _describe_selectors(selectors: list[Tools | MCPToolbox]) -> list[str]:
+    """Render the tool-selector surface for the operator-facing build log.
+
+    ``discover:*`` for the discover handle, the raw name list for named builtins,
+    and ``mcp:<server>`` per toolbox — the MCP label rides on the public
+    :attr:`MCPToolbox.name`, so a silent upstream rename surfaces in tests, not
+    in production logs.
+    """
+    described: list[str] = []
+    for selector in selectors:
+        if isinstance(selector, Tools):
+            described.append("discover:*" if selector.discover else f"tools:{list(selector.names)}")
+        else:
+            described.append(f"mcp:{selector.name}")
+    return described
+
+
 class AgentFactory:
     """Builds a :class:`Worker` running one LLM-backed agent.
 
@@ -248,7 +257,6 @@ class AgentFactory:
         default_provider: Provider = DEFAULT_PROVIDER,
         default_model: str | None = None,
         model_client_factory: ModelClientFactory | None = None,
-        tool_registry: dict[str, ToolNodeDef] | None = None,
     ) -> None:
         """Construct an agent factory.
 
@@ -272,21 +280,12 @@ class AgentFactory:
             model_client_factory: Optional override for model-client
                 construction. Used by tests to inject a fake without
                 building a real provider client.
-            tool_registry: Map of tool name → :class:`ToolNodeDef` used to
-                resolve the bare builtin names declared in
-                ``definition.tools``. Defaults to the module-level
-                :data:`TOOL_REGISTRY`; tests pass a fixture-built dict.
         """
         self._persona_sender = persona_sender
         self._calfkit_client = calfkit_client
         self._default_provider = default_provider
         self._default_model = default_model
         self._model_client_factory = model_client_factory or _default_model_client_factory
-        if tool_registry is None:
-            from calfcord.tools import TOOL_REGISTRY
-
-            tool_registry = TOOL_REGISTRY
-        self._tool_registry = tool_registry
 
     def build(self, definition: AgentDefinition) -> Worker:
         """Build a single-agent :class:`Worker`.
@@ -328,8 +327,8 @@ class AgentFactory:
                 ``read_file``/``write_file`` tools memory requires (see
                 :meth:`_require_memory_tools`).
         """
-        tools, mcp_selectors = self._resolve_tools(definition)
-        self._require_memory_tools(definition, tools)
+        selectors = self._build_tool_selectors(definition)
+        self._require_memory_tools(definition)
 
         provider = self._resolve_provider(definition)
         model_name = self._resolve_model(definition, provider)
@@ -344,7 +343,7 @@ class AgentFactory:
             # catalog default at client construction (logged there).
             model_name if model_name is not None else "<codex catalog default>",
             definition.thinking_effort,
-            [t.tool_schema.name for t in tools] + [f"mcp:{s.name}" for s in mcp_selectors],
+            _describe_selectors(selectors),
             [type(p).__name__ for p in peers],
         )
 
@@ -354,7 +353,7 @@ class AgentFactory:
             description=definition.description,
             model_client=self._model_client_factory(provider, model_name),
             model_settings=model_settings,
-            tools=[*tools, *mcp_selectors] or None,
+            tools=selectors or None,
             peers=peers or None,
         )
 
@@ -389,81 +388,57 @@ class AgentFactory:
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
 
-    def _resolve_tools(self, definition: AgentDefinition) -> tuple[list[ToolNodeDef], list[MCPToolbox]]:
-        """Resolve ``definition.tools`` into builtin nodes + deferred MCP selectors.
+    def _build_tool_selectors(self, definition: AgentDefinition) -> list[Tools | MCPToolbox]:
+        """Map builtin ``tools:`` and MCP ``mcp:`` grants to runtime selectors.
 
-        The flat ``tools:`` list mixes two kinds of entry, partitioned here:
-
-        * bare *builtin* names (``terminal``, ``calendar``) resolve against the
-          in-memory tool registry, with an aggregate unknown-name
-          :class:`ValueError` (every unknown name in one message);
-        * ``mcp/...`` selectors collapse into one
-          :class:`~calfkit.mcp.MCPToolbox` per server
-          (:func:`~calfcord.mcp.agent_select.selectors_from_entries`),
-          resolved per turn against the capability view — never against any
-          local registry, so there is nothing further to validate here.
-
-        Name collisions between the two kinds cannot be checked statically
-        (MCP tool names are only known at runtime); calfkit's per-turn
-        resolution drops a toolbox tool that collides with a static binding
-        (static wins, logged), which is the operative policy.
+        Nothing is resolved against a local registry: every selector is an
+        identity-only handle the capability view resolves per turn. Builtin
+        names become one :class:`~calfkit.nodes.tool.Tools` selector; canonical
+        ``mcp:`` entries become one :class:`~calfkit.mcp.MCPToolbox` per server
+        via :func:`~calfcord.mcp.agent_select.selectors_from_entries`.
 
         Semantics (mirrors :attr:`AgentDefinition.tools`):
-            - ``None``: tools-by-default — every registered builtin tool and
-              **no** MCP tools (MCP is always an explicit grant). This is
-              the in-memory representation of the "no ``tools:`` line in
-              frontmatter" case before the loader normalizes it.
-            - empty tuple ``()``: zero tools (explicit opt-out).
-            - non-empty tuple: exactly those entries.
+            - ``tools is None``: ``Tools(discover=True)`` — bind every live
+              builtin tool node at runtime.
+            - ``tools == ()``: no builtin selector.
+            - non-empty ``tools``: ``Tools(names=[...])``.
+            - non-empty ``mcp``: one ``MCPToolbox`` per named server.
 
-        Raises:
-            ValueError: if any builtin name is missing from the registry
-                (lists every unknown name in one message).
+        Unknown builtin names are NOT rejected here — an unresolved name
+        degrades at runtime (calfkit logs it, the tool is simply absent),
+        matching the deploy-time-authority model: the tools host, not this
+        process, owns which tools are live.
         """
+        selectors: list[Tools | MCPToolbox] = []
         if definition.tools is None:
-            return list(self._tool_registry.values()), []
-        if not definition.tools:
-            return [], []
+            selectors.append(Tools(discover=True))
+        elif definition.tools:
+            selectors.append(Tools(names=list(definition.tools)))
+        selectors.extend(selectors_from_entries(definition.mcp))
+        return selectors
 
-        mcp_entries = [e for e in definition.tools if is_mcp_selector(e)]
-        nodes: list[ToolNodeDef] = []
-        unknown: list[str] = []
-        for name in definition.tools:
-            if is_mcp_selector(name):
-                continue
-            node = self._tool_registry.get(name)
-            if node is None:
-                unknown.append(name)
-            else:
-                nodes.append(node)
-        if unknown:
-            known = sorted(self._tool_registry)
-            raise ValueError(
-                f"agent {definition.agent_id!r} declares unknown tool(s) "
-                f"{unknown!r}; known tools: {known or '<none registered>'}"
-            )
-
-        return nodes, selectors_from_entries(mcp_entries)
-
-    def _require_memory_tools(self, definition: AgentDefinition, tools: list[ToolNodeDef]) -> None:
+    def _require_memory_tools(self, definition: AgentDefinition) -> None:
         """Reject a ``memory: true`` agent that lacks the filesystem tools memory needs.
 
         A memory-enabled agent manages its notepad with the general-purpose
         ``read_file`` / ``write_file`` tools; without them the injected memory
         instructions are a silent no-op, so fail loud at build time instead.
-        Agents that omit ``tools:`` get every registered tool and pass
-        automatically — only an explicitly-restricted ``tools:`` list can trip
-        this. Operates on the resolved :class:`~calfkit.nodes.tool.ToolNodeDef`
-        list (not the raw names) so the "all tools" expansion is reflected
-        correctly.
+        Checks the frontmatter *names* — the resolved tool nodes no longer exist
+        at build time. An omitted ``tools:`` (``None``) discovers every live tool
+        node and passes; only an explicitly-restricted list that omits the fs
+        tools trips this. A deploy that drops or aliases read_file / write_file
+        on the tools host is not build-time checkable and degrades at runtime
+        (see the plan's risk notes).
         """
         if not definition.memory:
             return
-        available = {t.tool_schema.name for t in tools}
-        missing = sorted({"read_file", "write_file"} - available)
+        if definition.tools is None:
+            return
+        named = set(definition.tools)
+        missing = sorted({"read_file", "write_file"} - named)
         if missing:
             raise ValueError(
-                f"agent {definition.agent_id!r} sets memory: true but is missing "
-                f"required filesystem tool(s) {missing}; memory needs read_file and "
-                f"write_file. Add them to the agent's tools:, or omit tools: to grant all."
+                f"agent {definition.agent_id!r} sets memory: true but its tools: list omits "
+                f"{missing}; memory needs read_file and write_file. Add them to the agent's "
+                f"tools:, or omit tools: to discover all."
             )

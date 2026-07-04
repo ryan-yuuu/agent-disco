@@ -86,18 +86,15 @@ class TestLoadAgentsDir:
             load_agents_dir(tmp_path)
 
 
-class TestToolsDefaultExpansion:
-    """The loader normalizes ``tools=None`` (frontmatter omitted) to every
-    registered tool, so downstream consumers see a concrete tuple. Explicit
-    ``tools: []`` and explicit lists are preserved unchanged."""
+class TestToolsOmittedStaysNone:
+    """The loader does NOT normalize ``tools=None`` (frontmatter omitted): it
+    stays ``None`` so the factory maps it to ``Tools(discover=True)`` at build
+    time. Explicit ``tools: []`` and explicit lists are preserved unchanged."""
 
-    def test_omitted_tools_expands_to_all_registered(self, tmp_path: Path) -> None:
+    def test_omitted_tools_stays_none(self, tmp_path: Path) -> None:
         _write_agent(tmp_path, "scheduler")  # no tools: line
         defs = load_agents_dir(tmp_path)
-        from calfcord.tools import TOOL_REGISTRY
-
-        assert defs[0].tools is not None
-        assert set(defs[0].tools) == set(TOOL_REGISTRY)
+        assert defs[0].tools is None
 
     def test_explicit_empty_list_stays_empty(self, tmp_path: Path) -> None:
         _write_agent(tmp_path, "minimal", tools="[]")
@@ -115,13 +112,10 @@ class TestLoadOne:
     live definition; both the directory scan and explicit file targeting route
     through it, so tools normalization must apply identically either way."""
 
-    def test_omitted_tools_expands_to_all_registered(self, tmp_path: Path) -> None:
+    def test_omitted_tools_stays_none(self, tmp_path: Path) -> None:
         _write_agent(tmp_path, "scheduler")  # no tools: line
-        from calfcord.tools import TOOL_REGISTRY
-
         definition = _load_one(tmp_path / "scheduler.md")
-        assert definition.tools is not None
-        assert set(definition.tools) == set(TOOL_REGISTRY)
+        assert definition.tools is None
 
     def test_parity_with_dir_loaded_version(self, tmp_path: Path) -> None:
         """A file loaded via ``_load_one`` must equal the same file loaded via

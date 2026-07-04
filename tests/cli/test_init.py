@@ -225,14 +225,12 @@ def test_tools_checkbox_offers_all_builtins_prechecked(tmp_path: Path) -> None:
     assert all(builtin_rows.values())
 
 
-def test_keeping_all_tools_writes_full_builtin_list(tmp_path: Path) -> None:
-    from calfcord.tools import TOOL_REGISTRY
-
+def test_keeping_all_tools_omits_tools_key(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     # No checkbox script → fake returns every pre-checked (all builtin) row.
     prompter = _fresh_run_prompter(name="scribe", description="d", checkboxes=None)
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    assert set(parse_agent_md(agents_dir / "scribe.md").tools) == set(TOOL_REGISTRY)
+    assert parse_agent_md(agents_dir / "scribe.md").tools is None
 
 
 def test_selecting_a_subset_writes_that_subset(tmp_path: Path) -> None:

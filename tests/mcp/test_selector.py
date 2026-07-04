@@ -1,10 +1,10 @@
 """Unit tests for :mod:`calfcord.mcp.selector`.
 
-The selector module is a pure leaf: it recognizes and decomposes the
-``mcp/...`` tool-selector syntax used in agent frontmatter without touching
-mcp.json, calfkit, or any transport. These tests pin the two documented
-forms (``mcp/<server>`` and ``mcp/<server>/<tool>``), the rejection of every
-malformed shape, and the cheap ``is_mcp_selector`` prefix check.
+The selector module is a pure leaf: it recognizes legacy ``mcp/...`` tokens
+only so ``tools:`` can reject them, and decomposes canonical ``mcp:`` field
+entries without touching mcp.json, calfkit, or any transport. These tests pin
+the two documented canonical forms (``<server>`` and ``<server>/<tool>``), the
+rejection of every malformed shape, and the cheap legacy-prefix check.
 """
 
 from __future__ import annotations
@@ -27,20 +27,20 @@ class TestMcpSelectorType:
     with the legacy ``(server, tool)`` tuple (equality and unpacking)."""
 
     def test_named_fields_and_predicate(self) -> None:
-        sel = parse_mcp_selector("mcp/gmail/search")
+        sel = parse_mcp_selector("gmail/search")
         assert isinstance(sel, McpSelector)
         assert sel.server == "gmail"
         assert sel.tool == "search"
         assert sel.selects_all_tools is False
 
     def test_bare_server_selects_all(self) -> None:
-        sel = parse_mcp_selector("mcp/gmail")
+        sel = parse_mcp_selector("gmail")
         assert sel.server == "gmail"
         assert sel.tool is None
         assert sel.selects_all_tools is True
 
     def test_backward_compatible_with_tuple(self) -> None:
-        sel = parse_mcp_selector("mcp/gmail/search")
+        sel = parse_mcp_selector("gmail/search")
         assert sel == ("gmail", "search")
         server, tool = sel
         assert (server, tool) == ("gmail", "search")
@@ -72,62 +72,60 @@ class TestIsMcpSelector:
 
 class TestParseValid:
     def test_bare_server_yields_none_tool(self) -> None:
-        """``mcp/<server>`` selects every tool of the server — tool is ``None``."""
-        assert parse_mcp_selector("mcp/gmail") == ("gmail", None)
+        """``<server>`` selects every tool of the server — tool is ``None``."""
+        assert parse_mcp_selector("gmail") == ("gmail", None)
 
     def test_server_and_tool(self) -> None:
-        assert parse_mcp_selector("mcp/gmail/search") == ("gmail", "search")
+        assert parse_mcp_selector("gmail/search") == ("gmail", "search")
 
     def test_tool_segment_allows_hyphen_and_mixed_case(self) -> None:
         """The tool segment matches the upstream-advertised tool name, which
         we do not control and which may use hyphens or mixed case."""
-        assert parse_mcp_selector("mcp/demo/get-Item") == ("demo", "get-Item")
+        assert parse_mcp_selector("demo/get-Item") == ("demo", "get-Item")
 
     def test_server_segment_allows_underscore_and_digits(self) -> None:
-        assert parse_mcp_selector("mcp/srv_2") == ("srv_2", None)
+        assert parse_mcp_selector("srv_2") == ("srv_2", None)
 
     def test_server_segment_at_length_bound_accepted(self) -> None:
         """The server grammar caps at 64 chars — exactly 64 is accepted."""
         server = "a" * 64
-        assert parse_mcp_selector(f"mcp/{server}") == (server, None)
+        assert parse_mcp_selector(server) == (server, None)
 
     def test_tool_segment_at_length_bound_accepted(self) -> None:
         """The tool grammar caps at 128 chars — exactly 128 is accepted."""
         tool = "a" * 128
-        assert parse_mcp_selector(f"mcp/demo/{tool}") == ("demo", tool)
+        assert parse_mcp_selector(f"demo/{tool}") == ("demo", tool)
 
 
 class TestParseLengthBounds:
     def test_server_segment_over_length_bound_rejected(self) -> None:
         """65 chars exceeds the 64-char server cap and is rejected."""
         with pytest.raises(ValueError, match="invalid server name"):
-            parse_mcp_selector(f"mcp/{'a' * 65}")
+            parse_mcp_selector("a" * 65)
 
     def test_tool_segment_over_length_bound_rejected(self) -> None:
         """129 chars exceeds the 128-char tool cap and is rejected."""
         with pytest.raises(ValueError, match="invalid tool name"):
-            parse_mcp_selector(f"mcp/demo/{'a' * 129}")
+            parse_mcp_selector(f"demo/{'a' * 129}")
 
 
 class TestParseMalformed:
     @pytest.mark.parametrize(
         "entry",
         [
-            "mcp/",          # empty server segment
-            "mcp/a/b/c",     # too many segments
-            "mcp//x",        # empty server (doubled slash)
-            "mcp/gmail/",    # empty tool segment
-            "mcp/Gmail",     # uppercase server (server grammar is [a-z0-9_])
-            "mcp/gmail/bad tool",  # space in tool name (bad charset)
-            "shell",         # non-mcp prefix
-            "calendar",      # non-mcp prefix
+            "",            # empty server segment
+            "a/b/c",       # too many segments
+            "/x",          # empty server
+            "gmail/",      # empty tool segment
+            "Gmail",       # uppercase server (server grammar is [a-z0-9_])
+            "gmail/bad tool",  # space in tool name (bad charset)
         ],
     )
     def test_raises_value_error(self, entry: str) -> None:
         with pytest.raises(ValueError):
             parse_mcp_selector(entry)
 
-    @pytest.mark.parametrize("entry", ["mcp/", "mcp/a/b/c", "mcp//x", "mcp/gmail/"])
+    @pytest.mark.parametrize("entry", ["", "a/b/c", "/x", "gmail/"])
     def test_error_names_the_offending_entry(self, entry: str) -> None:
         """Every rejection names ``entry`` verbatim so a frontmatter typo
         surfaces with the exact bad string."""
@@ -137,11 +135,11 @@ class TestParseMalformed:
 
 class TestValidateMcpSelector:
     def test_returns_none_on_valid(self) -> None:
-        assert validate_mcp_selector("mcp/gmail/search") is None
+        assert validate_mcp_selector("gmail/search") is None
 
     def test_raises_on_malformed(self) -> None:
         with pytest.raises(ValueError):
-            validate_mcp_selector("mcp/a/b/c")
+            validate_mcp_selector("a/b/c")
 
 
 class TestIsValidServerName:
