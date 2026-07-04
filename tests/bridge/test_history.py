@@ -607,6 +607,32 @@ class TestChannelHistoryFetcher:
         assert records[0].content == "the answer"
 
     @pytest.mark.asyncio
+    async def test_v2_message_from_unowned_webhook_is_kept(self) -> None:
+        """The exclusion is scoped to the bridge's OWN persona webhooks. A
+        Components-V2 message from a third-party (unowned) webhook must NOT be
+        dropped — a regression removing the `_owns_webhook` guard would silently
+        delete third-party content from an agent's history."""
+        client = MagicMock()
+        client.get_channel.return_value = _FakeChannel(
+            messages=[
+                _fake_discord_message(
+                    message_id=1,
+                    content="from a foreign app",
+                    author_display_name="OtherApp",
+                    webhook_id=888,  # NOT one of the bridge's webhooks
+                    components_v2=True,
+                ),
+            ]
+        )
+        fetcher = ChannelHistoryFetcher(client, lambda wid: wid == 777)  # owns 777, not 888
+
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
+
+        assert len(records) == 1
+        assert records[0].message_id == 1
+        assert records[0].is_agent is False  # unowned webhook → human turn, not excluded
+
+    @pytest.mark.asyncio
     async def test_unowned_webhook_is_not_agent(self) -> None:
         """A third-party webhook (``webhook_id`` not owned by the bridge) is a
         human turn — ``is_agent`` False — never mis-read as an agent."""

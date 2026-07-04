@@ -84,9 +84,9 @@ class A2ADispatcher:
     def classify(self, step: StepEvent) -> A2AProjection | None:
         # NB: a ``handoff`` step is deliberately NOT classified here — a handoff
         # transfers conversation control (the peer replies in the caller's
-        # place, ADR-0019), unlike a ``message_agent`` consult (ADR-0015). It is
-        # rendered inline in the main step stream by the progress renderer, so it
-        # falls through to ``return None`` below.
+        # place), unlike a ``message_agent`` consult where the caller keeps
+        # control (both are ADR-0011). It is rendered inline in the main step
+        # stream by the progress renderer, so it falls through to ``return None``.
         if step.kind == "tool_call" and step.name == _MESSAGE_AGENT:
             args = step.args or {}
             call = A2ACall(

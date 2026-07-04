@@ -3,8 +3,8 @@
 On the calfkit 0.12 caller surface the final reply is the return value of
 ``handle.result()`` (awaited by the :class:`~calfcord.bridge.mention_handler.MentionHandler`),
 not a Kafka outbox message. This module re-homes the *posting* half of the old
-``bridge/outbox.py`` — persona webhook send with 5xx smoothing, the step-transcript
-expand toggle + durable transcript write, the chunk-split fallback — minus the
+``bridge/outbox.py`` — persona webhook send with 5xx smoothing, the durable
+transcript write (for tool-call replay), the chunk-split fallback — minus the
 consumer / ``pending_wires`` / registry plumbing.
 
 The retry-with-feedback *loop* lives in the handler (spec §9): :meth:`post_reply`
@@ -57,12 +57,16 @@ def _turn_delta(result: Any, initial_len: int) -> list[ModelMessage]:
 def _render_step_count(delta: list[ModelMessage]) -> int:
     """Count renderable step blocks in ``delta``, defensively (a tool call + its
     result render as one block). ``_render_tree_blocks`` can raise on malformed
-    args, so a failure degrades to zero steps — the reply still posts, just
-    without the toggle or a transcript row."""
+    args, so a failure degrades to zero steps — the reply still posts, but no
+    transcript row is written, so this turn's tool calls won't be available for
+    replay on the next turn."""
     try:
         return len(_render_tree_blocks(delta))
     except Exception:
-        logger.exception("reply poster: step-count render raised; posting without toggle/transcript")
+        logger.exception(
+            "reply poster: step-count render raised; posting without a transcript row "
+            "(tool-call replay will miss this turn)"
+        )
         return 0
 
 
@@ -288,7 +292,8 @@ async def _write_transcript(
 ) -> None:
     """Persist the completed turn's transcript row (best-effort, idempotent on
     ``correlation_id``). A store failure is logged and swallowed — the reply is
-    already posted; the toggle simply finds no row (documented degradation)."""
+    already posted; tool-call replay simply finds no row for this turn
+    (documented degradation)."""
     try:
         delta_json = ModelMessagesTypeAdapter.dump_json(delta).decode()
         await transcript_store.write_turn(
@@ -303,7 +308,7 @@ async def _write_transcript(
         )
     except Exception:
         logger.exception(
-            "failed to write transcript correlation_id=%s reply_id=%s; step toggle will have no row",
+            "failed to write transcript correlation_id=%s reply_id=%s; tool-call replay will miss this turn",
             correlation_id,
             final_message_id,
         )

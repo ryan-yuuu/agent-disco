@@ -28,10 +28,10 @@ so the history fetcher drops the bridge's own v2 messages
 (`ChannelHistoryFetcher._is_v2_step_message`). The model's tool memory continues
 to ride the separate structured transcript replay, unchanged.
 
-Handoffs, which transfer conversation control (ADR-0011, ADR-0019) — distinct
-from a `message_agent` consult where the caller keeps control — are no longer
-claimed by the A2A dispatcher; they render inline in the main step stream instead
-of the A2A audit channel.
+Handoffs, which transfer conversation control (ADR-0011) — distinct from a
+`message_agent` consult where the caller keeps control (also ADR-0011) — are no
+longer claimed by the A2A dispatcher; they render inline in the main step stream
+instead of the A2A audit channel.
 
 ## Considered options
 

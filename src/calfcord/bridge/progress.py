@@ -26,7 +26,11 @@ that did the work (e.g. a peer after a handoff) stamps the message.
 
 **Failure semantics.** Every send is best-effort
 (:func:`_best_effort_progress`): a transient/gone step message must never crash
-the run or affect the terminal reply. A failed send just drops that one line.
+the run or affect the terminal reply. A failed *Discord* send drops just that one
+line and the loop keeps posting the rest. A systematic non-Discord error (e.g. a
+sender that was never started, a non-text channel) is not caught here — it
+propagates to the drain's own ``except Exception``, which drops the whole step
+(logged) and keeps draining; the terminal reply is unaffected either way.
 
 **Typing** is disabled for now — the fire call is commented out; the notifier is
 still accepted (dormant) for a one-line re-enable.

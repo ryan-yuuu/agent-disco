@@ -127,8 +127,9 @@ class TestTreeRender:
             ModelRequest(parts=[ToolReturnPart(tool_name="dump", content=big, tool_call_id="t1")]),
         ]
         rendered = steps_render._render_tree_blocks(delta)[0]
-        # The full payload survives — the only bound is the overall message cap
-        # (enforced by steps_toggle's file-attachment path), not a per-part cap.
+        # The full payload survives — no per-part cap. The tree render now feeds
+        # the persisted transcript (tool-call replay) and the step count, not a
+        # size-bounded display, so it is deliberately unbounded here.
         assert rendered.count("y") == 9000
 
     def test_triple_backticks_in_result_cannot_break_the_fence(self) -> None:
@@ -263,6 +264,19 @@ class TestRenderStepMessage:
         assert len(bodies) >= 2
         assert all(0 < len(b) <= limit for b in bodies)
         assert "\n".join(bodies) == text  # blank line preserved, nothing lost
+
+    def test_agent_message_never_emits_an_empty_body(self) -> None:
+        # A line exactly at the cap, then a blank line, then more text: the blank
+        # line must NOT surface as an empty body — Discord rejects an empty
+        # TextDisplay (min length 1) with a 400.
+        limit = steps_render._V2_CHUNK
+        bodies = steps_render.render_step_message(_step("agent_message", text="a" * limit + "\n\n" + "b" * limit))
+        assert bodies and all(0 < len(b) <= limit for b in bodies)
+
+    def test_chunk_target_stays_under_the_hard_v2_cap(self) -> None:
+        # The chunk target must stay <= Discord's real per-message cap, or posts
+        # would 400 in production while these _V2_CHUNK-bound tests stayed green.
+        assert steps_render._V2_CHUNK <= steps_render._V2_TEXT_LIMIT
 
     def test_unknown_kind_is_a_safe_noop_that_logs(self, caplog) -> None:
         # A future/unknown calfkit kind must never crash the drain: render nothing,

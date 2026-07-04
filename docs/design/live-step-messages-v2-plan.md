@@ -57,7 +57,7 @@ sole source of the model's tool context.
 | D7 | Keep the transcript write + tool-call replay exactly as-is. | Sole source of the model's structured tool memory now. |
 | D8 | Remove the "N steps" button + its persistent view. | Steps are now always visible. |
 | D9 | Every emitted step kind is explicitly rendered (§5.1); unknown/future kinds hit a safe no-op fallback. Typing indicator **disabled** (commented out, not deleted) for now. | Completeness + robustness; typing paused per user. |
-| D10 | **Handoff** renders in the **main** step stream **only**, as `➡️ handed off to <target>` (bare name, no reason). The **A2ADispatcher** no longer claims `handoff` and the **A2AHandoff** audit projection is **removed**. `message_agent` consults still project to the A2A messaging/audit channel. | A handoff transfers conversation control (the peer replies in your place, ADR-0019) — distinct from a `message_agent` consult (agent keeps control, ADR-0015). The user should see the control transfer inline; the consult trail stays in the A2A channel. |
+| D10 | **Handoff** renders in the **main** step stream **only**, as `➡️ handed off to <target>` (bare name, no reason). The **A2ADispatcher** no longer claims `handoff` and the **A2AHandoff** audit projection is **removed**. `message_agent` consults still project to the A2A messaging/audit channel. | A handoff transfers conversation control (the peer replies in your place) — distinct from a `message_agent` consult (agent keeps control); both are ADR-0011. The user should see the control transfer inline; the consult trail stays in the A2A channel. |
 
 ## 5. Data flow (upstream unchanged)
 
@@ -83,8 +83,8 @@ has exactly **four emitted** members (`calfkit/models/step.py:173`); a fifth,
 v1 and not re-exported* (`step.py:165-170`), so it cannot currently be streamed.
 **normalize_run_event** maps events → **StepEvent**; the **A2ADispatcher** then removes
 only **message_agent** *consult* traffic (a Peer message — the agent keeps control and
-answers you itself, ADR-0015) to the audit channel. **Handoffs** (transfer of
-conversation control — the peer replies in your place, ADR-0019) now flow through to
+answers you itself, ADR-0011) to the audit channel. **Handoffs** (transfer of
+conversation control — the peer replies in your place, ADR-0011) now flow through to
 the progress renderer.
 
 | calfkit event (fields) | kind | A2A-claimed? | Reaches progress? | Rendered as |
@@ -135,8 +135,8 @@ emits **agent_thinking**, the change is localized: one map branch in
 - Remove: **render_step_line**, **_progress_content**, **_tail_window**,
   `_PROGRESS_DEBOUNCE_SECONDS`, the `_LIVE_*` caps, `_HIDDEN_STEPS_MARKER`.
 - Keep: **_render_tree_blocks** (still used to count steps for the transcript write).
-- New constants: `_V2_ACCENT = discord.Colour(0xE74C3C)`, `_V2_MAX_CHARS = 4000`,
-  `_V2_CHUNK = 3900` (headroom).
+- New constants: `_V2_ACCENT = discord.Colour(0xE74C3C)` (in `progress.py`),
+  `_V2_TEXT_LIMIT = 4000` and `_V2_CHUNK = 3900` (headroom, in `steps_render.py`).
 
 ### 6.3 `discord/persona.py` — add v2 send path, remove edit/delete
 - Add **send_components**`(persona, channel_id, view, *, thread_id) -> SentMessage`:

@@ -433,57 +433,6 @@ class DiscordPersonaSender:
         )
         return SentMessage(id=sent.id, channel_id=message_channel)
 
-    async def edit_message(
-        self, channel_id: int, message_id: int, *, content: str, thread_id: int | None = None
-    ) -> None:
-        """Edit the ``content`` of a persona message previously sent to ``channel_id``.
-
-        Used for the live step-progress message, which is edited in place as
-        steps stream in. Only the text changes; the message's components and
-        embeds are left untouched (``view`` omitted ⇒ retained). The webhook
-        owns the message because this sender created it.
-
-        ``thread_id`` must be supplied when the message lives inside a thread:
-        the webhook still hosts on ``channel_id`` (the parent), but Discord
-        requires the owning thread to locate the message for the edit.
-
-        Raises:
-            RuntimeError: If :meth:`start` has not been called.
-            discord.NotFound: If the message no longer exists.
-            discord.Forbidden: If the bot lacks ``Manage Webhooks`` and a
-                webhook does not yet exist in the channel.
-            discord.HTTPException: For other Discord-side failures.
-        """
-        if self._client is None:
-            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
-        webhook = await self._get_or_create_webhook(channel_id)
-        thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
-        await webhook.edit_message(message_id, content=content, thread=thread)
-
-    async def delete_message(self, channel_id: int, message_id: int, *, thread_id: int | None = None) -> None:
-        """Delete a persona message previously sent to ``channel_id``.
-
-        Used to remove the transient step-progress message once the final
-        reply (which carries the expand toggle) is posted. The webhook owns
-        the message because this sender created it.
-
-        ``thread_id`` must be supplied when the message lives inside a thread
-        (see :meth:`edit_message`): the webhook hosts on the parent
-        ``channel_id`` but Discord needs the owning thread to find the message.
-
-        Raises:
-            RuntimeError: If :meth:`start` has not been called.
-            discord.NotFound: If the message was already deleted.
-            discord.Forbidden: If the bot lacks ``Manage Webhooks`` and a
-                webhook does not yet exist in the channel.
-            discord.HTTPException: For other Discord-side failures.
-        """
-        if self._client is None:
-            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
-        webhook = await self._get_or_create_webhook(channel_id)
-        thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
-        await webhook.delete_message(message_id, thread=thread)
-
     def owns_webhook(self, webhook_id: int) -> bool:
         """Return ``True`` iff ``webhook_id`` is one of this sender's persona webhooks.
 

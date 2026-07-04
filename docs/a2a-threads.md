@@ -4,6 +4,13 @@ How agent-to-agent (A2A) conversations are projected to Discord, how
 operators set up the audit surface, and how agents opt into consulting
 or handing off to peers.
 
+> **Note (2026-07):** **handoffs are no longer projected to this audit
+> channel.** A handoff transfers conversation control, so it now renders
+> inline in the main step stream as `➡️ handed off to <target>` — see
+> [ADR-0016](./adr/0016-persistent-v2-step-messages.md). Only `message_agent`
+> **consults** are projected here. The handoff-projection references below are
+> retained for history but no longer describe current behavior.
+
 ## What changed
 
 **Before**: A2A was a first-party `private_chat` tool. An agent's LLM
@@ -106,16 +113,17 @@ message per human turn that produced A2A activity, each anchoring a thread:
 Click a thread to see the exchange in order: the caller's consult
 (caller persona), the peer's reply (peer persona), and any system notes.
 
-### Reject, fault, and handoff rendering
+### Reject and fault rendering
 
-Not every A2A event is a peer speaking, so three cases render as system
+Not every A2A event is a peer speaking, so two cases render as system
 `a2a` notes rather than peer posts:
 
 | Case | What you see |
 |---|---|
 | **Rejected consult** (peer offline / cycle / self) | `⚠️ consult to <peer> was rejected: <reason>` |
 | **Faulted peer** (no reply came back) | `⚠️ <peer> did not reply — the consult faulted before a response.` |
-| **Handoff** | `↪ <emitter> handed off to <target>: <reason>` |
+
+(Handoffs are no longer rendered here — see the note at the top of this doc.)
 
 The happy-path consult renders the request under the caller's persona and
 the reply under the peer's persona.

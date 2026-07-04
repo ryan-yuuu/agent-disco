@@ -234,10 +234,12 @@ def _render_tree_blocks(messages: Sequence[ModelMessage]) -> list[str]:
 # kinds are a safe no-op so a new calfkit event can never fault the drain.
 
 _V2_TEXT_LIMIT: Final[int] = 4000
-"""Discord's Components-V2 hard cap — enforced BOTH per ``TextDisplay`` and per
-whole message (the sum of all text across every container/text display).
-Verified against the live API (4000 accepted, 4001 rejected); discord.py does
-not enforce it client-side, so the renderer must."""
+"""Discord's Components-V2 hard cap — per ``TextDisplay`` AND per whole message
+(the sum of all text across every container/text display). Verified against the
+live API (4000 accepted, 4001 rejected); discord.py does not enforce it
+client-side. The renderer honors it *transitively*: it chunks agent text to
+:data:`_V2_CHUNK` (< this) and posts one ``TextDisplay`` per message, so no
+explicit 4000-char check is needed."""
 
 _V2_CHUNK: Final[int] = 3900
 """Chunk target for a full ``agent_message`` body — one chunk per v2 message,
@@ -245,14 +247,14 @@ kept under :data:`_V2_TEXT_LIMIT` for headroom."""
 
 
 def _chunk_text(text: str, limit: int) -> list[str]:
-    """Split ``text`` into ≤``limit``-char pieces on line boundaries.
+    """Split ``text`` into non-empty ≤``limit``-char pieces on line boundaries.
 
     Greedily packs whole lines; a single line longer than ``limit`` is
-    hard-split into ``limit``-sized pieces. Rejoining the result reconstructs
-    the input exactly (``"\\n".join`` across line-split boundaries, no separator
-    across a hard-split line) — nothing is dropped. ``current is None`` marks
-    "no line accumulated yet", distinct from an accumulated *blank* line (``""``),
-    so blank lines between paragraphs survive.
+    hard-split into ``limit``-sized pieces. ``current is None`` marks "no line
+    accumulated yet", distinct from an accumulated *blank* line (``""``), so
+    blank lines between paragraphs survive within a chunk. An empty piece (a
+    blank line flushed exactly at a cap boundary) is dropped so no empty body is
+    ever emitted — every returned chunk is 1..``limit`` chars.
     """
     chunks: list[str] = []
     current: str | None = None
@@ -271,7 +273,12 @@ def _chunk_text(text: str, limit: int) -> list[str]:
             current = candidate
     if current is not None:
         chunks.append(current)
-    return chunks
+    # Drop any empty piece: a blank line flushed at an exact-cap boundary yields
+    # ``""``, and Discord rejects an empty TextDisplay (min length 1). A blank
+    # line at a message boundary is cosmetically irrelevant (chunks post as
+    # separate messages). This upholds "render_step_message never emits an empty
+    # body". Non-empty input always leaves at least one non-empty chunk.
+    return [chunk for chunk in chunks if chunk]
 
 
 def render_step_message(step: StepEvent) -> list[str]:

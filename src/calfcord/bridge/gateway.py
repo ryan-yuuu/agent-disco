@@ -118,7 +118,7 @@ async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[Tra
     fails (bad path, disk error, corrupt DB, …) the bridge MUST NOT abort — a
     crash here would take down all Discord routing, not just transcripts. Instead
     we log a loud ERROR and substitute a :class:`NullTranscriptStore` so the run
-    continues with transcripts, tool-call replay, and the expand toggle disabled.
+    continues with transcripts and tool-call replay disabled.
     Yields whichever store is in effect; the real store's connection (if any) is
     closed on exit, and ``NullTranscriptStore.close`` is a harmless no-op.
     """
@@ -129,8 +129,8 @@ async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[Tra
             await store.connect()
         except Exception:
             logger.error(
-                "transcript store failed to open at %s — step transcripts, "
-                "tool-call replay, and the expand toggle are DISABLED for this run",
+                "transcript store failed to open at %s — step transcripts and "
+                "tool-call replay are DISABLED for this run",
                 settings.transcript_db_path,
                 exc_info=True,
             )

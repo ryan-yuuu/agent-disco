@@ -333,8 +333,10 @@ Consults are **stateless** — the peer answers on a fresh conversation, with no
 replay of prior A2A turns. Kafka is the system of record; Discord is a
 human-readable audit log, and the **bridge** (not a tool) renders it: it watches
 each `@mention` run's event `stream()`, pairs each `message_agent` call with its
-reply by `tool_call_id`, and projects consults and handoffs into per-turn threads
-in the unified A2A channel.
+reply by `tool_call_id`, and projects consults into per-turn threads in the
+unified A2A channel. (Handoffs are **not** projected here — a handoff transfers
+conversation control, so it renders inline in the main step stream instead; see
+[ADR-0016](./adr/0016-persistent-v2-step-messages.md).)
 
 See [`a2a-threads.md`](./a2a-threads.md) for the full projection design.
 
