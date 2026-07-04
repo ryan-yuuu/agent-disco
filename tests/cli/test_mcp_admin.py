@@ -52,6 +52,9 @@ class FakePrompter:
         self.confirm_messages.append(message)
         return self._confirm.pop(0)
 
+    def pause(self, message: str) -> None:
+        return None
+
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
         raise AssertionError(f"unexpected checkbox(): {message!r}")
 
