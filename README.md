@@ -15,23 +15,22 @@
 | src/calfcord/agents/memory.py                 |       53 |        0 |       10 |        0 |    100% |           |
 | src/calfcord/agents/runner.py                 |       93 |       20 |       18 |        1 |     81% |226-256, 260-269, 273 |
 | src/calfcord/agents/thinking.py               |       41 |        4 |       22 |        2 |     90% |103-107, 116-120 |
-| src/calfcord/bridge/a2a\_dispatch.py          |       57 |        0 |        6 |        0 |    100% |           |
-| src/calfcord/bridge/a2a\_project.py           |       68 |        1 |       16 |        1 |     98% |       147 |
+| src/calfcord/bridge/a2a\_dispatch.py          |       49 |        0 |        4 |        0 |    100% |           |
+| src/calfcord/bridge/a2a\_project.py           |       65 |        1 |       14 |        1 |     97% |       140 |
 | src/calfcord/bridge/egress.py                 |       79 |        3 |       18 |        0 |     97% |   185-191 |
-| src/calfcord/bridge/gateway.py                |      226 |       51 |       42 |        2 |     74% |90-91, 96-97, 240-241, 245-246, 326-328, 382, 401, 415-517, 521 |
-| src/calfcord/bridge/history.py                |      244 |        7 |       74 |        5 |     96% |384-\>386, 396-\>398, 418-\>420, 662-669, 722, 839-\>841, 935-946 |
+| src/calfcord/bridge/gateway.py                |      224 |       51 |       42 |        2 |     74% |89-90, 95-96, 239-240, 244-245, 320-322, 376, 395, 409-511, 515 |
+| src/calfcord/bridge/history.py                |      250 |        7 |       76 |        5 |     96% |384-\>386, 396-\>398, 418-\>420, 662-669, 745, 862-\>864, 958-969 |
 | src/calfcord/bridge/mention\_handler.py       |      131 |        0 |       24 |        0 |    100% |           |
 | src/calfcord/bridge/normalizer.py             |       43 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/bridge/overrides.py              |       23 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/persona\_resolve.py       |        5 |        0 |        0 |        0 |    100% |           |
-| src/calfcord/bridge/progress.py               |       82 |        2 |       20 |        2 |     96% |  223, 267 |
-| src/calfcord/bridge/reply\_poster.py          |      104 |        7 |       16 |        1 |     93% |65-67, 187-188, 312-313 |
+| src/calfcord/bridge/progress.py               |       39 |        0 |        4 |        0 |    100% |           |
+| src/calfcord/bridge/reply\_poster.py          |      101 |        7 |       16 |        1 |     93% |65-70, 188-189, 309-310 |
 | src/calfcord/bridge/roster.py                 |       29 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/slash.py                  |       98 |        6 |       16 |        0 |     95% |74, 97, 185-186, 224-225 |
 | src/calfcord/bridge/step\_events.py           |       48 |        3 |       12 |        1 |     93% | 64-65, 67 |
-| src/calfcord/bridge/steps\_render.py          |      160 |        9 |       70 |        8 |     93% |198-199, 218-221, 241, 318-\>313, 329-\>326, 331-\>326, 333-\>324, 365, 416, 451-452 |
-| src/calfcord/bridge/steps\_toggle.py          |       62 |        0 |        8 |        0 |    100% |           |
-| src/calfcord/bridge/transcripts.py            |      132 |        3 |       16 |        0 |     98% |   176-180 |
+| src/calfcord/bridge/steps\_render.py          |      117 |        4 |       62 |        4 |     96% |97-98, 115-118, 207-\>202, 220-\>215, 222-\>213, 274-\>281 |
+| src/calfcord/bridge/transcripts.py            |      132 |        3 |       16 |        0 |     98% |   175-179 |
 | src/calfcord/bridge/wire.py                   |       40 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/broker/runner.py                 |       30 |        1 |        6 |        1 |     94% |        80 |
 | src/calfcord/cli/\_agents.py                  |       85 |        5 |       14 |        1 |     94% |123-124, 163-165, 249-\>251 |
@@ -58,7 +57,7 @@
 | src/calfcord/cli/tool\_aliases.py             |       60 |        0 |        8 |        0 |    100% |           |
 | src/calfcord/discord/avatar.py                |        3 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/discord/messages.py              |       18 |        0 |        0 |        0 |    100% |           |
-| src/calfcord/discord/persona.py               |      155 |       76 |       40 |        0 |     44% |261-263, 266-267, 275, 279-285, 289-294, 347-393, 416-420, 440-444, 469-500, 505-512 |
+| src/calfcord/discord/persona.py               |      147 |       58 |       32 |        1 |     55% |260-262, 265-266, 274, 278-284, 288-293, 332-373, 463-490, 495-502 |
 | src/calfcord/discord/receiver.py              |       47 |       27 |        4 |        0 |     39% |43-45, 55-57, 64-65, 68-87, 95-97, 101-103, 110-111, 114-115, 118 |
 | src/calfcord/discord/retry\_feedback.py       |       60 |        0 |       28 |        3 |     97% |253-\>278, 256-\>258, 274-\>276 |
 | src/calfcord/discord/sender.py                |       45 |       28 |       10 |        0 |     31% |36-37, 40-41, 49, 53-60, 64-68, 81-85, 112-131 |
@@ -92,7 +91,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7802** |  **528** | **2088** |  **102** | **93%** |           |
+| **TOTAL**                                     | **7636** |  **503** | **2046** |   **97** | **93%** |           |
 
 
 ## Setup coverage badge
