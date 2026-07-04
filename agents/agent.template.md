@@ -67,15 +67,18 @@ provider: anthropic
 model: claude-sonnet-4-5
 
 # ----------------------------------------------------------------------------
-# Tools (optional). Each entry is a builtin name resolved at boot against
-# TOOL_REGISTRY (an unknown builtin fails fast, listing the valid alternatives),
-# OR an `mcp/...` selector for tools hosted by an MCP server in mcp.json:
-#   - mcp/<server>         every tool that server advertises
-#   - mcp/<server>/<tool>  exactly that one tool
-# MCP selectors are validated for syntax here; the agent resolves them per turn
+# Tools (optional). `tools:` is builtin-only. Each entry is a builtin tool name
+# that resolves against the live tools host at runtime.
+#
+# MCP tools use the separate `mcp:` field:
+#   - mcp: [github]          every tool that server advertises
+#   - mcp: [github/search]   exactly that one tool
+#
+# MCP grants are validated for syntax here; the agent resolves them per turn
 # against the live capability advertisement, so a server's tool list can change
-# with no agent restart (but editing these lines DOES need a restart, like a
-# builtin). See docs/mcp-tools.md.
+# with no agent restart. Editing `tools:` or `mcp:` still needs an agent restart
+# because the selector set is baked into the agent node at boot. See
+# docs/mcp-tools.md.
 # ----------------------------------------------------------------------------
 
 # Available builtins (vendored from calfkit-tools):
@@ -96,14 +99,16 @@ model: claude-sonnet-4-5
 # working directory, and task list are invisible to another.
 #
 # Semantics of the `tools:` line:
-#   - omitted entirely  → agent gets EVERY registered builtin (but NO MCP tools;
+#   - omitted entirely  → agent discovers EVERY live builtin (but NO MCP tools;
 #                         MCP grants are always explicit). Convenient, but means a
 #                         new agent ships with terminal/write_file/execute_code
 #                         access to the shared workspace — narrow the list if the
 #                         agent takes input from untrusted users.
 #   - tools: []         → agent gets NO tools (text-only).
-#   - tools: [a, b]     → exactly those builtins (and/or mcp/... selectors), e.g.
-#                         tools: [read_file, mcp/github, mcp/docs/search]
+#   - tools: [a, b]     → exactly those builtins, e.g.
+#                         tools: [read_file, web_search]
+#   - mcp: [github]     → every tool the github MCP server advertises.
+#   - mcp: [docs/search] → exactly one MCP tool.
 #
 # Filesystem/shell tools start in one shared workspace on the calfkit-tools
 # host (CALFCORD_WORKSPACE_DIR, default state/workspace/). Each agent gets its

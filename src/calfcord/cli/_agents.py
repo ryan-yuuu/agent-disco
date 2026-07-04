@@ -31,6 +31,7 @@ import os
 import re
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,18 @@ _DANGEROUS_TOOLS = frozenset(
 # that here so a friendly typed name ("My Helper") becomes a valid stem
 # ("my_helper") rather than failing validation at write time.
 _STEM_INVALID = re.compile(r"[^a-z0-9_-]+")
+
+
+@dataclass(frozen=True)
+class ToolGrantSelection:
+    """Structured result from the tools checkbox.
+
+    ``tools=None`` means omit ``tools:`` and discover all live builtins.
+    ``mcp`` entries are canonical ``server`` / ``server/tool`` values.
+    """
+
+    tools: list[str] | None
+    mcp: list[str]
 
 
 def detect_agents(agents_dir: Path) -> list[str]:
@@ -192,7 +205,8 @@ def write_agent(
     description: str,
     provider: str,
     model: str,
-    tools: list[str],
+    tools: list[str] | None,
+    mcp: list[str] | tuple[str, ...] = (),
     prune_seed: bool = False,
 ) -> Path:
     """Create or update ``agents_dir/<name>.md`` for the wizard's agent.
@@ -201,9 +215,9 @@ def write_agent(
 
     * **Target exists** — update the agent in place, preserving its body:
       rewrite ``description``/``provider``/``model`` via
-      :func:`md_writer._update_fields`, then the tool list via
-      :func:`md_writer.update_tools`. Both are validated-atomic, so a bad value
-      leaves the file untouched.
+      :func:`md_writer._update_fields`, then the split tool grants via
+      :func:`md_writer.update_tool_grants`. Both are validated-atomic, so a bad
+      value leaves the file untouched.
     * **Target missing** — build the frontmatter as a mapping and serialize it
       with :func:`frontmatter.dumps` (NOT string interpolation), which
       YAML-quotes free-text values so a description like ``"Calendar: book
@@ -229,7 +243,7 @@ def write_agent(
 
     if target.exists():
         md_writer._update_fields(target, {"description": description, "provider": provider, "model": model})
-        md_writer.update_tools(target, tools)
+        md_writer.update_tool_grants(target, tools=tools, mcp=mcp)
         return target
 
     body = agent_body(name)
@@ -238,8 +252,11 @@ def write_agent(
         "description": description,
         "provider": provider,
         "model": model,
-        "tools": list(tools),
     }
+    if tools is not None:
+        metadata["tools"] = list(tools)
+    if mcp:
+        metadata["mcp"] = list(mcp)
     # Validate the full definition in memory FIRST (mirrors
     # md_writer._update_fields): a bad free-text value raises here, before any
     # bytes touch disk, so the create path can never leave an unloadable file.
@@ -268,8 +285,8 @@ def pick_tools(
     *,
     mcp_servers_fn: Callable[[], list[str]] | None = None,
     live_tools_fn: Callable[[], dict[str, list[str]]] | None = None,
-) -> list[str]:
-    """Prompt for the agent's tools and return the selected tokens.
+) -> ToolGrantSelection:
+    """Prompt for the agent's tools and return split builtin/MCP grants.
 
     Every builtin (sorted :data:`calfcord.tools.TOOL_REGISTRY`) is offered
     pre-checked so the default is the same "all builtins" set a frontmatter that
@@ -307,4 +324,16 @@ def pick_tools(
             "— keep the bot off public Discord (docs/security.md §3.4)."
         )
 
-    return selected
+    return _split_tool_selection(selected, set(TOOL_REGISTRY))
+
+
+def _split_tool_selection(selected: list[str], builtin_names: set[str]) -> ToolGrantSelection:
+    """Convert checkbox UI values into canonical frontmatter fields."""
+    builtin_tokens = [token for token in selected if not token.startswith("mcp/")]
+    selected_known_builtins = {token for token in builtin_tokens if token in builtin_names}
+    has_unknown_builtin = any(token not in builtin_names for token in builtin_tokens)
+
+    tools = None if not has_unknown_builtin and selected_known_builtins == builtin_names else builtin_tokens
+
+    mcp = [token.removeprefix("mcp/") for token in selected if token.startswith("mcp/")]
+    return ToolGrantSelection(tools=tools, mcp=mcp)

@@ -322,20 +322,11 @@ resources or lifecycle hooks — only `todo` today — can't be cloned under a
 second wire identity and `deploy_filters` raises rather than build a broken
 clone.)
 
-### Configure the agent host
+### Configure the agent grant
 
-For an agent to call `patch_eu`, that name must exist in the
-agent host's `TOOL_REGISTRY`. Set the same alias on the agent host —
-`disco tools alias add patch patch_eu` (or the raw env directly):
-
-```env
-# .env on the agent host
-CALFCORD_TOOLS_ALIAS=patch=patch_eu
-```
-
-The agent host doesn't have an include filter, so both names land in
-its registry. An agent can now declare either or both in its
-frontmatter:
+Agents bind builtin tools against the broker's live capability view at
+runtime, so `patch_eu` only needs to be advertised by a tools host. Once
+that host is running, an agent can declare the alias in frontmatter:
 
 ```yaml
 ---
@@ -390,9 +381,9 @@ same broker.
 
 MCP servers split cleanly because of their **secrets boundary**: only the
 `mcp-<server>` processes read `mcp.json` and hold the credentials. Agents
-resolve their `mcp/...` selectors from the broker's `calf.capabilities` view, so
-an agent host needs **no `mcp.json` and no MCP secrets** — just the selector
-string in the agent's `.md`. A common shape is one host that owns all the MCP
+resolve their `mcp:` grants from the broker's `calf.capabilities` view, so
+an agent host needs **no `mcp.json` and no MCP secrets** — just the grant in
+the agent's `.md`. A common shape is one host that owns all the MCP
 servers (and their tokens) and agents anywhere else.
 
 **MCP host** — where `mcp.json` and its secrets live:
@@ -411,7 +402,7 @@ the github server's tools onto `calf.capabilities`, reachable org-wide.
 **Agent host** — no `mcp.json`, no `GITHUB_TOKEN`:
 
 ```bash
-# scribe.md already declares  tools: [..., mcp/github]
+# scribe.md already declares  mcp: [github]
 disco agent restart scribe                   # picks the tools up from the advertisement
 ```
 
@@ -586,10 +577,10 @@ a tool to one host, see § 10.
 
 **Empty registry.** A tools host whose `CALFCORD_TOOLS_INCLUDE`
 filters down to nothing fails fast in `runner.py` with `TOOL_REGISTRY
-is empty; nothing to host`. Separately, the agent boot hard-fails with
-a "known tools: …" error if its `tools:` list references a name not in
-its agent-side registry — that's an agent-side check, not a tool-side
-one.
+is empty; nothing to host`. Agent hosts no longer import their own builtin
+registry at boot; a hand-edited `tools:` name that no live tools host advertises
+degrades at runtime instead of failing agent construction. CLI write paths still
+validate names against the local registry before writing.
 
 ## 9. What changes when you split
 

@@ -1,12 +1,10 @@
 """The calfcord tool surface.
 
-Tools an agent declares in its ``.md`` frontmatter under ``tools:`` are
-resolved against :data:`TOOL_REGISTRY` at factory build time. The runnable
-tool node — the process that actually executes the tool's Python body —
-lives in a separate ``calfkit-tools`` deployment; the agent process only
-needs each tool's :class:`~calfkit.nodes.tool.ToolNodeDef` for its schema
-(LLM tool advertising) and its subscribe topic (where ``Agent`` publishes a
-``Call`` when the LLM invokes the tool).
+The runnable tool node — the process that actually executes the tool's Python
+body — lives in a separate ``calfkit-tools`` deployment. That process serves
+:data:`TOOL_REGISTRY`; agents carry runtime selectors and resolve live builtin
+tools from the capability view rather than importing this registry at build
+time.
 
 Composition over discovery
 --------------------------

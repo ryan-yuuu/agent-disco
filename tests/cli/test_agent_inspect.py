@@ -25,6 +25,7 @@ def _seed_agent(
     provider: str | None = "anthropic",
     model: str | None = "claude-sonnet-4-5",
     tools_line: str | None = "[read_file, shell]",
+    mcp_line: str | None = None,
     extra: list[str] | None = None,
 ) -> Path:
     """Write a minimal valid ``agents/<name>.md`` and return its path."""
@@ -40,6 +41,8 @@ def _seed_agent(
         lines.append(f"model: {model}")
     if tools_line is not None:
         lines.append(f"tools: {tools_line}")
+    if mcp_line is not None:
+        lines.append(f"mcp: {mcp_line}")
     lines += extra or []
     lines += ["---", "", f"You are {name}, a helpful agent.", ""]
     md_path = agents_dir / f"{name}.md"
@@ -90,9 +93,11 @@ def test_list_human_tools_summary(tmp_path: Path) -> None:
     """
     from calfcord.cli.agent_inspect import _tools_summary
 
-    assert _tools_summary(None) == "all"
-    assert _tools_summary(()) == "0"
-    assert _tools_summary(("read_file", "shell")) == "2"
+    assert _tools_summary(None, ()) == "all"
+    assert _tools_summary((), ()) == "0"
+    assert _tools_summary(("read_file", "shell"), ()) == "2"
+    assert _tools_summary(None, ("github",)) == "all+1mcp"
+    assert _tools_summary(("read_file", "shell"), ("github", "docs/search")) == "2+2mcp"
 
 
 def test_list_json_is_valid_and_contains_both(tmp_path: Path, capsys) -> None:
@@ -108,7 +113,16 @@ def test_list_json_is_valid_and_contains_both(tmp_path: Path, capsys) -> None:
     by_name = {row["name"]: row for row in data}
     assert by_name["penny"]["tools"] == []
     assert by_name["scribe"]["tools"] == ["read_file", "shell"]
+    assert by_name["scribe"]["mcp"] == []
     assert by_name["scribe"]["provider"] == "anthropic"
+
+
+def test_list_json_includes_mcp(tmp_path: Path, capsys) -> None:
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe", mcp_line="[github, docs/search]")
+    assert agent_inspect.run_list(agents_dir, as_json=True) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data[0]["mcp"] == ["github", "docs/search"]
 
 
 def test_list_empty_dir_human_friendly_line(tmp_path: Path, capsys) -> None:
@@ -149,6 +163,7 @@ def test_show_human_prints_fields(tmp_path: Path, capsys) -> None:
         agents_dir,
         "scribe",
         description="Takes notes.",
+        mcp_line="[github]",
         extra=["thinking_effort: high"],
     )
     rc = agent_inspect.run_show(agents_dir, "scribe")
@@ -159,6 +174,7 @@ def test_show_human_prints_fields(tmp_path: Path, capsys) -> None:
     # Labels from the FIELDS registry appear, with their rendered values.
     assert "Description" in out and "Takes notes." in out
     assert "Provider / model" in out and "anthropic" in out
+    assert "Tools" in out and "mcp: github" in out
     assert "Thinking effort" in out and "high" in out
     # The file path and a system-prompt preview are shown.
     assert str(agents_dir / "scribe.md") in out
@@ -172,6 +188,7 @@ def test_show_json_round_trips(tmp_path: Path, capsys) -> None:
         "scribe",
         description="Takes notes.",
         tools_line="[read_file, shell]",
+        mcp_line="[github]",
         extra=["thinking_effort: high"],
     )
     rc = agent_inspect.run_show(agents_dir, "scribe", as_json=True)
@@ -183,6 +200,7 @@ def test_show_json_round_trips(tmp_path: Path, capsys) -> None:
     assert obj["provider"] == "anthropic"
     assert obj["model"] == "claude-sonnet-4-5"
     assert obj["tools"] == ["read_file", "shell"]
+    assert obj["mcp"] == ["github"]
     assert obj["thinking_effort"] == "high"
     assert obj["memory"] is False
     # The full body is present (not a truncated preview).

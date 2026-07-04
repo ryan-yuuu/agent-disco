@@ -20,7 +20,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from calfkit import Handoff, Messaging
+from calfkit.mcp import MCPToolbox
 from calfkit.nodes import Agent
+from calfkit.nodes.tool import Tools
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 from calfcord.agents.definition import AgentDefinition, Provider
@@ -35,6 +37,7 @@ def _definition(
     provider: Provider | None = None,
     model: str | None = None,
     tools: tuple[str, ...] = (),
+    mcp: tuple[str, ...] = (),
     thinking_effort: str | None = None,
     a2a: bool | tuple[str, ...] = True,
     handoff: bool | tuple[str, ...] = True,
@@ -45,6 +48,7 @@ def _definition(
         provider=provider,
         model=model,
         tools=tools,
+        mcp=mcp,
         thinking_effort=thinking_effort,  # type: ignore[arg-type]
         a2a=a2a,
         handoff=handoff,
@@ -56,12 +60,14 @@ def _memory_definition(
     *,
     agent_id: str = "scribe",
     tools: tuple[str, ...] | None = (),
+    mcp: tuple[str, ...] = (),
 ) -> AgentDefinition:
     """A ``memory: true`` definition (built against the real TOOL_REGISTRY)."""
     return AgentDefinition(
         agent_id=agent_id,
         description="A test agent.",
         tools=tools,
+        mcp=mcp,
         memory=True,
         system_prompt="You are a test agent.",
     )
@@ -338,151 +344,102 @@ class TestResolveProviderModuleFunction:
             resolve_provider(_definition(provider=None))
 
 
-def _fake_tool_node(name: str) -> Any:
-    """Build a real ``ToolNodeDef`` whose schema name is ``name``.
-
-    calfkit's ``Agent(tools=...)`` flattener (``_flatten_tools``) rejects
-    anything that is not a ``ToolNodeDef`` / ``BaseToolNodeSchema``, so a bare
-    ``MagicMock`` no longer works as a stand-in.
-    ``agent_tool`` derives the schema name from the wrapped function's
-    ``__name__``; we rewrite ``__name__`` to ``name`` so the registered key,
-    the schema name, and the wiring assertions all line up.
-    """
-    from calfkit.nodes import agent_tool
-
-    async def _impl(ctx: Any, payload: str) -> str:
-        """Trivial tool body for wiring tests (never executed here)."""
-        return payload
-
-    _impl.__name__ = name
-    return agent_tool(_impl)
-
-
 class TestToolsWiring:
-    """``definition.tools`` names are resolved against the registry and passed
-    to the calfkit ``Agent``. Unknown names raise at build time."""
+    """``definition.tools`` maps to calfkit runtime *selectors*, resolved per
+    turn against the capability view — never against a local registry at build
+    time. Omitted ``tools:`` → ``Tools(discover=True)`` (every live tool node);
+    an explicit builtin list → one ``Tools(names=[...])``; and the separate
+    ``mcp:`` field → one ``MCPToolbox`` per server. Because these are deferred
+    selectors, the agent carries no eager bindings (``Agent.tools == []``); the
+    surface rides on ``Agent._tool_selectors``, which is also what makes the
+    Worker auto-register the capability view."""
 
-    def test_empty_tools_passes_none_to_agent(self) -> None:
-        """Empty tuple → ``Agent(tools=None)`` (calfkit's no-tools sentinel).
-        ``tools=()`` is the explicit "I want no tools" frontmatter case."""
-        worker = _factory(tool_registry={}).build(_definition(tools=()))
-        assert worker._nodes[0].tools == []
+    def test_omitted_tools_yields_discover_selector(self) -> None:
+        """``tools:`` omitted (None) → a single ``Tools(discover=True)`` so the
+        agent binds every live tool node at runtime, not a build-time snapshot."""
+        agent = _factory().build_node(_definition(tools=None))
+        assert agent.tools == []
+        assert agent._tool_selectors == [Tools(discover=True)]
 
-    def test_tools_none_expands_to_every_registered_tool(self) -> None:
-        """``definition.tools is None`` means "frontmatter omitted ``tools:``
-        line" — the factory expands it to every entry in the tool registry."""
-        fake_a = _fake_tool_node("alpha")
-        fake_b = _fake_tool_node("beta")
-        worker = _factory(tool_registry={"alpha": fake_a, "beta": fake_b}).build(_definition(tools=None))
-        # ``_resolve_tools`` returns ``registry.values()`` for ``tools=None``,
-        # so the agent's bindings are exactly the registry nodes' bindings, in
-        # insertion order (calfkit ≥ 0.9 expands ToolNodeDefs to ToolBindings
-        # at Agent construction).
-        assert worker._nodes[0].tools == [*fake_a.tool_bindings(), *fake_b.tool_bindings()]
+    def test_empty_tools_yields_no_selectors(self) -> None:
+        """``tools: []`` is the deliberate no-tools opt-out: no selectors, and
+        specifically NOT a discover handle (the empty case must not fall through
+        to "discover everything")."""
+        agent = _factory().build_node(_definition(tools=()))
+        assert agent.tools == []
+        assert agent._tool_selectors == []
 
-    def test_known_tool_name_is_wired_through_registry(self) -> None:
-        """A name listed in ``tools:`` resolves to the registry's ToolNodeDef,
-        whose bindings land in ``Agent.tools``."""
-        fake_calendar = _fake_tool_node("calendar")
-        worker = _factory(tool_registry={"calendar": fake_calendar}).build(_definition(tools=("calendar",)))
-        assert worker._nodes[0].tools == list(fake_calendar.tool_bindings())
+    def test_named_builtins_become_one_tools_names_selector(self) -> None:
+        """An explicit builtin list → one ``Tools(names=[...])`` in declared
+        order. No local-registry lookup, so no name is rejected here (unknown
+        names degrade at runtime per the capability view)."""
+        agent = _factory().build_node(_definition(tools=("terminal", "read_file")))
+        assert agent.tools == []
+        assert agent._tool_selectors == [Tools(names=["terminal", "read_file"])]
 
-    def test_unknown_tool_name_raises_with_known_list(self) -> None:
-        """Typo in ``.md`` fails at build, listing every unknown plus
-        what the registry actually contains so the operator can fix it."""
-        factory = _factory(tool_registry={"calendar": _fake_tool_node("calendar")})
-        with pytest.raises(ValueError, match="unknown tool"):
-            factory.build(_definition(agent_id="scheduler", tools=("calndar",)))
+    def test_named_builtins_dedupe_without_tripping_duplicate_rail(self) -> None:
+        """A duplicate builtin name collapses (calfkit's Tools order-preserving-
+        dedupes) rather than tripping the ``_add_tools`` duplicate-name rail."""
+        agent = _factory().build_node(_definition(tools=("terminal", "read_file", "terminal")))
+        assert agent._tool_selectors == [Tools(names=["terminal", "read_file"])]
 
-    def test_unknown_tool_error_aggregates_multiple_names(self) -> None:
-        """Several typos surface in one message — operator fixes the .md once."""
-        factory = _factory(tool_registry={"calendar": _fake_tool_node("calendar")})
-        with pytest.raises(ValueError) as excinfo:
-            factory.build(_definition(agent_id="scheduler", tools=("calndar", "emial")))
-        assert "calndar" in str(excinfo.value)
-        assert "emial" in str(excinfo.value)
+    def test_restricted_builtins_and_mcp_yield_both_selectors_builtins_first(self) -> None:
+        """A builtin list plus ``mcp:`` grants yields a leading
+        ``Tools(names=[...])`` for the builtins plus one ``MCPToolbox`` per
+        server."""
+        agent = _factory().build_node(_definition(tools=("terminal",), mcp=("gmail",)))
+        assert agent._tool_selectors == [Tools(names=["terminal"]), MCPToolbox("gmail")]
 
-    def test_mcp_selectors_become_deferred_selectors(self) -> None:
-        """``mcp/...`` entries are partitioned out of the builtin resolution
-        and land on the agent as per-server deferred selectors (calfkit's
-        ``_tool_selectors``) — one per server, with explicit tool picks
-        merged into a sorted ``include`` tuple. The deferred side is what
-        makes the Worker auto-register the capability view."""
-        from calfkit.mcp import MCPToolbox
+    def test_mcp_only_agent_has_no_tools_selector(self) -> None:
+        """``tools: []`` plus ``mcp:`` yields just the MCPToolbox(es) — no ``Tools``
+        selector is created (an empty ``Tools(names=[])`` would raise)."""
+        agent = _factory().build_node(_definition(tools=(), mcp=("gmail/search",)))
+        assert agent.tools == []
+        assert agent._tool_selectors == [MCPToolbox("gmail", include=("search",))]
 
-        fake_shell = _fake_tool_node("shell")
-        factory = _factory(tool_registry={"shell": fake_shell})
-        worker = factory.build(_definition(tools=("shell", "mcp/gmail/send", "mcp/gmail/search", "mcp/docs")))
-        agent = worker._nodes[0]
-        assert agent.tools == list(fake_shell.tool_bindings())
+    def test_mcp_selectors_collapse_per_server_sorted(self) -> None:
+        """Multiple ``mcp:`` entries collapse to one MCPToolbox per server;
+        explicit tool picks merge into a sorted ``include``; servers come back
+        sorted so the surface is deterministic regardless of declaration order."""
+        agent = _factory().build_node(
+            _definition(tools=(), mcp=("gmail/send", "gmail/search", "docs")),
+        )
         assert agent._tool_selectors == [
             MCPToolbox("docs"),
             MCPToolbox("gmail", include=("search", "send")),
         ]
 
-    def test_build_log_lists_mcp_grants_by_server(self, caplog: pytest.LogCaptureFixture) -> None:
-        """The build log enumerates MCP grants as ``mcp:<server>`` — the
-        operator-facing record of which servers an agent may reach. The
-        label rides on the public ``MCPToolbox.name`` field, so a silent
-        upstream rename must fail here, not in production logs."""
-        factory = _factory(tool_registry={"shell": _fake_tool_node("shell")})
+    def test_omitted_tools_with_mcp_discovers_builtins_plus_named_mcp(self) -> None:
+        """The split fields represent "all live builtins plus named MCP" without
+        pinning the builtin set in frontmatter."""
+        agent = _factory().build_node(_definition(tools=None, mcp=("github",)))
+        assert agent._tool_selectors == [Tools(discover=True), MCPToolbox("github")]
+
+    def test_omitted_tools_never_adds_mcp(self) -> None:
+        """Discover binds only ``node_kind == 'tool'`` (builtins); MCP is always
+        an explicit grant, so the omitted default never yields an MCPToolbox."""
+        agent = _factory().build_node(_definition(tools=None))
+        assert all(not isinstance(s, MCPToolbox) for s in agent._tool_selectors)
+
+    def test_build_log_describes_selector_surface(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The build log records the selector surface for operators: named
+        builtins inline and ``mcp:<server>`` per toolbox. The MCP label rides on
+        the public ``MCPToolbox.name`` field, so a silent upstream rename must
+        fail here, not in production logs."""
         with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
-            factory.build(_definition(tools=("shell", "mcp/gmail/send", "mcp/docs")))
+            _factory().build_node(_definition(tools=("terminal",), mcp=("gmail/send", "docs")))
         message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
         assert "mcp:docs" in message
         assert "mcp:gmail" in message
+        assert "terminal" in message
 
-    def test_mcp_only_agent_builds_with_no_builtin_bindings(self) -> None:
-        """An agent may declare only MCP tools; it builds with zero static
-        bindings and resolves everything per turn from the capability view."""
-        worker = _factory(tool_registry={}).build(_definition(tools=("mcp/gmail",)))
-        agent = worker._nodes[0]
-        assert agent.tools == []
-        assert len(agent._tool_selectors) == 1
-
-    def test_tools_none_grants_builtins_only_never_mcp(self) -> None:
-        """The "tools omitted -> all tools" default expands to every BUILTIN;
-        MCP tools are always explicit, so no selectors appear."""
-        fake_a = _fake_tool_node("alpha")
-        worker = _factory(tool_registry={"alpha": fake_a}).build(_definition(tools=None))
-        assert worker._nodes[0]._tool_selectors == []
-
-    def test_unknown_builtin_error_not_confused_by_mcp_entries(self) -> None:
-        """A bogus bare name still raises the aggregate unknown-tool error;
-        the co-declared ``mcp/...`` entry is NOT reported as unknown (it is
-        not a builtin lookup)."""
-        factory = _factory(tool_registry={})
-        with pytest.raises(ValueError, match=r"\['definitely_not_real'\]"):
-            factory.build(_definition(tools=("definitely_not_real", "mcp/gmail")))
-
-    @pytest.mark.parametrize(
-        "tool_name",
-        [
-            "terminal",
-            "process",
-            "read_file",
-            "write_file",
-            "patch",
-            "search_files",
-            "todo",
-            "execute_code",
-            "web_search",
-            "web_extract",
-            "web_fetch",
-        ],
-    )
-    def test_builtin_tool_resolves_through_default_registry(self, tool_name: str) -> None:
-        """Each builtin tool name listed in an agent's ``.md`` resolves
-        against the in-tree :data:`TOOL_REGISTRY` (no per-test override).
-        This is the smoke test that catches builtin-registration drift —
-        if a new tool is added to the registry but a wrapper isn't, or
-        vice versa, this test will fail.
-        """
-        # tool_registry=None → use the real TOOL_REGISTRY.
-        worker = _factory().build(_definition(tools=(tool_name,)))
-        resolved = worker._nodes[0].tools
-        assert resolved is not None and len(resolved) == 1
-        assert resolved[0].name == tool_name
+    def test_build_log_marks_discover(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An omitted-tools agent logs the discover handle explicitly so an
+        operator can see at a glance that the agent binds the live tool plane."""
+        with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
+            _factory().build_node(_definition(tools=None))
+        message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
+        assert "discover:*" in message
 
 
 class TestPublishTopicValidation:
@@ -530,7 +487,7 @@ class TestMemoryFlag:
         at runtime, so the factory cannot prove read_file/write_file exist.
         memory: true therefore requires the BUILTIN fs tools explicitly."""
         with pytest.raises(ValueError, match="memory needs read_file and"):
-            _factory().build(_memory_definition(tools=("mcp/files",)))
+            _factory().build(_memory_definition(tools=(), mcp=("files",)))
 
     def test_memory_agent_with_explicit_fs_tools_builds(self) -> None:
         worker = _factory().build(_memory_definition(tools=("read_file", "write_file")))

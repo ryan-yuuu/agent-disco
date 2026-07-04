@@ -59,7 +59,13 @@ def test_fake_prompter_satisfies_protocol() -> None:
     assert isinstance(FakePrompter(), Prompter)
 
 
-def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None = "[read_file, terminal]") -> Path:
+def _seed_agent(
+    agents_dir: Path,
+    name: str,
+    *,
+    tools_line: str | None = "[read_file, terminal]",
+    mcp_line: str | None = None,
+) -> Path:
     """Write a minimal valid ``agents/<name>.md`` and return its path."""
     agents_dir.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -70,6 +76,8 @@ def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None = "[read_
     ]
     if tools_line is not None:
         lines.append(f"tools: {tools_line}")
+    if mcp_line is not None:
+        lines.append(f"mcp: {mcp_line}")
     lines += ["---", "", f"You are {name}.", ""]
     md_path = agents_dir / f"{name}.md"
     md_path.write_text("\n".join(lines), encoding="utf-8")
@@ -148,6 +156,26 @@ def test_set_tools_writes_exactly_those(tmp_path: Path) -> None:
     md_path = _seed_agent(agents_dir, "scribe", tools_line=None)
     assert agent_lifecycle.run_set(agents_dir, "scribe", {"tools": "read_file, terminal"}) == 0
     assert parse_agent_md(md_path).tools == ("read_file", "terminal")
+
+
+def test_set_tools_preserves_existing_mcp(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    md_path = _seed_agent(agents_dir, "scribe", tools_line=None, mcp_line="[github]")
+    assert agent_lifecycle.run_set(agents_dir, "scribe", {"tools": "read_file"}) == 0
+    reparsed = parse_agent_md(md_path)
+    assert reparsed.tools == ("read_file",)
+    assert reparsed.mcp == ("github",)
+
+
+def test_set_tools_rejects_legacy_mcp_selector(tmp_path: Path, capsys) -> None:
+    agents_dir = tmp_path / "agents"
+    md_path = _seed_agent(agents_dir, "scribe", tools_line="[read_file]")
+    original = md_path.read_text(encoding="utf-8")
+
+    assert agent_lifecycle.run_set(agents_dir, "scribe", {"tools": "read_file,mcp/github"}) == 1
+    out = capsys.readouterr().out
+    assert "move MCP grants to mcp" in out
+    assert md_path.read_text(encoding="utf-8") == original
 
 
 def test_set_provider_and_model_keys(tmp_path: Path) -> None:

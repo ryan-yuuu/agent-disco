@@ -8,9 +8,10 @@ frontmatter schema for operators and is never a live agent; it is excluded
 by name so it does not have to satisfy ``parse_agent_md``'s
 ``stem == name`` check (it would otherwise abort the whole load).
 
-The loader also resolves the ``tools: omitted → all`` default at parse
-time so downstream consumers (the agent factory) see a concrete tuple of
-tool names rather than the ``None`` sentinel. See
+An omitted ``tools:`` line stays the ``None`` sentinel end to end: the agent
+factory maps ``None`` to calfkit's ``Tools(discover=True)`` selector, so the
+agent binds every live tool node at runtime rather than a build-time snapshot.
+The loader therefore does no tool normalization. See
 :attr:`AgentDefinition.tools` for the explicit / implicit semantics.
 
 The filesystem itself prevents duplicate ``agent_id`` (one ``.md`` file per
@@ -27,32 +28,18 @@ from calfcord.agents.definition import AgentDefinition, parse_agent_md
 logger = logging.getLogger(__name__)
 
 
-def _resolve_default_tools(definition: AgentDefinition) -> AgentDefinition:
-    """Expand ``tools=None`` (frontmatter omitted) to every registered tool.
-
-    The TOOL_REGISTRY import is lazy so this module stays importable
-    without dragging in the tools subpackage at agent-definition parse
-    time (which loader.py used to be free of).
-    """
-    if definition.tools is not None:
-        return definition  # explicit list (including explicit empty)
-    from calfcord.tools import TOOL_REGISTRY
-
-    return definition.model_copy(update={"tools": tuple(sorted(TOOL_REGISTRY))})
-
-
 def _load_one(path: Path) -> AgentDefinition:
-    """Parse one agent .md file and normalize its tools default.
+    """Parse one agent .md file into a live :class:`AgentDefinition`.
 
-    Single source of truth for turning one file into a live
-    ``AgentDefinition``. Both the directory scan (:func:`load_agents_dir`)
-    and explicit file targeting (:func:`load_agent_targets`) route through
-    here, so a given file yields an identical definition regardless of how
-    it was selected — crucially the ``tools: omitted → all`` expansion
-    (:func:`_resolve_default_tools`) is always applied. See
-    :attr:`AgentDefinition.tools` for the sentinel semantics.
+    Single source of truth for turning one file into a definition. Both the
+    directory scan (:func:`load_agents_dir`) and explicit file targeting
+    (:func:`load_agent_targets`) route through here, so a given file yields an
+    identical definition regardless of how it was selected. Tool resolution is
+    deferred to the factory and the runtime capability view, so nothing is
+    normalized here — an omitted ``tools:`` stays ``None`` (see
+    :attr:`AgentDefinition.tools`).
     """
-    return _resolve_default_tools(parse_agent_md(path))
+    return parse_agent_md(path)
 
 
 def load_agents_dir(path: Path) -> list[AgentDefinition]:
@@ -60,8 +47,9 @@ def load_agents_dir(path: Path) -> list[AgentDefinition]:
 
     Returns the definitions sorted by ``agent_id`` for deterministic ordering.
     Dot-prefixed files and ``*.template.md`` reference templates are skipped.
-    Any agent whose frontmatter omits ``tools:`` is normalized to receive
-    every registered builtin tool — see :func:`_resolve_default_tools`.
+    An agent whose frontmatter omits ``tools:`` keeps the ``None`` sentinel;
+    the factory maps it to runtime tool discovery (see
+    :attr:`AgentDefinition.tools`).
 
     Raises:
         FileNotFoundError: if ``path`` does not exist.
@@ -87,7 +75,7 @@ def load_agent_targets(targets: list[Path]) -> list[AgentDefinition]:
     Each target is classified by the filesystem:
 
     * **directory** — scanned via :func:`load_agents_dir` (skips dotfiles
-      and ``*.template.md``, applies tools normalization).
+      and ``*.template.md``).
     * **regular file** — loaded literally via :func:`_load_one`. Explicitly
       naming a file BYPASSES the directory skip filters: pointing at
       ``agents/foo.template.md`` is an unambiguous request to run it, so it

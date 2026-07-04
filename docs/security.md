@@ -311,11 +311,11 @@ process can now reach `$HOME`, `/etc`, and so on), but *more*
 predictable in operational terms — the host user's permissions are
 exactly the boundary.
 
-**`disco init` configures the agent with *all* tools selected by
-default.** Its tools step pre-checks every tool — including `terminal`,
-`execute_code`, `write_file`, `patch`, and the web tools — so a
-freshly-configured agent has the full terminal + code-execution +
-file-write + web reach described above,
+**`disco init` configures the agent to discover *all live builtin tools* by
+default.** Its tools step pre-checks every builtin tool — including `terminal`,
+`execute_code`, `write_file`, `patch`, and the web tools — and writes an
+omitted `tools:` field when they are all kept, so a freshly-configured agent
+has the full terminal + code-execution + file-write + web reach described above,
 running in the directory the workspace (`disco start`) was launched
 from and drivable by anyone who can mention it. The wizard prints a
 caution when those tools are kept. Deselect what the agent doesn't need

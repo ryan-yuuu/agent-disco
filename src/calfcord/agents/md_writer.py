@@ -187,26 +187,59 @@ def update_thinking_effort(md_path: Path, value: ThinkingEffort) -> AgentDefinit
     return _update_fields(md_path, {"thinking_effort": value})
 
 
+def update_tool_grants(
+    md_path: Path,
+    *,
+    tools: Sequence[str] | None,
+    mcp: Sequence[str] = (),
+) -> AgentDefinition:
+    """Rewrite builtin ``tools:`` and MCP ``mcp:`` grants atomically.
+
+    ``tools=None`` removes the ``tools:`` key, expressing runtime discovery of
+    all live builtin tools. ``tools=[]`` writes an explicit empty builtin list.
+    ``mcp=[]`` removes the ``mcp:`` key for canonical output.
+    """
+    from calfcord.tools import TOOL_REGISTRY
+
+    if tools is not None:
+        _validate_builtin_tools(tools, TOOL_REGISTRY)
+    _validate_mcp_grants(mcp)
+
+    try:
+        post = frontmatter.load(md_path)
+    except yaml.YAMLError as e:
+        raise ValueError(f"{md_path}: existing frontmatter is malformed YAML: {e}") from e
+
+    if tools is None:
+        post.metadata.pop("tools", None)
+    else:
+        post.metadata["tools"] = list(tools)
+
+    if mcp:
+        post.metadata["mcp"] = list(mcp)
+    else:
+        post.metadata.pop("mcp", None)
+
+    validated = _validate_and_write(md_path, post)
+    logger.info("rewrote tool grants in %s", md_path)
+    return validated
+
+
 def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
-    """Rewrite the ``tools`` frontmatter list in ``md_path`` to ``tools``.
+    """Rewrite only the builtin ``tools`` frontmatter list in ``md_path``.
 
     Every token is validated *before* the shared write path runs, so an
-    unknown builtin or a malformed ``mcp/`` selector raises a precise
+    unknown builtin or legacy ``mcp/...`` token raises a precise
     :class:`ValueError` (naming the offending token) with the on-disk file
     untouched, rather than surfacing as a generic pydantic error:
 
-    * an ``mcp/...`` token must be a well-formed selector
-      (:func:`~calfcord.mcp.selector.parse_mcp_selector`) — syntax only,
-      mirroring the frontmatter validator; whether the named server is
-      configured/running is a runtime concern the writer deliberately does
-      not check;
+    * an ``mcp/...`` token is rejected because ``tools:`` is builtin-only;
     * a *builtin* token must be a key of
       :data:`calfcord.tools.TOOL_REGISTRY`.
 
-    The writer always persists an *explicit* list (``tools: []`` when
-    ``tools`` is empty), which is what lets the editor convert the implicit
-    "tools omitted → all builtins" default into an unambiguous on-disk state
-    on first save.
+    Existing ``mcp:`` grants are preserved. Use :func:`update_tool_grants` when
+    a caller needs to rewrite both fields or remove ``tools:`` to express
+    builtin discovery.
 
     The ``TOOL_REGISTRY`` import is deferred to here (rather than module
     scope) so :func:`update_thinking_effort`'s path stays light: importing
@@ -216,32 +249,39 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
 
     Raises:
         FileNotFoundError: ``md_path`` does not exist.
-        ValueError: an unknown builtin token, a malformed ``mcp/`` selector,
+        ValueError: an unknown builtin token, a legacy ``mcp/...`` token,
             or a post-mutation :class:`AgentDefinition` validation failure.
             The on-disk file is unchanged.
         OSError: a filesystem error during the atomic write. The on-disk
             file is unchanged.
     """
-    from calfcord.mcp.selector import is_mcp_selector, parse_mcp_selector
     from calfcord.tools import TOOL_REGISTRY
 
+    _validate_builtin_tools(tools, TOOL_REGISTRY)
+
+    return _update_fields(md_path, {"tools": list(tools)})
+
+
+def _validate_builtin_tools(tools: Sequence[str], registry: dict[str, object]) -> None:
+    from calfcord.mcp.selector import is_mcp_selector
+
     for token in tools:
-        # ``is_mcp_selector`` reaches for ``token.startswith`` — a non-str token
-        # would surface as an ``AttributeError`` instead of the ``ValueError`` this
-        # seam documents, so reject it up front with the contract-honoring error.
         if not isinstance(token, str):
             raise ValueError(f"invalid tool {token!r}: expected a string")
         if is_mcp_selector(token):
-            parse_mcp_selector(token)  # syntactic check only; raises naming the token
-            continue
-        if token not in TOOL_REGISTRY:
-            valid = ", ".join(sorted(TOOL_REGISTRY)) or "(none registered)"
-            raise ValueError(
-                f"unknown tool {token!r}; expected a builtin ({valid}) or an MCP "
-                f"selector (mcp/<server> or mcp/<server>/<tool>)"
-            )
+            raise ValueError(f"invalid tool {token!r}: tools: is builtin-only; move MCP grants to mcp:")
+        if token not in registry:
+            valid = ", ".join(sorted(registry)) or "(none registered)"
+            raise ValueError(f"unknown tool {token!r}; expected a builtin ({valid})")
 
-    return _update_fields(md_path, {"tools": list(tools)})
+
+def _validate_mcp_grants(mcp: Sequence[str]) -> None:
+    from calfcord.mcp.selector import validate_mcp_selector
+
+    for token in mcp:
+        if not isinstance(token, str):
+            raise ValueError(f"invalid MCP grant {token!r}: expected a string")
+        validate_mcp_selector(token)
 
 
 def _atomic_write_text(path: Path, payload: str) -> None:

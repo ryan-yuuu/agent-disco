@@ -93,9 +93,8 @@ pattern, and broker auth/TLS), see
 boundary the table above shows: **only the `mcp-<server>` processes read
 `mcp.json`** (the commands, URLs, and credentials). Each toolbox advertises its
 tools — names, JSON schemas, and a dispatch topic — onto the compacted
-`calf.capabilities` control-plane topic. Agents resolve their `mcp/...`
-selectors against that capability view **per turn**, never against the config
-file, so:
+`calf.capabilities` control-plane topic. Agents resolve their `mcp:` grants
+against that capability view **per turn**, never against the config file, so:
 
 - agent hosts need no `mcp.json` and hold no MCP secrets — the credentials stay
   on the host running the server;
@@ -357,7 +356,7 @@ src/calfcord/
 │   │                     # vendored calfkit-tools nodes (no first-party tools)
 │   ├── deploy_filters.py # pure INCLUDE/ALIAS transform -> TOOL_REGISTRY
 │   └── runner.py         # calfkit-tools entry point
-└── mcp/           # MCP integration: selector (frontmatter grammar),
+└── mcp/           # MCP integration: mcp: grant grammar,
                    # agent_select (frontmatter -> MCPToolbox handles),
                    # config + config_write (mcp.json), capability_read
                    # (live per-tool display), runner (calfkit-mcp entry point)

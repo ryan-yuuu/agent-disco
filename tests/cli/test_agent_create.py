@@ -385,12 +385,29 @@ def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
         mcp_servers_fn=lambda: ["github"],
         live_tools_fn=lambda: {"github": ["search"]},
     )
-    assert selected == ["terminal"]
+    assert selected.tools == ["terminal"]
+    assert selected.mcp == []
     by_value = {c.value: c for c in prompter.last_checkbox_choices}
     assert by_value["mcp/github"].checked is False
     assert by_value["mcp/github/search"].checked is False
     # Builtins are still the pre-checked default.
     assert by_value["terminal"].checked is True
+
+
+def test_pick_tools_splits_selected_mcp_rows(monkeypatch) -> None:
+    """The create checkbox keeps ``mcp/...`` as UI values but returns canonical
+    split grants for the writer."""
+    from calfcord.cli import _agents
+
+    prompter = FakePrompter(checkboxes=[["terminal", "mcp/github", "mcp/github/search"]])
+    selected = _agents.pick_tools(
+        prompter,
+        "helper",
+        mcp_servers_fn=lambda: ["github"],
+        live_tools_fn=lambda: {"github": ["search"]},
+    )
+    assert selected.tools == ["terminal"]
+    assert selected.mcp == ["github", "github/search"]
 
 
 def test_create_agent_forwards_live_tools_fn_to_pick_tools(tmp_path: Path) -> None:

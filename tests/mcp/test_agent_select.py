@@ -1,6 +1,6 @@
 """Unit tests for :mod:`calfcord.mcp.agent_select` — the agent-path selector.
 
-Agents resolve ``mcp/...`` frontmatter entries through calfkit's public
+Agents resolve canonical ``mcp:`` frontmatter entries through calfkit's public
 :class:`~calfkit.mcp.MCPToolbox` — an identity-only handle constructible
 with just the server name, so distributed agent hosts never need
 ``mcp.json``. The contract pins below are deliberate: calfcord's secrets
@@ -15,7 +15,7 @@ Pinned:
 * view resolution — ``include`` scoping and missing-server degradation
   (calfkit 0.12 dropped the ``strict`` flag; a missing server degrades
   structurally via ``missing_targets`` / ``unresolved``, never a raise);
-* grouping — ``selectors_from_entries`` merges an agent's ``mcp/...``
+* grouping — ``selectors_from_entries`` merges an agent's ``mcp:``
   frontmatter entries into one ref per server with the old schema-build
   semantics (bare form subsumes explicit; dedup; sorted). This part is
   calfcord semantics, not calfkit's.
@@ -92,7 +92,7 @@ class TestResolveTools:
         ``strict`` flag — a missing server surfaces structurally as
         ``missing_targets`` / ``unresolved`` (never a raise) — and
         ``selectors_from_entries`` never suppresses it, both pinned here."""
-        for sel in selectors_from_entries(["mcp/gmail", "mcp/docs/search"]):
+        for sel in selectors_from_entries(["gmail", "docs/search"]):
             result = sel.resolve_tools({})
             assert result.bindings == ()
             assert result.unresolved
@@ -105,31 +105,29 @@ class TestResolveTools:
 
 class TestSelectorsFromEntries:
     def test_explicit_tools_merge_per_server_sorted_deduped(self) -> None:
-        sels = selectors_from_entries(["mcp/gmail/send", "mcp/gmail/search", "mcp/gmail/send"])
+        sels = selectors_from_entries(["gmail/send", "gmail/search", "gmail/send"])
         assert sels == [MCPToolbox("gmail", include=("search", "send"))]
 
     def test_bare_server_selects_all(self) -> None:
-        assert selectors_from_entries(["mcp/gmail"]) == [MCPToolbox("gmail", include=None)]
+        assert selectors_from_entries(["gmail"]) == [MCPToolbox("gmail", include=None)]
 
     def test_bare_subsumes_explicit(self) -> None:
-        """``mcp/gmail`` + ``mcp/gmail/search`` collapses to the wildcard —
+        """``gmail`` + ``gmail/search`` collapses to the wildcard —
         the old schema-build dedup semantics."""
-        sels = selectors_from_entries(["mcp/gmail/search", "mcp/gmail"])
+        sels = selectors_from_entries(["gmail/search", "gmail"])
         assert sels == [MCPToolbox("gmail", include=None)]
 
     def test_servers_sorted_for_determinism(self) -> None:
-        sels = selectors_from_entries(["mcp/zeta", "mcp/alpha"])
+        sels = selectors_from_entries(["zeta", "alpha"])
         assert [s.name for s in sels] == ["alpha", "zeta"]
 
-    def test_malformed_selector_raises_naming_entry(self) -> None:
-        with pytest.raises(ValueError, match="mcp/a/b/c"):
-            selectors_from_entries(["mcp/a/b/c"])
+    def test_malformed_grant_raises_naming_entry(self) -> None:
+        with pytest.raises(ValueError, match="a/b/c"):
+            selectors_from_entries(["a/b/c"])
 
-    def test_non_mcp_entry_rejected(self) -> None:
-        """The caller (factory) partitions builtins out first; a bare name
-        reaching this function is a programming error, not user input."""
-        with pytest.raises(ValueError, match="shell"):
-            selectors_from_entries(["shell"])
+    def test_bare_name_is_server_grant(self) -> None:
+        """In the canonical field, a bare name is a server wildcard grant."""
+        assert selectors_from_entries(["shell"]) == [MCPToolbox("shell")]
 
     def test_empty_input_yields_empty(self) -> None:
         assert selectors_from_entries([]) == []

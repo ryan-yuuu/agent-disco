@@ -12,7 +12,7 @@ supervisor restart/back off each server independently, and make
 This is the **only** process type that reads ``mcp.json`` (transport +
 credentials). On startup the toolbox connects to its MCP server, lists its
 tools, and advertises them on the compacted ``calf.capabilities`` topic;
-agents resolve their ``mcp/...`` selectors against that advertisement per
+agents resolve their ``mcp:`` grants against that advertisement per
 turn — so agents never hold MCP secrets and never restart for tool changes.
 
 Run::

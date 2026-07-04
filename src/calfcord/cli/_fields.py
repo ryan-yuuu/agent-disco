@@ -144,7 +144,7 @@ def render_value(defn: AgentDefinition, field: Field) -> str:
         return f"{provider} · {model}"
 
     if field.kind == "tools":
-        return _render_tools(defn.tools)
+        return _render_tools(defn.tools, defn.mcp)
 
     if field.kind == "prompt":
         return _render_prompt(defn.system_prompt)
@@ -162,8 +162,8 @@ def render_value(defn: AgentDefinition, field: Field) -> str:
     return str(value)
 
 
-def _render_tools(tools: tuple[str, ...] | None) -> str:
-    """Render a tool tuple as a short label: first few names, then ``(+N)``.
+def _render_tools(tools: tuple[str, ...] | None, mcp: tuple[str, ...] = ()) -> str:
+    """Render builtin and MCP grants as a short label.
 
     ``None`` (frontmatter ``tools:`` omitted) means "all builtins" — shown as
     ``(all builtins)`` rather than an empty cell, matching the loader's
@@ -171,12 +171,20 @@ def _render_tools(tools: tuple[str, ...] | None) -> str:
     opt-out, shown as ``(none)``.
     """
     if tools is None:
-        return "(all builtins)"
-    if not tools:
-        return "(none)"
-    head = ", ".join(tools[:_TOOLS_PREVIEW_COUNT])
-    extra = len(tools) - _TOOLS_PREVIEW_COUNT
-    return f"{head} (+{extra})" if extra > 0 else head
+        builtin = "(all builtins)"
+    elif not tools:
+        builtin = "(none)"
+    else:
+        head = ", ".join(tools[:_TOOLS_PREVIEW_COUNT])
+        extra = len(tools) - _TOOLS_PREVIEW_COUNT
+        builtin = f"{head} (+{extra})" if extra > 0 else head
+
+    if not mcp:
+        return builtin
+    head = ", ".join(mcp[:_TOOLS_PREVIEW_COUNT])
+    extra = len(mcp) - _TOOLS_PREVIEW_COUNT
+    mcp_rendered = f"{head} (+{extra})" if extra > 0 else head
+    return f"{builtin}; mcp: {mcp_rendered}"
 
 
 def _render_prompt(system_prompt: str) -> str:

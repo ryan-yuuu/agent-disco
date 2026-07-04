@@ -71,7 +71,13 @@ def test_fake_prompter_satisfies_protocol() -> None:
     assert isinstance(FakePrompter(), Prompter)
 
 
-def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None) -> Path:
+def _seed_agent(
+    agents_dir: Path,
+    name: str,
+    *,
+    tools_line: str | None,
+    mcp_line: str | None = None,
+) -> Path:
     """Write an ``agents/<name>.md`` whose ``tools:`` frontmatter is controlled.
 
     ``tools_line`` is the literal YAML value for ``tools`` (e.g. ``"[]"`` or
@@ -86,6 +92,8 @@ def _seed_agent(agents_dir: Path, name: str, *, tools_line: str | None) -> Path:
     ]
     if tools_line is not None:
         lines.append(f"tools: {tools_line}")
+    if mcp_line is not None:
+        lines.append(f"mcp: {mcp_line}")
     lines += ["---", "", "You are a helpful agent.", ""]
     md_path = agents_dir / f"{name}.md"
     md_path.write_text("\n".join(lines), encoding="utf-8")
@@ -140,6 +148,17 @@ def test_selecting_subset_writes_that_subset(tmp_path: Path) -> None:
     # On-disk: an explicit list of exactly the selected tools, reloadable.
     assert frontmatter.load(md_path).metadata["tools"] == ["read_file", "terminal"]
     assert parse_agent_md(md_path).tools == ("read_file", "terminal")
+
+
+def test_selecting_all_builtins_removes_tools_key(tmp_path: Path) -> None:
+    md_path = _seed_agent(tmp_path, "assistant", tools_line="[read_file]")
+    fake = FakePrompter(checkbox_result=sorted(BUILTIN_NAMES))
+    rc = agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+    assert rc == 0
+
+    metadata = frontmatter.load(md_path).metadata
+    assert "tools" not in metadata
+    assert parse_agent_md(md_path).tools is None
 
 
 def test_deselecting_all_writes_empty_list(tmp_path: Path) -> None:
@@ -198,13 +217,11 @@ def test_malformed_md_returns_1_without_traceback(tmp_path: Path, capsys) -> Non
     assert "broken" in out
 
 
-def test_mcp_entry_in_md_kept_as_prechecked_row(tmp_path: Path) -> None:
-    """An ``.md`` carrying ``mcp/...`` selectors opens in the editor and the
-    selectors appear as pre-checked rows after the builtins — a tool the
-    editor cannot enumerate (no mcp.json on this host, server offline) must
-    never be silently dropped by an unrelated edit."""
+def test_mcp_field_in_md_kept_as_prechecked_row(tmp_path: Path) -> None:
+    """An ``.md`` carrying ``mcp:`` grants opens in the editor and the
+    grants appear as pre-checked ``mcp/...`` UI rows after the builtins."""
     agents_dir = tmp_path
-    _seed_agent(agents_dir, "legacy", tools_line="[terminal, mcp/gmail]")
+    _seed_agent(agents_dir, "legacy", tools_line="[terminal]", mcp_line="[gmail]")
     fake = FakePrompter(checkbox_result=["terminal", "mcp/gmail"])
     assert agent_tools.run(fake, agents_dir=agents_dir, name="legacy") == 0
 
@@ -213,8 +230,9 @@ def test_mcp_entry_in_md_kept_as_prechecked_row(tmp_path: Path) -> None:
     assert by_value["mcp/gmail"].checked is True
     assert by_value["terminal"].checked is True
 
-    # Write-through preserves the selector verbatim.
-    assert parse_agent_md(agents_dir / "legacy.md").tools == ("terminal", "mcp/gmail")
+    reparsed = parse_agent_md(agents_dir / "legacy.md")
+    assert reparsed.tools == ("terminal",)
+    assert reparsed.mcp == ("gmail",)
 
 
 # -------------------------------------------------------------- first_line ---
@@ -252,6 +270,23 @@ def test_editor_offers_configured_mcp_server_rows(tmp_path: Path) -> None:
     assert by_value["mcp/github"].checked is False
 
 
+def test_editor_selected_mcp_rows_write_mcp_field(tmp_path: Path) -> None:
+    agents_dir = tmp_path
+    md_path = _seed_agent(agents_dir, "helper", tools_line="[terminal]")
+    fake = FakePrompter(checkbox_result=["terminal", "mcp/github"])
+    rc = agent_tools.run(
+        fake,
+        agents_dir=agents_dir,
+        name="helper",
+        mcp_servers_fn=lambda: ["github"],
+        live_tools_fn=lambda: {},
+    )
+    assert rc == 0
+    metadata = frontmatter.load(md_path).metadata
+    assert metadata["tools"] == ["terminal"]
+    assert metadata["mcp"] == ["github"]
+
+
 def test_editor_offers_live_discovered_tool_rows(tmp_path: Path) -> None:
     """When the capability view is reachable, per-tool ``mcp/<server>/<tool>``
     rows appear — including for servers another host configured (the broker
@@ -276,7 +311,7 @@ def test_editor_offers_live_discovered_tool_rows(tmp_path: Path) -> None:
 
 def test_editor_prechecks_current_mcp_selections(tmp_path: Path) -> None:
     agents_dir = tmp_path
-    _seed_agent(agents_dir, "helper", tools_line="[mcp/github/search_issues]")
+    _seed_agent(agents_dir, "helper", tools_line="[]", mcp_line="[github/search_issues]")
     fake = FakePrompter(checkbox_result=["mcp/github/search_issues"])
     rc = agent_tools.run(
         fake,
@@ -295,9 +330,9 @@ def test_editor_prechecks_current_mcp_selections(tmp_path: Path) -> None:
 
 def test_editor_mcp_enumeration_failure_degrades_to_kept_rows(tmp_path: Path) -> None:
     """A broken mcp.json / unreachable broker must not break the editor: the
-    agent's existing selectors still appear as pre-checked kept rows."""
+    agent's existing grants still appear as pre-checked kept rows."""
     agents_dir = tmp_path
-    _seed_agent(agents_dir, "helper", tools_line="[mcp/github]")
+    _seed_agent(agents_dir, "helper", tools_line="[]", mcp_line="[github]")
     fake = FakePrompter(checkbox_result=["mcp/github"])
     rc = agent_tools.run(
         fake,
