@@ -27,7 +27,6 @@ from typing import assert_never
 
 from calfcord.bridge.a2a_dispatch import (
     A2ACall,
-    A2AHandoff,
     A2AProjection,
     A2AReject,
     A2AReply,
@@ -133,17 +132,11 @@ class A2AProjector:
                 f"⚠️ consult to {projection.peer} was rejected: {projection.text}",
                 thread_name=_build_thread_name(projection.caller, projection.peer, projection.text),
             )
-        elif isinstance(projection, A2AHandoff):
-            reason = f": {projection.reason}" if projection.reason else ""
-            await self._emit(
-                projection.correlation_id,
-                _SYSTEM_PERSONA,
-                f"↪ {projection.emitter} handed off to {projection.target}{reason}",
-                thread_name=_build_thread_name(projection.emitter, projection.target, projection.reason),
-            )
         else:
-            # Exhaustiveness guard: a 5th A2AProjection variant added without a
-            # branch here is a mypy error, not a silent no-op render.
+            # Exhaustiveness guard: a 4th A2AProjection variant added without a
+            # branch here is a mypy error, not a silent no-op render. (Handoffs
+            # are NOT projected here — they render inline in the main step stream
+            # via the progress renderer; the dispatcher no longer emits them.)
             assert_never(projection)
 
     async def _channel(self) -> int:

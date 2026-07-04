@@ -36,7 +36,6 @@ from pydantic import SecretStr
 from calfcord.bridge.gateway import DiscordIngressGateway
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.normalizer import MessageNormalizer
-from calfcord.bridge.steps_toggle import StepsToggleView
 from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.discord.settings import DiscordSettings
 
@@ -344,9 +343,10 @@ class TestDrainInflight:
         await gateway.drain_inflight()  # must not raise
 
 
-class TestOnReadyRegistersStepsToggleView:
-    async def test_on_ready_adds_persistent_steps_toggle_view(self, tmp_path, monkeypatch) -> None:
-        # _on_ready writes the first heartbeat too (§12.1); contain it in a tmp home.
+class TestOnReadyRegistersNoPersistentView:
+    async def test_on_ready_registers_no_persistent_view(self, tmp_path, monkeypatch) -> None:
+        # The N-steps toggle was removed; step traces are now plain persistent v2
+        # messages, so _on_ready must no longer register any persistent view.
         monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
         gateway = _gateway()  # add_view is stubbed to a MagicMock
         with (
@@ -355,6 +355,4 @@ class TestOnReadyRegistersStepsToggleView:
         ):
             await gateway._on_ready()
 
-        gateway._client.add_view.assert_called_once()
-        view = gateway._client.add_view.call_args.args[0]
-        assert isinstance(view, StepsToggleView)
+        gateway._client.add_view.assert_not_called()

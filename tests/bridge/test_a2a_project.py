@@ -13,7 +13,7 @@ from typing import Any
 import discord
 import pytest
 
-from calfcord.bridge.a2a_dispatch import A2ACall, A2AHandoff, A2AReject, A2AReply, A2ARequest
+from calfcord.bridge.a2a_dispatch import A2ACall, A2AReject, A2AReply, A2ARequest
 from calfcord.bridge.a2a_project import _EMPTY_PLACEHOLDER, _SYSTEM_PERSONA, A2AProjector
 from calfcord.discord.messages import SentMessage
 from calfcord.discord.persona import Persona
@@ -136,27 +136,6 @@ class TestReject:
         assert note["persona"].name == _SYSTEM_PERSONA.name  # NOT "ghost"
         assert note["thread_id"] == 9001
         assert "ghost" in note["content"] and "agent offline" in note["content"]
-
-
-class TestHandoff:
-    async def test_handoff_with_existing_thread_posts_note(self) -> None:
-        proj, personas, resolver = _make()
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
-        )
-        await proj.project(A2AHandoff(correlation_id="c1", emitter="conan", target="dot", reason="needs math"))
-        assert len(resolver.created) == 1  # reused
-        note = personas.sends[1]
-        assert note["persona"].name == _SYSTEM_PERSONA.name
-        assert "conan" in note["content"] and "dot" in note["content"] and "needs math" in note["content"]
-
-    async def test_handoff_with_no_prior_thread_lazily_creates(self) -> None:
-        proj, personas, resolver = _make()
-        await proj.project(A2AHandoff(correlation_id="c9", emitter="scribe", target="conan", reason="transfer"))
-        # lazily anchored a thread for this turn even with no preceding consult
-        assert len(resolver.created) == 1
-        assert proj._threads["c9"] == 9001
-        assert personas.sends[0]["persona"].name == _SYSTEM_PERSONA.name
 
 
 class TestFault:

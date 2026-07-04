@@ -279,8 +279,14 @@ def _fake_discord_message(
     author_id: int = 1,
     webhook_id: int | None = None,
     created_at: datetime | None = None,
+    components_v2: bool = False,
 ) -> Any:
-    """Hand-built ``discord.Message`` look-alike for fetcher tests."""
+    """Hand-built ``discord.Message`` look-alike for fetcher tests.
+
+    ``components_v2`` sets ``flags.components_v2`` — a real ``discord.Message``
+    always exposes a ``MessageFlags``; the progress renderer's step traces carry
+    this flag, and the fetcher drops the bridge's own v2 messages from history.
+    """
     author = SimpleNamespace(
         display_name=author_display_name,
         name=author_name or author_display_name,
@@ -292,6 +298,7 @@ def _fake_discord_message(
         webhook_id=webhook_id,
         author=author,
         created_at=created_at or datetime.now(UTC),
+        flags=SimpleNamespace(components_v2=components_v2),
     )
 
 
@@ -550,6 +557,54 @@ class TestChannelHistoryFetcher:
         assert len(records) == 1
         assert records[0].is_agent is True
         assert records[0].author_display_name == "Scribe"
+
+    @pytest.mark.asyncio
+    async def test_v2_persona_step_message_is_excluded_from_history(self) -> None:
+        """A Components-V2 message from one of the bridge's persona webhooks is a
+        display-only step trace posted by the progress renderer — it must NOT
+        enter history (the model's tool memory rides the transcript replay). The
+        exclusion is by the ``components_v2`` flag, not by content, so a trace
+        with non-empty content is still dropped."""
+        client = MagicMock()
+        client.get_channel.return_value = _FakeChannel(
+            messages=[
+                # newest-first: a human turn, then the v2 step trace.
+                _fake_discord_message(message_id=2, content="hello there", author_display_name="ryan"),
+                _fake_discord_message(
+                    message_id=1,
+                    content="🔧 read_file called",
+                    author_display_name="Scribe",
+                    webhook_id=777,
+                    components_v2=True,
+                ),
+            ]
+        )
+        fetcher = ChannelHistoryFetcher(client, lambda wid: wid == 777)
+
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
+
+        # Only the human turn survives; the v2 step trace is gone.
+        assert [r.message_id for r in records] == [2]
+
+    @pytest.mark.asyncio
+    async def test_non_v2_persona_reply_is_kept(self) -> None:
+        """Guard against over-exclusion: a normal (non-v2) persona reply — the
+        agent's actual answer — is a real agent turn and stays in history."""
+        client = MagicMock()
+        client.get_channel.return_value = _FakeChannel(
+            messages=[
+                _fake_discord_message(
+                    message_id=1, content="the answer", author_display_name="Scribe", webhook_id=777
+                ),
+            ]
+        )
+        fetcher = ChannelHistoryFetcher(client, lambda wid: wid == 777)
+
+        records = await fetcher.fetch(source_channel_id=100, before_message_id=999, limit=10)
+
+        assert len(records) == 1
+        assert records[0].is_agent is True
+        assert records[0].content == "the answer"
 
     @pytest.mark.asyncio
     async def test_unowned_webhook_is_not_agent(self) -> None:

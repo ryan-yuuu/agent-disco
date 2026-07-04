@@ -93,7 +93,6 @@ class _FakePersonas:
         content: str,
         *,
         reply_to: Any = None,
-        extra_buttons: Any = None,
         thread_id: int | None = None,
     ) -> SentMessage:
         if self.errors:
@@ -107,7 +106,6 @@ class _FakePersonas:
                 "channel_id": channel_id,
                 "content": content,
                 "reply_to": reply_to,
-                "extra_buttons": extra_buttons,
                 "thread_id": thread_id,
             }
         )
@@ -153,8 +151,7 @@ class TestPostReply:
         assert len(personas.sends) == 1
         assert personas.sends[0]["persona"].name == "scribe"
         assert personas.sends[0]["content"] == "done"
-        assert personas.sends[0]["extra_buttons"] is None  # pure-text turn: no toggle
-        assert store.rows == []
+        assert store.rows == []  # pure-text turn: no transcript row
 
     async def test_empty_output_is_ok_without_sending(self) -> None:
         poster, personas, _ = _poster()
@@ -164,8 +161,8 @@ class TestPostReply:
         assert out.status == "ok"
         assert personas.sends == []
 
-    async def test_tool_turn_attaches_toggle_and_writes_transcript(self) -> None:
-        poster, personas, store = _poster()
+    async def test_tool_turn_writes_transcript(self) -> None:
+        poster, _, store = _poster()
         out = await poster.post_reply(
             _req(),
             Persona(name="scribe"),
@@ -174,21 +171,21 @@ class TestPostReply:
             correlation_id="c1",
         )
         assert out.status == "ok"
-        assert personas.sends[0]["extra_buttons"] is not None  # toggle attached
+        # A turn that used tools persists its transcript (for tool-call replay).
         assert len(store.rows) == 1
         assert store.rows[0].agent_id == "scribe" and store.rows[0].correlation_id == "c1"
 
-    async def test_pure_text_turn_no_toggle_no_row(self) -> None:
+    async def test_pure_text_turn_no_row(self) -> None:
         poster, personas, store = _poster()
         # message_history with no tool slice → empty delta
         hist = [ModelRequest(parts=[TextPart(content="p")]), ModelResponse(parts=[TextPart(content="final")])]
         await poster.post_reply(
             _req(), Persona(name="scribe"), _result("final", message_history=hist), initial_len=1, correlation_id="c1"
         )
-        assert personas.sends[0]["extra_buttons"] is None
-        assert store.rows == []
+        assert len(personas.sends) == 1  # the reply still posts
+        assert store.rows == []  # no tools → no transcript row
 
-    async def test_disabled_store_suppresses_toggle_and_write(self) -> None:
+    async def test_disabled_store_suppresses_write(self) -> None:
         poster, personas, store = _poster(store=_FakeStore(enabled=False))
         await poster.post_reply(
             _req(),
@@ -197,8 +194,8 @@ class TestPostReply:
             initial_len=1,
             correlation_id="c1",
         )
-        assert personas.sends[0]["extra_buttons"] is None
-        assert store.rows == []
+        assert len(personas.sends) == 1  # the reply still posts
+        assert store.rows == []  # disabled store: no transcript row
 
     async def test_thread_routing(self) -> None:
         poster, personas, _ = _poster()
@@ -275,7 +272,7 @@ class TestFailureClassification:
 
 
 class TestPostChunked:
-    async def test_long_reply_splits_first_chunk_has_toggle_and_row(self) -> None:
+    async def test_long_reply_splits_first_chunk_anchored_and_writes_row(self) -> None:
         poster, personas, store = _poster()
         big = "x" * 4500
         posted = await poster.post_chunked(
@@ -287,11 +284,9 @@ class TestPostChunked:
         )
         assert posted is True  # at least one chunk delivered
         assert len(personas.sends) >= 3  # >2 chunks
-        assert personas.sends[0]["extra_buttons"] is not None  # toggle on first chunk only
-        assert all(s["extra_buttons"] is None for s in personas.sends[1:])
         assert personas.sends[0]["reply_to"] is not None  # anchor on first chunk only
         assert all(s["reply_to"] is None for s in personas.sends[1:])
-        assert len(store.rows) == 1
+        assert len(store.rows) == 1  # the turn used tools → one transcript row
 
     async def test_all_chunks_fail_returns_false(self) -> None:
         personas = _FakePersonas()

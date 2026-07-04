@@ -15,9 +15,8 @@ connection, no broker):
   gates each write on, so a dropped gateway ages the beat out within the TTL.
 
 Post-0.12 ``_on_ready`` no longer publishes a discovery ping (the discovery topic
-is gone); it adds the persistent :class:`StepsToggleView` instead. The gateway is
-built with mocked collaborators; the ``_GatewayClient`` constructor is sync +
-offline, so no network is touched.
+is gone). The gateway is built with mocked collaborators; the ``_GatewayClient``
+constructor is sync + offline, so no network is touched.
 """
 
 from __future__ import annotations
@@ -44,9 +43,7 @@ def _gateway() -> DiscordIngressGateway:
     """A real gateway with mocked collaborators.
 
     Every injected collaborator is a ``MagicMock`` — none is exercised by the
-    heartbeat/liveness paths under test. ``add_view`` is stubbed because
-    ``_on_ready`` registers the persistent steps-toggle view through it, and we do
-    not want to depend on discord.py's offline view-store internals here.
+    heartbeat/liveness paths under test.
     """
     gateway = DiscordIngressGateway(
         _settings(),
@@ -60,7 +57,6 @@ def _gateway() -> DiscordIngressGateway:
         reply=MagicMock(),
         memory_deps=MagicMock(),
     )
-    gateway._client.add_view = MagicMock()  # type: ignore[method-assign]
     return gateway
 
 

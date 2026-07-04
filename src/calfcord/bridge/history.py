@@ -531,7 +531,7 @@ class ChannelHistoryFetcher:
                 if is_clear_marker(ordered[i], bot_user_id):
                     cut = i
                     break
-            return [self._to_record(m) for m in ordered[cut + 1:]]
+            return [self._to_record(m) for m in ordered[cut + 1:] if not self._is_v2_step_message(m)]
         except Exception:
             logger.exception(
                 "channel_id=%d: failed to project messages into HistoryRecords; "
@@ -690,6 +690,29 @@ class ChannelHistoryFetcher:
             author_display_name=author_display_name,
             is_agent=is_agent,
         )
+
+    def _is_v2_step_message(self, msg: Any) -> bool:
+        """A persona-webhook Components-V2 message is a display-only step trace
+        (posted by :class:`~calfcord.bridge.progress.ProgressRenderer`) and is
+        NEVER part of history.
+
+        v2 messages carry no ``content`` (Discord forbids it under the
+        ``components_v2`` flag), so :func:`build_message_history` already skips
+        them; excluding them here at the fetch level makes the invariant explicit
+        — independent of that empty-content skip — and keeps them out of the
+        transcript-replay join too. Scoped to the bridge's OWN persona webhooks
+        so a (hypothetical) third-party v2 message is untouched.
+
+        Defensive ``getattr`` chain: a real ``discord.Message`` always exposes a
+        ``MessageFlags``, but this degrades to ``False`` rather than raising if a
+        future library shape omits ``flags`` — matching the fetcher's "never
+        raises into the invocation path" contract.
+        """
+        flags = getattr(msg, "flags", None)
+        if not getattr(flags, "components_v2", False):
+            return False
+        webhook_id = getattr(msg, "webhook_id", None)
+        return webhook_id is not None and self._owns_webhook(webhook_id)
 
     def _cache_and_return(
         self,

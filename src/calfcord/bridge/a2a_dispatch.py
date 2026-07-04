@@ -70,17 +70,7 @@ class A2AReject:
     text: str
 
 
-@dataclass(frozen=True)
-class A2AHandoff:
-    """Render a handoff note."""
-
-    correlation_id: str
-    emitter: str
-    target: str
-    reason: str
-
-
-A2AProjection = A2ARequest | A2AReply | A2AReject | A2AHandoff
+A2AProjection = A2ARequest | A2AReply | A2AReject
 
 
 class A2ADispatcher:
@@ -92,13 +82,11 @@ class A2ADispatcher:
         self._open: dict[str, A2ACall] = {}
 
     def classify(self, step: StepEvent) -> A2AProjection | None:
-        if step.kind == "handoff":
-            return A2AHandoff(
-                correlation_id=step.correlation_id,
-                emitter=step.emitter,
-                target=step.target or "",
-                reason=step.reason or "",
-            )
+        # NB: a ``handoff`` step is deliberately NOT classified here — a handoff
+        # transfers conversation control (the peer replies in the caller's
+        # place, ADR-0019), unlike a ``message_agent`` consult (ADR-0015). It is
+        # rendered inline in the main step stream by the progress renderer, so it
+        # falls through to ``return None`` below.
         if step.kind == "tool_call" and step.name == _MESSAGE_AGENT:
             args = step.args or {}
             call = A2ACall(

@@ -49,7 +49,6 @@ from calfcord.bridge.progress import ProgressRenderer
 from calfcord.bridge.reply_poster import ReplyPoster
 from calfcord.bridge.roster import MeshRoster
 from calfcord.bridge.slash import SlashCommandManager
-from calfcord.bridge.steps_toggle import StepsToggleView
 from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptStore,
@@ -282,11 +281,6 @@ class DiscordIngressGateway:
             logger.exception("failed to write initial bridge heartbeat; continuing boot")
 
         await self._slash.sync(self._settings.guild_id)
-
-        # Persistent view for the step-transcript expand toggle: one instance
-        # handles every click carrying ``steps:toggle`` on any agent reply,
-        # including replies posted before this restart (matched by custom_id).
-        self._client.add_view(StepsToggleView(self._transcript_store))
 
     async def _on_disconnect(self) -> None:
         """Mark the bridge disconnected when the Discord gateway drops (§12.1)."""

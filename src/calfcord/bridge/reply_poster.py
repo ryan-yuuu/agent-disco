@@ -26,7 +26,6 @@ from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelMessagesType
 
 from calfcord.bridge.mention_handler import MentionRequest, ReplyOutcome
 from calfcord.bridge.steps_render import _render_tree_blocks
-from calfcord.bridge.steps_toggle import build_toggle_button
 from calfcord.bridge.transcripts import TranscriptRow, TranscriptStoreLike
 from calfcord.bridge.wire import WireMessage
 from calfcord.discord.persona import DiscordPersonaSender, Persona, ReplyContext
@@ -100,7 +99,6 @@ class ReplyPoster:
         delta = _turn_delta(result, initial_len)
         rendered = _render_step_count(delta)
         write_transcript = bool(rendered) and self._store.enabled
-        extra_buttons = [build_toggle_button(rendered)] if write_transcript else None
         try:
             sent = await _send_with_one_retry_on_outage(
                 self._personas,
@@ -108,7 +106,6 @@ class ReplyPoster:
                 channel_id=wire.channel_id,
                 content=text,
                 reply_to=ReplyContext.from_wire(wire),
-                extra_buttons=extra_buttons,
                 thread_id=wire.thread_id,
             )
         except discord.DiscordException as e:
@@ -171,9 +168,9 @@ class ReplyPoster:
     ) -> bool:
         """Final fallback (retries exhausted): split the reply into ≤2000-char
         chunks and post each under ``persona``. The first chunk carries the
-        inline-reply anchor + (if the turn used tools) the expand toggle and the
-        transcript row; later chunks are bare continuations. Per-chunk failures
-        are logged independently so partial delivery survives.
+        inline-reply anchor + (if the turn used tools) the persisted transcript
+        row; later chunks are bare continuations. Per-chunk failures are logged
+        independently so partial delivery survives.
 
         Returns ``True`` if at least one chunk posted (or there was nothing to
         post), ``False`` if the reply was fully lost (every chunk failed) so the
@@ -189,7 +186,6 @@ class ReplyPoster:
         delta = _turn_delta(result, initial_len)
         rendered = _render_step_count(delta)
         write_transcript = bool(rendered) and self._store.enabled
-        first_chunk_buttons = [build_toggle_button(rendered)] if write_transcript else None
         total = len(chunks)
         failures: list[int | None] = []
         for i, chunk in enumerate(chunks):
@@ -199,7 +195,6 @@ class ReplyPoster:
                     channel_id=wire.channel_id,
                     content=chunk,
                     reply_to=ReplyContext.from_wire(wire) if i == 0 else None,
-                    extra_buttons=first_chunk_buttons if i == 0 else None,
                     thread_id=wire.thread_id,
                 )
                 if i == 0 and write_transcript:
@@ -252,7 +247,6 @@ async def _send_with_one_retry_on_outage(
     channel_id: int,
     content: str,
     reply_to: ReplyContext | None,
-    extra_buttons: list[Any] | None = None,
     thread_id: int | None = None,
 ) -> Any:
     """Send via the persona webhook with exactly one extra attempt on a first-try
@@ -264,7 +258,6 @@ async def _send_with_one_retry_on_outage(
             channel_id=channel_id,
             content=content,
             reply_to=reply_to,
-            extra_buttons=extra_buttons,
             thread_id=thread_id,
         )
     except discord.DiscordServerError as e:
@@ -280,7 +273,6 @@ async def _send_with_one_retry_on_outage(
         channel_id=channel_id,
         content=content,
         reply_to=reply_to,
-        extra_buttons=extra_buttons,
         thread_id=thread_id,
     )
 

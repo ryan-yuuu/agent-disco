@@ -1,5 +1,13 @@
 # Step Transcripts, Live Step Streaming & Tool-Call Replay — Implementation Plan
 
+> **⚠️ Superseded (2026-07) — decision D-1a is reversed.** The transient
+> edit-then-delete live-progress message and the "⤵ N steps" reply toggle
+> described here were replaced by **persistent, inline Components-V2 step
+> messages** (see [`live-step-messages-v2-plan.md`](./live-step-messages-v2-plan.md)
+> and [ADR-0016](../adr/0016-persistent-v2-step-messages.md)). The **tool-call
+> replay** (§4.1, §6) and the transcript store still ship as described; the live
+> streaming (§5.2, §7.3) and the toggle (§5, §7.4–7.5) do not.
+
 **Status**: Finalized v2 — reviewed by 4 agents; decision D-1a chosen (2026-05-30).
 **Superseded by v3** (see the v3 changelog below): the inline expand/collapse toggle
 shipped as **ephemeral step display** (the reply is never edited).
