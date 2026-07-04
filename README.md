@@ -9,7 +9,7 @@
 | src/calfcord/\_worker\_runtime.py             |       41 |        0 |       14 |        0 |    100% |           |
 | src/calfcord/agents/definition.py             |       89 |        0 |       22 |        0 |    100% |           |
 | src/calfcord/agents/factory.py                |      107 |        2 |       34 |        2 |     97% |  147, 161 |
-| src/calfcord/agents/identifier.py             |       20 |        0 |        6 |        0 |    100% |           |
+| src/calfcord/agents/identifier.py             |       22 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/agents/loader.py                 |       43 |        1 |       18 |        1 |     97% |       127 |
 | src/calfcord/agents/md\_writer.py             |       78 |        3 |       14 |        3 |     93% |89-\>92, 160, 270-\>276, 276-\>exit, 283-287 |
 | src/calfcord/agents/memory.py                 |       53 |        0 |       10 |        0 |    100% |           |
@@ -20,7 +20,7 @@
 | src/calfcord/bridge/egress.py                 |       79 |        3 |       18 |        0 |     97% |   185-191 |
 | src/calfcord/bridge/gateway.py                |      226 |       51 |       42 |        2 |     74% |90-91, 96-97, 240-241, 245-246, 326-328, 382, 401, 415-517, 521 |
 | src/calfcord/bridge/history.py                |      244 |        7 |       74 |        5 |     96% |384-\>386, 396-\>398, 418-\>420, 662-669, 722, 839-\>841, 935-946 |
-| src/calfcord/bridge/mention\_handler.py       |      130 |        0 |       24 |        0 |    100% |           |
+| src/calfcord/bridge/mention\_handler.py       |      131 |        0 |       24 |        0 |    100% |           |
 | src/calfcord/bridge/normalizer.py             |       43 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/bridge/overrides.py              |       23 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/persona\_resolve.py       |        5 |        0 |        0 |        0 |    100% |           |
@@ -92,7 +92,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7799** |  **528** | **2088** |  **102** | **93%** |           |
+| **TOTAL**                                     | **7802** |  **528** | **2088** |  **102** | **93%** |           |
 
 
 ## Setup coverage badge
