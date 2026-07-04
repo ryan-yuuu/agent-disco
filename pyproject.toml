@@ -8,6 +8,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "authlib>=1.7.2",
     "calfkit>=0.12.5",
+    "calfkit-mesh>=0.1.1",
     "calfkit-tools>=0.1.3",
     "discord-py>=2.7.1",
     "httpx>=0.28.1",
@@ -27,6 +28,7 @@ calfkit-tools = "calfcord.tools.runner:main"
 calfkit-mcp = "calfcord.mcp.runner:main"
 calfkit-auth = "calfcord.providers.codex.cli:main"
 calfcord-cli = "calfcord.cli.main:main"
+calfcord-broker = "calfcord.broker.runner:main"
 
 [build-system]
 requires = ["hatchling"]

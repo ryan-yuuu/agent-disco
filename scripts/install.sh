@@ -39,8 +39,6 @@ CONFIG_ENV="$CONFIG_DIR/.env"
 AGENTS_DIR="$CALFCORD_HOME/agents"            # operator's agent .md files (stable across updates)
 CURRENT_LINK="$CALFCORD_HOME/current"
 
-# Native broker: pinned tansu-io/tansu release, downloaded into BIN_DIR/tansu.
-TANSU_VERSION="${CALFCORD_TANSU_VERSION:-v0.6.0}"
 # Process supervisor: pinned F1bonacc1/process-compose release, downloaded into
 # BIN_DIR/process-compose. Pin matches the Phase-0 gate (docs §13.2): the REST
 # update semantics and the disabled-slot start path are version-specific.
@@ -54,7 +52,6 @@ UV=""            # resolved by ensure_uv
 INSTALLED_DEST=""   # set by install_version
 PREVIOUS_SHA=""     # set by activate_version (for GC)
 SEEDED_STARTER=0    # set by seed_agents when it drops in the starter agent
-TANSU_OK=0          # set by ensure_tansu when the native broker binary is in place
 PROCESS_COMPOSE_OK=0  # set by ensure_process_compose when the supervisor binary is in place
 PATH_WIRED=0        # set by ensure_path when it wires PATH (so activation is needed)
 
@@ -152,79 +149,16 @@ ensure_uv() {
   [ -x "$UV" ] || die "uv unavailable after bootstrap"
 }
 
-# Download the pinned native Tansu broker binary into $BIN_DIR/tansu. Best
-# effort: an unsupported platform or a failed download WARNS and leaves
-# TANSU_OK=0 rather than aborting the install — Agent Disco can still run against a
-# Docker or remote broker. Net-new vs ensure_uv (which delegates to uv's own
-# installer): Tansu ships raw per-target tarballs, so we detect the target
-# triple, fetch, extract bin/tansu, and clear the macOS quarantine xattr that
-# would otherwise block first launch.
-ensure_tansu() {
-  if [ -x "$BIN_DIR/tansu" ]; then
-    TANSU_OK=1
-    log "using existing tansu broker at $BIN_DIR/tansu"
-    return 0
-  fi
-  local os arch
-  case "$(uname -s)" in
-    Darwin) os="apple-darwin" ;;
-    Linux) os="unknown-linux-gnu" ;;
-    *) warn "no native tansu broker for $(uname -s); use the Docker broker (docker compose up tansu) or a remote CALF_HOST_URL"; return 0 ;;
-  esac
-  case "$(uname -m)" in
-    arm64 | aarch64) arch="aarch64" ;;
-    x86_64 | amd64) arch="x86_64" ;;
-    *) warn "no native tansu broker for CPU $(uname -m); use the Docker broker or a remote CALF_HOST_URL"; return 0 ;;
-  esac
-  local target="tansu-$arch-$os"
-  local url="https://github.com/tansu-io/tansu/releases/download/$TANSU_VERSION/$target.tar.gz"
-  log "installing tansu broker $TANSU_VERSION ($target) ..."
-  mkdir -p "$BIN_DIR"
-  local tmp
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/calfcord-tansu.XXXXXX")"
-  # Extract the whole tarball to a temp dir then move just the binary — most
-  # portable across GNU/BSD tar (avoids strip-components + leading-./ quirks).
-  if ! fetch "$url" | tar -xz -C "$tmp"; then
-    rm -rf "$tmp"
-    warn "failed to download tansu from $url; native broker unavailable (use Docker or a remote broker)"
-    return 0
-  fi
-  if [ ! -f "$tmp/bin/tansu" ]; then
-    rm -rf "$tmp"
-    warn "tansu tarball did not contain bin/tansu (release layout changed?); native broker unavailable"
-    return 0
-  fi
-  # Guard the placement like every other step in this function: a filesystem
-  # fault moving the OPTIONAL broker binary must not trip the ERR trap and abort
-  # the whole install (Agent Disco still runs against Docker / a remote broker).
-  if ! { mv "$tmp/bin/tansu" "$BIN_DIR/tansu" && chmod +x "$BIN_DIR/tansu"; }; then
-    rm -rf "$tmp"
-    warn "failed to install tansu into $BIN_DIR (filesystem/permissions?); native broker unavailable (use Docker or a remote broker)"
-    return 0
-  fi
-  rm -rf "$tmp"
-  # macOS quarantines downloaded binaries; clear it so first launch isn't blocked.
-  if [ "$os" = "apple-darwin" ] && have xattr; then
-    xattr -d com.apple.quarantine "$BIN_DIR/tansu" 2>/dev/null || true
-  fi
-  if [ -x "$BIN_DIR/tansu" ]; then
-    TANSU_OK=1
-    log "tansu broker installed at $BIN_DIR/tansu"
-  else
-    warn "tansu binary not executable after install; native broker unavailable"
-  fi
-  return 0
-}
-
 # Download the pinned process-compose supervisor binary into
-# $BIN_DIR/process-compose. Mirrors ensure_tansu's best-effort contract: an
-# unsupported platform or any download/extract/placement failure WARNS and
-# leaves PROCESS_COMPOSE_OK=0 rather than aborting the install — Agent Disco can
-# still run its processes manually (`disco run …`) or under Docker without the
-# native supervisor. Two deliberate divergences from ensure_tansu, both verified
-# against the real v1.110.0 release assets:
+# $BIN_DIR/process-compose. Best-effort: an unsupported platform or any
+# download/extract/placement failure WARNS and leaves PROCESS_COMPOSE_OK=0 rather
+# than aborting the install — Agent Disco can still run its processes manually
+# (`disco run …`) or under Docker without the native supervisor. This is the one
+# native binary the installer still fetches by hand (the Tansu broker now ships as
+# the calfkit-mesh wheel dependency); process-compose has no first-party wheel.
+# Layout notes, verified against the real v1.110.0 release assets:
 #   * os/arch use the Go-style names process-compose ships (darwin/linux,
-#     arm64/amd64), not Tansu's Rust target triple.
+#     arm64/amd64).
 #   * the binary sits at the TARBALL ROOT (./process-compose), not under bin/.
 # Windows ships a .zip and is intentionally not bootstrapped (use WSL/Docker).
 ensure_process_compose() {
@@ -282,6 +216,22 @@ ensure_process_compose() {
     warn "process-compose binary not executable after install; native supervisor unavailable"
   fi
   return 0
+}
+
+# Pre-extract the calfkit-mesh-bundled Tansu binary now (a one-time copy to
+# ~/.calfkit/bin) so the supervised broker never does it inside Process Compose's
+# restart-always loop on first `disco start`. Best-effort: a failure here
+# (read-only/full disk, permissions) WARNS and proceeds — the wheel is already
+# installed and `disco doctor` re-checks. The `if` guard keeps a non-zero result
+# from tripping the ERR trap and aborting the install.
+warm_broker_cache() {
+  local dest="$1"
+  if "$UV" run --frozen --no-sync --project "$dest" -- \
+      python -c "import calfkit_mesh; calfkit_mesh.resolve_broker_bin()" >/dev/null 2>&1; then
+    log "broker binary ready (calfkit-mesh)"
+  else
+    warn "could not pre-extract the Tansu broker binary; 'disco broker' will retry on first use (check: disco doctor)"
+  fi
 }
 
 # Build versions/<sha> in place (idempotent). Sets INSTALLED_DEST.
@@ -424,21 +374,6 @@ if [ "${1:-}" = "self" ]; then
   exec "$H/shims/disco-self" "$@"
 fi
 
-# `disco broker` runs the bundled native Tansu broker (a standalone Rust
-# binary, NOT a uv console script, so it short-circuits before the uv passthrough
-# below). Defaults are supplied via env so an operator's env or passthrough CLI
-# args still override them: ephemeral memory storage, advertised on
-# localhost:9092. Run it, then point the runners at CALF_HOST_URL=localhost:9092.
-if [ "${1:-}" = "broker" ]; then
-  shift
-  TANSU="$H/bin/tansu"
-  [ -x "$TANSU" ] || { echo "disco: native tansu broker not installed at $TANSU; re-run the installer, or use the Docker broker (docker compose up tansu)" >&2; exit 1; }
-  exec env \
-    STORAGE_ENGINE="${STORAGE_ENGINE:-memory://tansu/}" \
-    ADVERTISED_LISTENER_URL="${ADVERTISED_LISTENER_URL:-tcp://localhost:9092}" \
-    "$TANSU" broker "$@"
-fi
-
 usage() {
   cat <<'USAGE'
 usage:
@@ -483,6 +418,16 @@ if [ ! -x "$UV" ]; then
 fi
 { [ -n "$UV" ] && [ -x "$UV" ]; } || { echo "disco: uv not found; re-run the installer" >&2; exit 1; }
 [ -e "$H/current" ] || { echo "disco: no active install at $H/current; re-run the installer" >&2; exit 1; }
+
+# `disco broker` runs the calfcord-broker console script in the pinned venv,
+# which resolves the calfkit-mesh-bundled Tansu binary and runs it with calfcord
+# defaults (ephemeral memory storage on localhost:9092). Deliberately NOT via
+# --env-file: like the native binary it replaced, the broker does not read
+# config/.env — its config comes from the process env and passthrough args only.
+if [ "${1:-}" = "broker" ]; then
+  shift
+  exec "$UV" run --frozen --no-sync --project "$H/current" -- calfcord-broker "$@"
+fi
 
 ENVF="$H/config/.env"
 
@@ -746,12 +691,12 @@ main() {
   log "installing Agent Disco from $REPO @ $REF"
   mkdir -p "$CALFCORD_HOME" "$VERSIONS_DIR"
   ensure_uv
-  ensure_tansu
   ensure_process_compose
   local sha
   sha="$(resolve_sha "$REF")"
   log "resolved $REF -> ${sha:0:12}"
   install_version "$sha"
+  warm_broker_cache "$INSTALLED_DEST"
   seed_config "$INSTALLED_DEST"
   seed_agents "$INSTALLED_DEST"
   activate_version "$INSTALLED_DEST"
@@ -764,11 +709,7 @@ main() {
   fi
   log "  version:  disco self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: disco self set-broker <url>)"
-  if [ "$TANSU_OK" -eq 1 ]; then
-    log "  broker:   disco broker   (native Tansu, ephemeral, localhost:9092)"
-  else
-    log "  broker:   native broker unavailable — use Docker (docker compose up tansu) or a remote CALF_HOST_URL"
-  fi
+  log "  broker:   disco broker   (Tansu via calfkit-mesh, ephemeral memory, localhost:9092)"
   if [ "$PROCESS_COMPOSE_OK" -eq 1 ]; then
     log "  supervisor: process-compose $PROCESS_COMPOSE_VERSION installed"
   else

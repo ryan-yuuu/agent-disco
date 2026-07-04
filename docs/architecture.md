@@ -147,9 +147,10 @@ unified or per-component logs.
 
 On a single host the **substrate** (broker + bridge) is managed by
 **[Process Compose](https://f1bonacc1.github.io/process-compose)**, a
-cross-platform single-binary supervisor that Agent Disco bootstraps the same way it
-bootstraps the Tansu broker (a pinned binary under `$CALFCORD_HOME/bin`, kept out
-of the agent Python path). Its configuration is **derived state**: Agent Disco
+cross-platform single-binary supervisor the installer downloads to a pinned
+binary under `$CALFCORD_HOME/bin`, kept out of the agent Python path. (The Tansu
+broker, by contrast, ships as the `calfkit-mesh` dependency inside the locked
+environment.) Its configuration is **derived state**: Agent Disco
 generates a **substrate-only** `$CALFCORD_HOME/state/process-compose.yaml` (broker
 + bridge) from your config — you never hand-edit it — and the CLI verbs are a thin
 veneer over the supervisor's REST API. Process Compose absorbs the substrate

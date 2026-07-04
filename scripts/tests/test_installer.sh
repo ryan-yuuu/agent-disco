@@ -141,31 +141,21 @@ for tok in "disco start" "disco stop" "disco status" \
     && pass "usage lists '$tok'" || fail "usage missing '$tok': $help"
 done
 
-# `disco broker` execs the bundled native tansu binary directly (NOT via uv),
-# supplying ephemeral-storage + localhost:9092 defaults via env and passing
-# extra args through. Stub the binary so this stays network-free.
-printf '#!/usr/bin/env bash\necho "TANSU $*"\necho "SE=$STORAGE_ENGINE"\necho "AL=$ADVERTISED_LISTENER_URL"\n' > "$TD/bin/tansu"; chmod +x "$TD/bin/tansu"
+# `disco broker` runs the calfcord-broker console script inside the pinned venv
+# (which resolves the calfkit-mesh-bundled tansu binary) and passes extra args
+# through. It is deliberately NOT routed through --env-file: like the native
+# binary it replaced, the broker does not read config/.env (its storage/listener
+# defaults live in the calfcord-broker launcher, unit-tested separately).
 out="$("$B" "$C" broker --cluster-id demo 2>&1)"
-{ printf '%s' "$out" | grep -Fq "TANSU broker --cluster-id demo" \
-  && printf '%s' "$out" | grep -Fq "SE=memory://tansu/" \
-  && printf '%s' "$out" | grep -Fq "AL=tcp://localhost:9092"; } \
-  && pass "broker verb: env defaults + passthrough" || fail "broker verb: $out"
-# operator env overrides the advertised-listener default
-out="$(ADVERTISED_LISTENER_URL=tcp://0.0.0.0:9092 "$B" "$C" broker 2>&1)"
-printf '%s' "$out" | grep -Fq "AL=tcp://0.0.0.0:9092" \
-  && pass "broker verb: env override wins" || fail "broker override: $out"
-# missing binary -> branded error + non-zero exit
-rm -f "$TD/bin/tansu"
-out="$("$B" "$C" broker 2>&1)"; rc=$?
-{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "native tansu broker not installed"; } \
-  && pass "broker verb: missing binary error" || fail "broker missing (rc=$rc): $out"
-
-# ensure_tansu degrades (no die, TANSU_OK stays 0) on an unsupported platform.
-printf '#!/usr/bin/env bash\n[ "$1" = -s ] && echo Plan9 || echo sparc\n' > "$SB/uname"; chmod +x "$SB/uname"
-out="$(PATH="$SB:$PATH" CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; ensure_tansu; echo TANSU_OK=\$TANSU_OK" 2>&1)"; rc=$?
-rm -f "$SB/uname"
-{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "TANSU_OK=0"; } \
-  && pass "ensure_tansu: unsupported platform degrades" || fail "ensure_tansu degrade (rc=$rc): $out"
+printf '%s' "$out" | grep -Fq \
+  "STUB_UV run --frozen --no-sync --project $TD/current -- calfcord-broker --cluster-id demo" \
+  && pass "broker verb: dispatch to calfcord-broker + passthrough" || fail "broker verb: $out"
+# the broker arm must NOT load config/.env (no --env-file), unlike calfcord-cli verbs
+if printf '%s' "$out" | grep -Fq -- "--env-file"; then
+  fail "broker verb: must not use --env-file: $out"
+else
+  pass "broker verb: no --env-file (broker ignores config/.env)"
+fi
 
 # ensure_process_compose has the same best-effort contract: an unsupported
 # platform WARNS and returns 0 (no die), leaving PROCESS_COMPOSE_OK=0 so the
@@ -175,6 +165,20 @@ out="$(PATH="$SB:$PATH" CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; ensure_proce
 rm -f "$SB/uname"
 { [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "PC_OK=0"; } \
   && pass "ensure_process_compose: unsupported platform degrades" || fail "ensure_process_compose degrade (rc=$rc): $out"
+
+# warm_broker_cache pre-extracts the calfkit-mesh broker binary best-effort. It
+# runs under `set -Eeuo pipefail` + the ERR trap, so its load-bearing property is
+# that a failed extraction MUST NOT abort the install — it warns and returns 0.
+# (Own uv stubs passed via UV= so the shared STUB_UV is untouched.)
+printf '#!/usr/bin/env bash\nexit 0\n' > "$SB/uv-ok"; chmod +x "$SB/uv-ok"
+out="$(CALFCORD_VERBOSE=1 CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; UV='$SB/uv-ok'; warm_broker_cache '$TD/versions/$Bsha'; echo RC=\$?" 2>&1)"
+{ printf '%s' "$out" | grep -q "RC=0" && printf '%s' "$out" | grep -q "broker binary ready"; } \
+  && pass "warm_broker_cache: success logs readiness" || fail "warm_broker_cache success: $out"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$SB/uv-fail"; chmod +x "$SB/uv-fail"
+out="$(CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; UV='$SB/uv-fail'; warm_broker_cache '$TD/versions/$Bsha'; echo RC=\$?" 2>&1)"
+{ printf '%s' "$out" | grep -q "RC=0" && printf '%s' "$out" | grep -q "could not pre-extract"; } \
+  && pass "warm_broker_cache: failure degrades without aborting install" || fail "warm_broker_cache failure: $out"
+rm -f "$SB/uv-ok" "$SB/uv-fail"
 
 # set-broker: single replaced line, other keys preserved, mode 600
 "$B" "$CS" set-broker kafka-b:9092 >/dev/null 2>&1

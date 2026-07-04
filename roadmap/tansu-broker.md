@@ -79,6 +79,13 @@ on startup. **Stage 1 is complete and has shipped on `main`.**
 
 ### Migration plan (executed)
 
+> **Superseded (2026-07-03):** the bespoke `ensure_tansu` bash download below was
+> later replaced by the [`calfkit-mesh`](https://github.com/calf-ai/calfkit-mesh)
+> wheel dependency, which bundles a **memory-only** Tansu binary — see
+> [`../docs/design/tansu-via-calfkit-mesh.md`](../docs/design/tansu-via-calfkit-mesh.md).
+> `disco broker` now runs the `calfcord-broker` console script (which resolves the
+> bundled binary) rather than a hand-downloaded `~/.calfcord/bin/tansu`.
+
 1. **Native bootstrap + `calfcord broker`.** Added an `ensure_tansu` step to `scripts/install.sh`
    mirroring the existing `ensure_uv` (OS/arch detect, download the release binary to
    `~/.calfcord/bin/tansu`, strip the macOS quarantine attribute, verify). Added a `broker` verb to the

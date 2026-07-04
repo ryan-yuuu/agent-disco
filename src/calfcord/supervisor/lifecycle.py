@@ -218,8 +218,8 @@ def resolve_pc_binary() -> str:
 
     Precedence (design §12.4): an explicit ``$CALFCORD_PROCESS_COMPOSE_BIN`` (dev
     override / packaging) → the install's ``$CALFCORD_HOME/bin/process-compose``
-    (the ``ensure_process_compose`` bootstrap target, mirroring ``ensure_tansu``)
-    → a ``process-compose`` on ``PATH``. Each candidate must be an existing,
+    (the ``ensure_process_compose`` bootstrap target) → a ``process-compose`` on
+    ``PATH``. Each candidate must be an existing,
     executable file; a stale env var pointing at nothing falls through rather than
     masking a working PATH binary.
     """
