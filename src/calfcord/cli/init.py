@@ -568,7 +568,7 @@ def _pick_guild(prompter: Prompter, guilds: list[Guild], *, default: str | None)
         # name it so the operator still sees which server is in play; that echo is
         # the only thing a single-option pick-list would have added.
         only = guilds[0]
-        print(f"  Using the only server the bot is in: {only.name}.")
+        print(f"  using the only server the bot is in: {only.name}.")
         return only.id
     choices = [Choice(g.id, f"{g.name}{' (owner)' if g.owner else ''}") for g in guilds]
     return prompter.select(

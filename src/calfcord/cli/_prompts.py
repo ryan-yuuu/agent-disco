@@ -120,7 +120,14 @@ class InquirerPrompter:
         # press-Enter gate needs no prompt_toolkit ``Application.run()`` (→ its own
         # ``asyncio.run()``), so it cannot raise "asyncio.run() cannot be called from
         # a running event loop" the way ``confirm`` could. The typed line is discarded.
-        input(message)
+        try:
+            input(message)
+        except EOFError:
+            # No stdin to read (Ctrl-D, or a closed / piped non-TTY): treat the gate
+            # as acknowledged and continue. This is a discarded-answer pause, and the
+            # finish flow must never crash *after* the workspace is already up — the
+            # same never-crash-once-live contract ``_await_presence`` upholds.
+            print()
 
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
         from InquirerPy import inquirer
