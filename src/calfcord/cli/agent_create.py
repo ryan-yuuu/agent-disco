@@ -507,11 +507,11 @@ async def _start_now(
         detected = False
         watch_error = exc
     if detected:
-        print(f"{name} is online — say @{name} hello in Discord")
+        print(f"{name} is online — say !{name} hello in Discord")
     else:
         cause = f" (presence watch failed: {watch_error})" if watch_error is not None else ""
         print(
-            f"  {name} is starting — try `@{name} hello` in Discord. "
+            f"  {name} is starting — try `!{name} hello` in Discord. "
             f"If nothing replies, run `disco doctor`.{cause}"
         )
     return 0

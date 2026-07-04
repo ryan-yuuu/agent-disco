@@ -1,7 +1,7 @@
-"""The bridge's per-``@mention`` orchestration (spec §5.2).
+"""The bridge's per-``!mention`` orchestration (spec §5.2).
 
 Replaces the old publish-to-Kafka → outbox-consumer round trip with the calfkit
-caller surface. For each ``@mention`` the handler:
+caller surface. For each ``!mention`` the handler:
 
 1. resolves the target against the live mesh roster (R-A2 fail-fast);
 2. starts the agent by name on the caller surface (``client.agent(name).start``);
@@ -25,6 +25,7 @@ import discord
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import NodeFaultError
 
+from calfcord.agents.identifier import MENTION_PREFIX
 from calfcord.agents.thinking import build_model_settings_union
 from calfcord.bridge.a2a_dispatch import A2ACall, A2ADispatcher, A2AProjection
 from calfcord.bridge.persona_resolve import persona_for
@@ -47,7 +48,7 @@ _REPLY_DROPPED = (
 
 
 def _none_online_text(mention_ids: tuple[str, ...]) -> str:
-    names = ", ".join(f"`@{m}`" for m in mention_ids)
+    names = ", ".join(f"`{MENTION_PREFIX}{m}`" for m in mention_ids)
     return f"No agent matching {names} is online right now."
 
 
@@ -85,10 +86,10 @@ def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> str | N
 
 @dataclass(frozen=True)
 class MentionRequest:
-    """A normalized inbound ``@mention`` — what the Discord gateway hands the
+    """A normalized inbound ``!mention`` — what the Discord gateway hands the
     handler.
 
-    ``mention_ids`` are the parsed ``@<id>`` tokens in order; ``wire`` is the typed
+    ``mention_ids`` are the parsed ``!<id>`` tokens in order; ``wire`` is the typed
     :class:`WireMessage` the normalizer already produced (validated once at the
     gateway boundary) — the handler serializes it into ``deps["discord"]`` for the
     agent, and the reply poster reads its typed ``channel_id``/``thread_id`` without
@@ -161,7 +162,7 @@ class ReplyPoster(Protocol):
 
 
 class MentionHandler:
-    """Orchestrates one ``@mention`` end to end on the caller surface."""
+    """Orchestrates one ``!mention`` end to end on the caller surface."""
 
     def __init__(
         self,
@@ -201,7 +202,7 @@ class MentionHandler:
             if req.mention_ids:
                 # Mentioned an agent that is not online right now.
                 await self._reply.post_notice(req, _none_online_text(req.mention_ids))
-            # else: no @mention at all → ambient → unanswered (C2): do nothing.
+            # else: no !mention at all → ambient → unanswered (C2): do nothing.
             return
 
         history = await self._history.message_history(req)

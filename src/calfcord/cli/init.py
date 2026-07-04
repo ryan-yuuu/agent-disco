@@ -24,7 +24,7 @@ reusable:
 * **Live finish** — :func:`_run_finish` composes
   :func:`calfcord.supervisor.lifecycle.start` (substrate, health-gated) →
   :func:`calfcord.supervisor.roster.agent_start` (the agent clocks in) → an
-  in-flow ``@<agent> hello`` prompt → online-presence detection on the mesh
+  in-flow ``!<agent> hello`` prompt → online-presence detection on the mesh
   (:func:`_wait_for_agent_online`, §4.6 / §12.6). On a dev run (no install) or a
   missing supervisor binary it DEGRADES to honest manual next-steps rather than
   orchestrating something it cannot.
@@ -687,7 +687,7 @@ def _run_finish(
     instead of orchestrating something it cannot (no green light that lies).
 
     On the native happy path it runs three correctly-layered phases:
-    :func:`_bring_online` (async) → an in-flow ``@<name> hello`` press-Enter pause
+    :func:`_bring_online` (async) → an in-flow ``!<name> hello`` press-Enter pause
     (synchronous, no event loop running) → :func:`_await_presence` (async), mapping
     each failure to its specific hint:
 
@@ -759,12 +759,12 @@ def _run_finish(
     if rc != 0:
         return rc
 
-    # Phase 2 — the human nudge (§12.6: prompt the @mention INSIDE init). A
+    # Phase 2 — the human nudge (§12.6: prompt the !mention INSIDE init). A
     # press-Enter pause, not a Y/n confirm: there is no choice to record, only an
     # acknowledgment that the operator has sent the hello. Runs synchronously with NO
     # event loop of ours running (between the two ``asyncio.run`` phases), so the
     # blocking read can neither stall nor crash a loop.
-    prompter.pause(f"\nSay  @{name} hello  in Discord, then press Enter to continue…")
+    prompter.pause(f"\nSay  !{name} hello  in Discord, then press Enter to continue…")
     print(f"Waiting for {name} to come online…")
 
     # Phase 3 — confirm presence (async, level-triggered read). The org is already
@@ -866,7 +866,7 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
     "add a teammate" signpost (and where to learn more) shows on either. ``postable``
     is the Discord-step postability preflight verdict. A ``False`` (the bot can post in
     no channel) is a proven, fixable problem handled INDEPENDENTLY of detection: it
-    always surfaces the permission remedy — never the "try `@name hello`" errand that
+    always surfaces the permission remedy — never the "try `!name hello`" errand that
     can't get a reply — whether or not the agent was also seen online (§12.6, no green
     light that lies). ``None`` (unknown) is not asserted as a failure, so a detected
     agent still celebrates. ``tools_ok`` is the advisory tools-host outcome: ``False``
@@ -876,13 +876,13 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
     if postable is False:
         # The preflight PROVED the bot can post in no channel — a known, fixable problem
         # independent of detection. Lead with the remedy rather than the generic "try
-        # `@name hello`" (it can't get a reply) or a bare `disco doctor` (it won't
+        # `!name hello`" (it can't get a reply) or a bare `disco doctor` (it won't
         # diagnose Discord permissions) (§12.6). Whether or not it also came online.
         if detected:
             print(f"{name} is online, but it can't post in any Discord channel yet.")
         else:
             print(f"{name} can't post in any Discord channel yet — and it isn't online in Discord either.")
-        print(f"  Grant it View Channel + Send Messages + Manage Webhooks, then say `@{name} hello`.")
+        print(f"  Grant it View Channel + Send Messages + Manage Webhooks, then say `!{name} hello`.")
         if not detected:
             print("  If it stays quiet after that, run `disco doctor`.")
     elif not tools_ok:
@@ -901,7 +901,7 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
     else:
         # Bounded fallback (§12.6): never promise more than we detected.
         print(
-            f"  your organization is live — try `@{name} hello` in Discord. If nothing replies, run `disco doctor`."
+            f"  your organization is live — try `!{name} hello` in Discord. If nothing replies, run `disco doctor`."
         )
     # The next step nobody teaches: a one-agent org is step one, not the finish line.
     print()
@@ -927,7 +927,7 @@ def _print_manual_finish(name: str) -> None:
     print(f"Set up agent '{name}'. To bring it online:")
     print("    disco start")
     print(f"    disco agent start {name}")
-    print(f"Then in Discord, say: @{name} hello")
+    print(f"Then in Discord, say: !{name} hello")
     print("Add more teammates any time: disco agent create <name>")
     # Agents do not auto-start with the substrate, so the reboot steer names both.
     print(f"({_REBOOT_NOTE} Re-run `disco start`, then `disco agent start --all`, after a reboot.)")

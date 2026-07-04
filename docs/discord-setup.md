@@ -61,10 +61,10 @@ your agent online, and waits until the agent shows up online. When it finishes,
 confirm in any channel the bot can see:
 
 ```
-@assistant hello
+!assistant hello
 ```
 
-A reply appears under the agent's persona. You're connected. (`@assistant` is the
+A reply appears under the agent's persona. You're connected. (`!assistant` is the
 default starter agent — use whatever name you gave yours in `init`.)
 
 ---

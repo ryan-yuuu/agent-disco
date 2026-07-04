@@ -50,7 +50,7 @@ before exposing it.
 **`init` ends live.** After config it opens your workspace, brings your agent
 online, and watches Discord until it sees the first reply — so the session
 finishes with a working agent, not a "now run these commands" wall. Saying
-`@assistant hello` afterward is a confirmation, not the moment of truth.
+`!assistant hello` afterward is a confirmation, not the moment of truth.
 
 It's idempotent — re-run it any time to change a setting (an existing agent of
 the same name is updated in place, body preserved), and a crash or Ctrl-C
@@ -172,8 +172,8 @@ cheap, glanceable view; `doctor` is the thorough config + daemon check.
 
 ### Talking to an agent
 
-An agent answers when you `@mention` it (`@assistant hello`); a message with no
-`@mention` goes unanswered by design — there is no ambient router. A mentioned
+An agent answers when you mention it (`!assistant hello`); a message with no
+mention goes unanswered by design — there is no ambient router. A mentioned
 agent can also consult or hand off to a peer, which the bridge projects to an
 audit channel (see [`a2a-threads.md`](a2a-threads.md)).
 

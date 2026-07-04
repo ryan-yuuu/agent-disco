@@ -127,7 +127,7 @@ class TestBuildModelSettingsUnion:
     def test_unknown_tier_degrades_to_empty_dict(self, bad: str, caplog: pytest.LogCaptureFixture) -> None:
         """A stale/garbage tier (this reads a raw ``str`` straight off the SQLite
         overrides map on the per-turn hot path) must degrade to ``{}`` — NOT raise.
-        A raise here would dark-out the agent on EVERY @mention until the DB is
+        A raise here would dark-out the agent on EVERY !mention until the DB is
         hand-edited. Warns so the bad tier is diagnosable."""
         with caplog.at_level("WARNING"):
             assert build_model_settings_union(bad) == {}  # type: ignore[arg-type]

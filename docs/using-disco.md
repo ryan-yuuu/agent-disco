@@ -41,7 +41,7 @@ place — picking up a new build or config, and clearing a bridge that has stopp
 disturbing the broker or your running agents. If the bridge doesn't come back healthy, the command says so
 and points you at `disco logs bridge` rather than reporting a false success.
 
-You can also restart just the bridge on demand — handy if it stops responding to `@mentions` but everything
+You can also restart just the bridge on demand — handy if it stops responding to mentions but everything
 else is fine:
 
 ```bash
@@ -154,8 +154,8 @@ disco agent delete scribe        # --yes to skip the confirmation
 
 ## How agents get invoked
 
-Agents reply when you **`@mention`** them (`@scribe summarize this`). There is no
-ambient auto-answering — a message with no `@mention` goes unanswered by design,
+Agents reply when you **mention** them (`!scribe summarize this`). There is no
+ambient auto-answering — a message with no mention goes unanswered by design,
 and there is no router to configure. A mentioned agent can also consult or hand
 off to a peer; that agent-to-agent traffic is projected to an audit channel (see
 [a2a-threads.md](a2a-threads.md)).

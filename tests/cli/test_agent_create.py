@@ -676,7 +676,7 @@ def test_run_start_now_yes_workspace_not_running_opens_and_starts(
     assert finish.agent_kwargs[0]["name"] == "scribe"
     assert finish.tools_kwargs[0]["name"] == "tools"
     out = capsys.readouterr().out
-    assert "scribe is online — say @scribe hello in Discord" in out
+    assert "scribe is online — say !scribe hello in Discord" in out
 
 
 def test_run_start_now_running_does_not_restart_tools_host(

@@ -15,6 +15,7 @@ from calfcord.agents.identifier import (
     AGENT_ID_CHARSET,
     AGENT_ID_PATTERN,
     MCP_SLOT_PREFIX,
+    MENTION_PREFIX,
     RESERVED_AGENT_IDS,
     reserved_agent_id_error,
 )
@@ -38,6 +39,7 @@ class TestAgentIdPattern:
             "agent id",  # space not allowed
             "agent!",  # special char
             "@scribe",  # @ not part of charset
+            "!scribe",  # the mention prefix is not part of the charset
         ],
     )
     def test_invalid_ids_reject(self, value: str) -> None:
@@ -49,6 +51,13 @@ class TestAgentIdCharset:
         # The normalizer builds its mention regex from this constant.
         # Pinning it guards against silent drift in the leaf module.
         assert AGENT_ID_CHARSET == "a-z0-9_-"
+
+    def test_mention_prefix_is_bang_and_outside_the_charset(self) -> None:
+        # The bridge scanner triggers on this exact character. Pinning it keeps the
+        # trigger and the docs in lockstep, and asserts the prefix can never be a
+        # legal agent-id char (else the scanner couldn't split prefix from id).
+        assert MENTION_PREFIX == "!"
+        assert AGENT_ID_PATTERN.fullmatch(MENTION_PREFIX) is None
 
 
 class TestReservedAgentIds:

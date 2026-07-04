@@ -471,7 +471,7 @@ migration it is pure compute on the Kafka wire — it opens no Discord
 connection and no longer boots an `A2AChannelResolver` (the A2A audit
 channel is bridge-hosted now; see `src/calfcord/tools/runner.py`).
 
-**Verify.** In Discord: `` @scribe please run `pwd && uname -a` via terminal ``.
+**Verify.** In Discord: `` !scribe please run `pwd && uname -a` via terminal ``.
 The reply should contain builder's hostname and `/workspace` — proving
 the call landed on the remote box. If you see laptop's hostname, you
 have a duplicate `terminal` consumer; see § 10.
