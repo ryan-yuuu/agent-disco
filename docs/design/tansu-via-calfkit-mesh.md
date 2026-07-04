@@ -138,6 +138,13 @@ genuinely new.)
 New `src/calfcord/broker/__init__.py` + `src/calfcord/broker/runner.py` (named
 `runner.py` for consistency with `tools/runner.py`, `mcp/runner.py`):
 
+> **As-built note:** the sketch below is the design intent; the shipped
+> `runner.py` is the source of truth. It factored the env defaults into a
+> `_default_env` helper + module constants, references `calfkit_mesh.ENV_VAR`
+> (not a hardcoded `"CALF_TANSU_BIN"`), and wraps `os.execv` in the same branded
+> error handling as `resolve_broker_bin` (a resolved-but-unrunnable binary exits
+> cleanly instead of tracebacking under `restart: always`).
+
 ```python
 import os
 import sys

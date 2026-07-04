@@ -170,15 +170,23 @@ rm -f "$SB/uname"
 # runs under `set -Eeuo pipefail` + the ERR trap, so its load-bearing property is
 # that a failed extraction MUST NOT abort the install — it warns and returns 0.
 # (Own uv stubs passed via UV= so the shared STUB_UV is untouched.)
-printf '#!/usr/bin/env bash\nexit 0\n' > "$SB/uv-ok"; chmod +x "$SB/uv-ok"
+# success: the stub records its argv to a file so we assert the ACTUAL extraction
+# command (right venv + the resolve_broker_bin call), not just an exit code — a
+# mis-built invocation would still exit 0 and silently no-op the cache-warm.
+printf '#!/usr/bin/env bash\necho "$*" > "%s"\nexit 0\n' "$SB/uv-args" > "$SB/uv-ok"; chmod +x "$SB/uv-ok"
 out="$(CALFCORD_VERBOSE=1 CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; UV='$SB/uv-ok'; warm_broker_cache '$TD/versions/$Bsha'; echo RC=\$?" 2>&1)"
-{ printf '%s' "$out" | grep -q "RC=0" && printf '%s' "$out" | grep -q "broker binary ready"; } \
-  && pass "warm_broker_cache: success logs readiness" || fail "warm_broker_cache success: $out"
+args="$(cat "$SB/uv-args" 2>/dev/null)"
+{ printf '%s' "$out" | grep -q "RC=0" \
+  && printf '%s' "$out" | grep -q "broker binary ready" \
+  && printf '%s' "$args" | grep -Fq -- "run --frozen --no-sync --project $TD/versions/$Bsha -- python -c" \
+  && printf '%s' "$args" | grep -q "resolve_broker_bin"; } \
+  && pass "warm_broker_cache: success runs the extraction command + logs readiness" \
+  || fail "warm_broker_cache success: out=$out args=$args"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$SB/uv-fail"; chmod +x "$SB/uv-fail"
 out="$(CALFCORD_HOME="$TD" "$B" -c "source '$LIB'; UV='$SB/uv-fail'; warm_broker_cache '$TD/versions/$Bsha'; echo RC=\$?" 2>&1)"
 { printf '%s' "$out" | grep -q "RC=0" && printf '%s' "$out" | grep -q "could not pre-extract"; } \
   && pass "warm_broker_cache: failure degrades without aborting install" || fail "warm_broker_cache failure: $out"
-rm -f "$SB/uv-ok" "$SB/uv-fail"
+rm -f "$SB/uv-ok" "$SB/uv-fail" "$SB/uv-args"
 
 # set-broker: single replaced line, other keys preserved, mode 600
 "$B" "$CS" set-broker kafka-b:9092 >/dev/null 2>&1

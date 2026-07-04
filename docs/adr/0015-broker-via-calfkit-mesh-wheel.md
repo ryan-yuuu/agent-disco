@@ -21,8 +21,8 @@ into `uv.lock` — canonical and reproducible. It is a first-party calf-ai packa
 (same org as the `calfkit` SDK we already depend on) with **no runtime
 dependencies** (zero interaction with our `calfkit>=0.12.5` pin), and its wheels
 cover a **wider** surface than the old bash (macOS + Linux glibc **and musl**,
-x86_64/aarch64). The bundled Tansu version (`v0.6.0`) is byte-identical to what
-the bash installer pinned, so this is a pure mechanism swap, not a broker
+x86_64/aarch64). The bundled Tansu is the **same version** (`v0.6.0`) the bash
+installer pinned (a memory-only build of it), so this is a pure mechanism swap, not a broker
 upgrade.
 
 ## Considered options

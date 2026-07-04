@@ -160,12 +160,13 @@ def test_broker_unreachable_fails(monkeypatch, tmp_path, capsys):
 def test_broker_binary_ok_shows_resolved_path(monkeypatch, tmp_path, capsys):
     """The broker-binary check reports the resolved calfkit-mesh path as ok."""
     env_path, agents_dir = _setup(monkeypatch, tmp_path)
-    monkeypatch.setattr(doctor, "resolve_broker_bin", lambda: "/opt/tansu", raising=False)
+    monkeypatch.setattr(doctor, "resolve_broker_bin", lambda: "/opt/tansu")
     rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
     out = capsys.readouterr().out
     assert rc == 0
     assert "broker binary" in out
     assert "/opt/tansu" in out
+    assert "⚠" not in out and "✗" not in out  # the check is ok, not warn/fail
 
 
 def test_broker_binary_unresolvable_warns_not_fails(monkeypatch, tmp_path, capsys):
@@ -179,12 +180,29 @@ def test_broker_binary_unresolvable_warns_not_fails(monkeypatch, tmp_path, capsy
     def _raise():
         raise TansuBinaryNotFound("no wheel for this platform")
 
-    monkeypatch.setattr(doctor, "resolve_broker_bin", _raise, raising=False)
+    monkeypatch.setattr(doctor, "resolve_broker_bin", _raise)
     rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
     out = capsys.readouterr().out
     assert rc == 0
     assert "⚠" in out
     assert "no wheel for this platform" in out
+
+
+def test_broker_binary_empty_message_names_the_type(monkeypatch, tmp_path, capsys):
+    """A dependency exception with no message still names a cause in the detail
+    line, rather than leaving a bare ``unavailable:``."""
+    from calfkit_mesh import TansuBinaryNotFound
+
+    env_path, agents_dir = _setup(monkeypatch, tmp_path)
+
+    def _raise():
+        raise TansuBinaryNotFound("")
+
+    monkeypatch.setattr(doctor, "resolve_broker_bin", _raise)
+    rc = doctor.run(env_path=env_path, agents_dir=agents_dir, client_factory=_factory(_resp_ok))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "TansuBinaryNotFound" in out
 
 
 @pytest.mark.parametrize(

@@ -160,7 +160,7 @@ def _check_broker_binary() -> Result:
     try:
         path = resolve_broker_bin()
     except (TansuBinaryNotFound, OSError) as exc:
-        return Result("broker binary", "warn", f"unavailable: {exc}")
+        return Result("broker binary", "warn", f"unavailable: {str(exc) or type(exc).__name__}")
     return Result("broker binary", "ok", path)
 
 
@@ -212,7 +212,7 @@ def _check_agents(agents_dir: Path) -> Result:
 
 # --------------------------------------------------------------------- runtime checks
 #
-# The five checks above are STATIC — they answer "will the processes boot?" from
+# The six checks above are STATIC — they answer "will the processes boot?" from
 # config alone, with no running daemon. When the workspace IS open (the substrate
 # started detached via ``disco start``) doctor adds a RUNTIME section that proves
 # the daemon is actually alive — the "green light that lies" the design (§12.1)
@@ -309,10 +309,13 @@ def run(
     When ``home`` is supplied (a native install) doctor additionally runs the
     RUNTIME section — daemon liveness plus a pointer to the native mesh roster view
     — but only if the daemon is actually up (a fresh bridge heartbeat exists); a
-    closed workspace prints a next-step hint and adds no findings. doctor stays
-    **read-only**: the runtime seams (``read_beat_fn`` / ``now``) are injected so
-    tests need no real beat file, and default in production to the heartbeat reader
-    and the system clock.
+    closed workspace prints a next-step hint and adds no findings. doctor is
+    **read-only** apart from one benign, idempotent side effect: the broker-binary
+    check calls ``resolve_broker_bin()``, which materializes the calfkit-mesh
+    binary into ``~/.calfkit/bin`` on first run (a deliberate cache-warm). The
+    runtime seams (``read_beat_fn`` / ``now``) are injected so tests need no real
+    beat file, and default in production to the heartbeat reader and the system
+    clock.
     """
     results = [
         _check_config(env_path),
