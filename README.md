@@ -25,11 +25,9 @@ Message your agent team and watch them work in real time. When an agent needs a 
 
 ### 🐮 Built on [calfkit](https://github.com/calf-ai/calfkit-sdk)
 
-Agent Disco is built on **[🐮 calfkit](https://github.com/calf-ai/calfkit-sdk)**, the SDK for highly connected, event-driven, scalable agents. Calfkit agents work on a shared **mesh**: they discover each other at runtime, message each other, and hand off work right out of the box.
+- **Agent Disco is built on [🐮 calfkit](https://github.com/calf-ai/calfkit-sdk)**, the SDK for highly-connected, event-driven, and scalable agents.
 
-**Want to build your own multi-agent system?** Start with the calfkit [quickstart](https://github.com/calf-ai/calfkit-sdk#quickstart) and [examples](https://github.com/calf-ai/calfkit-sdk/blob/main/examples/README.md).
-
-⭐ **[Star the calfkit SDK](https://github.com/calf-ai/calfkit-sdk)**
+- **Want to build your own multi-agent system?** Start with the calfkit [quickstart](https://github.com/calf-ai/calfkit-sdk#quickstart) and [examples](https://github.com/calf-ai/calfkit-sdk/blob/main/examples/README.md).
 
 ## A connected *team*, not just a chatbot
 
