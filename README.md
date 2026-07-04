@@ -33,6 +33,7 @@
 | src/calfcord/bridge/steps\_toggle.py          |       62 |        0 |        8 |        0 |    100% |           |
 | src/calfcord/bridge/transcripts.py            |      132 |        3 |       16 |        0 |     98% |   176-180 |
 | src/calfcord/bridge/wire.py                   |       40 |        0 |        6 |        0 |    100% |           |
+| src/calfcord/broker/runner.py                 |       30 |        1 |        6 |        1 |     94% |        80 |
 | src/calfcord/cli/\_agents.py                  |       85 |        5 |       14 |        1 |     94% |123-124, 163-165, 249-\>251 |
 | src/calfcord/cli/\_envfile.py                 |       55 |        2 |       32 |        2 |     95% |   75, 141 |
 | src/calfcord/cli/\_fields.py                  |       70 |        0 |       26 |        0 |    100% |           |
@@ -47,7 +48,7 @@
 | src/calfcord/cli/agent\_tools.py              |       89 |        9 |       26 |        1 |     91% |56, 139-144, 223-228 |
 | src/calfcord/cli/deploy.py                    |       86 |        1 |       30 |        2 |     97% |488-\>493, 497 |
 | src/calfcord/cli/discord\_discovery.py        |      193 |       16 |       50 |        7 |     91% |214-215, 239-241, 383, 387, 494-\>492, 519-520, 539, 546, 554-555, 563-565 |
-| src/calfcord/cli/doctor.py                    |      164 |        5 |       66 |        0 |     98% |    99-103 |
+| src/calfcord/cli/doctor.py                    |      171 |        5 |       66 |        0 |     98% |   101-105 |
 | src/calfcord/cli/explain.py                   |       17 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/cli/init.py                      |      281 |        0 |       66 |        1 |     99% |651-\>exit |
 | src/calfcord/cli/logs.py                      |       77 |        0 |       28 |        0 |    100% |           |
@@ -84,14 +85,14 @@
 | src/calfcord/supervisor/\_workspace.py        |      189 |        4 |       42 |        1 |     98% |189, 296-298 |
 | src/calfcord/supervisor/client.py             |       59 |        0 |        2 |        0 |    100% |           |
 | src/calfcord/supervisor/component.py          |       47 |        0 |       14 |        0 |    100% |           |
-| src/calfcord/supervisor/compose.py            |       66 |        0 |       14 |        2 |     98% |135-\>137, 219-\>221 |
+| src/calfcord/supervisor/compose.py            |       66 |        0 |       14 |        2 |     98% |148-\>150, 232-\>234 |
 | src/calfcord/supervisor/lifecycle.py          |      388 |        1 |      104 |        2 |     99% |231-\>236, 1141 |
 | src/calfcord/supervisor/mcp\_roster.py        |      140 |        3 |       52 |        2 |     97% |330-331, 335 |
 | src/calfcord/supervisor/procspawn.py          |      239 |       15 |       60 |        5 |     93% |302, 442-443, 524, 533-534, 540, 543, 562-563, 565, 661-662, 709-710 |
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7752** |  **527** | **2080** |  **101** | **93%** |           |
+| **TOTAL**                                     | **7789** |  **528** | **2086** |  **102** | **93%** |           |
 
 
 ## Setup coverage badge
