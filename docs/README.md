@@ -12,6 +12,7 @@
 | Understand how it works | [`docs/architecture.md`](./docs/architecture.md) (or run `disco explain topology`) |
 | See everything I can do, task by task | [`docs/using-disco.md`](./docs/using-disco.md) |
 | Configure every setting | [`docs/configuration.md`](./docs/configuration.md) |
+| Configure bridge behavior | [`docs/bridge-settings.md`](./docs/bridge-settings.md) |
 | Review security / threat model | [`docs/security.md`](./docs/security.md) |
 | Fix something that's broken | [`docs/troubleshooting.md`](./docs/troubleshooting.md) |
 
@@ -24,6 +25,7 @@
 - [`docs/mcp-tools.md`](./docs/mcp-tools.md) — give agents external tools via MCP servers.
 - [`docs/architecture.md`](./docs/architecture.md) — the substrate/roster model, the worker process types, deployment matrix, run modes.
 - [`docs/configuration.md`](./docs/configuration.md) — full environment-variable reference.
+- [`docs/bridge-settings.md`](./docs/bridge-settings.md) — configure bridge behavior in `settings.json`.
 - [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.
 - [`docs/codex-auth.md`](./docs/codex-auth.md) — use a ChatGPT Plus/Pro subscription via Codex.
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent messaging + handoff (native `message_agent`).

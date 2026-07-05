@@ -1,10 +1,14 @@
 # Configuration
 
-Every Agent Disco component — the substrate (broker + bridge) and the roster (agents,
-tools, and MCP servers) — is configured through environment variables, read from a
-`.env` file (loaded via `python-dotenv`). On a native install the `disco` shim
-reads `$CALFCORD_HOME/config/.env`; `disco init` writes most of this for you.
-This page is the complete reference, including variables `init` doesn't set.
+Most Agent Disco component configuration — the substrate (broker + bridge) and
+the roster (agents, tools, and MCP servers) — comes from environment variables,
+read from a `.env` file (loaded via `python-dotenv`). On a native install the
+`disco` shim reads `$CALFCORD_HOME/config/.env`; `disco init` writes most of
+this for you. Bridge behavior toggles live in `settings.json` instead; see
+[bridge-settings.md](./bridge-settings.md).
+
+This page is the complete reference for environment variables, including
+variables `init` doesn't set.
 
 To start from a template instead of the wizard, copy and fill it in:
 
@@ -73,6 +77,7 @@ Docker broker, whose image retains the libsql/postgres/S3 storage engines.
 |---|---|---|
 | `CALFKIT_AGENTS_DIR` | optional | Directory the **agent runner** (and the CLI) scan for agent `.md` files — the bridge does not read it. On a native install the `disco` shim defaults it to `~/.calfcord/agents` (so definitions survive `disco self update`); dev (`uv run`) and Docker keep the CWD-relative `agents/`. Override via shell env or `~/.calfcord/config/.env`. |
 | `DISCORD_TRANSCRIPT_DB_PATH` | optional | Bridge-local SQLite store (default `state/transcripts.sqlite3`). Holds the per-turn transcripts used for tool-call replay across turns **and** the persisted per-agent `/thinking-effort` overrides (the `agent_overrides` table), so an override survives a bridge restart. Read only by the bridge. |
+| `CALFCORD_SETTINGS` | optional | Path to the bridge `settings.json` file. Resolution is `CALFCORD_SETTINGS` → `$CALFCORD_HOME/config/settings.json` → `./settings.json` (dev fallback). See [bridge-settings.md](./bridge-settings.md). |
 | `CALFKIT_A2A_CHANNEL_NAME` | optional | Name of the unified A2A audit channel, **read by the bridge** (the A2A projection moved from the tools process to the bridge in the calfkit 0.12 migration). Code default `private-a2a-chats`; lazy-created on the first A2A projection. |
 | `CALFKIT_A2A_CHANNEL_CATEGORY` | optional | Discord category to group the A2A audit channel under, created lazily on first use. Read by the bridge. Edit the category's permission overwrites once to lock down audit visibility — the channel and its threads inherit them. Non-disruptive to enable on a running deployment. |
 | `CALFCORD_WORKSPACE_DIR` | optional | Host path the terminal/filesystem/search tools resolve against. The tools runner resolves it once at boot and exports it as `TERMINAL_CWD`, the working directory the vendored hermes terminal starts each agent's shell session in. Native install: the `disco` shim defaults it to **the directory the workspace (`disco start`) was launched from** (`$PWD`, the Claude-Code model — not a hidden dir). Bare `uv run` keeps the CWD-relative `<cwd>/state/workspace/`. Docker Compose: set to `/workspace` (bind-mounted from the dedicated `./workspace` scratch dir, **not** the project root). All agents share this dir — see [`security.md`](./security.md) § 3.3. |
@@ -128,6 +133,11 @@ Everything the running workspace writes lives under `$CALFCORD_HOME/state/`:
 | `$CALFCORD_HOME/state/transcripts.sqlite3` | Bridge-local SQLite store: per-turn transcripts (tool-call replay) and persisted `/thinking-effort` overrides. See `DISCORD_TRANSCRIPT_DB_PATH` above. |
 | `$CALFCORD_HOME/state/process-compose.yaml` | The generated supervisor project — derived state, regenerated on every `start`. Don't edit it. |
 
+The bridge behavior settings file lives at
+`$CALFCORD_HOME/config/settings.json` on native installs. It is seeded by the
+installer and is not overwritten on update. See
+[bridge-settings.md](./bridge-settings.md) for the JSON shape and restart steps.
+
 ## Applying changes
 
 `.env` is read **once, at process boot** — each component (every agent, the tools
@@ -145,7 +155,7 @@ Which restart depends on which process reads the value you changed:
 | One agent's key, model, or provider (`agent set`/`edit`) | `disco agent restart <name>` |
 | A key several agents share (e.g. `ANTHROPIC_API_KEY`, `CALFKIT_AGENT_DEFAULT_MODEL`) | `disco agent restart --all` (every agent on this host) |
 | Anything the tools host reads | `disco tools restart` |
-| A bridge value (`CALFKIT_A2A_CHANNEL_*`, `DISCORD_TRANSCRIPT_DB_PATH`, the Discord token) | `disco stop && disco start` (the bridge is part of the substrate) |
+| A bridge value (`CALFKIT_A2A_CHANNEL_*`, `CALFCORD_SETTINGS`, `DISCORD_TRANSCRIPT_DB_PATH`, the Discord token) | `disco stop && disco start` (the bridge is part of the substrate) |
 | A workspace-wide value the whole roster reads (e.g. `CALF_HOST_URL`) | `disco stop && disco start`, then bring the roster back up on the new value: `disco agent start --all` plus `disco tools start` (and `disco mcp start --all`) for any of those you run |
 
 > **Boot-time gotcha for workspace-wide values.** `disco stop` tears the

@@ -41,11 +41,13 @@ disco init
   — no numeric IDs to copy. See [`discord-setup.md`](discord-setup.md) for the
   bot-token prerequisite.
 
-It writes `~/.calfcord/config/.env` plus the agent at
-`~/.calfcord/agents/<name>.md` (provider, model, and tools baked in). Because the
-tools step defaults to *every* tool, a freshly-configured agent has terminal,
-file-write, code-execution, and web reach — see [`security.md`](security.md#33-tools-native-broker--others-in-docker)
-before exposing it.
+It writes `~/.calfcord/config/.env`, seeds
+`~/.calfcord/config/settings.json`, and writes the agent at
+`~/.calfcord/agents/<name>.md` (provider, model, and tools baked in). Because
+the tools step defaults to *every* tool, a freshly-configured agent has terminal,
+file-write, code-execution, and web reach — see
+[`security.md`](security.md#33-tools-native-broker--others-in-docker) before
+exposing it.
 
 **`init` ends live.** After config it opens your workspace, brings your agent
 online, and watches Discord until it sees the first reply — so the session
@@ -55,12 +57,15 @@ finishes with a working agent, not a "now run these commands" wall. Saying
 It's idempotent — re-run it any time to change a setting (an existing agent of
 the same name is updated in place, body preserved), and a crash or Ctrl-C
 resumes where you left off instead of restarting. Prefer to edit by hand? Open
-`~/.calfcord/config/.env` directly (it's commented; the full list is in
-[`configuration.md`](configuration.md)):
+`~/.calfcord/config/.env` directly for environment variables, or
+`~/.calfcord/config/settings.json` for bridge behavior such as sticky replies:
 
 ```bash
 $EDITOR ~/.calfcord/config/.env
 ```
+
+See [`configuration.md`](configuration.md) for environment variables and
+[`bridge-settings.md`](bridge-settings.md) for `settings.json`.
 
 ## How the workspace runs
 
