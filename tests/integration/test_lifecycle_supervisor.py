@@ -23,7 +23,7 @@ fast-fail precondition, is the one exception).
 Gated behind ``CALF_TEST_PC`` with ``process-compose`` on PATH (mirrors
 ``tests/integration/test_pc_client.py``); skips cleanly otherwise::
 
-    CALF_TEST_PC=1 PATH="$HOME/.calfcord/bin:$PATH" \
+    CALF_TEST_PC=1 PATH="$HOME/.agent-disco/bin:$PATH" \
         uv run pytest tests/integration/test_lifecycle_supervisor.py
 """
 

@@ -16,11 +16,11 @@ from pathlib import Path
 
 
 def calfcord_home() -> Path:
-    """The install root: ``$CALFCORD_HOME``, else the shim's ``~/.calfcord`` default.
+    """The install root: ``$CALFCORD_HOME``, else the shim's ``~/.agent-disco`` default.
 
     An empty ``CALFCORD_HOME=`` counts as unset (so a stray assignment doesn't
     root paths at ``/``), matching the guard the CLI/mcp/bridge resolvers use.
     Resolved at call time, not import, so the env is read where the path is used.
     """
     home = os.environ.get("CALFCORD_HOME")
-    return Path(home) if home else Path.home() / ".calfcord"
+    return Path(home) if home else Path.home() / ".agent-disco"

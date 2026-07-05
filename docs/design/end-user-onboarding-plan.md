@@ -18,7 +18,7 @@
 The README quick start today is the **Docker Compose** path: it assumes a repo
 clone (`cp .env.example .env`, drop `agents/scribe.md` into the tree,
 `docker compose up --build`). That is a developer workflow, not an end-user one.
-The native installer (`curl … | bash` → `~/.calfcord/`) is the genuinely
+The native installer (`curl … | bash` → `~/.agent-disco/`) is the genuinely
 end-user-shaped path, but it had a gap: nothing gave the install a stable home
 for agent definitions, and the "add an agent" / "pick a provider" steps were
 undocumented.
@@ -26,7 +26,7 @@ undocumented.
 This plan reorients the README around the installer and closes that gap with the
 smallest, most reusable set of changes:
 
-1. a stable agents/state home under `~/.calfcord/`, with the tools **workspace
+1. a stable agents/state home under `~/.agent-disco/`, with the tools **workspace
    following the launch directory** (the Claude Code model);
 2. a provider-agnostic **starter agent** (`agents/assistant.md`);
 3. a guided **`calfcord init`** for first-run config; and
@@ -43,7 +43,7 @@ validators, or provider plumbing are introduced.
 | Tools / thinking / model are **baked into the node at boot**; the `.md` is read once | `agents/factory.py:436` (`Agent(...)`), `agents/loader.py` | Tool edits need an **agent restart**; live mutation is out of scope |
 | Provider resolves `frontmatter → CALFKIT_AGENT_DEFAULT_PROVIDER → "anthropic"` | `agents/factory.py:204` (`resolve_provider`) | Starter ships with **no `provider:`**; one env var drives it |
 | `tools:` omitted → **all** builtins; `tools: []` → none | `agents/loader.py:32` (`_resolve_default_tools`), `agents/definition.py:113` | Starter uses `tools: []`; a tools editor must distinguish omitted vs empty |
-| Per-agent `<id>.json` is **agent-managed** (channel subscriptions); the bridge never reads it | `agents/runner.py` (`store.load/save`); bridge has no refs | Safe to pin `CALFKIT_STATE_DIR` under `~/.calfcord` |
+| Per-agent `<id>.json` is **agent-managed** (channel subscriptions); the bridge never reads it | `agents/runner.py` (`store.load/save`); bridge has no refs | Safe to pin `CALFKIT_STATE_DIR` under `~/.agent-disco` |
 | Workspace defaults to **`Path.cwd()`-relative** | `tools/builtin/workspace.py:53` | Native default → the launch directory (not a hidden dir) |
 | Builtins + MCP schemas enumerate **without transport/secrets** | `tools/__init__.py` (`TOOL_REGISTRY`), `mcp/discovery.py`, `mcp/selector.py` | A local CLI can list the full tool universe, honoring the decoupling invariant |
 | `InquirerPy` / `prompt-toolkit` / `rich` already resolved | `uv.lock` | Interactive multi-select needs **no new heavy dependency** |
@@ -58,7 +58,7 @@ validators, or provider plumbing are introduced.
   the broker is now a supervised substrate process brought up by `calfcord start`;
   `calfcord broker` survives only as an advanced/dev escape hatch.
 - Provider-agnostic starter named **`assistant`** (general-purpose), `tools: []`.
-- Agents + state **pinned** under `~/.calfcord/`; the tools **workspace follows
+- Agents + state **pinned** under `~/.agent-disco/`; the tools **workspace follows
   the launch directory** (Claude Code model).
 - An interactive **`calfcord agent tools`** editor; a live Discord `/tools`
   command is explicitly **out of scope** (needs a node hot-rebuild / lifecycle
@@ -70,8 +70,8 @@ validators, or provider plumbing are introduced.
 
 | Var | Native default | Owner | Why |
 |---|---|---|---|
-| `CALFKIT_AGENTS_DIR` | `~/.calfcord/agents` | operator (edits) | stable home; survives `self update` GC |
-| `CALFKIT_STATE_DIR` | `~/.calfcord/state/agents` | agent process | channel-subscription bookkeeping; must persist regardless of CWD |
+| `CALFKIT_AGENTS_DIR` | `~/.agent-disco/agents` | operator (edits) | stable home; survives `self update` GC |
+| `CALFKIT_STATE_DIR` | `~/.agent-disco/state/agents` | agent process | channel-subscription bookkeeping; must persist regardless of CWD |
 | `CALFCORD_WORKSPACE_DIR` | **the launch `$PWD`** | tools process | agents act where you launched, like Claude Code |
 
 `agents/` and `state/` are calfcord's own data and must outlive the GC'd
@@ -109,7 +109,7 @@ Dev (`uv run`) and Docker never see the shim and keep their current defaults.
 > @assistant hello" funnel below is the old run-it-yourself flow and is retained
 > only for history.
 
-Writes `~/.calfcord/config/.env` (dev: `./.env`), idempotent, secrets masked,
+Writes `~/.agent-disco/config/.env` (dev: `./.env`), idempotent, secrets masked,
 `chmod 600`. Seeding the starter is the installer's job — `init` only *detects
 and reports* the agent, so there is no duplicated starter content.
 

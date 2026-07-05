@@ -128,7 +128,7 @@ services:
   # Codex subscription agents (``provider: openai-codex``) require an
   # OAuth login performed on the HOST before the container starts:
   #   uv run calfkit-auth codex login
-  # Credentials persist to ``~/.calfcord/auth/`` on the host and are
+  # Credentials persist to ``~/.agent-disco/auth/`` on the host and are
   # bind-mounted into the container below. Docker auto-creates the
   # source directories if they don't exist yet, so non-Codex deploys
   # boot cleanly — a Codex-opted-in agent will simply fail at first
@@ -158,11 +158,11 @@ services:
       # (``uv run calfkit-auth codex ...``) so token rotation that
       # happens inside the container writes back through the bind
       # mount and the host CLI always sees the latest state.
-      - ${HOME}/.calfcord/auth:/home/calfcord/.calfcord/auth
+      - ${HOME}/.agent-disco/auth:/home/calfcord/.agent-disco/auth
       # Codex CLI system-prompt cache. Sharing with every other
       # container means a single ``calfkit-auth codex refresh-prompts``
       # primes all services' caches at once.
-      - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
+      - ${HOME}/.agent-disco/codex_prompts:/home/calfcord/.agent-disco/codex_prompts
 
   # The builtin-tool runner: a plain calfkit Worker hosting the
   # shell / fs / grep / glob / web tool nodes, with the trusted shared

@@ -398,6 +398,19 @@ def test_shim_exports_calfcord_home(tmp_path: Path) -> None:
     assert 'export CALFCORD_HOME="$H"' in shim_text
 
 
+def test_generated_shims_default_to_agent_disco_home(tmp_path: Path) -> None:
+    """Unset CALFCORD_HOME defaults to the Agent Disco install dir, not legacy calfcord."""
+    home = tmp_path / "home"
+    _install_shims(home)
+    shim_text = (home / "shims" / "disco").read_text()
+    self_text = (home / "shims" / "disco-self").read_text()
+
+    assert 'H="${CALFCORD_HOME:-$HOME/.agent-disco}"' in shim_text
+    assert 'H="${CALFCORD_HOME:-$HOME/.agent-disco}"' in self_text
+    assert "$HOME/.calfcord" not in shim_text
+    assert "$HOME/.calfcord" not in self_text
+
+
 def test_write_shims_removes_legacy_shims(tmp_path: Path) -> None:
     """Clean cutover: a re-run deletes any pre-rename command shims.
 

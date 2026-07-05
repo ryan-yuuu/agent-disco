@@ -41,9 +41,9 @@ disco init
   — no numeric IDs to copy. See [`discord-setup.md`](discord-setup.md) for the
   bot-token prerequisite.
 
-It writes `~/.calfcord/config/.env`, seeds
-`~/.calfcord/config/settings.json`, and writes the agent at
-`~/.calfcord/agents/<name>.md` (provider, model, and tools baked in). Because
+It writes `~/.agent-disco/config/.env`, seeds
+`~/.agent-disco/config/settings.json`, and writes the agent at
+`~/.agent-disco/agents/<name>.md` (provider, model, and tools baked in). Because
 the tools step defaults to *every* tool, a freshly-configured agent has terminal,
 file-write, code-execution, and web reach — see
 [`security.md`](security.md#33-tools-native-broker--others-in-docker) before
@@ -57,11 +57,11 @@ finishes with a working agent, not a "now run these commands" wall. Saying
 It's idempotent — re-run it any time to change a setting (an existing agent of
 the same name is updated in place, body preserved), and a crash or Ctrl-C
 resumes where you left off instead of restarting. Prefer to edit by hand? Open
-`~/.calfcord/config/.env` directly for environment variables, or
-`~/.calfcord/config/settings.json` for bridge behavior such as sticky replies:
+`~/.agent-disco/config/.env` directly for environment variables, or
+`~/.agent-disco/config/settings.json` for bridge behavior such as sticky replies:
 
 ```bash
-$EDITOR ~/.calfcord/config/.env
+$EDITOR ~/.agent-disco/config/.env
 ```
 
 See [`configuration.md`](configuration.md) for environment variables and
@@ -72,7 +72,7 @@ See [`configuration.md`](configuration.md) for environment variables and
 `init` leaves you with a running **workspace**: a local Kafka broker plus the
 Discord bridge, kept alive in the background by a process supervisor the
 installer bootstraps ([Process Compose](https://f1bonacc1.github.io/process-compose),
-a single static binary, downloaded to `~/.calfcord/bin/process-compose`). You
+a single static binary, downloaded to `~/.agent-disco/bin/process-compose`). You
 never edit the supervisor's config; Agent Disco generates it from your config.
 
 Two layers are worth keeping straight:
@@ -153,7 +153,7 @@ disco agent stop <name>   # take an agent offline
 ```
 
 `logs` reads the supervisor's per-component log files (which also live on disk at
-`~/.calfcord/state/logs/<name>.log`); pass a component name to scope the tail,
+`~/.agent-disco/state/logs/<name>.log`); pass a component name to scope the tail,
 e.g. `disco logs -f bridge`.
 
 ### Sanity-check with `doctor`
@@ -185,9 +185,9 @@ audit channel (see [`a2a-threads.md`](a2a-threads.md)).
 ## Where your agents live
 
 The installer seeds a text-only starter agent at
-`~/.calfcord/agents/assistant.md`; `disco init` writes or updates the agent
+`~/.agent-disco/agents/assistant.md`; `disco init` writes or updates the agent
 there with the provider, model, and tools you chose. Your agents live in
-`~/.calfcord/agents/` and survive `disco self update`. To add or remove an
+`~/.agent-disco/agents/` and survive `disco self update`. To add or remove an
 agent's tools interactively, run `disco agent tools [<name>]`, then
 `disco agent restart <name>` (tools are loaded at agent boot). See
 [`authoring-agents.md`](authoring-agents.md) for the full field reference.
@@ -198,7 +198,7 @@ Claude Code works. Mind the trust implications before pointing it at sensitive
 files: [`security.md`](security.md#33-tools-native-broker--others-in-docker).
 
 The installer also seeds an empty MCP server registry at
-`~/.calfcord/config/mcp.json` (mode `0600`, never clobbered on update). It stays
+`~/.agent-disco/config/mcp.json` (mode `0600`, never clobbered on update). It stays
 empty until you add a server with `disco mcp add` — that's how agents reach
 external [MCP](https://modelcontextprotocol.io) tools. See
 [`mcp-tools.md`](mcp-tools.md).
@@ -245,14 +245,31 @@ start`/`restart`, `mcp start`/`restart`) will refuse with "this workspace was
 started by an older calfcord" until you run exactly that stop/start cycle —
 `stop` and `status` keep working so you can wind the old workspace down.
 
+### Existing `~/.calfcord` installs
+
+New installs default to `~/.agent-disco`. Existing installs keep using their
+current `$CALFCORD_HOME` when you run `disco self update`, because the old shim
+passes that path into the installer. To move an existing install, stop the
+workspace, move the directory, then update your shell profile hook to source the
+new env file:
+
+```bash
+disco stop
+mv ~/.calfcord ~/.agent-disco
+. ~/.agent-disco/env
+```
+
+Edit the `# Agent Disco` block in `~/.profile`, `~/.bashrc`, or `~/.zprofile`
+if it still points at `~/.calfcord/env`.
+
 ## Uninstall
 
 ```bash
-rm -rf ~/.calfcord
+rm -rf ~/.agent-disco
 ```
 
-Then remove the `# disco` line the installer added to your shell profile
-(`~/.zshrc`, `~/.bashrc`, or `~/.bash_profile`).
+Then remove the `# Agent Disco` block the installer added to your shell profile
+(`~/.profile`, `~/.bashrc`, or `~/.zprofile`).
 
 ---
 

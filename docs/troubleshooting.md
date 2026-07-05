@@ -430,7 +430,7 @@ service holds a still-"fresh" token):
   anything else while the service is running:
   - the official `codex` CLI signed in to the same account,
   - a second service replica / a local dev run sharing the same
-    `CALFCORD_AUTH_DIR` (`~/.calfcord/auth`),
+    `CALFCORD_AUTH_DIR` (`~/.agent-disco/auth`),
   - a manual `calfkit-auth codex login --force` or `... refresh` against the
     shared credential file.
 - **Operator revoked the app** in ChatGPT settings, or signed out everywhere.
@@ -469,7 +469,7 @@ If `status` shows the access token *not* expired but requests still 401 with
 
 - **Single writer per account.** Don't run the official `codex` CLI, a second
   replica, or a local dev instance against the same ChatGPT account / same
-  `~/.calfcord/auth` file while the service is live. Concurrent use of one grant
+  `~/.agent-disco/auth` file while the service is live. Concurrent use of one grant
   is the most common way to trigger rotation revocation.
 - After any deliberate `login --force` / `refresh` on a shared credential file,
   expect already-running consumers holding the old token to start failing until
@@ -498,7 +498,7 @@ clocked it in natively (`disco agent start <name>`) or via a container
 (`docker compose up agent`).
 
 **What it means.** An agent declares `provider: openai-codex` but no cached
-credentials exist at `~/.calfcord/auth/openai_oauth.json`.
+credentials exist at `~/.agent-disco/auth/openai_oauth.json`.
 
 **Resolution.** Run the one-time login on the **host**, then retry:
 

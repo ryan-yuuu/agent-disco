@@ -199,7 +199,7 @@ class TestBaseDirResolution:
 
     def test_lands_under_calfcord_home_when_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The bug: a relocated install must keep the prompt cache beside the
-        # rest of the install, not always at ~/.calfcord.
+        # rest of the install, not always at the default home.
         monkeypatch.delenv("CALFCORD_PROMPT_CACHE_DIR", raising=False)
         monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "opt" / "calfcord"))
         cache = PromptCache()
@@ -218,7 +218,7 @@ class TestBaseDirResolution:
         monkeypatch.delenv("CALFCORD_HOME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
         cache = PromptCache()
-        assert cache.base_dir == tmp_path / ".calfcord" / "codex_prompts"
+        assert cache.base_dir == tmp_path / ".agent-disco" / "codex_prompts"
 
 
 class TestEntryShape:

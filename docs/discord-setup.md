@@ -75,7 +75,7 @@ default starter agent — use whatever name you gave yours in `init`.)
 They're here for cases where you want to set a value explicitly — e.g. pin
 slash-command sync to one guild, or unlock owner-only commands. Turn on
 **Developer Mode** (Discord → User Settings → Advanced), right-click to **Copy
-ID**, and set the key in `~/.calfcord/config/.env`:
+ID**, and set the key in `~/.agent-disco/config/.env`:
 
 | `.env` key | Copy ID from | What it does |
 |---|---|---|
