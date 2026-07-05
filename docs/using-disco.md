@@ -154,11 +154,18 @@ disco agent delete scribe        # --yes to skip the confirmation
 
 ## How agents get invoked
 
-Agents reply when you **mention** them (`!scribe summarize this`). There is no
-ambient auto-answering — a message with no mention goes unanswered by design,
-and there is no router to configure. A mentioned agent can also consult or hand
-off to a peer; that agent-to-agent traffic is projected to an audit channel (see
-[a2a-threads.md](a2a-threads.md)).
+Start an agent conversation by **mentioning** the agent
+(`!scribe summarize this`). With sticky replies enabled, a successful visible
+agent reply makes the current channel or thread sticky to that responding
+agent, so later ambient human messages in the same place route to that agent
+without repeating `!scribe`.
+
+Use `!unstick` in Discord to clear sticky routing for the current channel or
+thread. If you want strict mention-only behavior, disable sticky replies in
+[`settings.json`](bridge-settings.md).
+
+A mentioned agent can also consult or hand off to a peer; that agent-to-agent
+traffic is projected to an audit channel (see [a2a-threads.md](a2a-threads.md)).
 
 ## Run the built-in tools host
 
@@ -235,6 +242,14 @@ Just need to repoint the broker (for example, to move agents onto a remote one)?
 disco self set-broker my-broker:9092
 ```
 
+To change bridge behavior such as sticky replies, edit the bridge settings file:
+
+```bash
+$EDITOR ~/.calfcord/config/settings.json
+disco bridge restart
+```
+
+→ How to edit `settings.json`: [bridge-settings.md](bridge-settings.md).
 → Every setting, in one table: [configuration.md](configuration.md).
 
 ## Run across machines or in production
