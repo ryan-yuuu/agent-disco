@@ -20,11 +20,11 @@
 | src/calfcord/bridge/egress.py                 |       79 |        3 |       18 |        0 |     97% |   185-191 |
 | src/calfcord/bridge/gateway.py                |      252 |       53 |       52 |        4 |     76% |100-101, 106-107, 266-269, 273-274, 355-357, 361-\>365, 384, 455, 474, 488-599, 603 |
 | src/calfcord/bridge/history.py                |      250 |        7 |       76 |        5 |     96% |384-\>386, 396-\>398, 418-\>420, 662-669, 745, 862-\>864, 958-969 |
-| src/calfcord/bridge/mention\_handler.py       |      146 |        1 |       30 |        1 |     99% |       347 |
+| src/calfcord/bridge/mention\_handler.py       |      149 |        1 |       32 |        1 |     99% |       357 |
 | src/calfcord/bridge/normalizer.py             |       43 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/bridge/overrides.py              |       23 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/persona\_resolve.py       |        5 |        0 |        0 |        0 |    100% |           |
-| src/calfcord/bridge/progress.py               |       39 |        0 |        4 |        0 |    100% |           |
+| src/calfcord/bridge/progress.py               |       40 |        0 |        4 |        0 |    100% |           |
 | src/calfcord/bridge/reply\_poster.py          |      101 |        7 |       16 |        1 |     93% |65-70, 188-189, 309-310 |
 | src/calfcord/bridge/roster.py                 |       29 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/settings.py               |       39 |        1 |        6 |        0 |     98% |        57 |
@@ -92,7 +92,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7779** |  **511** | **2074** |  **102** | **93%** |           |
+| **TOTAL**                                     | **7783** |  **511** | **2076** |  **102** | **93%** |           |
 
 
 ## Setup coverage badge
