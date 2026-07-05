@@ -44,6 +44,34 @@ from calfcord.discord.sender import DiscordSender
 logger = logging.getLogger(__name__)
 
 
+async def create_thread_from_message(message: discord.Message, *, name: str) -> int:
+    """Create a public thread anchored on ``message`` and return its id.
+
+    This helper is intentionally generic: unlike :class:`A2AChannelResolver`, it
+    is not tied to the A2A audit channel. It uses the original message as the
+    Discord thread starter, matching the user-facing ``Start Thread from Message``
+    behavior.
+    """
+    try:
+        thread = await message.create_thread(name=name)
+    except discord.DiscordException:
+        logger.warning(
+            "message thread creation failed message_id=%d name=%r",
+            message.id,
+            name,
+            exc_info=True,
+        )
+        raise
+
+    logger.info(
+        "created message thread message_id=%d thread_id=%d name=%r",
+        message.id,
+        thread.id,
+        name,
+    )
+    return thread.id
+
+
 class A2AChannelResolver:
     """Resolves the unified A2A audit channel and anchors A2A threads on it."""
 

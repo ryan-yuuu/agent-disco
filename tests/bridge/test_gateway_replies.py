@@ -303,6 +303,136 @@ class TestStickyRouting:
         assert handler.calls == []
 
 
+class TestNewThreadCommand:
+    async def test_new_with_explicit_mention_creates_thread_and_dispatches_from_thread(self, fake_message) -> None:
+        gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+        _ready(gateway)
+
+        with patch(
+            "calfcord.bridge.gateway.create_thread_from_message",
+            new=AsyncMock(return_value=9000),
+        ) as create_thread:
+            msg = fake_message(message_id=42, channel_id=200, guild_id=_GUILD_ID, content="!new !scribe help me")
+            await gateway._on_message(msg)
+            await _settle(gateway)
+
+        create_thread.assert_awaited_once_with(msg, name="!new !scribe help me")
+        assert len(handler.calls) == 1
+        req = handler.calls[0]
+        assert req.mention_ids == ("scribe",)
+        assert req.content == "!new !scribe help me"
+        assert req.channel_id == 200
+        assert req.source_channel_id == 9000
+        assert req.wire.source_channel_id == 9000
+        assert req.wire.content == "!new !scribe help me"
+        gateway._reply.post_notice.assert_not_awaited()
+
+    async def test_new_without_mention_dispatches_to_parent_sticky_owner(self, fake_message) -> None:
+        store = _StickyStore(owner="planner")
+        gateway = _gateway(sticky_store=store)
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        with patch("calfcord.bridge.gateway.create_thread_from_message", new=AsyncMock(return_value=9000)):
+            msg = fake_message(message_id=42, channel_id=200, guild_id=_GUILD_ID, content="!new plan this")
+            await gateway._on_message(msg)
+            await _settle(gateway)
+
+        assert store.gets == ["200"]
+        assert len(handler.calls) == 1
+        req = handler.calls[0]
+        assert req.mention_ids == ("planner",)
+        assert req.route_kind == "sticky"
+        assert req.source_channel_id == 9000
+        assert req.channel_id == 200
+
+    async def test_new_without_mention_or_sticky_posts_note_in_new_thread(self, fake_message) -> None:
+        store = _StickyStore(owner=None)
+        gateway = _gateway(sticky_store=store)
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+        _ready(gateway)
+
+        with patch("calfcord.bridge.gateway.create_thread_from_message", new=AsyncMock(return_value=9000)):
+            msg = fake_message(message_id=42, channel_id=200, guild_id=_GUILD_ID, content="!new plan this")
+            await gateway._on_message(msg)
+            await _settle(gateway)
+
+        assert handler.calls == []
+        gateway._reply.post_notice.assert_awaited_once()
+        posted_req, text = gateway._reply.post_notice.await_args.args
+        assert posted_req.channel_id == 200
+        assert posted_req.source_channel_id == 9000
+        assert "No agent" in text
+
+    async def test_new_only_triggers_as_first_word(self, fake_message) -> None:
+        gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        with patch(
+            "calfcord.bridge.gateway.create_thread_from_message",
+            new=AsyncMock(return_value=9000),
+        ) as create_thread:
+            msg = fake_message(guild_id=_GUILD_ID, content="hello !new !scribe")
+            await gateway._on_message(msg)
+            await _settle(gateway)
+
+        create_thread.assert_not_awaited()
+        assert len(handler.calls) == 1
+        assert handler.calls[0].mention_ids == ("scribe",)
+        assert handler.calls[0].source_channel_id == 2000
+
+    async def test_new_inside_thread_posts_notice_only(self, fake_message) -> None:
+        gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+        _ready(gateway)
+
+        with patch(
+            "calfcord.bridge.gateway.create_thread_from_message",
+            new=AsyncMock(return_value=9000),
+        ) as create_thread:
+            msg = fake_message(channel_id=500, thread_parent_id=200, guild_id=_GUILD_ID, content="!new !scribe hi")
+            await gateway._on_message(msg)
+            await _settle(gateway)
+
+        create_thread.assert_not_awaited()
+        assert handler.calls == []
+        gateway._reply.post_notice.assert_awaited_once()
+        posted_req, text = gateway._reply.post_notice.await_args.args
+        assert posted_req.source_channel_id == 500
+        assert "parent channel" in text
+
+    async def test_new_thread_creation_failure_posts_notice_and_does_not_dispatch(self, fake_message) -> None:
+        gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+        _ready(gateway)
+
+        with patch(
+            "calfcord.bridge.gateway.create_thread_from_message",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            msg = fake_message(guild_id=_GUILD_ID, content="!new !scribe hi")
+            await gateway._on_message(msg)
+            await _settle(gateway)
+
+        assert handler.calls == []
+        gateway._reply.post_notice.assert_awaited_once()
+        posted_req, text = gateway._reply.post_notice.await_args.args
+        assert posted_req.source_channel_id == 2000
+        assert "couldn't create" in text
+
+
 class TestOnMessageFilters:
     """Messages that must never spawn a handler task."""
 

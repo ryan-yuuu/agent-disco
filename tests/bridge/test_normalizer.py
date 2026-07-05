@@ -85,10 +85,10 @@ class TestExtractMentionIds:
         # A ``:`` (or any non-id char) terminates the token but keeps what precedes.
         assert extract_mention_ids("!scribe: please help") == ("scribe",)
 
-    def test_reserved_router_name_is_just_a_token_now(self) -> None:
-        # No registry means no special-casing: ``!_router`` is an ordinary token.
-        # (Whether such an agent is online is decided by the mesh, not here.)
-        assert extract_mention_ids("!_router hello") == ("_router",)
+    def test_reserved_command_names_are_not_mentions(self) -> None:
+        assert extract_mention_ids("!new !scribe hello") == ("scribe",)
+        assert extract_mention_ids("!unstick !scribe hello") == ("scribe",)
+        assert extract_mention_ids("!new") == ()
 
 
 class TestNormalizeMentionAndKind:

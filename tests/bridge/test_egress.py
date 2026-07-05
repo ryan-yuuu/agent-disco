@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from calfcord.bridge.egress import A2AChannelResolver
+from calfcord.bridge.egress import A2AChannelResolver, create_thread_from_message
 from calfcord.discord.sender import DiscordSender
 
 
@@ -323,6 +323,29 @@ class TestCreateAnchoredThread:
 
         with pytest.raises(TypeError, match="expected TextChannel"):
             await resolver.create_anchored_thread(555, 12345, name="t")
+
+
+class TestCreateThreadFromMessage:
+    async def test_uses_parent_message_create_thread(self) -> None:
+        message = MagicMock(spec=discord.Message)
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 4444
+        message.create_thread = AsyncMock(return_value=thread)
+
+        thread_id = await create_thread_from_message(message, name="!new do the thing")
+
+        assert thread_id == 4444
+        message.create_thread.assert_awaited_once_with(name="!new do the thing")
+
+    async def test_discord_error_propagates(self) -> None:
+        message = MagicMock(spec=discord.Message)
+        message.id = 12345
+        message.create_thread = AsyncMock(
+            side_effect=discord.Forbidden(MagicMock(status=403), "no threads")
+        )
+
+        with pytest.raises(discord.Forbidden):
+            await create_thread_from_message(message, name="!new task")
 
 
 class TestCategoryResolution:

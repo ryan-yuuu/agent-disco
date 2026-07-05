@@ -75,7 +75,7 @@ class TestReservedAgentIds:
         # that name would share state/logs/process-compose.log with the live
         # supervisor — and rotate-at-spawn would rename the supervisor's log out
         # from under it.
-        assert frozenset({"broker", "bridge", "tools", "process-compose", "unstick"}) == RESERVED_AGENT_IDS
+        assert frozenset({"broker", "bridge", "tools", "process-compose", "unstick", "new"}) == RESERVED_AGENT_IDS
         assert MCP_SLOT_PREFIX == "mcp-"
 
     def test_reserved_set_matches_the_supervisor_slot_namespace(self) -> None:
@@ -88,7 +88,7 @@ class TestReservedAgentIds:
         assert compose._RESERVED_PROCESS_NAMES < RESERVED_AGENT_IDS
         assert MCP_SLOT_PREFIX == compose.MCP_SLOT_PREFIX
 
-    @pytest.mark.parametrize("name", ["broker", "bridge", "tools", "process-compose", "unstick"])
+    @pytest.mark.parametrize("name", ["broker", "bridge", "tools", "process-compose", "unstick", "new"])
     def test_reserved_names_yield_an_error(self, name: str) -> None:
         message = reserved_agent_id_error(name)
         assert message is not None
@@ -100,6 +100,13 @@ class TestReservedAgentIds:
         message = reserved_agent_id_error("unstick")
         assert message is not None
         assert "!unstick" in message
+        assert "routing command" in message
+        assert "pick another agent name" in message
+
+    def test_new_error_names_the_command_collision(self) -> None:
+        message = reserved_agent_id_error("new")
+        assert message is not None
+        assert "!new" in message
         assert "routing command" in message
         assert "pick another agent name" in message
 
