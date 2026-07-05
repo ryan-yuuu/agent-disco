@@ -50,13 +50,18 @@ from calfcord.bridge.overrides import EffortOverrides
 from calfcord.bridge.progress import ProgressRenderer
 from calfcord.bridge.reply_poster import ReplyPoster
 from calfcord.bridge.roster import MeshRoster
-from calfcord.bridge.settings import BridgeSettings, load_settings, resolve_settings_path
+from calfcord.bridge.settings import (
+    BridgeSettings,
+    load_settings,
+    resolve_settings_path,
+)
 from calfcord.bridge.slash import SlashCommandManager
 from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptStore,
     TranscriptStoreLike,
 )
+from calfcord.bridge.wire import WireMessage
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.discord.settings import DiscordSettings
 from calfcord.discord.typing import TypingNotifier
@@ -117,7 +122,9 @@ def _resolve_health_home() -> Path:
 
 
 @asynccontextmanager
-async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[TranscriptStoreLike]:
+async def _open_transcript_store(
+    settings: DiscordSettings,
+) -> AsyncIterator[TranscriptStoreLike]:
     """Open the transcript store, degrading to a no-op store on failure.
 
     Constructs the real :class:`TranscriptStore` and connects it. If the open
@@ -146,7 +153,9 @@ async def _open_transcript_store(settings: DiscordSettings) -> AsyncIterator[Tra
         await yielded.close()
 
 
-async def _prune_on_startup(store: TranscriptStoreLike, settings: DiscordSettings) -> None:
+async def _prune_on_startup(
+    store: TranscriptStoreLike, settings: DiscordSettings
+) -> None:
     """Best-effort startup sweep: drop transcript rows past the retention window.
 
     The bridge is the sole writer and restarts on every deploy, so a startup
@@ -160,7 +169,11 @@ async def _prune_on_startup(store: TranscriptStoreLike, settings: DiscordSetting
         cutoff = int(time.time()) - settings.transcript_retention_days * 86400
         pruned = await store.prune_older_than(cutoff)
         if pruned:
-            logger.info("pruned %d transcript row(s) older than %d days", pruned, settings.transcript_retention_days)
+            logger.info(
+                "pruned %d transcript row(s) older than %d days",
+                pruned,
+                settings.transcript_retention_days,
+            )
     except Exception:
         logger.exception("transcript retention prune failed at startup; continuing")
 
@@ -198,7 +211,9 @@ class DiscordIngressGateway:
         # (R-A3) via the persona sender's id set.
         fetcher = ChannelHistoryFetcher(self._client, persona_sender.owns_webhook)
         history = DiscordHistoryProvider(fetcher, transcript_store)
-        handler_sticky = sticky_store if self._bridge_settings.sticky_replies.enabled else None
+        handler_sticky = (
+            sticky_store if self._bridge_settings.sticky_replies.enabled else None
+        )
         self._handler = MentionHandler(
             client=calfkit_client,
             roster=roster,
@@ -248,7 +263,9 @@ class DiscordIngressGateway:
 
     async def start(self) -> None:
         """Connect to the Discord gateway. Blocks until cancelled or disconnect."""
-        logger.info("DiscordIngressGateway starting (guild_id=%s)", self._settings.guild_id)
+        logger.info(
+            "DiscordIngressGateway starting (guild_id=%s)", self._settings.guild_id
+        )
         await self._client.start(self._settings.bot_token.get_secret_value())
 
     async def close(self) -> None:
@@ -273,7 +290,9 @@ class DiscordIngressGateway:
         bot_user = self._client.user
         assert bot_user is not None, "on_ready fires after authentication completes"
         self._bot_user_id = bot_user.id
-        self._message_normalizer = MessageNormalizer(human_owner_id=self._settings.owner_user_id)
+        self._message_normalizer = MessageNormalizer(
+            human_owner_id=self._settings.owner_user_id
+        )
         logger.info("gateway ready as %s (id=%s)", bot_user, bot_user.id)
 
         # Discord is connected as of on_ready — record liveness + identity, then
@@ -290,14 +309,18 @@ class DiscordIngressGateway:
                 now=datetime.now(UTC),
             )
         except Exception:
-            logger.exception("failed to write initial bridge heartbeat; continuing boot")
+            logger.exception(
+                "failed to write initial bridge heartbeat; continuing boot"
+            )
 
         await self._slash.sync(self._settings.guild_id)
 
     async def _on_disconnect(self) -> None:
         """Mark the bridge disconnected when the Discord gateway drops (§12.1)."""
         self._connected = False
-        logger.warning("discord gateway disconnected; bridge heartbeat will go stale until reconnect")
+        logger.warning(
+            "discord gateway disconnected; bridge heartbeat will go stale until reconnect"
+        )
 
     async def _on_resumed(self) -> None:
         """Mark the bridge connected again when a dropped session resumes (§12.1)."""
@@ -307,14 +330,21 @@ class DiscordIngressGateway:
     async def _on_message(self, message: discord.Message) -> None:
         if message.guild is None:
             return
-        if self._settings.guild_id is not None and message.guild.id != self._settings.guild_id:
+        if (
+            self._settings.guild_id is not None
+            and message.guild.id != self._settings.guild_id
+        ):
             return
         if self._message_normalizer is None:
             return  # pre-ready; defensive
         # Skip the bot's own non-webhook posts (e.g. /clear markers, notices).
         # Webhook posts (the bot acting as an agent persona) flow through so the
         # author-stamping / peer-visibility paths see them.
-        if self._bot_user_id is not None and message.author.id == self._bot_user_id and message.webhook_id is None:
+        if (
+            self._bot_user_id is not None
+            and message.author.id == self._bot_user_id
+            and message.webhook_id is None
+        ):
             return
         if self._already_seen(message.id):
             logger.debug("ignoring redelivered message id=%s", message.id)
@@ -329,7 +359,9 @@ class DiscordIngressGateway:
         if _UNSTICK_COMMAND_RE.match(message.content):
             req = self._build_request(message, wire, ())
             if self._sticky_store is not None:
-                await self._sticky_store.clear_sticky_owner(str(wire.source_channel_id or wire.channel_id))
+                await self._sticky_store.clear_sticky_owner(
+                    str(wire.source_channel_id or wire.channel_id)
+                )
             await self._reply.post_notice(req, _UNSTICK_NOTICE)
             return
 
@@ -340,9 +372,14 @@ class DiscordIngressGateway:
             # posts must never feed back into sticky routing and loop.
             if getattr(message, "webhook_id", None) is not None:
                 return
-            if not self._bridge_settings.sticky_replies.enabled or self._sticky_store is None:
+            if (
+                not self._bridge_settings.sticky_replies.enabled
+                or self._sticky_store is None
+            ):
                 return
-            owner = await self._sticky_store.get_sticky_owner(str(wire.source_channel_id or wire.channel_id))
+            owner = await self._sticky_store.get_sticky_owner(
+                str(wire.source_channel_id or wire.channel_id)
+            )
             if not owner:
                 return
             mention_ids = (owner,)
@@ -398,7 +435,9 @@ class DiscordIngressGateway:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("mention handler crashed for message_id=%s", req.message_id)
+            logger.exception(
+                "mention handler crashed for message_id=%s", req.message_id
+            )
             with contextlib.suppress(Exception):
                 await self._reply.post_notice(
                     req,
@@ -446,11 +485,15 @@ class _GatewayClient(discord.Client):
 
 def main() -> None:
     """CLI entry point. Loads config, constructs the gateway, runs until SIGINT/SIGTERM."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
 
     settings = DiscordSettings()  # type: ignore[call-arg]
     if settings.guild_id is None:
-        raise SystemExit("DISCORD_GUILD_ID is required (global slash sync is too slow for dev)")
+        raise SystemExit(
+            "DISCORD_GUILD_ID is required (global slash sync is too slow for dev)"
+        )
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
@@ -484,7 +527,9 @@ def main() -> None:
 
                     typing_notifier = TypingNotifier(persona_sender.client)
                     overrides = EffortOverrides(transcript_store)
-                    await overrides.hydrate()  # restore /thinking-effort overrides across restarts (D-8)
+                    await (
+                        overrides.hydrate()
+                    )  # restore /thinking-effort overrides across restarts (D-8)
                     # A2A audit projection: the resolver only uses the sender's
                     # ``.client`` (a REST login), which the persona sender provides.
                     resolver = A2AChannelResolver(
