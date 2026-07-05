@@ -21,8 +21,14 @@ separate transcript replay, so the display never double-counts.
 per-correlation entry, no message-id tracking, no debounce, and no post/edit/
 delete dance — so a mid-run restart strands nothing.
 
-**Persona** is resolved per step from ``persona_for(step.emitter)`` so the node
-that did the work (e.g. a peer after a handoff) stamps the message.
+**Persona** is resolved per step. For agent-authored steps (``agent_message``,
+``handoff``) the emitter's persona is used so a peer after a handoff stamps its
+own identity. For tool steps (``tool_call``, ``tool_result``) the *owning agent*
+—the agent currently in control of the run—is used instead, because a tool is a
+utility, not a conversational participant: posting ``✅ `todo` returned`` under a
+``todo`` persona would create a spurious identity in Discord. The owning agent is
+tracked by the handler (initialized to the mention target, updated on handoff)
+and passed in via ``owning_agent``.
 
 **Failure semantics.** Every send is best-effort
 (:func:`_best_effort_progress`): a transient/gone step message must never crash
@@ -120,20 +126,31 @@ class ProgressRenderer:
         # is a one-line change and the gateway wiring stays intact.
         self._typing = typing_notifier
 
-    async def on_step(self, step: StepEvent, req: MentionRequest) -> None:
+    async def on_step(self, step: StepEvent, req: MentionRequest, *, owning_agent: str) -> None:
         """Post one persistent v2 message per rendered body for this step.
 
         Renders the step (:func:`render_step_message`) — a tool call/result short
         line, a handoff note, or the full agent text split into ≤-cap chunks —
-        and posts each body under the step's emitter persona, into the
-        originating thread when the wire came from one, else the parent channel.
-        A step that renders nothing posts nothing. Every send is best-effort.
+        and posts each body under the appropriate persona, into the originating
+        thread when the wire came from one, else the parent channel. A step that
+        renders nothing posts nothing. Every send is best-effort.
+
+        ``owning_agent`` is the agent currently in control of the run (the mention
+        target initially, updated on handoff). It is used as the persona for
+        ``tool_call``/``tool_result`` steps so tool progress lines don't appear
+        under the tool's own identity. ``agent_message``/``handoff`` steps keep
+        ``step.emitter`` — the genuine peer-emitter cases.
         """
         bodies = render_step_message(step)
         if not bodies:
             return
         thread_id = req.source_channel_id if req.source_channel_id != req.channel_id else None
-        persona = persona_for(step.emitter)
+        # Tools are utilities, not conversational participants — their progress
+        # lines appear under the calling agent's persona. Agent-authored steps
+        # (messages, handoffs) keep the emitter's persona so a peer after a
+        # handoff stamps its own identity.
+        persona_name = owning_agent if step.kind in ("tool_call", "tool_result") else step.emitter
+        persona = persona_for(persona_name)
         # Typing disabled for now — re-enable by uncommenting (the notifier is
         # still wired through the gateway, just dormant):
         # if self._typing is not None:

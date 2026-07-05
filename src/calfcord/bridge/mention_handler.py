@@ -131,7 +131,7 @@ class A2AProjectorLike(Protocol):
 
 
 class ProgressRenderer(Protocol):
-    async def on_step(self, step: StepEvent, req: MentionRequest) -> None: ...
+    async def on_step(self, step: StepEvent, req: MentionRequest, *, owning_agent: str) -> None: ...
     async def finish(self, correlation_id: str) -> None: ...
 
 
@@ -238,6 +238,11 @@ class MentionHandler:
         )
 
         dispatcher = A2ADispatcher()
+        # The owning agent is who is currently in control of the run. It starts
+        # as the mention target and transfers to the peer on each handoff, so
+        # tool progress lines (tool_call/tool_result) after a handoff are stamped
+        # with the new agent's persona, not the original target's.
+        owning_agent = target
         try:
             async for event in handle.stream():
                 try:
@@ -248,7 +253,12 @@ class MentionHandler:
                     if projection is not None:
                         await self._a2a.project(projection)
                     else:
-                        await self._progress.on_step(step, req)
+                        await self._progress.on_step(step, req, owning_agent=owning_agent)
+                    # After a handoff the receiving agent owns all subsequent
+                    # steps. Update AFTER rendering so the handoff announcement
+                    # itself stays under the handing-off agent's persona.
+                    if step.kind == "handoff" and step.target:
+                        owning_agent = step.target.removeprefix("/")
                 except Exception:
                     # A render/normalize/classify bug (or a future calfkit event
                     # shape) must NOT unwind the drain and cost the user the
