@@ -145,10 +145,12 @@ class ProgressRenderer:
         if not bodies:
             return
         thread_id = req.source_channel_id if req.source_channel_id != req.channel_id else None
-        if step.kind in ("tool_call", "tool_result"):
-            persona = persona_for(owning_agent)
-        else:
-            persona = persona_for(step.emitter)
+        # Tools are utilities, not conversational participants — their progress
+        # lines appear under the calling agent's persona. Agent-authored steps
+        # (messages, handoffs) keep the emitter's persona so a peer after a
+        # handoff stamps its own identity.
+        persona_name = owning_agent if step.kind in ("tool_call", "tool_result") else step.emitter
+        persona = persona_for(persona_name)
         # Typing disabled for now — re-enable by uncommenting (the notifier is
         # still wired through the gateway, just dormant):
         # if self._typing is not None:
