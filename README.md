@@ -20,7 +20,7 @@
 | src/calfcord/bridge/egress.py                 |       87 |        3 |       18 |        0 |     97% |   213-219 |
 | src/calfcord/bridge/gateway.py                |      294 |       54 |       62 |        5 |     79% |105-106, 111-112, 280-283, 287-288, 369-371, 375-\>379, 402, 457, 524, 543, 557-668, 672 |
 | src/calfcord/bridge/history.py                |      250 |        7 |       76 |        5 |     96% |384-\>386, 396-\>398, 418-\>420, 662-669, 745, 862-\>864, 958-969 |
-| src/calfcord/bridge/mention\_handler.py       |      149 |        1 |       32 |        1 |     99% |       357 |
+| src/calfcord/bridge/mention\_handler.py       |      195 |        4 |       54 |        4 |     97% |92, 97, 150, 484 |
 | src/calfcord/bridge/normalizer.py             |       46 |        0 |        8 |        0 |    100% |           |
 | src/calfcord/bridge/overrides.py              |       23 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/persona\_resolve.py       |        5 |        0 |        0 |        0 |    100% |           |
@@ -92,7 +92,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7838** |  **512** | **2090** |  **103** | **93%** |           |
+| **TOTAL**                                     | **7884** |  **515** | **2112** |  **106** | **93%** |           |
 
 
 ## Setup coverage badge
