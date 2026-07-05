@@ -77,6 +77,17 @@ CREATE TABLE IF NOT EXISTS agent_overrides (
   agent_id  TEXT PRIMARY KEY,
   effort    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS discord_messages (
+  message_id    TEXT PRIMARY KEY,
+  channel_id    TEXT NOT NULL,
+  content       TEXT NOT NULL,
+  author_id     TEXT NOT NULL,
+  author_name   TEXT NOT NULL,
+  is_agent      INTEGER NOT NULL,
+  created_at    REAL NOT NULL,
+  updated_at    REAL
+);
+CREATE INDEX IF NOT EXISTS ix_messages_channel_time ON discord_messages(channel_id, message_id DESC);
 """
 
 
@@ -109,6 +120,18 @@ class TranscriptRow:
     final_message_id: str
     delta_json: str
     created_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordMessageRecord:
+    message_id: str
+    channel_id: str
+    content: str
+    author_id: str
+    author_name: str
+    is_agent: bool
+    created_at: float
+    updated_at: float | None = None
 
 
 def _row_from_tuple(row: tuple[object, ...]) -> TranscriptRow:
@@ -340,6 +363,81 @@ class TranscriptStore:
             rows = await cursor.fetchall()
         return {str(agent_id): str(effort) for agent_id, effort in rows}
 
+    async def upsert_discord_message(self, record: DiscordMessageRecord) -> None:
+        conn = self._require_conn()
+        await conn.execute(
+            """
+            INSERT INTO discord_messages 
+            (message_id, channel_id, content, author_id, author_name, is_agent, created_at, updated_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET 
+                channel_id=excluded.channel_id,
+                content=excluded.content,
+                author_id=excluded.author_id,
+                author_name=excluded.author_name,
+                is_agent=excluded.is_agent,
+                created_at=excluded.created_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                record.message_id,
+                record.channel_id,
+                record.content,
+                record.author_id,
+                record.author_name,
+                1 if record.is_agent else 0,
+                record.created_at,
+                record.updated_at,
+            ),
+        )
+        await conn.commit()
+
+    async def update_discord_message_content(self, message_id: str, new_content: str, updated_at: float) -> None:
+        conn = self._require_conn()
+        await conn.execute(
+            "UPDATE discord_messages SET content=?, updated_at=? WHERE message_id=?",
+            (new_content, updated_at, message_id),
+        )
+        await conn.commit()
+
+    async def delete_discord_message(self, message_id: str) -> None:
+        conn = self._require_conn()
+        await conn.execute(
+            "DELETE FROM discord_messages WHERE message_id=?",
+            (message_id,),
+        )
+        await conn.commit()
+
+    async def get_discord_messages(self, channel_id: str, limit: int, before_message_id: str | None = None) -> list[DiscordMessageRecord]:
+        conn = self._require_conn()
+        
+        query = "SELECT message_id, channel_id, content, author_id, author_name, is_agent, created_at, updated_at FROM discord_messages WHERE channel_id=?"
+        params: list[object] = [channel_id]
+        
+        if before_message_id:
+            query += " AND message_id < ?"
+            params.append(before_message_id)
+            
+        query += " ORDER BY message_id DESC LIMIT ?"
+        params.append(limit)
+        
+        async with conn.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+            
+        return [
+            DiscordMessageRecord(
+                message_id=str(row[0]),
+                channel_id=str(row[1]),
+                content=str(row[2]),
+                author_id=str(row[3]),
+                author_name=str(row[4]),
+                is_agent=bool(row[5]),
+                created_at=float(row[6]),
+                updated_at=float(row[7]) if row[7] is not None else None,
+            )
+            for row in rows
+        ]
+
     async def __aenter__(self) -> TranscriptStore:
         await self.connect()
         return self
@@ -412,6 +510,18 @@ class NullTranscriptStore:
     async def close(self) -> None:
         """No-op: there is no connection to release."""
         return None
+
+    async def upsert_discord_message(self, record: DiscordMessageRecord) -> None:
+        return None
+
+    async def update_discord_message_content(self, message_id: str, new_content: str, updated_at: float) -> None:
+        return None
+
+    async def delete_discord_message(self, message_id: str) -> None:
+        return None
+
+    async def get_discord_messages(self, channel_id: str, limit: int, before_message_id: str | None = None) -> list[DiscordMessageRecord]:
+        return []
 
 
 # Either the real store or its no-op substitute. Callers type their

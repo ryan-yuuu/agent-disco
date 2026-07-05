@@ -15,6 +15,7 @@ import sqlite3
 import pytest
 
 from calfcord.bridge.transcripts import (
+    DiscordMessageRecord,
     NullTranscriptStore,
     TranscriptRow,
     TranscriptStore,
@@ -97,6 +98,46 @@ async def test_double_connect_is_idempotent(tmp_path: pathlib.Path) -> None:
         await store.connect()
         await store.write_turn(_row())
         assert await store.get_by_final_message_id("msg-9001") is not None
+    finally:
+        await store.close()
+
+
+async def test_discord_message_upsert_and_fetch(tmp_path: pathlib.Path) -> None:
+    store = TranscriptStore(_db_path(tmp_path))
+    await store.connect()
+    try:
+        msg = DiscordMessageRecord(
+            message_id="msg-1",
+            channel_id="chan-1",
+            content="hello",
+            author_id="user-1",
+            author_name="Alice",
+            is_agent=False,
+            created_at=1000.0,
+            updated_at=None,
+        )
+        await store.upsert_discord_message(msg)
+        history = await store.get_discord_messages("chan-1", 10)
+        assert len(history) == 1
+        assert history[0].content == "hello"
+        assert history[0].is_agent is False
+
+        # Test upsert updates existing record
+        msg2 = DiscordMessageRecord(
+            message_id="msg-1",
+            channel_id="chan-1",
+            content="hello updated",
+            author_id="user-1",
+            author_name="Alice",
+            is_agent=False,
+            created_at=1000.0,
+            updated_at=1005.0,
+        )
+        await store.upsert_discord_message(msg2)
+        history2 = await store.get_discord_messages("chan-1", 10)
+        assert len(history2) == 1
+        assert history2[0].content == "hello updated"
+        assert history2[0].updated_at == 1005.0
     finally:
         await store.close()
 
