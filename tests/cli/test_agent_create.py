@@ -12,6 +12,7 @@ the printed guidance (via ``capsys``), and the exit code.
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from pathlib import Path
 
@@ -901,3 +902,41 @@ def test_run_missing_process_compose_binary_names_the_reason(
     assert finish.calls == []  # nothing orchestrated — degraded before any orchestration seam ran
     assert "can't be started automatically" in out  # the defect banner (anchors the dev test's "not in")
     assert "process-compose binary not found; re-run the installer" in out
+
+
+def test_run_start_now_confirm_runs_outside_asyncio_loop(tmp_path: Path) -> None:
+    """The 'Start now?' confirm must run on the SYNC side of the asyncio boundary.
+
+    InquirerPy's ``.execute()`` itself calls ``asyncio.run()`` (via prompt_toolkit's
+    ``Application.prompt()``), so calling ``confirm`` from inside ``asyncio.run``
+    raises ``RuntimeError: asyncio.run() cannot be called from a running event
+    loop`` — the exact crash users hit at the end of ``disco agent create`` on a
+    native install. This pins the structural fix: the confirm (and the workspace
+    probe that informs its manual next-steps) are hoisted out of the async body
+    into the sync caller, so the prompter is never re-entered from inside a loop.
+    """
+
+    class _LoopGuardPrompter(FakePrompter):
+        """FakePrompter whose ``confirm`` fails if a loop is running.
+
+        ``asyncio.get_running_loop()`` raises ``RuntimeError`` when no loop is
+        running on this thread — exactly the condition ``confirm`` requires.
+        """
+
+        def confirm(self, message: str, *, default: bool = False) -> bool:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return super().confirm(message, default=default)  # good: no loop running
+            raise AssertionError(
+                f"confirm() must run outside the asyncio loop, but found {loop!r} "
+                f"running (message={message!r})"
+            )
+
+    finish = _FinishRecorder(running=True, present=True)
+    # confirms: [edit-prompt=No, Start now?=Yes] — the second confirm is the one
+    # the bug used to call from inside asyncio.run(_start_now(...)).
+    prompter = _LoopGuardPrompter(texts=["scribe", "d"], confirms=[False, True])
+    rc = _run_live(prompter, tmp_path, finish, name="scribe")
+    assert rc == 0
+    assert finish.calls == ["workspace_running", "agent_start", "presence"]
