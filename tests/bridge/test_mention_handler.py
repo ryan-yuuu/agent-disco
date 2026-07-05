@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from calfkit.client import AgentMessageEvent, HandoffEvent, RunCompleted, RunFailed, ToolCallEvent, ToolResultEvent
 from calfkit.exceptions import NodeFaultError
-from calfkit.models.error_report import ErrorReport
+from calfkit.models.error_report import ErrorReport, ExceptionInfo, FaultTypes
 from calfkit.models.node_result import InvocationResult
 from calfkit.models.payload import TextPart
 from calfkit.models.state import State
@@ -594,3 +594,193 @@ class TestRetryWithFeedback:
         await handler.handle(_req())
         assert len(fakes["reply"].notices) == 1
         assert fakes["reply"].chunked == []
+
+
+# ---------------------------------------------------------------------------
+# Root-cause surfacing: a fault_group carries its child faults in report.causes;
+# the bridge walks them so the operator log and the Discord notice name the
+# underlying exceptions (e.g. "4 x WebFetchError 403"), not just "agent X errored".
+# ---------------------------------------------------------------------------
+
+
+def _leaf_exception_fault(
+    exc_type: str, message: str, *, origin: str = "web_fetch", attrs: dict[str, Any] | None = None
+) -> ErrorReport:
+    """A ``calf.exception`` report as ``ErrorReport.from_exception`` would build.
+
+    Mirrors the shape the tools host synthesizes when a tool raises (e.g. a
+    WebFetchError): ``error_type=calf.exception`` with the harvested ``exception``
+    slot carrying the class name + sanitized attrs.
+    """
+    return ErrorReport.build_safe(
+        error_type=FaultTypes.EXCEPTION,
+        message=message,
+        origin_node_id=origin,
+        exception=ExceptionInfo(type=exc_type, attrs=attrs or {}),
+    )
+
+
+def _fault_group(target: str, causes: list[ErrorReport]) -> NodeFaultError:
+    """A ``calf.fault_group`` wrapping child faults (a fan-out batch failure)."""
+    return NodeFaultError(
+        ErrorReport.build_safe(
+            error_type=FaultTypes.FAULT_GROUP,
+            message=f"fan-out batch closed with {len(causes)} unhandled fault(s)",
+            origin_node_id=target,
+            causes=causes,
+        )
+    )
+
+
+class TestFaultRootCauses:
+    """The bridge surfaces underlying root-cause exceptions from a fault — both in
+    the operator log (full detail per leaf) and in the user-facing Discord notice
+    (enough context to understand the failure). A fault_group carries its child
+    faults in ``report.causes``; ``report.walk()`` yields them. Without this the
+    operator/user sees only "fan-out batch closed with N fault(s)" / "agent X hit
+    an error" — the actual 403s (or whatever) are invisible without a cross-host
+    log dig.
+    """
+
+    async def test_fault_group_logs_each_root_cause_at_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Each leaf exception in a fault_group is logged at ERROR with its origin,
+        type, message, and attrs — full forensics without a cross-host log dig."""
+        exc = _fault_group(
+            "scribe",
+            [
+                _leaf_exception_fault(
+                    "WebFetchError",
+                    "Failed to fetch https://x.test/: 403 Forbidden",
+                    attrs={"status_code": 403},
+                ),
+                _leaf_exception_fault(
+                    "WebFetchError",
+                    "Failed to fetch https://y.test/: 403 Forbidden",
+                    attrs={"status_code": 403},
+                ),
+            ],
+        )
+        handler, _client, _fakes = _make(handle=_FakeHandle(fault=exc))
+        with caplog.at_level("ERROR"):
+            await handler.handle(_req())
+        cause_logs = [r for r in caplog.records if "root cause" in r.message and r.levelname == "ERROR"]
+        assert len(cause_logs) == 2  # one per leaf, not just the group summary
+        for record in cause_logs:
+            assert "WebFetchError" in record.message
+            assert "403 Forbidden" in record.message
+            assert "web_fetch" in record.message  # the origin node, not just the agent
+
+    async def test_fault_group_notice_names_the_root_cause_exceptions(self) -> None:
+        """The Discord notice names the underlying exception type(s) and message(s),
+        not just the origin agent — so a user can tell 'fetches 403'd' from 'agent crashed'."""
+        exc = _fault_group(
+            "scribe",
+            [
+                _leaf_exception_fault("WebFetchError", "Failed to fetch https://x.test/: 403 Forbidden"),
+                _leaf_exception_fault("WebFetchError", "Failed to fetch https://y.test/: 403 Forbidden"),
+            ],
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=exc))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "scribe" in notice  # still names the agent
+        assert "WebFetchError" in notice  # ...AND the root cause exception type
+        assert "403 Forbidden" in notice  # ...AND enough message to understand it
+        assert "x.test" in notice and "y.test" in notice  # both root causes, not just the first
+
+    async def test_single_exception_fault_notice_surfaces_the_exception(self) -> None:
+        """A top-level ``calf.exception`` (no group) also surfaces its exception
+        type/message in the notice — the assistant's ``UnexpectedModelBehavior`` case."""
+        report = ErrorReport.build_safe(
+            error_type=FaultTypes.EXCEPTION,
+            message="Exceeded maximum retries (1) for output validation",
+            origin_node_id="scribe",
+            exception=ExceptionInfo(type="UnexpectedModelBehavior", attrs={}),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError(report)))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "UnexpectedModelBehavior" in notice
+        assert "Exceeded maximum retries" in notice
+
+    async def test_minted_fault_with_no_exception_includes_report_message(self) -> None:
+        """A framework/minted fault with no exception slot (e.g. ``billing.quota_exceeded``)
+        has no leaf to surface — the notice stays the honest generic form but includes
+        the report's ``message`` if it adds context the user can act on."""
+        exc = NodeFaultError("billing.quota_exceeded", message="monthly quota exhausted")
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=exc))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "hit an error" in notice  # the honest generic anchor
+        assert "monthly quota exhausted" in notice  # the report message adds actionable context
+
+    async def test_many_leaves_are_bounded_under_discord_limit(self) -> None:
+        """A pathological fault_group (many causes with long messages) must not blow
+        past Discord's 2000-char notice limit — show as many root causes as fit and
+        point to the logs for the rest."""
+        causes = [
+            _leaf_exception_fault(
+                "WebFetchError",
+                f"Failed to fetch https://reddit.com/r/LocalLLaMA/comments/xxxxx/long_path_{i}/: 403 Forbidden",
+            )
+            for i in range(30)
+        ]
+        exc = _fault_group("scribe", causes)
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=exc))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert len(notice) <= 2000
+        assert "more" in notice.lower()  # names the elision honestly
+
+    async def test_cause_chain_surfaces_only_outermost_not_cause_links(self) -> None:
+        """A ``calf.exception`` whose ``causes`` hold a ``__cause__`` chain link
+        surfaces ONLY the outermost failure — the chain is operator-log detail, not
+        a separate user-facing failure (else one fetch wrapping httpx counts as two).
+
+        Pins the deliberate narrowing of ``walk()`` documented on
+        ``_root_cause_failures``: the framework's ``walk()`` yields both the
+        outermost report and each ``__cause__`` link; this function yields only the
+        outermost per failure path.
+        """
+        inner = ErrorReport.build_safe(
+            error_type=FaultTypes.EXCEPTION,
+            message="[Errno 61] Connection refused",
+            exception=ExceptionInfo(type="ConnectError", attrs={}),
+        )
+        outer = ErrorReport.build_safe(
+            error_type=FaultTypes.EXCEPTION,
+            message="Failed to fetch https://x.test/: 403 Forbidden",
+            origin_node_id="web_fetch",
+            exception=ExceptionInfo(type="WebFetchError", attrs={"status_code": 403}),
+            causes=[inner],  # the __cause__ chain — must NOT be surfaced as a separate failure
+        )
+        exc = _fault_group("scribe", [outer])
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=exc))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "WebFetchError" in notice  # the outermost failure surfaced
+        assert "403 Forbidden" in notice
+        assert "ConnectError" not in notice  # the __cause__ chain link is NOT surfaced
+
+    async def test_mixed_group_surfaces_typed_fault_children_too(self) -> None:
+        """A fault_group mixing exception-bearing children and minted typed-fault
+        children surfaces BOTH — the minted child's ``error_type`` stands in for
+        the exception type (it has no harvested ``exception`` slot). Without this,
+        a mixed group would silently drop its typed-fault children from the notice.
+        """
+        exception_child = _leaf_exception_fault(
+            "WebFetchError", "Failed to fetch https://x.test/: 403 Forbidden"
+        )
+        minted_child = ErrorReport.build_safe(
+            error_type="billing.quota_exceeded",
+            message="monthly quota exhausted",
+            origin_node_id="scribe",
+        )
+        exc = _fault_group("scribe", [exception_child, minted_child])
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=exc))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "WebFetchError" in notice  # the exception child
+        assert "403 Forbidden" in notice
+        assert "billing.quota_exceeded" in notice  # the minted child — not silently dropped
+        assert "monthly quota exhausted" in notice

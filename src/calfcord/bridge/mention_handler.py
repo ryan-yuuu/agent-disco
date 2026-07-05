@@ -24,6 +24,7 @@ from typing import Any, Literal, Protocol
 import discord
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import NodeFaultError
+from calfkit.models.error_report import ErrorReport, FaultTypes
 
 from calfcord.agents.identifier import MENTION_PREFIX
 from calfcord.agents.thinking import build_model_settings_union
@@ -50,26 +51,136 @@ _STICKY_OWNER_OFFLINE = (
     "Use `!unstick` or address another agent with `!name`."
 )
 
+# Notice budget: Discord caps a message at 2000 chars. The cap below is a SOFT
+# target — the "and N more" elision line (when appended) lives in the 100-char
+# headroom, so a worst-case notice lands near ~1950, never past 2000. The full
+# detail is in the log regardless.
+_DISCORD_NOTICE_LIMIT = 2000
+_MAX_NOTICE_CHARS = _DISCORD_NOTICE_LIMIT - 100
+# Per-cause truncation: a single WebFetchError message can run long (full URL +
+# the echoed URL); cap each line so one verbose cause can't crowd out the others.
+_MAX_CAUSE_MSG_CHARS = 240
+
 
 def _none_online_text(mention_ids: tuple[str, ...]) -> str:
     names = ", ".join(f"`{MENTION_PREFIX}{m}`" for m in mention_ids)
     return f"No agent matching {names} is online right now."
 
 
-def _agent_error_text(origin: str | None) -> str:
-    who = f"`{origin}`" if origin else "The agent"
-    return f"{who} hit an error handling that message. Please try again."
+def _root_cause_failures(report: ErrorReport | None) -> list[ErrorReport]:
+    """The outermost report per independent failure path in a fault_group.
+
+    This is a DELIBERATE narrowing of ``ErrorReport.walk()``. The framework's
+    ``walk()`` yields every nested report — including ``__cause__`` chain links
+    (a ``WebFetchError`` wrapping an ``httpx.ConnectError`` yields both), which
+    would double-count failures in the notice. Calfkit provides no
+    "sibling-failures-only" traversal (no ``walk_leaves()`` helper exists; the
+    ``causes`` field serves double duty as both group children and ``__cause__``
+    links), so we branch on ``error_type == FaultTypes.FAULT_GROUP`` — the stable
+    code ``_build_fault_group`` (calfkit ``base.py:1441``) is the sole producer
+    of, and whose ``causes`` are by construction independent failure paths.
+
+    Within a group, EVERY direct child is surfaced (whether it carries a
+    harvested ``exception`` slot or is itself a minted typed fault like
+    ``billing.quota_exceeded``) — a mixed group must not silently drop its
+    typed-fault children. Nested groups are recursed. A top-level non-group fault
+    surfaces itself only if it carries an ``exception`` slot; minted/framework
+    faults at the top level yield nothing and the caller falls back to
+    ``report.message``.
+    """
+    if report is None:
+        return []
+    if report.error_type == FaultTypes.FAULT_GROUP:
+        failures: list[ErrorReport] = []
+        for child in report.causes:
+            if child.error_type == FaultTypes.FAULT_GROUP:
+                failures.extend(_root_cause_failures(child))
+            else:
+                failures.append(child)
+        return failures
+    if report.exception is not None:
+        return [report]
+    return []
 
 
-def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> str | None:
-    """Log the full ``ErrorReport`` calfkit shipped; return the fault origin node.
+def _format_cause_line(failure: ErrorReport) -> str:
+    """One Discord notice line for a root-cause failure: origin, type, and message.
+
+    The origin + type prefix the message so a multi-cause notice stays scannable
+    even when (as is common) several failures share a type (``web_fetch:
+    WebFetchError — ...``). The type falls back to ``error_type`` for minted
+    typed faults (``billing.quota_exceeded``) that carry no harvested exception
+    slot. The message is truncated per-leaf so one verbose cause (a long URL)
+    can't crowd out the rest.
+    """
+    origin = failure.origin_node_id or "unknown"
+    exc_type = failure.exception.type if failure.exception is not None else failure.error_type
+    message = (failure.message or "")[:_MAX_CAUSE_MSG_CHARS]
+    return f"  • {origin}: {exc_type} — {message}"
+
+
+def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> str:
+    """Build the user-facing fault notice, surfacing root-cause exceptions.
+
+    Surfaces the outermost exception per failure path so the user can tell "4
+    fetches 403'd" from "agent crashed" — without this, a fault_group's children
+    are invisible (they live in ``report.causes``, which the old origin-only
+    notice never read). When there are no failures to surface (a minted/framework
+    fault like ``billing.quota_exceeded``), the notice includes ``report.message``
+    if it adds actionable context, else falls back to the honest generic form.
+
+    Leak posture: ``failure.message`` is ``safe_exc_message(exc)`` — the raw
+    exception message the failing tool raised. It is posted to Discord on the
+    TRUST assumption that the agent's own tool exceptions (the only producers in
+    this system) keep their messages free of secrets. ``exception.attrs`` (which
+    may carry sanitized ``vars(exc)`` like status codes) is deliberately kept
+    log-only, never posted.
+    """
+    who = f"`{target}`" if target else "The agent"
+    header = f"{who} hit an error handling that message:"
+    failures = _root_cause_failures(report)
+
+    if not failures:
+        # No harvested exception to surface. Include the report's message if it's
+        # informative (a minted fault's message often is — e.g. "quota exhausted");
+        # otherwise stay generic rather than expose a raw framework code.
+        message = report.message if report is not None else None
+        if message:
+            return f"{header} {message}. Please try again."
+        return f"{header} Please try again."
+
+    footer = "Please try again, or ask an operator to check the logs."
+    cause_lines = [_format_cause_line(f) for f in failures]
+    # Soft budget: show as many lines as fit under the cap. The "and N more"
+    # line (when it appends) lands in the 100-char headroom above the cap.
+    budget = _MAX_NOTICE_CHARS - len(header) - len(footer) - 2
+    shown = 0
+    for line in cause_lines:
+        if len(line) + 1 > budget:  # +1 for the newline joining it
+            break
+        budget -= len(line) + 1
+        shown += 1
+    lines = [header, *cause_lines[:shown]]
+    hidden = len(failures) - shown
+    if hidden:
+        lines.append(f"… and {hidden} more failure(s) — see the bridge logs.")
+    lines.append(footer)
+    return "\n".join(lines)
+
+
+def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> None:
+    """Log the full ``ErrorReport`` calfkit shipped, plus each root cause.
 
     Agents run on other hosts, so the report the bridge received on the fault
     (spec §11.1) is the operator's only in-hand diagnostic — log ``error_type``,
     ``message``, ``retryable`` and the harvested upstream exception at ERROR, not
-    just ``origin`` (which alone forces a cross-host log dig for every fault). The
-    defensive ``getattr`` chain tolerates a framework/minted fault (no
-    ``exception`` slot) and a malformed fault with no report.
+    just ``origin`` (which alone forces a cross-host log dig for every fault).
+    Then surface each root-cause FAILURE (one ERROR line per outermost exception)
+    with its origin/type/message/attrs: a fault_group summarizes ("N unhandled
+    fault(s)") but the actual failures (the 403s, the exception types) live in
+    the children — without this the operator sees the count but not the causes.
+    The defensive ``getattr`` chain on the summary line tolerates a malformed
+    fault with no report; ``_root_cause_failures`` is null-safe on its own.
     """
     report = getattr(exc, "report", None)
     origin = getattr(report, "origin_node_id", None)
@@ -85,7 +196,23 @@ def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> str | N
         getattr(report, "message", None),
         upstream,
     )
-    return origin
+    # One ERROR line per root-cause failure so each is named individually
+    # (origin/type/message/attrs) — the group summary alone hides them. A failure
+    # may lack an ``exception`` slot (a minted typed fault like
+    # ``billing.quota_exceeded`` in a mixed group); fall back to ``error_type``.
+    failures = _root_cause_failures(report)
+    for i, failure in enumerate(failures, 1):
+        failure_exc = failure.exception
+        logger.error(
+            "agent %s root cause [%d/%d] origin=%s type=%s message=%s attrs=%s",
+            phase,
+            i,
+            len(failures),
+            failure.origin_node_id,
+            failure_exc.type if failure_exc is not None else failure.error_type,
+            failure.message,
+            failure_exc.attrs if failure_exc is not None else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -358,9 +485,14 @@ class MentionHandler:
         await self._sticky.set_sticky_owner(str(req.source_channel_id or req.channel_id), owner_agent_id)
 
     async def _post_fault_notice(self, req: MentionRequest, exc: NodeFaultError, target: str, *, phase: str) -> None:
-        """Log the fault's full report (I-1) and post the user-facing error notice."""
-        origin = _log_agent_fault(exc, target, phase=phase)
-        await self._reply.post_notice(req, _agent_error_text(origin))
+        """Log the fault's full report (I-1) and post the user-facing error notice.
+
+        Surfaces root-cause exceptions (the 403s behind a fault_group) in BOTH the
+        log and the notice — pass the whole report so ``_agent_error_text`` can
+        walk ``report.causes`` rather than read only the top-level origin.
+        """
+        _log_agent_fault(exc, target, phase=phase)
+        await self._reply.post_notice(req, _agent_error_text(target, getattr(exc, "report", None)))
 
     async def _await_terminal(
         self, req: MentionRequest, handle: Any, dispatcher: A2ADispatcher, target: str
