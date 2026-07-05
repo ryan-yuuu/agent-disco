@@ -389,6 +389,15 @@ def _finish_create(
     On the native path it resolves the orchestration coroutines lazily (import-
     light; and the presence watcher is REUSED from ``init`` rather than duplicated)
     and runs the async :func:`_start_now`.
+
+    The workspace probe and the "Start now?" confirm are both run HERE, on the
+    sync side of the asyncio boundary, NOT inside ``asyncio.run(_start_now(...))``.
+    The prompter is the real ``InquirerPrompter`` in production, whose
+    ``.execute()`` calls ``asyncio.run()`` internally (via prompt_toolkit's
+    ``Application.prompt()``); nesting it inside our own ``asyncio.run`` raises
+    ``RuntimeError: asyncio.run() cannot be called from a running event loop`` —
+    the exact crash users hit at the end of ``disco agent create``. Architectural
+    rule (mirroring ``init``): ask everything first, THEN ``asyncio.run`` the work.
     """
     pc_binary_fn = pc_binary_fn or default_pc_binary
     # Dev run (``home is None`` — no install-scoped supervisor by design) degrades
@@ -422,36 +431,51 @@ def _finish_create(
         presence_fn = presence_fn or _wait_for_agent_online
         workspace_running_fn = workspace_running_fn or _default_workspace_running
 
+    # Probe the workspace state and ask the operator BEFORE entering asyncio. Both
+    # must run sync-side: the probe's result informs the confirm's manual next-steps
+    # branch, and the confirm itself cannot run inside ``asyncio.run`` (see the
+    # docstring). The probe is its own ``asyncio.run`` because the real
+    # ``workspace_is_up`` is async (a supervisor REST round-trip); the agent
+    # orchestration is a SECOND ``asyncio.run`` so the prompt sits cleanly between
+    # them rather than interleaved with IO.
+    running = asyncio.run(workspace_running_fn(home))
+    if not prompter.confirm(f"Start {name} now?", default=True):
+        _print_manual_next_steps(name, running=running)
+        return 0
+
     return asyncio.run(
         _start_now(
-            prompter,
             name=name,
             home=home,
             server_urls=server_urls,
+            running=running,
             start_fn=start_fn,
             tools_start_fn=tools_start_fn,
             agent_start_fn=agent_start_fn,
             presence_fn=presence_fn,
-            workspace_running_fn=workspace_running_fn,
         )
     )
 
 
 async def _start_now(
-    prompter: Prompter,
     *,
     name: str,
     home: Path,
     server_urls: str,
+    running: bool,
     start_fn: Callable[..., Awaitable[int]],
     tools_start_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]],
     presence_fn: Callable[..., Awaitable[bool]],
-    workspace_running_fn: Callable[[Path], Awaitable[bool]],
 ) -> int:
-    """The native live finish: confirm, open the workspace if closed, start, watch.
+    """The native live finish: open the workspace if closed, start, watch presence.
 
-    Branches on the REAL workspace state (a local supervisor-REST probe):
+    The operator's "Start now?" decision and the workspace-state probe have
+    already happened on the sync side of the asyncio boundary in
+    :func:`_finish_create`; this function is PURE orchestration — no prompting —
+    so it can run safely inside ``asyncio.run``.
+
+    Branches on the pre-resolved workspace state (``running``):
 
     * **not running** → :func:`_supervisor.open_workspace` opens the substrate
       (broker + bridge) AND the tools host — the same "open the workspace" ``disco
@@ -468,12 +492,6 @@ async def _start_now(
     Returns ``0`` once the agent has started (presence is advisory); a workspace or
     agent-start failure propagates the underlying non-zero code.
     """
-    running = await workspace_running_fn(home)
-
-    if not prompter.confirm(f"Start {name} now?", default=True):
-        _print_manual_next_steps(name, running=running)
-        return 0
-
     if not running:
         # Open the workspace the SAME way `disco start` does — substrate THEN the tools
         # host — via the one shared `open_workspace`, so a cold-open `agent create` can't
