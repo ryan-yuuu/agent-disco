@@ -75,25 +75,33 @@ class TestReservedAgentIds:
         # that name would share state/logs/process-compose.log with the live
         # supervisor — and rotate-at-spawn would rename the supervisor's log out
         # from under it.
-        assert frozenset({"broker", "bridge", "tools", "process-compose"}) == RESERVED_AGENT_IDS
+        assert frozenset({"broker", "bridge", "tools", "process-compose", "unstick"}) == RESERVED_AGENT_IDS
         assert MCP_SLOT_PREFIX == "mcp-"
 
     def test_reserved_set_matches_the_supervisor_slot_namespace(self) -> None:
         """The supervisor cannot import this module at module level (the agents
         package init pulls calfkit; the supervisor stays import-light), so the two
-        literals are defined twice — this pins them equal so they cannot drift."""
+        process-slot literals are defined twice — this pins that subset so it
+        cannot drift while allowing command-reserved names such as ``unstick``."""
         from calfcord.supervisor import compose
 
-        assert RESERVED_AGENT_IDS == compose._RESERVED_PROCESS_NAMES
+        assert compose._RESERVED_PROCESS_NAMES < RESERVED_AGENT_IDS
         assert MCP_SLOT_PREFIX == compose.MCP_SLOT_PREFIX
 
-    @pytest.mark.parametrize("name", ["broker", "bridge", "tools", "process-compose"])
+    @pytest.mark.parametrize("name", ["broker", "bridge", "tools", "process-compose", "unstick"])
     def test_reserved_names_yield_an_error(self, name: str) -> None:
         message = reserved_agent_id_error(name)
         assert message is not None
         assert name in message
         # The message must say WHY the name is off-limits (the process it collides with).
         assert "reserved" in message
+
+    def test_unstick_error_names_the_command_collision(self) -> None:
+        message = reserved_agent_id_error("unstick")
+        assert message is not None
+        assert "!unstick" in message
+        assert "routing command" in message
+        assert "pick another agent name" in message
 
     def test_process_compose_error_names_the_log_collision(self) -> None:
         # The collision is the supervisor's LOG file, not a process slot — the
@@ -110,6 +118,6 @@ class TestReservedAgentIds:
         assert "mcp-" in message
         assert "reserved" in message
 
-    @pytest.mark.parametrize("name", ["scribe", "assistant", "mcp", "mcpx", "toolsmith", "bridges"])
+    @pytest.mark.parametrize("name", ["scribe", "assistant", "mcp", "mcpx", "toolsmith", "bridges", "unstuck"])
     def test_ordinary_names_pass(self, name: str) -> None:
         assert reserved_agent_id_error(name) is None

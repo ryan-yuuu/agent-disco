@@ -179,6 +179,14 @@ class _FakeReply:
         self.notices.append(text)
 
 
+class _FakeSticky:
+    def __init__(self) -> None:
+        self.sets: list[tuple[str, str]] = []
+
+    async def set_sticky_owner(self, conversation_key: str, owner_agent_id: str) -> None:
+        self.sets.append((conversation_key, owner_agent_id))
+
+
 def _result(output: str, emitter: str) -> InvocationResult:
     return InvocationResult(
         output=output, state=State(message_history=[]), correlation_id="c1", emitter_node_id=emitter
@@ -232,7 +240,12 @@ def _wire(content: str = "hello") -> WireMessage:
     )
 
 
-def _req(content: str = "hello", mentions: tuple[str, ...] = ("scribe",)) -> MentionRequest:
+def _req(
+    content: str = "hello",
+    mentions: tuple[str, ...] = ("scribe",),
+    *,
+    route_kind: str = "explicit",
+) -> MentionRequest:
     return MentionRequest(
         content=content,
         mention_ids=mentions,
@@ -242,6 +255,7 @@ def _req(content: str = "hello", mentions: tuple[str, ...] = ("scribe",)) -> Men
         channel_id=10,
         wire=_wire(content),
         reply_target=object(),
+        route_kind=route_kind,  # type: ignore[arg-type]
     )
 
 
@@ -254,6 +268,7 @@ def _make(
     reply_outcomes: list[ReplyOutcome] | None = None,
     chunked_ok: bool = True,
     progress: Any = None,
+    sticky: _FakeSticky | None = None,
 ) -> tuple[MentionHandler, _FakeClient, dict[str, Any]]:
     if handles is None:
         handles = [handle if handle is not None else _FakeHandle(result=_result("done", "scribe"))]
@@ -263,6 +278,7 @@ def _make(
         "progress": progress if progress is not None else _FakeProgress(),
         "reply": _FakeReply(reply_outcomes, chunked_ok=chunked_ok),
         "history": _FakeHistory(),
+        "sticky": sticky if sticky is not None else _FakeSticky(),
     }
     handler = MentionHandler(
         client=client,
@@ -273,6 +289,7 @@ def _make(
         progress=fakes["progress"],
         reply=fakes["reply"],
         memory_deps=lambda: {"memory_prompt": "tmpl"},
+        sticky=fakes["sticky"],
     )
     return handler, client, fakes
 
@@ -301,6 +318,40 @@ class TestRouting:
         persona, _ = fakes["reply"].replies[0]
         assert persona.name == "conan"  # the node that actually replied
 
+    async def test_successful_reply_sets_sticky_owner_to_emitter(self) -> None:
+        handler, _client, fakes = _make(handle=_FakeHandle(result=_result("handed off answer", "conan")))
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["sticky"].sets == [("10", "conan")]
+
+    async def test_empty_no_post_reply_does_not_set_sticky_owner(self) -> None:
+        handler, _client, fakes = _make(
+            handle=_FakeHandle(result=_result("", "scribe")),
+            reply_outcomes=[ReplyOutcome("ok", posted=False)],
+        )
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["sticky"].sets == []
+
+    async def test_dropped_reply_does_not_set_sticky_owner(self) -> None:
+        handler, _client, fakes = _make(reply_outcomes=[ReplyOutcome("dropped")])
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["sticky"].sets == []
+
+    async def test_chunk_fallback_success_sets_sticky_owner(self) -> None:
+        handler, _client, fakes = _make(
+            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="too long")] * 3,
+            chunked_ok=True,
+        )
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["sticky"].sets == [("10", "scribe")]
+
+    async def test_chunk_fallback_total_failure_does_not_set_sticky_owner(self) -> None:
+        handler, _client, fakes = _make(
+            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="too long")] * 3,
+            chunked_ok=False,
+        )
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["sticky"].sets == []
+
     async def test_no_mention_is_unanswered(self) -> None:
         handler, client, fakes = _make()
         await handler.handle(_req(mentions=()))
@@ -326,6 +377,17 @@ class TestRouting:
         await handler.handle(_req(mentions=("scribe",)))
         assert client.requested_agent is None
         assert len(fakes["reply"].notices) == 1 and "roster" in fakes["reply"].notices[0].lower()
+
+    async def test_sticky_routed_offline_owner_posts_sticky_notice_without_clearing(self) -> None:
+        handler, client, fakes = _make(online=frozenset())
+        await handler.handle(_req(mentions=("scribe",), route_kind="sticky"))
+        assert client.requested_agent is None
+        assert fakes["reply"].replies == []
+        assert fakes["sticky"].sets == []
+        assert fakes["reply"].notices == [
+            "This conversation is sticky to `!scribe`, but that agent is offline. "
+            "Use `!unstick` or address another agent with `!name`."
+        ]
 
 
 class TestStreamDrain:

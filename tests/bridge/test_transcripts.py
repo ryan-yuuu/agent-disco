@@ -427,6 +427,51 @@ async def test_agent_overrides_persist_across_reopen(tmp_path: pathlib.Path) -> 
         await store2.close()
 
 
+# --- sticky conversation ownership ---------------------------------------
+# Sticky replies use the same bridge-local SQLite database: one row per Discord
+# source channel/thread, holding the current owner agent for ambient routing.
+
+
+async def test_set_then_get_sticky_owner_round_trips(tmp_path: pathlib.Path) -> None:
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        assert await store.get_sticky_owner("500") is None
+        await store.set_sticky_owner("500", "scribe")
+        assert await store.get_sticky_owner("500") == "scribe"
+
+
+async def test_set_sticky_owner_upsert_overwrites(tmp_path: pathlib.Path) -> None:
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        await store.set_sticky_owner("500", "scribe")
+        await store.set_sticky_owner("500", "planner")
+        assert await store.get_sticky_owner("500") == "planner"
+
+
+async def test_clear_sticky_owner_removes_existing_and_is_idempotent(tmp_path: pathlib.Path) -> None:
+    store = TranscriptStore(_db_path(tmp_path))
+    async with store:
+        await store.set_sticky_owner("500", "scribe")
+        await store.clear_sticky_owner("500")
+        await store.clear_sticky_owner("500")
+        assert await store.get_sticky_owner("500") is None
+
+
+async def test_sticky_owner_persists_across_reopen(tmp_path: pathlib.Path) -> None:
+    db_path = _db_path(tmp_path)
+    store1 = TranscriptStore(db_path)
+    await store1.connect()
+    await store1.set_sticky_owner("500", "scribe")
+    await store1.close()
+
+    store2 = TranscriptStore(db_path)
+    await store2.connect()
+    try:
+        assert await store2.get_sticky_owner("500") == "scribe"
+    finally:
+        await store2.close()
+
+
 def test_real_store_reports_enabled_true(tmp_path: pathlib.Path) -> None:
     # The real store is always enabled — transcripts, replay, and the toggle
     # are active for it. (No connection needed; ``enabled`` is a class-level
@@ -472,6 +517,13 @@ async def test_null_store_agent_overrides_degrade() -> None:
     assert await store.clear_agent_override("scheduler") is None
     assert await store.get_agent_override("scheduler") is None
     assert await store.all_agent_overrides() == {}
+
+
+async def test_null_store_sticky_owners_degrade() -> None:
+    store = NullTranscriptStore()
+    assert await store.set_sticky_owner("500", "scribe") is None
+    assert await store.clear_sticky_owner("500") is None
+    assert await store.get_sticky_owner("500") is None
 
 
 def test_null_store_mirrors_real_store_surface() -> None:

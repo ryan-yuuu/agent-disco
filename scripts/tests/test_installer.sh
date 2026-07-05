@@ -200,6 +200,26 @@ k="$(grep -c '^DISCORD_BOT_TOKEN=keep-me$' "$TD/config/.env")"
 perm="$(stat -c '%a' "$TD/config/.env" 2>/dev/null || stat -f '%Lp' "$TD/config/.env" 2>/dev/null)"
 [ "$perm" = "600" ] && pass "config perms 600" || fail "perms ($perm)"
 
+# seed_config creates the bridge settings file beside .env and mcp.json, keeps it
+# owner-only, and never clobbers operator edits on a re-run.
+SH="$BASE/settings-home"; SRC="$BASE/settings-src"; mkdir -p "$SRC"
+printf 'DISCORD_BOT_TOKEN=\n' > "$SRC/.env.example"
+CALFCORD_HOME="$SH" "$B" -c "source '$LIB'; seed_config '$SRC'" >/dev/null 2>&1
+settings="$SH/config/settings.json"
+settings_perm="$(stat -c '%a' "$settings" 2>/dev/null || stat -f '%Lp' "$settings" 2>/dev/null)"
+{ [ -f "$settings" ] \
+  && grep -Fq '"sticky_replies"' "$settings" \
+  && grep -Fq '"enabled": true' "$settings" \
+  && [ "$settings_perm" = "600" ]; } \
+  && pass "seed_config seeds settings.json enabled + 600" \
+  || fail "seed_config settings seed"
+printf '{\n  "sticky_replies": {"enabled": false},\n  "operator": "kept"\n}\n' > "$settings"
+chmod 600 "$settings"
+CALFCORD_HOME="$SH" "$B" -c "source '$LIB'; seed_config '$SRC'" >/dev/null 2>&1
+{ grep -Fq '"operator": "kept"' "$settings" && grep -Fq '"enabled": false' "$settings"; } \
+  && pass "seed_config preserves existing settings.json" \
+  || fail "seed_config clobbered settings"
+
 # rollback: uses recorded previous, flips, rewrites marker with swapped previous
 "$B" "$CS" rollback >/dev/null 2>&1; rc=$?
 tgt="$(readlink "$TD/current")"
