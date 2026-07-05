@@ -118,12 +118,12 @@ class TestBuildStepView:
 
 
 class TestOnStepPosts:
-    """Each renderable step posts a persistent v2 message under its emitter
+    """Each renderable step posts a persistent v2 message under the appropriate
     persona — no edit, no delete."""
 
-    async def test_tool_call_posts_one_message_under_emitter_persona(self, persona_sender: AsyncMock) -> None:
+    async def test_tool_call_posts_one_message_under_owning_agent_persona(self, persona_sender: AsyncMock) -> None:
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("tool_call", name="read_file"), _req())
+        await renderer.on_step(_step("tool_call", name="read_file"), _req(), owning_agent="aksel")
 
         assert persona_sender.send_components.await_count == 1
         persona_sender.edit_message.assert_not_called()
@@ -135,23 +135,52 @@ class TestOnStepPosts:
         assert call.kwargs["thread_id"] is None
         assert _view_bodies(call.kwargs["view"]) == ["🔧 `read_file` called"]
 
+    async def test_tool_result_uses_owning_agent_not_tool_emitter(self, persona_sender: AsyncMock) -> None:
+        """The bug fix: a tool_result's emitter is the tool node (e.g. 'todo'),
+        but the progress message must appear under the calling agent's persona."""
+        renderer = ProgressRenderer(persona_sender)
+        await renderer.on_step(
+            _step("tool_result", name="todo", emitter="todo"),
+            _req(),
+            owning_agent="aksel",
+        )
+        assert persona_sender.send_components.call_args.kwargs["persona"].name == "aksel"
+
     async def test_tool_result_error_posts_errored_body(self, persona_sender: AsyncMock) -> None:
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("tool_result", name="read_file", is_error=True), _req())
+        await renderer.on_step(
+            _step("tool_result", name="read_file", is_error=True), _req(), owning_agent="aksel"
+        )
         assert _view_bodies(persona_sender.send_components.call_args.kwargs["view"]) == ["❌ `read_file` errored"]
 
     async def test_handoff_posts_bare_target_body(self, persona_sender: AsyncMock) -> None:
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("handoff", target="/billing"), _req())
+        await renderer.on_step(_step("handoff", target="/billing"), _req(), owning_agent="aksel")
         assert persona_sender.send_components.await_count == 1
         assert _view_bodies(persona_sender.send_components.call_args.kwargs["view"]) == ["➡️ handed off to `billing`"]
 
-    async def test_persona_resolved_per_step_emitter(self, persona_sender: AsyncMock) -> None:
+    async def test_agent_message_uses_emitter_not_owning_agent(self, persona_sender: AsyncMock) -> None:
+        """agent_message keeps the emitter persona (genuine peer-emitter case)
+        even when owning_agent differs — e.g. after a handoff the peer's text
+        appears under the peer's identity."""
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("tool_call", name="a", emitter="codex"), _req())
-        await renderer.on_step(_step("tool_call", name="b", emitter="conan"), _req())
-        personas = [c.kwargs["persona"].name for c in persona_sender.send_components.call_args_list]
-        assert personas == ["codex", "conan"]
+        await renderer.on_step(
+            _step("agent_message", text="hello", emitter="billing"),
+            _req(),
+            owning_agent="aksel",
+        )
+        assert persona_sender.send_components.call_args.kwargs["persona"].name == "billing"
+
+    async def test_handoff_uses_emitter_not_owning_agent(self, persona_sender: AsyncMock) -> None:
+        """The handoff announcement stays under the handing-off agent (emitter),
+        not the receiving agent (target/owning_agent after update)."""
+        renderer = ProgressRenderer(persona_sender)
+        await renderer.on_step(
+            _step("handoff", target="billing", emitter="aksel"),
+            _req(),
+            owning_agent="aksel",
+        )
+        assert persona_sender.send_components.call_args.kwargs["persona"].name == "aksel"
 
     async def test_long_agent_message_posts_one_message_per_chunk(self, persona_sender: AsyncMock) -> None:
         text = "\n".join("y" * 80 for _ in range(200))  # well over the v2 cap → multiple chunks
@@ -160,7 +189,7 @@ class TestOnStepPosts:
         assert len(expected) >= 2  # sanity: this really does chunk
 
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(step, _req())
+        await renderer.on_step(step, _req(), owning_agent="aksel")
 
         assert persona_sender.send_components.await_count == len(expected)
         posted = [_view_bodies(c.kwargs["view"])[0] for c in persona_sender.send_components.call_args_list]
@@ -172,7 +201,7 @@ class TestNothingRenderable:
 
     async def test_whitespace_agent_message_posts_nothing(self, persona_sender: AsyncMock) -> None:
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("agent_message", text="   \n  "), _req())
+        await renderer.on_step(_step("agent_message", text="   \n  "), _req(), owning_agent="aksel")
         persona_sender.send_components.assert_not_called()
 
 
@@ -183,7 +212,7 @@ class TestThreadRouting:
     async def test_thread_originated_step_posts_into_thread(self, persona_sender: AsyncMock) -> None:
         thread_id = 555_001
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req(source_channel_id=thread_id))
+        await renderer.on_step(_step("tool_call", name="t"), _req(source_channel_id=thread_id), owning_agent="aksel")
         call = persona_sender.send_components.call_args
         assert call.kwargs["channel_id"] == _CHANNEL_ID  # webhook host = parent
         assert call.kwargs["thread_id"] == thread_id  # routed into the thread
@@ -194,7 +223,7 @@ class TestFinishIsNoop:
 
     async def test_finish_after_posts_does_nothing(self, persona_sender: AsyncMock) -> None:
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req())
+        await renderer.on_step(_step("tool_call", name="t"), _req(), owning_agent="aksel")
         persona_sender.send_components.reset_mock()
         await renderer.finish(_CORRELATION_ID)
         persona_sender.send_components.assert_not_called()
@@ -215,21 +244,21 @@ class TestFailureSwallowing:
         persona_sender.send_components = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
         renderer = ProgressRenderer(persona_sender)
         with caplog.at_level(logging.WARNING, logger="calfcord.bridge.progress"):
-            await renderer.on_step(_step("tool_call", name="t"), _req())  # must not raise
+            await renderer.on_step(_step("tool_call", name="t"), _req(), owning_agent="aksel")  # must not raise
         assert any("Forbidden" in r.getMessage() for r in caplog.records)
 
     async def test_notfound_on_send_is_swallowed(self, persona_sender: AsyncMock) -> None:
         # A gone message (NotFound) on the send is swallowed at DEBUG.
         persona_sender.send_components = AsyncMock(side_effect=_http_exc(discord.NotFound, 404))
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req())  # must not raise
+        await renderer.on_step(_step("tool_call", name="t"), _req(), owning_agent="aksel")  # must not raise
 
     async def test_rate_limited_on_send_is_swallowed(self, persona_sender: AsyncMock) -> None:
         # discord.RateLimited is a DiscordException but NOT an HTTPException — the
         # broader catch must funnel it through.
         persona_sender.send_components = AsyncMock(side_effect=discord.RateLimited(retry_after=1.0))
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req())  # must not raise
+        await renderer.on_step(_step("tool_call", name="t"), _req(), owning_agent="aksel")  # must not raise
 
     async def test_one_chunk_failing_does_not_stop_the_rest(self, persona_sender: AsyncMock) -> None:
         # A failed body is swallowed and the loop continues to the next chunk.
@@ -244,7 +273,7 @@ class TestFailureSwallowing:
         assert len(steps_render.render_step_message(step)) == 2  # exactly two chunks
 
         renderer = ProgressRenderer(persona_sender)
-        await renderer.on_step(step, _req())  # must not raise despite the first failing
+        await renderer.on_step(step, _req(), owning_agent="aksel")  # must not raise despite the first failing
         assert persona_sender.send_components.await_count == 2
 
 
@@ -254,5 +283,5 @@ class TestTypingDisabled:
     async def test_typing_notifier_is_not_fired(self, persona_sender: AsyncMock) -> None:
         notifier = MagicMock()
         renderer = ProgressRenderer(persona_sender, notifier)
-        await renderer.on_step(_step("tool_call", name="t"), _req())
+        await renderer.on_step(_step("tool_call", name="t"), _req(), owning_agent="aksel")
         notifier.fire.assert_not_called()

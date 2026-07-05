@@ -137,9 +137,13 @@ class _FakeProgress:
     def __init__(self) -> None:
         self.steps: list[Any] = []
         self.finished: list[str] = []
+        # Track the owning agent passed to each on_step call so handoff-tracking
+        # tests can assert that tool steps after a handoff carry the new agent.
+        self.owning_agents: list[str] = []
 
-    async def on_step(self, step: Any, req: MentionRequest) -> None:
+    async def on_step(self, step: Any, req: MentionRequest, *, owning_agent: str) -> None:
         self.steps.append(step)
+        self.owning_agents.append(owning_agent)
 
     async def finish(self, correlation_id: str) -> None:
         self.finished.append(correlation_id)
@@ -224,6 +228,19 @@ def _consult_reply(tcid: str, peer: str, text: str) -> ToolResultEvent:
 
 def _handoff(target: str, reason: str = "", emitter: str = "scribe") -> HandoffEvent:
     return HandoffEvent(correlation_id="c1", depth=0, frame_id="f", emitter=emitter, target=target, reason=reason)
+
+
+def _tool_call(tcid: str, tool_name: str, emitter: str = "scribe") -> ToolCallEvent:
+    """A non-message_agent tool call (the progress-renderer path, not A2A)."""
+    return ToolCallEvent(
+        correlation_id="c1",
+        depth=1,
+        frame_id="f",
+        emitter=emitter,
+        tool_call_id=tcid,
+        name=tool_name,
+        args={},
+    )
 
 
 def _wire(content: str = "hello") -> WireMessage:
@@ -417,11 +434,29 @@ class TestStreamDrain:
         assert [s.kind for s in fakes["progress"].steps] == ["handoff"]
         assert fakes["a2a"].projected == []
 
+    async def test_owning_agent_transfers_on_handoff(self) -> None:
+        # After a handoff from scribe → dot, subsequent tool steps carry dot as
+        # the owning agent (their progress lines must appear under dot's persona,
+        # not scribe's). The handoff step itself still carries the pre-transfer
+        # owner (scribe announced it).
+        steps = (
+            _tool_call("t1", "terminal"),  # scribe's tool call
+            _handoff("dot", "you handle this"),  # scribe hands off to dot
+            _tool_call("t2", "read_file"),  # dot's tool call
+            _agent_msg("done", emitter="dot"),  # dot's reply
+        )
+        handler, _client, fakes = _make(
+            handle=_FakeHandle(steps=steps, result=_result("done", "dot"))
+        )
+        await handler.handle(_req(mentions=("scribe",)))
+        # owning_agents aligns 1:1 with steps
+        assert fakes["progress"].owning_agents == ["scribe", "scribe", "dot", "dot"]
+
     async def test_render_fault_in_drain_does_not_lose_terminal_reply(self) -> None:
         # I-3: a render/normalize/classify fault on a step must be swallowed (logged)
         # so it can't unwind the drain and cost the user the already-computed reply.
         class _RaisingProgress(_FakeProgress):
-            async def on_step(self, step: Any, req: MentionRequest) -> None:
+            async def on_step(self, step: Any, req: MentionRequest, *, owning_agent: str) -> None:
                 raise RuntimeError("render boom")
 
         handler, _client, fakes = _make(
