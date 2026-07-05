@@ -174,7 +174,7 @@ def test_render_emits_broker_before_bridge() -> None:
 # real-binary lane — so it skips cleanly on a host without the binary and never
 # blocks the unit suite::
 #
-#     CALF_TEST_PC=1 PATH="$HOME/.calfcord/bin:$PATH" \
+#     CALF_TEST_PC=1 PATH="$HOME/.agent-disco/bin:$PATH" \
 #         uv run pytest tests/supervisor/test_compose.py
 _PC_GATE = pytest.mark.skipif(
     not os.getenv("CALF_TEST_PC") or shutil.which("process-compose") is None,

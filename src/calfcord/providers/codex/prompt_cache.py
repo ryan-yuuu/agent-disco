@@ -23,7 +23,7 @@ filesystem guarantees the replace is atomic.
 
 Locations
 ---------
-Default base dir: ``$CALFCORD_HOME/codex_prompts/`` (``~/.calfcord/codex_prompts/``
+Default base dir: ``$CALFCORD_HOME/codex_prompts/`` (``~/.agent-disco/codex_prompts/``
 when ``CALFCORD_HOME`` is unset), so the cache moves with a relocated or
 per-host install. Override via the ``CALFCORD_PROMPT_CACHE_DIR`` environment
 variable. The directory is created with mode ``0o700`` on POSIX so other users

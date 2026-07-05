@@ -294,7 +294,7 @@ def test_pc_port_for_differs_per_home() -> None:
 
 
 def test_pc_port_for_is_in_documented_high_range() -> None:
-    for home in ("/a", "/b/c", "/srv/calfcord", "/Users/x/.calfcord"):
+    for home in ("/a", "/b/c", "/srv/calfcord", "/Users/x/.agent-disco"):
         port = lifecycle.pc_port_for(home)
         assert lifecycle._PORT_RANGE_START <= port <= lifecycle._PORT_RANGE_END
         # Never the supervisor default, which is the whole point of deriving it.

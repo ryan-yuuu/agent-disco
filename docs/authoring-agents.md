@@ -574,13 +574,13 @@ projection design.
 Every field in §3 can be hand-edited in the `.md`, but the `disco
 agent` command group does the same work — create, inspect, edit, and
 remove agents — from the terminal, writing the same `agents/<name>.md`
-files (under `~/.calfcord/agents/` on a native install). Each command
+files (under `~/.agent-disco/agents/` on a native install). Each command
 writes through the same validators the loader uses, so a value the CLI
 accepts is a value the agent will boot with.
 
 | Command | What it does |
 | ------- | ------------ |
-| `disco agent create [<name>]` | Guided wizard: name, description, provider + API key, a model **picked from a live list** fetched from the provider, a **tools checkbox** (all builtins pre-selected), and an optional "edit the system prompt now? (opens `$EDITOR`)" step. Writes `~/.calfcord/agents/<name>.md`. |
+| `disco agent create [<name>]` | Guided wizard: name, description, provider + API key, a model **picked from a live list** fetched from the provider, a **tools checkbox** (all builtins pre-selected), and an optional "edit the system prompt now? (opens `$EDITOR`)" step. Writes `~/.agent-disco/agents/<name>.md`. |
 | `disco agent list [--json]` | Table of every agent (name, provider·model, tool count, description), or a JSON array with `--json`. |
 | `disco agent show <name> [--json]` | One agent's full config plus a system-prompt preview; `--json` emits the complete config (full body included). |
 | `disco agent edit [<name>]` | Interactive field menu — pick a field, edit it with the right widget; each change is written immediately. Omit `<name>` to pick from a list. |

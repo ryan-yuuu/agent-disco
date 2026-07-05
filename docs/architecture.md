@@ -213,7 +213,7 @@ Pick by intent — operating an install, hacking on the source, or containerizin
 ### 1. Supervised native (primary)
 
 The end-user path. The native installer (`curl … | bash`) drops a `disco`
-shim under `~/.calfcord/`; `disco init` walks you through first-run config and
+shim under `~/.agent-disco/`; `disco init` walks you through first-run config and
 ends with your first agent online. From then on you operate the
 [substrate and roster](#runtime-model-substrate--roster) through the shim: **the
 substrate runs under Process Compose** (health-gated startup, dependency ordering,
@@ -230,8 +230,8 @@ disco stop                   # close the office (roster + substrate)
 
 On a native install the agent and state directories are pinned under the install
 home so they survive `disco self update` and are found from any directory —
-`CALFKIT_AGENTS_DIR` → `~/.calfcord/agents`, `CALFKIT_STATE_DIR` →
-`~/.calfcord/state/agents` — while the tools **workspace follows the launch
+`CALFKIT_AGENTS_DIR` → `~/.agent-disco/agents`, `CALFKIT_STATE_DIR` →
+`~/.agent-disco/state/agents` — while the tools **workspace follows the launch
 directory** (`CALFCORD_WORKSPACE_DIR` defaults to the `$PWD` where the substrate
 was launched, the Claude-Code model — agents act where you opened the office).
 See the [README quick start](../README.md#quick-start) and

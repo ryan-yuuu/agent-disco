@@ -75,7 +75,7 @@ Docker broker, whose image retains the libsql/postgres/S3 storage engines.
 
 | Variable | Required | Description |
 |---|---|---|
-| `CALFKIT_AGENTS_DIR` | optional | Directory the **agent runner** (and the CLI) scan for agent `.md` files — the bridge does not read it. On a native install the `disco` shim defaults it to `~/.calfcord/agents` (so definitions survive `disco self update`); dev (`uv run`) and Docker keep the CWD-relative `agents/`. Override via shell env or `~/.calfcord/config/.env`. |
+| `CALFKIT_AGENTS_DIR` | optional | Directory the **agent runner** (and the CLI) scan for agent `.md` files — the bridge does not read it. On a native install the `disco` shim defaults it to `~/.agent-disco/agents` (so definitions survive `disco self update`); dev (`uv run`) and Docker keep the CWD-relative `agents/`. Override via shell env or `~/.agent-disco/config/.env`. |
 | `DISCORD_TRANSCRIPT_DB_PATH` | optional | Bridge-local SQLite store (default `state/transcripts.sqlite3`). Holds the per-turn transcripts used for tool-call replay across turns **and** the persisted per-agent `/thinking-effort` overrides (the `agent_overrides` table), so an override survives a bridge restart. Read only by the bridge. |
 | `CALFCORD_SETTINGS` | optional | Path to the bridge `settings.json` file. Resolution is `CALFCORD_SETTINGS` → `$CALFCORD_HOME/config/settings.json` → `./settings.json` (dev fallback). See [bridge-settings.md](./bridge-settings.md). |
 | `CALFKIT_A2A_CHANNEL_NAME` | optional | Name of the unified A2A audit channel, **read by the bridge** (the A2A projection moved from the tools process to the bridge in the calfkit 0.12 migration). Code default `private-a2a-chats`; lazy-created on the first A2A projection. |
@@ -112,7 +112,7 @@ you're overriding the bootstrap or running two installs on one host.
 
 | Variable | Required | Description |
 |---|---|---|
-| `CALFCORD_HOME` | optional | Install root. Defaults to `~/.calfcord`. The shim exports it so Agent Disco can find `config/.env`, the agents dir, and the supervisor's state. Two installs on one host = two `CALFCORD_HOME`s. |
+| `CALFCORD_HOME` | optional | Install root. Defaults to `~/.agent-disco`. The shim exports it so Agent Disco can find `config/.env`, the agents dir, and the supervisor's state. Two installs on one host = two `CALFCORD_HOME`s. |
 | `CALFCORD_PROCESS_COMPOSE_VERSION` | optional (installer-time) | Pins the Process Compose release the installer downloads. Defaults to `v1.110.0` (the version Agent Disco's supervisor wire contract is tested against — don't change it without reason). |
 | `CALFCORD_PROCESS_COMPOSE_BIN` | optional | Absolute path to a `process-compose` binary to use instead of the bootstrapped one (dev override / packaging). Resolution: this var → `$CALFCORD_HOME/bin/process-compose` → `process-compose` on `PATH`. A stale value pointing at nothing falls through rather than masking a working binary. |
 | `PC_API_TOKEN` | optional | Shared key (≥ 20 chars) for the supervisor's REST API, if you've secured it. Agent Disco sends it in the `X-PC-Token-Key` header; unset = unauthenticated (the common single-user case). |

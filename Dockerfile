@@ -88,9 +88,9 @@ RUN groupadd --gid ${GID} calfcord \
 # 0o700, the named volume inherits the owner+perms on first mount.
 # A host-bind-mounted dir on macOS still works regardless via Docker
 # Desktop's UID translation.
-RUN install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.calfcord \
- && install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.calfcord/auth \
- && install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.calfcord/codex_prompts
+RUN install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.agent-disco \
+ && install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.agent-disco/auth \
+ && install -d -o calfcord -g calfcord -m 0700 /home/calfcord/.agent-disco/codex_prompts
 
 WORKDIR /app
 

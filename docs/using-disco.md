@@ -245,7 +245,7 @@ disco self set-broker my-broker:9092
 To change bridge behavior such as sticky replies, edit the bridge settings file:
 
 ```bash
-$EDITOR ~/.calfcord/config/settings.json
+$EDITOR ~/.agent-disco/config/settings.json
 disco bridge restart
 ```
 

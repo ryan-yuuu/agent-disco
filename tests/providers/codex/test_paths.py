@@ -14,14 +14,14 @@ class TestCalfcordHome:
         monkeypatch.setenv("CALFCORD_HOME", str(tmp_path / "opt" / "calfcord"))
         assert calfcord_home() == tmp_path / "opt" / "calfcord"
 
-    def test_falls_back_to_dot_calfcord_when_unset(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_falls_back_to_dot_agent_disco_when_unset(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("CALFCORD_HOME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
-        assert calfcord_home() == tmp_path / ".calfcord"
+        assert calfcord_home() == tmp_path / ".agent-disco"
 
     def test_empty_calfcord_home_counts_as_unset(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         # A stray ``CALFCORD_HOME=`` must not root paths at ``/`` — same guard
         # the CLI / mcp / bridge resolvers use.
         monkeypatch.setenv("CALFCORD_HOME", "")
         monkeypatch.setenv("HOME", str(tmp_path))
-        assert calfcord_home() == tmp_path / ".calfcord"
+        assert calfcord_home() == tmp_path / ".agent-disco"

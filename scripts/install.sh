@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/install.sh | bash
 #
 # What it does, making NO assumptions about the box (no git, no system Python):
-#   1. bootstraps `uv` (a static binary) privately under ~/.calfcord
+#   1. bootstraps `uv` (a static binary) privately under ~/.agent-disco
 #   2. pins + downloads the source for a single commit of `main` (tarball, no git)
 #   3. builds an isolated, locked venv with `uv sync --locked --no-dev`
 #   4. installs a `disco` command that thinly wraps `uv run` in that venv
@@ -17,7 +17,7 @@
 # forwards `<x>` to `uv run`, so new entry points need no installer changes.
 #
 # Env knobs:
-#   CALFCORD_HOME   install root          (default: ~/.calfcord)
+#   CALFCORD_HOME   install root          (default: ~/.agent-disco)
 #   CALFCORD_REF    branch or commit SHA  (default: main)
 #   CALFCORD_REPO   owner/repo            (default: ryan-yuuu/agent-disco)
 #   GITHUB_TOKEN    optional, for API rate limits / private mirrors
@@ -29,7 +29,7 @@ set -Eeuo pipefail
 # ------------------------------------------------------------------ config ---
 REPO="${CALFCORD_REPO:-ryan-yuuu/agent-disco}"
 REF="${CALFCORD_REF:-main}"
-CALFCORD_HOME="${CALFCORD_HOME:-$HOME/.calfcord}"
+CALFCORD_HOME="${CALFCORD_HOME:-$HOME/.agent-disco}"
 
 BIN_DIR="$CALFCORD_HOME/bin"          # private uv (NOT placed on PATH)
 SHIM_DIR="$CALFCORD_HOME/shims"       # disco + disco-self (placed on PATH)
@@ -372,7 +372,7 @@ set -euo pipefail
 # shellcheck disable=SC2154  # rc is assigned by rc=$? at the start of the trap body
 trap 'rc=$?; printf "disco: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
-H="${CALFCORD_HOME:-$HOME/.calfcord}"
+H="${CALFCORD_HOME:-$HOME/.agent-disco}"
 export CALFCORD_HOME="$H"  # so calfcord-cli can locate config/.env and the agents dir
 
 if [ "${1:-}" = "self" ]; then
@@ -499,7 +499,7 @@ CALF_SHIM
 set -euo pipefail
 trap 'rc=$?; printf "disco self: failed (exit %s): %s\n" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
-H="${CALFCORD_HOME:-$HOME/.calfcord}"
+H="${CALFCORD_HOME:-$HOME/.agent-disco}"
 VERSION_FILE="$H/version"
 VERSIONS_DIR="$H/versions"
 CURRENT_LINK="$H/current"

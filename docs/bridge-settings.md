@@ -9,7 +9,7 @@ and process wiring in `config/.env` instead.
 On a native install, edit:
 
 ```bash
-$EDITOR ~/.calfcord/config/settings.json
+$EDITOR ~/.agent-disco/config/settings.json
 ```
 
 The installer creates this file with sticky replies enabled:

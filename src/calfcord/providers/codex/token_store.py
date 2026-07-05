@@ -10,7 +10,7 @@ time units:
 
 This module owns the conversion in both directions and provides a single
 canonical on-disk location under the install root — ``$CALFCORD_HOME/auth/``
-(default ``~/.calfcord/auth/``), override with ``CALFCORD_AUTH_DIR``. OpenHands
+(default ``~/.agent-disco/auth/``), override with ``CALFCORD_AUTH_DIR``. OpenHands
 writes during initial login; authlib writes during runtime refresh — both go
 through the same OpenHands ``CredentialStore`` so the file format stays
 consistent.
@@ -39,8 +39,8 @@ def get_credentials_dir() -> Path:
 
     ``CALFCORD_AUTH_DIR`` wins (explicit operator intent); otherwise the
     credentials live beside the rest of the install at ``$CALFCORD_HOME/auth``
-    (``~/.calfcord/auth`` when ``CALFCORD_HOME`` is unset) so they move with a
-    relocated or per-host install rather than always landing at ``~/.calfcord``.
+    (``~/.agent-disco/auth`` when ``CALFCORD_HOME`` is unset) so they move with a
+    relocated or per-host install rather than always landing at the default home.
     """
     override = os.environ.get(_AUTH_DIR_ENV)
     return Path(override) if override else calfcord_home() / "auth"

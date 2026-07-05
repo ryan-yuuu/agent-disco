@@ -29,16 +29,16 @@ uv run calfkit-auth codex status
 #   Access token expires: 2026-05-28T01:23:45+00:00
 ```
 
-Both commands persist data under `~/.calfcord/` on your host:
+Both commands persist data under `~/.agent-disco/` on your host:
 
-- `~/.calfcord/auth/openai_oauth.json` — OAuth tokens (0600 perms)
-- `~/.calfcord/codex_prompts/` — cached `models.json` + `prompt.md` (ETag-conditional refresh)
+- `~/.agent-disco/auth/openai_oauth.json` — OAuth tokens (0600 perms)
+- `~/.agent-disco/codex_prompts/` — cached `models.json` + `prompt.md` (ETag-conditional refresh)
 
 The host CLI is the source of truth for both. Token rotation that happens later inside any container writes back through the bind mount to these same files, so the host CLI always sees the latest state.
 
 ## Bringing a Codex agent online
 
-On a native install the host login above is all the auth a Codex-backed agent needs — it reads `~/.calfcord/auth/openai_oauth.json` directly. Bring the agent online the same way as any other teammate:
+On a native install the host login above is all the auth a Codex-backed agent needs — it reads `~/.agent-disco/auth/openai_oauth.json` directly. Bring the agent online the same way as any other teammate:
 
 ```bash
 disco agent start codex_demo
@@ -53,8 +53,8 @@ The shipped `docker-compose.yml` bind-mounts those two host dirs into the agent 
 ```yaml
 agent:
   volumes:
-    - ${HOME}/.calfcord/auth:/home/calfcord/.calfcord/auth
-    - ${HOME}/.calfcord/codex_prompts:/home/calfcord/.calfcord/codex_prompts
+    - ${HOME}/.agent-disco/auth:/home/calfcord/.agent-disco/auth
+    - ${HOME}/.agent-disco/codex_prompts:/home/calfcord/.agent-disco/codex_prompts
 ```
 
 The same `CodexNotLoggedInError` means the same thing — log in on the host, then retry.
