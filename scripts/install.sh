@@ -36,6 +36,7 @@ SHIM_DIR="$CALFCORD_HOME/shims"       # disco + disco-self (placed on PATH)
 VERSIONS_DIR="$CALFCORD_HOME/versions"
 CONFIG_DIR="$CALFCORD_HOME/config"
 CONFIG_ENV="$CONFIG_DIR/.env"
+CONFIG_SETTINGS="$CONFIG_DIR/settings.json"
 AGENTS_DIR="$CALFCORD_HOME/agents"            # operator's agent .md files (stable across updates)
 CURRENT_LINK="$CALFCORD_HOME/current"
 
@@ -263,6 +264,11 @@ seed_config() {
     printf '{\n  "mcpServers": {}\n}\n' > "$CONFIG_DIR/mcp.json"
     chmod 600 "$CONFIG_DIR/mcp.json"
     log "seeded MCP config at $CONFIG_DIR/mcp.json (add servers with: disco mcp add)"
+  fi
+  if [ ! -f "$CONFIG_SETTINGS" ]; then
+    printf '{\n  "sticky_replies": {\n    "enabled": true\n  }\n}\n' > "$CONFIG_SETTINGS"
+    chmod 600 "$CONFIG_SETTINGS"
+    log "seeded bridge settings at $CONFIG_SETTINGS"
   fi
   if [ -f "$CONFIG_ENV" ]; then
     log "keeping existing config at $CONFIG_ENV"

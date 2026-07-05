@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import signal
 import time
 from collections import OrderedDict
@@ -33,6 +34,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Literal
 
 import discord
 from calfkit.client import Client, MeshViewConfig
@@ -48,6 +50,7 @@ from calfcord.bridge.overrides import EffortOverrides
 from calfcord.bridge.progress import ProgressRenderer
 from calfcord.bridge.reply_poster import ReplyPoster
 from calfcord.bridge.roster import MeshRoster
+from calfcord.bridge.settings import BridgeSettings, load_settings, resolve_settings_path
 from calfcord.bridge.slash import SlashCommandManager
 from calfcord.bridge.transcripts import (
     NullTranscriptStore,
@@ -77,6 +80,9 @@ _BRIDGE_INBOX_TOPIC = "discord.bridge.inbox"
 # gracefully-stopped agent tombstones immediately; this only gates the window
 # after an ungraceful crash.
 _MESH_STALE_AFTER_SECONDS = 90.0
+
+_UNSTICK_COMMAND_RE = re.compile(r"^\s*!unstick(?:\s|$)", re.IGNORECASE)
+_UNSTICK_NOTICE = "Sticky replies cleared for this thread."
 
 # A2A audit channel/category, moved from the tools service to the bridge (spec §10).
 _A2A_CHANNEL_NAME_ENV = "CALFKIT_A2A_CHANNEL_NAME"
@@ -175,9 +181,13 @@ class DiscordIngressGateway:
         progress: ProgressRenderer,
         reply: ReplyPoster,
         memory_deps: MemoryPromptDeps,
+        bridge_settings: BridgeSettings | None = None,
+        sticky_store: Any | None = None,
     ) -> None:
         self._settings = settings
+        self._bridge_settings = bridge_settings or BridgeSettings()
         self._transcript_store = transcript_store
+        self._sticky_store = sticky_store
         self._reply = reply
         self._client = _GatewayClient(self)
 
@@ -188,6 +198,7 @@ class DiscordIngressGateway:
         # (R-A3) via the persona sender's id set.
         fetcher = ChannelHistoryFetcher(self._client, persona_sender.owns_webhook)
         history = DiscordHistoryProvider(fetcher, transcript_store)
+        handler_sticky = sticky_store if self._bridge_settings.sticky_replies.enabled else None
         self._handler = MentionHandler(
             client=calfkit_client,
             roster=roster,
@@ -197,6 +208,7 @@ class DiscordIngressGateway:
             progress=progress,
             reply=reply,
             memory_deps=memory_deps,
+            sticky=handler_sticky,
         )
 
         # The MessageNormalizer needs bot_user_id, known only at on_ready.
@@ -308,19 +320,46 @@ class DiscordIngressGateway:
             logger.debug("ignoring redelivered message id=%s", message.id)
             return
 
-        # Ambient (non-!mention) messages go unanswered (C2): skip them before any
-        # work. The handler also no-ops on an empty mention list, but skipping here
-        # avoids a needless task + mesh read per ambient message.
-        mention_ids = extract_mention_ids(message.content)
-        if not mention_ids:
-            return
-
         try:
             wire = self._message_normalizer.normalize(message)
         except Exception:
             logger.exception("failed to normalize message id=%s", message.id)
             return
 
+        if _UNSTICK_COMMAND_RE.match(message.content):
+            req = self._build_request(message, wire, ())
+            if self._sticky_store is not None:
+                await self._sticky_store.clear_sticky_owner(str(wire.source_channel_id or wire.channel_id))
+            await self._reply.post_notice(req, _UNSTICK_NOTICE)
+            return
+
+        mention_ids = extract_mention_ids(message.content)
+        route_kind = "explicit"
+        if not mention_ids:
+            # Agent persona webhooks are Discord messages too. Ambient webhook
+            # posts must never feed back into sticky routing and loop.
+            if getattr(message, "webhook_id", None) is not None:
+                return
+            if not self._bridge_settings.sticky_replies.enabled or self._sticky_store is None:
+                return
+            owner = await self._sticky_store.get_sticky_owner(str(wire.source_channel_id or wire.channel_id))
+            if not owner:
+                return
+            mention_ids = (owner,)
+            route_kind = "sticky"
+
+        req = self._build_request(message, wire, mention_ids, route_kind=route_kind)
+        self._spawn_handle(req)
+
+    def _build_request(
+        self,
+        message: discord.Message,
+        wire: WireMessage,
+        mention_ids: tuple[str, ...],
+        *,
+        route_kind: Literal["explicit", "sticky"] = "explicit",
+    ) -> MentionRequest:
+        """Build the handler request from an already-normalized wire."""
         req = MentionRequest(
             content=wire.content,
             mention_ids=mention_ids,
@@ -330,8 +369,9 @@ class DiscordIngressGateway:
             channel_id=wire.channel_id,
             wire=wire,
             reply_target=message,
+            route_kind=route_kind,
         )
-        self._spawn_handle(req)
+        return req
 
     def _spawn_handle(self, req: MentionRequest) -> None:
         """Run one ``!mention`` as a tracked background task.
@@ -453,6 +493,7 @@ def main() -> None:
                         channel_name=_a2a_channel_name(),
                         category_name=_a2a_category_name(),
                     )
+                    bridge_settings = load_settings(resolve_settings_path())
                     gateway = DiscordIngressGateway(
                         settings,
                         calfkit_client=calfkit_client,
@@ -464,6 +505,8 @@ def main() -> None:
                         progress=ProgressRenderer(persona_sender, typing_notifier),
                         reply=ReplyPoster(persona_sender, transcript_store),
                         memory_deps=MemoryPromptDeps(),
+                        bridge_settings=bridge_settings,
+                        sticky_store=transcript_store,
                     )
                     try:
                         stop = asyncio.Event()

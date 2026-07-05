@@ -36,7 +36,7 @@ AGENT_ID_PATTERN = re.compile(_AGENT_ID_REGEX_STR)
 ``.fullmatch(value)`` for membership checks; the character class
 also appears verbatim inside the bridge normalizer's mention scanner."""
 
-RESERVED_AGENT_IDS = frozenset({"broker", "bridge", "tools", "process-compose"})
+RESERVED_AGENT_IDS = frozenset({"broker", "bridge", "tools", "process-compose", "unstick"})
 """Workspace slot names an agent id may never take.
 
 Agents share one process/slot namespace with the substrate (the ``broker`` and
@@ -77,6 +77,11 @@ def reserved_agent_id_error(agent_id: str) -> str | None:
             "'process-compose' is reserved for the workspace supervisor — an "
             "agent by this name would share (and rotate) the supervisor's log "
             "file; pick another agent name"
+        )
+    if agent_id == "unstick":
+        return (
+            "'unstick' is reserved for the Discord !unstick routing command — "
+            "pick another agent name"
         )
     if agent_id in RESERVED_AGENT_IDS:
         role = "substrate" if agent_id in ("broker", "bridge") else "tools host"

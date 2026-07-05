@@ -98,7 +98,7 @@ class ReplyPoster:
         if not text:
             # Discord rejects an empty webhook send; there is nothing to post and
             # nothing the agent can fix, so treat it as a (no-op) success.
-            return ReplyOutcome("ok")
+            return ReplyOutcome("ok", posted=False)
         wire = req.wire  # already a validated WireMessage (built at the gateway)
         delta = _turn_delta(result, initial_len)
         rendered = _render_step_count(delta)

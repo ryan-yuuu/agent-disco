@@ -45,6 +45,10 @@ _REPLY_DROPPED = (
     "I finished, but couldn't post my reply — a Discord error is blocking it. "
     "If this keeps happening, an operator should check the bot's channel permissions."
 )
+_STICKY_OWNER_OFFLINE = (
+    "This conversation is sticky to `{mention}`, but that agent is offline. "
+    "Use `!unstick` or address another agent with `!name`."
+)
 
 
 def _none_online_text(mention_ids: tuple[str, ...]) -> str:
@@ -110,6 +114,7 @@ class MentionRequest:
     channel_id: int
     wire: WireMessage
     reply_target: Any
+    route_kind: Literal["explicit", "sticky"] = "explicit"
 
 
 class HistoryProvider(Protocol):
@@ -128,6 +133,10 @@ class A2AProjectorLike(Protocol):
 class ProgressRenderer(Protocol):
     async def on_step(self, step: StepEvent, req: MentionRequest) -> None: ...
     async def finish(self, correlation_id: str) -> None: ...
+
+
+class StickyStore(Protocol):
+    async def set_sticky_owner(self, conversation_key: str, owner_agent_id: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -149,6 +158,7 @@ class ReplyOutcome:
     status: Literal["ok", "dropped", "retry"]
     error: discord.HTTPException | None = None
     failed_text: str = ""
+    posted: bool = True
 
 
 class ReplyPoster(Protocol):
@@ -175,6 +185,7 @@ class MentionHandler:
         progress: ProgressRenderer,
         reply: ReplyPoster,
         memory_deps: Any = dict,
+        sticky: StickyStore | None = None,
     ) -> None:
         self._client = client
         self._roster = roster
@@ -184,6 +195,7 @@ class MentionHandler:
         self._progress = progress
         self._reply = reply
         self._memory_deps = memory_deps
+        self._sticky = sticky
 
     async def handle(self, req: MentionRequest) -> None:
         # Refresh the mesh snapshot once per turn so the (synchronous) online()
@@ -200,6 +212,12 @@ class MentionHandler:
         target = next((m for m in req.mention_ids if m in online), None)
         if target is None:
             if req.mention_ids:
+                if req.route_kind == "sticky":
+                    await self._reply.post_notice(
+                        req,
+                        _STICKY_OWNER_OFFLINE.format(mention=f"{MENTION_PREFIX}{req.mention_ids[0]}"),
+                    )
+                    return
                 # Mentioned an agent that is not online right now.
                 await self._reply.post_notice(req, _none_online_text(req.mention_ids))
             # else: no !mention at all → ambient → unanswered (C2): do nothing.
@@ -279,6 +297,8 @@ class MentionHandler:
                 req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
             )
             if outcome.status == "ok":
+                if outcome.posted:
+                    await self._set_sticky_owner(req, persona.name)
                 return
             if outcome.status == "dropped":
                 # A Discord error the agent can't fix (missing Manage Webhooks, bad
@@ -295,7 +315,9 @@ class MentionHandler:
                 posted = await self._reply.post_chunked(
                     req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
                 )
-                if not posted:
+                if posted:
+                    await self._set_sticky_owner(req, persona.name)
+                else:
                     await self._reply.post_notice(req, _REPLY_DROPPED)
                 return
             attempts += 1
@@ -318,6 +340,12 @@ class MentionHandler:
                 await self._post_fault_notice(req, exc, target, phase="retry")
                 return
             attempt_history = retry_history
+
+    async def _set_sticky_owner(self, req: MentionRequest, owner_agent_id: str) -> None:
+        """Persist the visible terminal responder as this conversation's owner."""
+        if self._sticky is None:
+            return
+        await self._sticky.set_sticky_owner(str(req.source_channel_id or req.channel_id), owner_agent_id)
 
     async def _post_fault_notice(self, req: MentionRequest, exc: NodeFaultError, target: str, *, phase: str) -> None:
         """Log the fault's full report (I-1) and post the user-facing error notice."""

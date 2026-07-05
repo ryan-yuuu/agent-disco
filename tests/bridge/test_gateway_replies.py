@@ -36,6 +36,7 @@ from pydantic import SecretStr
 from calfcord.bridge.gateway import DiscordIngressGateway
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.normalizer import MessageNormalizer
+from calfcord.bridge.settings import BridgeSettings, StickyRepliesSettings
 from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.discord.settings import DiscordSettings
 
@@ -53,7 +54,29 @@ def _settings() -> DiscordSettings:
     )
 
 
-def _gateway() -> DiscordIngressGateway:
+class _StickyStore:
+    def __init__(self, owner: str | None = None) -> None:
+        self.owner = owner
+        self.gets: list[str] = []
+        self.clears: list[str] = []
+
+    async def get_sticky_owner(self, conversation_key: str) -> str | None:
+        self.gets.append(conversation_key)
+        return self.owner
+
+    async def set_sticky_owner(self, conversation_key: str, owner_agent_id: str) -> None:
+        self.owner = owner_agent_id
+
+    async def clear_sticky_owner(self, conversation_key: str) -> None:
+        self.clears.append(conversation_key)
+        self.owner = None
+
+
+def _gateway(
+    *,
+    bridge_settings: BridgeSettings | None = None,
+    sticky_store: _StickyStore | None = None,
+) -> DiscordIngressGateway:
     """A real gateway with mocked collaborators and a stubbed ``add_view``."""
     gateway = DiscordIngressGateway(
         _settings(),
@@ -66,6 +89,8 @@ def _gateway() -> DiscordIngressGateway:
         progress=MagicMock(),
         reply=MagicMock(),
         memory_deps=MagicMock(),
+        bridge_settings=bridge_settings,
+        sticky_store=sticky_store,
     )
     gateway._client.add_view = MagicMock()  # type: ignore[method-assign]
     return gateway
@@ -191,6 +216,91 @@ class TestOnMessageSpawnsHandler:
         await _settle(gateway)
 
         assert handler.calls[0].mention_ids == ("scribe", "echo")
+
+
+class TestStickyRouting:
+    async def test_ambient_message_routes_to_sticky_owner_for_thread_source(self, fake_message) -> None:
+        store = _StickyStore(owner="scribe")
+        gateway = _gateway(sticky_store=store)
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        msg = fake_message(channel_id=500, thread_parent_id=200, guild_id=_GUILD_ID, content="continue here")
+        await gateway._on_message(msg)
+        await _settle(gateway)
+
+        assert store.gets == ["500"]
+        assert len(handler.calls) == 1
+        req = handler.calls[0]
+        assert req.mention_ids == ("scribe",)
+        assert req.route_kind == "sticky"
+        assert req.content == "continue here"
+        assert req.channel_id == 200
+        assert req.source_channel_id == 500
+
+    async def test_ambient_message_is_ignored_when_sticky_replies_disabled(self, fake_message) -> None:
+        store = _StickyStore(owner="scribe")
+        gateway = _gateway(
+            bridge_settings=BridgeSettings(sticky_replies=StickyRepliesSettings(enabled=False)),
+            sticky_store=store,
+        )
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        await gateway._on_message(fake_message(guild_id=_GUILD_ID, content="continue here"))
+        await _settle(gateway)
+
+        assert store.gets == []
+        assert handler.calls == []
+
+    async def test_explicit_mention_bypasses_sticky_owner(self, fake_message) -> None:
+        store = _StickyStore(owner="planner")
+        gateway = _gateway(sticky_store=store)
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        await gateway._on_message(fake_message(guild_id=_GUILD_ID, content="!scribe explicit"))
+        await _settle(gateway)
+
+        assert store.gets == []
+        assert handler.calls[0].mention_ids == ("scribe",)
+        assert handler.calls[0].route_kind == "explicit"
+
+    async def test_unstick_clears_owner_posts_notice_and_does_not_route_trailing_text(self, fake_message) -> None:
+        store = _StickyStore(owner="scribe")
+        gateway = _gateway(sticky_store=store)
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        msg = fake_message(channel_id=200, guild_id=_GUILD_ID, content=" !Unstick keep chatting")
+        await gateway._on_message(msg)
+        await _settle(gateway)
+
+        assert store.clears == ["200"]
+        assert handler.calls == []
+        gateway._reply.post_notice.assert_awaited_once()
+        posted_req, text = gateway._reply.post_notice.await_args.args
+        assert posted_req.content == " !Unstick keep chatting"
+        assert text == "Sticky replies cleared for this thread."
+
+    async def test_ambient_webhook_post_does_not_route_to_sticky_owner(self, fake_message) -> None:
+        store = _StickyStore(owner="scribe")
+        gateway = _gateway(sticky_store=store)
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        msg = fake_message(author_id=_BOT_USER_ID, webhook_id=777, guild_id=_GUILD_ID, content="agent reply")
+        await gateway._on_message(msg)
+        await _settle(gateway)
+
+        assert store.gets == []
+        assert handler.calls == []
 
 
 class TestOnMessageFilters:
