@@ -474,7 +474,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
     { name = "calfkit", specifier = ">=0.12.5" },
-    { name = "calfkit-mesh", specifier = ">=0.1.1" },
+    { name = "calfkit-mesh", specifier = ">=0.1.2" },
     { name = "calfkit-tools", specifier = ">=0.1.3" },
     { name = "discord-py", specifier = ">=2.7.1" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -525,15 +525,15 @@ wheels = [
 
 [[package]]
 name = "calfkit-mesh"
-version = "0.1.1"
+version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/00/f5/4bc0efe6520eebea47d0f7221f3a6e80bc6727e29b1a86a6e34add68bdeb/calfkit_mesh-0.1.1-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:87e8906bc981c44732f204ad162a7013b297f9bbd9520abef3ce09dbe015ce46", size = 12120967, upload-time = "2026-07-01T22:51:01.225Z" },
-    { url = "https://files.pythonhosted.org/packages/86/12/b11c987875029d60a92e657d322e30df854dc557423fb9fcff11304c9787/calfkit_mesh-0.1.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c553dc5ec524a796a9b49b01a244bb96698c06a183070e57d6be2cee810f7640", size = 10467163, upload-time = "2026-07-01T22:51:04.483Z" },
-    { url = "https://files.pythonhosted.org/packages/42/b9/1801aa7134700302550504099f4000e90fff9ef64705267b9509e4752ee4/calfkit_mesh-0.1.1-py3-none-manylinux2014_aarch64.whl", hash = "sha256:df7cec705012a2eeead9698bcecdf6a80db04f6c2ff241a92c4af6f482a1992b", size = 11495002, upload-time = "2026-07-01T22:51:07.279Z" },
-    { url = "https://files.pythonhosted.org/packages/ba/ea/807558d39e958d65c3c511aef4829d5dc5f87a394d820660350b27c692af/calfkit_mesh-0.1.1-py3-none-manylinux2014_x86_64.whl", hash = "sha256:669c10cb5d9447ae8bf8dbe377bbd05eb4997e6bc64be38e2149430c3f04708f", size = 12776642, upload-time = "2026-07-01T22:51:10.262Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/e2/95791b6c7dfbc5d5e8200646b6fea927f3a791b3cb82cc0475b12bb227fb/calfkit_mesh-0.1.1-py3-none-musllinux_1_1_aarch64.whl", hash = "sha256:7dfabc564287e2ccea75c74439e4ddf04ca9b358f5cbe06fdfe5ad73ba70a508", size = 11495002, upload-time = "2026-07-01T22:51:12.89Z" },
-    { url = "https://files.pythonhosted.org/packages/1e/74/8d6e5b3b61167f37e6102b35e09376d27abfa343402c97f75bc800f6bb2d/calfkit_mesh-0.1.1-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:5f7cf737f659ec28dd54030e12322960642fdb51221b0d7bd52d56dce28df175", size = 12776642, upload-time = "2026-07-01T22:51:16.077Z" },
+    { url = "https://files.pythonhosted.org/packages/13/d9/2adfb06a52fabde6db9cb3a91f70e3e0c05ec7f0e6fa509233a60acbd243/calfkit_mesh-0.1.2-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:59e24ebcf8a28b161243309eaa0e7b3599aa2832bdfd8ec83e2fa655ba2533b0", size = 13987285, upload-time = "2026-07-05T02:41:46.213Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/dd/5f4bc1fde08fff6796acbabbe9e09d6305e96a2fdeb5de39dc2827a9b16d/calfkit_mesh-0.1.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c8ebf6ff2b6d1749b7e21dcec55038971544f5ff5c8e1ca2cfa142486ff64e92", size = 12029628, upload-time = "2026-07-05T02:41:48.508Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/15/d5afdf40c4f4e5bed4e971ccb44a5db657406e44254bacf495f6f4030d61/calfkit_mesh-0.1.2-py3-none-manylinux2014_aarch64.whl", hash = "sha256:76195f1a8775b00ea1bc7ffbb1f0c825b072b646b8860680687a53d11f7ad6b9", size = 13023936, upload-time = "2026-07-05T02:41:50.69Z" },
+    { url = "https://files.pythonhosted.org/packages/38/17/3cb22ee91a47934c2bc459eaf08374295a37de5e1f5c5d2e5341c9d6a807/calfkit_mesh-0.1.2-py3-none-manylinux2014_x86_64.whl", hash = "sha256:c86a3a1ead6cbc2ba21bcd8195ba9c74d28bdad5057a72674129028f5b4b6a6f", size = 14607287, upload-time = "2026-07-05T02:41:53.194Z" },
+    { url = "https://files.pythonhosted.org/packages/00/35/aa521bec9cbfa6468ed22f1fe66196c93a9df78a250b8c7025ccd9ca1482/calfkit_mesh-0.1.2-py3-none-musllinux_1_1_aarch64.whl", hash = "sha256:78be0a4d34864209f9f48491c2d8ad77068d6b22e969b180156f1c2dd7e5a253", size = 13023938, upload-time = "2026-07-05T02:41:55.684Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/87/30f3ff8e98da392cdf407ff2996a444782238fc903796217b163246d3f2c/calfkit_mesh-0.1.2-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:5aa684b29fa241b781e44e8fd25fc9d5b0edce7b8286f9c84aedf9be664b27e4", size = 14607286, upload-time = "2026-07-05T02:41:58.362Z" },
 ]
 
 [[package]]
