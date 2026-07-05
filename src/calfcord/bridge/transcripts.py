@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -76,6 +77,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_transcripts_final ON transcripts(final_mess
 CREATE TABLE IF NOT EXISTS agent_overrides (
   agent_id  TEXT PRIMARY KEY,
   effort    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sticky_conversations (
+  conversation_key  TEXT PRIMARY KEY,
+  owner_agent_id    TEXT NOT NULL,
+  updated_at        INTEGER NOT NULL
 );
 """
 
@@ -340,6 +346,39 @@ class TranscriptStore:
             rows = await cursor.fetchall()
         return {str(agent_id): str(effort) for agent_id, effort in rows}
 
+    async def get_sticky_owner(self, conversation_key: str) -> str | None:
+        """Return the sticky owner for a Discord channel/thread, if any."""
+        conn = self._require_conn()
+        async with conn.execute(
+            "SELECT owner_agent_id FROM sticky_conversations WHERE conversation_key = ?",
+            (conversation_key,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return str(row[0])
+
+    async def set_sticky_owner(self, conversation_key: str, owner_agent_id: str) -> None:
+        """Upsert the sticky owner for a Discord channel/thread."""
+        conn = self._require_conn()
+        await conn.execute(
+            "INSERT INTO sticky_conversations (conversation_key, owner_agent_id, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(conversation_key) DO UPDATE SET "
+            "owner_agent_id=excluded.owner_agent_id, "
+            "updated_at=excluded.updated_at",
+            (conversation_key, owner_agent_id, int(time.time())),
+        )
+        await conn.commit()
+
+    async def clear_sticky_owner(self, conversation_key: str) -> None:
+        """Delete a sticky owner; idempotent if the conversation is already free."""
+        conn = self._require_conn()
+        await conn.execute(
+            "DELETE FROM sticky_conversations WHERE conversation_key = ?",
+            (conversation_key,),
+        )
+        await conn.commit()
+
     async def __aenter__(self) -> TranscriptStore:
         await self.connect()
         return self
@@ -408,6 +447,18 @@ class NullTranscriptStore:
     async def all_agent_overrides(self) -> dict[str, str]:
         """Always empty — no overrides persisted (bridge starts with none)."""
         return {}
+
+    async def get_sticky_owner(self, conversation_key: str) -> str | None:
+        """Always misses — no sticky owner is persisted."""
+        return None
+
+    async def set_sticky_owner(self, conversation_key: str, owner_agent_id: str) -> None:
+        """No-op: the failed-open store can't persist sticky ownership."""
+        return None
+
+    async def clear_sticky_owner(self, conversation_key: str) -> None:
+        """No-op: there is nothing persisted to clear."""
+        return None
 
     async def close(self) -> None:
         """No-op: there is no connection to release."""
