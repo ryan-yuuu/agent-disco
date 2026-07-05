@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 import uuid_utils
 
-from calfcord.agents.identifier import AGENT_ID_CHARSET, MENTION_PREFIX
+from calfcord.agents.identifier import AGENT_ID_CHARSET, MENTION_PREFIX, RESERVED_AGENT_IDS
 from calfcord.bridge.wire import WireAuthor, WireMessage
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,10 @@ def extract_mention_ids(content: str) -> tuple[str, ...]:
     """
     seen: dict[str, None] = {}
     for raw in _MENTION_RE.findall(content):
-        seen.setdefault(raw.lower(), None)
+        agent_id = raw.lower()
+        if agent_id in RESERVED_AGENT_IDS:
+            continue
+        seen.setdefault(agent_id, None)
     return tuple(seen)
 
 

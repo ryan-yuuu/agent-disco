@@ -42,7 +42,7 @@ from calfkit.client import Client, MeshViewConfig
 from calfcord._provisioning import PROVISIONING
 from calfcord.agents.memory import MemoryPromptDeps
 from calfcord.bridge.a2a_project import A2AProjector
-from calfcord.bridge.egress import A2AChannelResolver
+from calfcord.bridge.egress import A2AChannelResolver, create_thread_from_message
 from calfcord.bridge.history import ChannelHistoryFetcher, DiscordHistoryProvider
 from calfcord.bridge.mention_handler import MentionHandler, MentionRequest
 from calfcord.bridge.normalizer import MessageNormalizer, extract_mention_ids
@@ -88,6 +88,11 @@ _MESH_STALE_AFTER_SECONDS = 90.0
 
 _UNSTICK_COMMAND_RE = re.compile(r"^\s*!unstick(?:\s|$)", re.IGNORECASE)
 _UNSTICK_NOTICE = "Sticky replies cleared for this thread."
+_NEW_THREAD_COMMAND_RE = re.compile(r"^\s*!new(?:\s|$)", re.IGNORECASE)
+_NEW_THREAD_IN_THREAD_NOTICE = "`!new` can only be used from a parent channel, not inside a thread."
+_NEW_THREAD_CREATE_FAILED_NOTICE = "I couldn't create a new thread for that message."
+_NEW_THREAD_NO_AGENT_NOTICE = "No agent was mentioned and this parent channel does not have a sticky agent."
+_NEW_THREAD_TITLE_LIMIT = 100
 
 # A2A audit channel/category, moved from the tools service to the bridge (spec §10).
 _A2A_CHANNEL_NAME_ENV = "CALFKIT_A2A_CHANNEL_NAME"
@@ -105,6 +110,15 @@ def _a2a_category_name() -> str | None:
     """The optional Discord category for the A2A channel, or ``None`` when unset."""
     value = os.getenv(_A2A_CHANNEL_CATEGORY_ENV)
     return value.strip() if value and value.strip() else None
+
+
+def _is_new_thread_command(content: str) -> bool:
+    return _NEW_THREAD_COMMAND_RE.match(content) is not None
+
+
+def _thread_title_from_content(content: str) -> str:
+    title = content[:_NEW_THREAD_TITLE_LIMIT]
+    return title or "!new"
 
 
 def _resolve_health_home() -> Path:
@@ -365,6 +379,10 @@ class DiscordIngressGateway:
             await self._reply.post_notice(req, _UNSTICK_NOTICE)
             return
 
+        if _is_new_thread_command(message.content):
+            await self._handle_new_thread_command(message, wire)
+            return
+
         mention_ids = extract_mention_ids(message.content)
         route_kind = "explicit"
         if not mention_ids:
@@ -387,6 +405,57 @@ class DiscordIngressGateway:
 
         req = self._build_request(message, wire, mention_ids, route_kind=route_kind)
         self._spawn_handle(req)
+
+    async def _handle_new_thread_command(self, message: discord.Message, wire: WireMessage) -> None:
+        """Create a message thread for ``!new`` and optionally dispatch into it."""
+        if wire.source_channel_id != wire.channel_id:
+            req = self._build_request(message, wire, ())
+            await self._reply.post_notice(req, _NEW_THREAD_IN_THREAD_NOTICE)
+            return
+
+        req = self._build_request(message, wire, ())
+        try:
+            thread_id = await create_thread_from_message(
+                message,
+                name=_thread_title_from_content(message.content),
+            )
+        except Exception:
+            logger.warning(
+                "failed to create !new thread for message_id=%s channel_id=%s",
+                wire.message_id,
+                wire.channel_id,
+                exc_info=True,
+            )
+            await self._reply.post_notice(req, _NEW_THREAD_CREATE_FAILED_NOTICE)
+            return
+
+        thread_wire = wire.model_copy(update={"source_channel_id": thread_id})
+        mention_ids = extract_mention_ids(message.content)
+        route_kind: Literal["explicit", "sticky"] = "explicit"
+        if not mention_ids:
+            owner = await self._sticky_owner_for_parent(wire.channel_id)
+            if owner is None:
+                thread_req = self._build_request(message, thread_wire, ())
+                await self._reply.post_notice(thread_req, _NEW_THREAD_NO_AGENT_NOTICE)
+                return
+            mention_ids = (owner,)
+            route_kind = "sticky"
+
+        thread_req = self._build_request(
+            message,
+            thread_wire,
+            mention_ids,
+            route_kind=route_kind,
+        )
+        self._spawn_handle(thread_req)
+
+    async def _sticky_owner_for_parent(self, channel_id: int) -> str | None:
+        if (
+            not self._bridge_settings.sticky_replies.enabled
+            or self._sticky_store is None
+        ):
+            return None
+        return await self._sticky_store.get_sticky_owner(str(channel_id))
 
     def _build_request(
         self,
