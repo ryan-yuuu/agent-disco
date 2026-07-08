@@ -100,6 +100,17 @@ def _registered_before_node_seams(node: Agent) -> list[Any]:
     return getattr(node, "_seam_chains", {}).get("before_node", [])
 
 
+def _registered_on_callee_error_seams(node: Agent) -> list[Any]:
+    """Return the agent's ``on_callee_error`` seam chain.
+
+    ``on_tool_error`` is a promoted surface that is sugar over ``on_callee_error``
+    (calfkit 0.12.7): a handler passed to ``on_tool_error=`` lands here wrapped in
+    a ``functools.wraps`` adapter that preserves the handler's ``__qualname__``, so
+    the chain identifies which policy was wired.
+    """
+    return getattr(node, "_seam_chains", {}).get("on_callee_error", [])
+
+
 class TestConstruction:
     def test_constructs_with_required_args(self) -> None:
         factory = AgentFactory(persona_sender=MagicMock(), calfkit_client=MagicMock())
@@ -532,3 +543,42 @@ class TestMemoryFlag:
         system prompt is in ``_instructions``."""
         node = _factory().build_node(_definition(tools=("read_file",)))
         assert [i for i in node._agent_loop._instructions if callable(i)] == []
+
+
+class TestToolErrorPolicy:
+    """Every deployed agent surfaces tool failures to its model.
+
+    The factory wires calfkit's zero-arg ``surface_to_model()`` prebuilt on the
+    ``on_tool_error`` seam, so a failing tool becomes a model-visible error the
+    agent can see and react to. Without it, calfkit's default is to escalate: the
+    run faults and the model sees nothing (calfkit 0.12.7).
+    """
+
+    @staticmethod
+    def _surfaces_tool_errors(node: Agent) -> bool:
+        return any(
+            getattr(handler, "__qualname__", "").startswith("surface_to_model")
+            for handler in _registered_on_callee_error_seams(node)
+        )
+
+    def test_agent_surfaces_tool_errors_to_model(self) -> None:
+        node = _factory().build_node(_definition())
+        assert self._surfaces_tool_errors(node), (
+            "every agent must wire surface_to_model() on the tool-error seam"
+        )
+
+    @pytest.mark.parametrize(
+        "definition",
+        [
+            pytest.param(_definition(tools=None), id="discover-all-tools"),
+            pytest.param(_definition(tools=()), id="no-tools"),
+            pytest.param(_definition(tools=("terminal",), mcp=("gmail",)), id="builtins-and-mcp"),
+            pytest.param(_definition(a2a=False, handoff=False), id="no-peers"),
+            pytest.param(_memory_definition(tools=("read_file", "write_file")), id="memory-agent"),
+        ],
+    )
+    def test_policy_applies_regardless_of_agent_config(self, definition: AgentDefinition) -> None:
+        """The surface is unconditional — every agent gets it whatever its tools,
+        MCP grants, peers, or memory flag."""
+        node = _factory().build_node(definition)
+        assert self._surfaces_tool_errors(node)
