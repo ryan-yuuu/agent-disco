@@ -59,7 +59,7 @@ import logging
 import os
 from collections.abc import Callable
 
-from calfkit import Handoff, Messaging
+from calfkit import Handoff, Messaging, surface_to_model
 from calfkit.client import Client
 from calfkit.mcp import MCPToolbox
 from calfkit.nodes import Agent
@@ -355,6 +355,13 @@ class AgentFactory:
             model_settings=model_settings,
             tools=selectors or None,
             peers=peers or None,
+            # Surface tool faults back to the model instead of faulting the run.
+            # calfkit's default is to escalate a failed tool call — the run dies
+            # and the model never sees it. ``surface_to_model()`` converts every
+            # tool failure into a model-visible error the agent can react to
+            # (retry, adapt, or explain), which is the behaviour we want for
+            # every deployed agent (calfkit ``on_tool_error``, 0.12.7).
+            on_tool_error=[surface_to_model()],
         )
 
         # Memory-enabled agents carry a dynamic-instructions hook. It reads
