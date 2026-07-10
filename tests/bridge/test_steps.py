@@ -40,12 +40,12 @@ def _step(
     text: str = "",
     name: str | None = None,
     args: dict[str, object] | None = None,
-    is_error: bool = False,
+    outcome: str = "success",
     target: str | None = None,
 ) -> StepEvent:
     """Build a StepEvent for the renderer. correlation_id/depth/emitter are
     fixed — the pure renderer reads only ``kind``/``text``/``name``/``args``/
-    ``is_error``/``target``."""
+    ``outcome``/``target``."""
     return StepEvent(
         kind=kind,  # type: ignore[arg-type]
         correlation_id="corr-1",
@@ -54,7 +54,7 @@ def _step(
         text=text,
         name=name,
         args=args,
-        is_error=is_error,
+        outcome=outcome,  # type: ignore[arg-type]
         target=target,
     )
 
@@ -202,12 +202,17 @@ class TestRenderStepMessage:
     def test_tool_call_renders_monospace_name(self) -> None:
         assert steps_render.render_step_message(_step("tool_call", name="read_file")) == ["🔧 `read_file` called"]
 
-    def test_tool_result_renders_returned(self) -> None:
+    def test_tool_result_success_renders_returned(self) -> None:
         assert steps_render.render_step_message(_step("tool_result", name="read_file")) == ["✅ `read_file` returned"]
 
-    def test_tool_result_error_renders_errored(self) -> None:
-        assert steps_render.render_step_message(_step("tool_result", name="read_file", is_error=True)) == [
-            "❌ `read_file` errored"
+    def test_tool_result_failed_renders_failed(self) -> None:
+        assert steps_render.render_step_message(_step("tool_result", name="read_file", outcome="failed")) == [
+            "❌ `read_file` failed"
+        ]
+
+    def test_tool_result_denied_renders_denied(self) -> None:
+        assert steps_render.render_step_message(_step("tool_result", name="read_file", outcome="denied")) == [
+            "🚫 `read_file` denied"
         ]
 
     def test_handoff_renders_bare_target(self) -> None:

@@ -16,6 +16,14 @@ from calfkit.client import RunEvent
 
 StepKind = Literal["agent_message", "tool_call", "tool_result", "handoff"]
 
+Outcome = Literal["success", "failed", "denied"]
+"""The result of a ``tool_result`` step, mirroring calfkit's ``ToolResultEvent.outcome``.
+Owned here (not imported) so the renderers depend on THIS seam, never on calfkit's
+types — the step source can change behind :func:`normalize_run_event` (spec §5.1).
+``success`` renders as a return; ``failed`` (the call raised / retry-marked) and
+``denied`` (the caller refused to dispatch) are distinct error kinds — a plain bool
+would collapse them, so Discord could not render them 1:1."""
+
 
 @dataclass(frozen=True)
 class StepEvent:
@@ -40,8 +48,8 @@ class StepEvent:
     (the peer, on an A2A reply)."""
     args: dict[str, Any] | None = None
     """``tool_call`` arguments (normalized to a dict)."""
-    is_error: bool = False
-    """``tool_result``: the call raised / was rejected."""
+    outcome: Outcome = "success"
+    """``tool_result``: whether the call succeeded, failed, or was denied."""
     target: str | None = None
     """``handoff``: the agent control transfers to."""
     reason: str | None = None
@@ -103,7 +111,7 @@ def normalize_run_event(event: RunEvent) -> StepEvent | None:
             tool_call_id=event.tool_call_id,
             name=event.name,
             text=_render_text(event.parts),
-            is_error=event.is_error,
+            outcome=event.outcome,
         )
     if kind == "handoff":
         return StepEvent(

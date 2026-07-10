@@ -13,7 +13,7 @@ from typing import Any
 import discord
 import pytest
 
-from calfcord.bridge.a2a_dispatch import A2ACall, A2AReject, A2AReply, A2ARequest
+from calfcord.bridge.a2a_dispatch import A2ACall, A2AFailed, A2AReject, A2AReply, A2ARequest
 from calfcord.bridge.a2a_project import _EMPTY_PLACEHOLDER, _SYSTEM_PERSONA, A2AProjector
 from calfcord.discord.messages import SentMessage
 from calfcord.discord.persona import Persona
@@ -136,6 +136,23 @@ class TestReject:
         assert note["persona"].name == _SYSTEM_PERSONA.name  # NOT "ghost"
         assert note["thread_id"] == 9001
         assert "ghost" in note["content"] and "agent offline" in note["content"]
+
+
+class TestFailed:
+    async def test_failed_renders_system_note_distinct_from_reject(self) -> None:
+        proj, personas, _ = _make()
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
+        )
+        await proj.project(
+            A2AFailed(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="boom")
+        )
+        note = personas.sends[1]
+        assert note["persona"].name == _SYSTEM_PERSONA.name  # NOT "conan"
+        assert note["thread_id"] == 9001
+        content = note["content"]
+        assert "conan" in content and "boom" in content and "failed" in content
+        assert "rejected" not in content  # distinct from the A2AReject note
 
 
 class TestFault:

@@ -222,7 +222,7 @@ def _consult_reply(tcid: str, peer: str, text: str) -> ToolResultEvent:
         tool_call_id=tcid,
         name=peer,
         parts=[TextPart(text=text)],
-        is_error=False,
+        outcome="success",
     )
 
 
