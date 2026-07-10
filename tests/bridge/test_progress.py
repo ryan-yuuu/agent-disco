@@ -79,7 +79,7 @@ def _step(
     text: str = "",
     name: str | None = None,
     args: dict[str, object] | None = None,
-    is_error: bool = False,
+    outcome: str = "success",
     target: str | None = None,
 ) -> StepEvent:
     return StepEvent(
@@ -90,7 +90,7 @@ def _step(
         text=text,
         name=name,
         args=args,
-        is_error=is_error,
+        outcome=outcome,  # type: ignore[arg-type]
         target=target,
     )
 
@@ -146,12 +146,12 @@ class TestOnStepPosts:
         )
         assert persona_sender.send_components.call_args.kwargs["persona"].name == "aksel"
 
-    async def test_tool_result_error_posts_errored_body(self, persona_sender: AsyncMock) -> None:
+    async def test_tool_result_failed_posts_failed_body(self, persona_sender: AsyncMock) -> None:
         renderer = ProgressRenderer(persona_sender)
         await renderer.on_step(
-            _step("tool_result", name="read_file", is_error=True), _req(), owning_agent="aksel"
+            _step("tool_result", name="read_file", outcome="failed"), _req(), owning_agent="aksel"
         )
-        assert _view_bodies(persona_sender.send_components.call_args.kwargs["view"]) == ["❌ `read_file` errored"]
+        assert _view_bodies(persona_sender.send_components.call_args.kwargs["view"]) == ["❌ `read_file` failed"]
 
     async def test_handoff_posts_bare_target_body(self, persona_sender: AsyncMock) -> None:
         renderer = ProgressRenderer(persona_sender)

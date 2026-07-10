@@ -27,6 +27,7 @@ from typing import assert_never
 
 from calfcord.bridge.a2a_dispatch import (
     A2ACall,
+    A2AFailed,
     A2AProjection,
     A2AReject,
     A2AReply,
@@ -130,6 +131,15 @@ class A2AProjector:
                 projection.correlation_id,
                 _SYSTEM_PERSONA,
                 f"⚠️ consult to {projection.peer} was rejected: {projection.text}",
+                thread_name=_build_thread_name(projection.caller, projection.peer, projection.text),
+            )
+        elif isinstance(projection, A2AFailed):
+            # A consult that reached the peer but faulted — a system note distinct
+            # from a refused dispatch (A2AReject); the peer engaged but errored.
+            await self._emit(
+                projection.correlation_id,
+                _SYSTEM_PERSONA,
+                f"💥 consult to {projection.peer} failed: {projection.text}",
                 thread_name=_build_thread_name(projection.caller, projection.peer, projection.text),
             )
         else:

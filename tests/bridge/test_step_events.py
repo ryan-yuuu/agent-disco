@@ -51,8 +51,8 @@ def test_tool_call_normalizes_json_string_args() -> None:
     assert s is not None and s.args == {"name": "scribe", "message": "hi"}
 
 
-def test_tool_result_renders_text() -> None:
-    e = ToolResultEvent(
+def _tool_result(outcome: str) -> ToolResultEvent:
+    return ToolResultEvent(
         correlation_id="c1",
         depth=1,
         frame_id="f",
@@ -60,11 +60,26 @@ def test_tool_result_renders_text() -> None:
         tool_call_id="t1",
         name="scribe",
         parts=[TextPart(text="the summary")],
-        is_error=False,
+        outcome=outcome,  # type: ignore[arg-type]
     )
-    s = normalize_run_event(e)
+
+
+def test_tool_result_renders_text_and_success_outcome() -> None:
+    s = normalize_run_event(_tool_result("success"))
     assert s is not None
-    assert (s.kind, s.text, s.tool_call_id, s.is_error) == ("tool_result", "the summary", "t1", False)
+    assert (s.kind, s.text, s.tool_call_id, s.outcome) == ("tool_result", "the summary", "t1", "success")
+
+
+def test_tool_result_preserves_failed_outcome() -> None:
+    """The three-valued calfkit outcome must survive the seam 1:1 — a lossy
+    ``is_error`` bool would collapse ``failed`` and ``denied`` together."""
+    s = normalize_run_event(_tool_result("failed"))
+    assert s is not None and s.outcome == "failed"
+
+
+def test_tool_result_preserves_denied_outcome() -> None:
+    s = normalize_run_event(_tool_result("denied"))
+    assert s is not None and s.outcome == "denied"
 
 
 def test_agent_message_concatenates_text_parts() -> None:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from calfcord.bridge.a2a_dispatch import (
     A2ADispatcher,
+    A2AFailed,
     A2AReject,
     A2AReply,
     A2ARequest,
@@ -41,7 +42,7 @@ def _result(
     text: str,
     corr: str = "c1",
     depth: int = 1,
-    is_error: bool = False,
+    outcome: str = "success",
     name: str | None = None,
 ) -> StepEvent:
     return StepEvent(
@@ -52,7 +53,7 @@ def _result(
         tool_call_id=tool_call_id,
         name=name,
         text=text,
-        is_error=is_error,
+        outcome=outcome,  # type: ignore[arg-type]
     )
 
 
@@ -83,18 +84,33 @@ class TestA2ADispatcher:
         d = A2ADispatcher()
         assert d.classify(_result("never-a-consult", emitter="x", text="tool output")) is None
 
-    def test_rejected_consult_renders_as_reject_with_peer_from_request(self) -> None:
-        """An offline/cycle/self consult is a tool_result with is_error=True,
+    def test_denied_consult_renders_as_reject_with_peer_from_request(self) -> None:
+        """An offline/cycle/self consult is a tool_result with outcome=="denied",
         emitter==caller, name=='message_agent' — render a system note, and take
         the peer identity from the recorded REQUEST args (stable across reject)."""
         d = A2ADispatcher()
         d.classify(_call("t2", peer="ghost", message="hi"))
         rej = d.classify(
-            _result("t2", emitter="alice", text="error: agent 'ghost' is offline", is_error=True, name="message_agent")
+            _result(
+                "t2", emitter="alice", text="error: agent 'ghost' is offline", outcome="denied", name="message_agent"
+            )
         )
         assert isinstance(rej, A2AReject)
         assert rej.peer == "ghost"
         assert "offline" in rej.text
+
+    def test_failed_consult_renders_as_failed_with_peer_from_request(self) -> None:
+        """A consult whose tool result comes back ``failed`` (the peer engaged but
+        faulted) is distinct from a ``denied`` dispatch refusal — it projects as
+        A2AFailed, not A2AReject."""
+        d = A2ADispatcher()
+        d.classify(_call("t3", peer="conan", message="hi"))
+        failed = d.classify(
+            _result("t3", emitter="conan", text="boom: the tool raised", outcome="failed", name="message_agent")
+        )
+        assert isinstance(failed, A2AFailed)
+        assert failed.peer == "conan"
+        assert "boom" in failed.text
 
     def test_handoff_is_not_classified_as_a2a(self) -> None:
         # A handoff transfers conversation control (the peer replies in the

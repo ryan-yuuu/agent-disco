@@ -290,9 +290,11 @@ def render_step_message(step: StepEvent) -> list[str]:
     if step.kind == "tool_call":
         return [f"🔧 `{step.name}` called"]
     if step.kind == "tool_result":
-        if step.is_error:
-            return [f"❌ `{step.name}` errored"]
-        return [f"✅ `{step.name}` returned"]
+        return {
+            "success": [f"✅ `{step.name}` returned"],
+            "failed": [f"❌ `{step.name}` failed"],
+            "denied": [f"🚫 `{step.name}` denied"],
+        }[step.outcome]
     if step.kind == "handoff":
         target = (step.target or "").removeprefix("/")
         return [f"➡️ handed off to `{target}`"]

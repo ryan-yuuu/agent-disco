@@ -61,7 +61,7 @@ class A2AReply:
 @dataclass(frozen=True)
 class A2AReject:
     """Render a rejected consult (peer offline / cycle / self) as a system note,
-    not a peer post (``is_error`` result, ``emitter==caller``)."""
+    not a peer post (``denied`` result — the caller refused to dispatch)."""
 
     correlation_id: str
     tool_call_id: str
@@ -70,7 +70,20 @@ class A2AReject:
     text: str
 
 
-A2AProjection = A2ARequest | A2AReply | A2AReject
+@dataclass(frozen=True)
+class A2AFailed:
+    """Render a consult that reached the peer but faulted (``failed`` result) as a
+    system note — distinct from :class:`A2AReject` (a refused dispatch) and from a
+    dangling fault (the peer never emitted a result at all)."""
+
+    correlation_id: str
+    tool_call_id: str
+    caller: str
+    peer: str
+    text: str
+
+
+A2AProjection = A2ARequest | A2AReply | A2AReject | A2AFailed
 
 
 class A2ADispatcher:
@@ -106,7 +119,7 @@ class A2ADispatcher:
             )
         if step.kind == "tool_result" and step.tool_call_id is not None and step.tool_call_id in self._open:
             call = self._open.pop(step.tool_call_id)
-            cls = A2AReject if step.is_error else A2AReply
+            cls = {"success": A2AReply, "failed": A2AFailed, "denied": A2AReject}[step.outcome]
             return cls(
                 correlation_id=call.correlation_id,
                 tool_call_id=call.tool_call_id,
