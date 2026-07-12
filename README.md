@@ -42,9 +42,9 @@
 | src/calfcord/cli/\_providers.py               |      137 |        6 |       42 |        4 |     94% |215-216, 221-222, 224, 295-\>299, 357, 393-\>395 |
 | src/calfcord/cli/\_supervisor.py              |       34 |        0 |        8 |        0 |    100% |           |
 | src/calfcord/cli/agent\_create.py             |      125 |       11 |       36 |        2 |     92% |329-330, 426-432, 546-549 |
-| src/calfcord/cli/agent\_edit.py               |      125 |       15 |       34 |        2 |     89% |86-90, 116-120, 144-146, 239-240, 269, 296-300 |
+| src/calfcord/cli/agent\_edit.py               |      139 |       15 |       38 |        2 |     90% |88-92, 118-122, 146-148, 241-242, 271, 299-303 |
 | src/calfcord/cli/agent\_inspect.py            |       70 |        2 |       18 |        2 |     95% |   74, 137 |
-| src/calfcord/cli/agent\_lifecycle.py          |      109 |        2 |       34 |        1 |     98% |249-250, 264-\>266 |
+| src/calfcord/cli/agent\_lifecycle.py          |      110 |        2 |       34 |        1 |     98% |250-251, 265-\>267 |
 | src/calfcord/cli/agent\_tools.py              |       89 |        9 |       24 |        1 |     91% |55, 138-143, 221-226 |
 | src/calfcord/cli/deploy.py                    |       86 |        1 |       30 |        2 |     97% |488-\>493, 497 |
 | src/calfcord/cli/discord\_discovery.py        |      193 |       16 |       50 |        7 |     91% |214-215, 239-241, 383, 387, 494-\>492, 519-520, 539, 546, 554-555, 563-565 |
@@ -92,7 +92,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **7893** |  **515** | **2112** |  **106** | **93%** |           |
+| **TOTAL**                                     | **7908** |  **515** | **2116** |  **106** | **93%** |           |
 
 
 ## Setup coverage badge
