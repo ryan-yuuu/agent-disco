@@ -56,6 +56,7 @@ class FakePrompter:
         self._secrets = deque(secrets or [])
         self._confirms = deque(confirms or [])
         self._checkboxes = deque(checkboxes or [])
+        self.checkbox_calls = 0
         self.last_checkbox_choices: list[Choice] = []
 
     def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
@@ -82,6 +83,7 @@ class FakePrompter:
         return None
 
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
+        self.checkbox_calls += 1
         self.last_checkbox_choices = choices
         if not self._checkboxes:
             # An empty script means "keep every pre-checked row" — mirrors the
@@ -127,22 +129,21 @@ def _fresh_run_prompter(
     name: str = "assistant",
     description: str = "",
     broker: str = "native",
-    checkboxes: list[list[str]] | None = None,
 ) -> FakePrompter:
     """Script the prompts the agent-creation path consumes, then degrade in dev mode.
 
     With no Discord token (the secret prompt answered empty) the Discord step is
     skipped entirely — no invite/app-id/guild/channel prompts fire. So after the
     provider sub-flow is stubbed away, the only prompts are: text(name),
-    text(description), checkbox(tools), secret(token="" → skip Discord),
-    select(broker). Dev mode (``home=None`` in :func:`_run`) then degrades the
-    finish to printed next-steps, consuming no further prompts.
+    text(description), secret(token="" → skip Discord), select(broker). Init
+    enables all builtins without a tools checkbox. Dev mode (``home=None`` in
+    :func:`_run`) then degrades the finish to printed next-steps, consuming no
+    further prompts.
     """
     return FakePrompter(
         selects=[broker],
         texts=[name, description],
         secrets=[""],  # empty token → Discord discovery skipped
-        checkboxes=checkboxes,
     )
 
 
@@ -189,93 +190,17 @@ def test_blank_description_uses_default(tmp_path: Path) -> None:
     assert parse_agent_md(agents_dir / "scribe.md").description == _agents.DEFAULT_DESCRIPTION
 
 
-# --- tools checkbox ---------------------------------------------------------
+# --- all builtin tools, without a selection prompt -------------------------
 
 
-def test_init_does_not_probe_broker_for_live_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """During ``init`` the tools step must NOT open the live capability view:
-    the broker isn't chosen/running yet, so a probe would dial the wrong (or a
-    stale) broker. The live ``mcp/<server>/<tool>`` rows are deferred to
-    ``disco agent tools`` post-setup."""
-    from calfcord.mcp import capability_read
-
-    calls: list[object] = []
-
-    def _spy(*a: object, **k: object) -> dict[str, list[str]]:
-        calls.append((a, k))
-        return {}
-
-    monkeypatch.setattr(capability_read, "snapshot_capability_tools", _spy)
-
-    prompter = _fresh_run_prompter(name="scribe", description="d")
-    assert _run(prompter, tmp_path, agents_dir=tmp_path / "agents") == 0
-    assert calls == []
-
-
-def test_tools_checkbox_offers_all_builtins_prechecked(tmp_path: Path) -> None:
-    from calfcord.tools import TOOL_REGISTRY
-
+def test_init_enables_all_builtins_without_a_tools_checkbox(tmp_path: Path) -> None:
+    """Init writes the canonical all-builtins grant and never offers tool selection."""
     agents_dir = tmp_path / "agents"
     prompter = _fresh_run_prompter(name="scribe", description="d")
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
 
-    builtin_rows = {c.value: c.checked for c in prompter.last_checkbox_choices}
-    # Every builtin is offered, and every builtin row is pre-checked.
-    assert set(builtin_rows) == set(TOOL_REGISTRY)
-    assert all(builtin_rows.values())
-
-
-def test_keeping_all_tools_omits_tools_key(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    # No checkbox script → fake returns every pre-checked (all builtin) row.
-    prompter = _fresh_run_prompter(name="scribe", description="d", checkboxes=None)
     assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
     assert parse_agent_md(agents_dir / "scribe.md").tools is None
-
-
-def test_selecting_a_subset_writes_that_subset(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(
-        name="scribe",
-        description="d",
-        checkboxes=[["read_file", "web_search"]],
-    )
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    assert set(parse_agent_md(agents_dir / "scribe.md").tools) == {"read_file", "web_search"}
-
-
-def test_empty_tool_selection_writes_explicit_empty_list(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(name="scribe", description="d", checkboxes=[[]])
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    # ``tools: []`` parses to an empty tuple (explicit "no tools"), not None.
-    assert parse_agent_md(agents_dir / "scribe.md").tools == ()
-
-
-def test_security_caution_prints_when_dangerous_tool_selected(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    agents_dir = tmp_path / "agents"
-    # execute_code runs arbitrary code on the tools host — selecting it (even
-    # without a write tool) must trigger the caution.
-    prompter = _fresh_run_prompter(
-        name="scribe", description="d", checkboxes=[["execute_code", "read_file"]]
-    )
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    out = capsys.readouterr().out
-    assert "code execution + file write access" in out
-    assert "docs/security.md §3.4" in out
-
-
-def test_security_caution_silent_for_readonly_tools(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    agents_dir = tmp_path / "agents"
-    prompter = _fresh_run_prompter(
-        name="scribe", description="d", checkboxes=[["read_file", "web_search"]]
-    )
-    assert _run(prompter, tmp_path, agents_dir=agents_dir) == 0
-    assert "file write access" not in capsys.readouterr().out
+    assert prompter.checkbox_calls == 0
 
 
 # --- provider key / .env side effects (via the real provider sub-flow) ------

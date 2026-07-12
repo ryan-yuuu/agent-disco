@@ -296,7 +296,6 @@ def _prompter(
     guild_select: str | None = None,
     broker: str = "native",
     broker_url: str = "broker:9092",
-    checkboxes: list[list[str]] | None = None,
     extra_selects: list[str] | None = None,
     extra_texts: list[str] | None = None,
     extra_secrets: list[str] | None = None,
@@ -305,8 +304,7 @@ def _prompter(
     """Build a prompter scripting one full native happy-path pass.
 
     Consumed prompts (provider sub-flow stubbed out):
-      text(name), text(description), checkbox(tools),
-      secret(discord token),
+      text(name), text(description), secret(discord token),
       [select(guild) ONLY when ``guild_select`` is set],
       select(broker) [+ text(broker_url) on the ``url`` branch],
       pause(say-hello-now).
@@ -333,7 +331,6 @@ def _prompter(
         selects=selects,
         texts=texts,
         secrets=secrets,
-        checkboxes=checkboxes,
     )
 
 
@@ -993,19 +990,13 @@ def test_live_finish_starts_tools_host_after_substrate_before_agent(tmp_path: Pa
     assert finish.order == ["substrate", "tools", "agent"]
 
 
-def test_tools_host_started_even_when_agent_selects_no_tools(tmp_path: Path) -> None:
-    """The tools host serves ALL builtins regardless of any one agent's selection, so
-    it is started UNCONDITIONALLY — even when the created agent picked zero tools
-    (deselecting every pre-checked builtin at the tools checkbox)."""
+def test_tools_host_started_for_all_builtin_init_agent(tmp_path: Path) -> None:
+    """Init starts the singleton tools host before its all-builtin agent."""
     agents_dir = tmp_path / "agents"
     finish = _FinishStub(reply=True)
-    rc = _run(
-        _prompter(name="scribe", checkboxes=[[]]), tmp_path, agents_dir=agents_dir, home=tmp_path, finish=finish
-    )
+    rc = _run(_prompter(name="scribe"), tmp_path, agents_dir=agents_dir, home=tmp_path, finish=finish)
     assert rc == 0
-    # Precondition pinned: the created agent really has NO tools, so this genuinely
-    # exercises the "regardless of selection" path (not a silent fallback to defaults).
-    assert not parse_agent_md(agents_dir / "scribe.md").tools
+    assert parse_agent_md(agents_dir / "scribe.md").tools is None
     assert len(finish.tools_calls) == 1
 
 

@@ -15,8 +15,8 @@ reusable:
 * **Agent + provider + model** — delegated wholesale to
   :func:`calfcord.cli.agent_create.create_agent` (the ONE shared create flow,
   which ``agent create`` also uses, so the two can't drift). ``init`` opts into
-  pruning the pristine starter and persists the chosen provider as the install
-  default.
+  pruning the pristine starter, enabling all builtin tools without a selection
+  prompt, and persisting the chosen provider as the install default.
 * **Discord** — :func:`_run_discord` composes :mod:`calfcord.cli.discord_discovery`
   (verify-token-on-paste, the invite link + intents reminder, block-and-poll
   until the bot joins, then a guild pick-list plus a report-only postability
@@ -224,8 +224,9 @@ def run(
 ) -> int:
     """Run the guided, resumable, ends-live setup flow and return an exit code.
 
-    Phases, in order: **(1)** agent identity + provider + model + tools + write
-    (the shared :func:`create_agent`), **(2)** Discord (:func:`_run_discord`),
+    Phases, in order: **(1)** agent identity + provider + model + write (with
+    all builtin tools enabled, via the shared :func:`create_agent`), **(2)** Discord
+    (:func:`_run_discord`),
     **(3)** broker, **(4)** the live finish (:func:`_run_finish`). A checkpoint is
     saved after each completed phase so a Ctrl-C resumes; each resumed phase
     re-verifies its real artifact before skipping (advisory, §12.7).
@@ -271,14 +272,15 @@ def run(
         # bare "? Agent name:" gives no hint that the shown value is an editable
         # suggestion or why it is being asked — spell out the Enter-to-accept /
         # type-to-change mechanic once, up front, for the whole wizard.
-        print("Now we'll create your agent — its name, description, model, and tools.")
+        print("Now we'll create your agent — its name, description, and model.")
+        print("It starts with all builtin tools enabled; use `disco agent tools` later to restrict them.")
         print(
             "Each prompt shows a suggested value: press Enter to accept it, or type a "
             "new one and press Enter."
         )
     print()
 
-    # --- Phase 1: agent identity + provider + model + tools + write --------
+    # --- Phase 1: agent identity + provider + model + all-builtins write ---
     # Delegated wholesale to the shared create flow so ``agent create`` and
     # ``init`` can't drift on how an agent is made. A write failure means no
     # usable agent landed, so abort before Discord / broker / the live finish.
@@ -295,14 +297,10 @@ def run(
             name_default=checkpoint.agent_name if resuming else None,
             prune_seed=True,
             offer_prompt=False,
-            # Suppress the live-capability probe during setup: the broker phase
-            # (§3) hasn't run yet, so a probe would dial the default/stale broker
-            # — one the operator hasn't chosen — and could hang on a leftover
-            # local broker. The tools editor still offers server-level
-            # ``mcp/<server>`` rows from mcp.json (no broker); the live per-tool
-            # rows come later via ``disco agent tools``, against the broker the
-            # install actually configured.
-            live_tools_fn=lambda: {},
+            # Onboarding starts with the canonical all-builtins grant (an omitted
+            # ``tools:`` field) and deliberately skips the picker. Operators can
+            # narrow it later with ``disco agent tools <name>`` after setup.
+            select_tools=False,
         )
     except (ValueError, OSError) as e:
         print(f"error: could not create agent: {e}")
@@ -793,7 +791,7 @@ async def _bring_online(
 
     The tools host is spawned BETWEEN the substrate and the agent (a first-turn tool
     call can't land before its host is up) and is UNCONDITIONAL — it serves every
-    builtin regardless of the created agent's tool selection. Its start is advisory
+    builtin granted to the initialized agent. Its start is advisory
     (warn-and-continue, :func:`_supervisor.start_tools_host`): a failure warns but does
     not block the agent, so it never changes ``rc``. Its outcome rides out as the
     separate ``tools_ok`` flag so the finish banner can be honest (not a green light
