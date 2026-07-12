@@ -45,10 +45,10 @@ from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import agent_tools
 from calfcord.cli._agents import detect_agents, slug_stem
 from calfcord.cli._envfile import read_env
-from calfcord.cli.agent_lifecycle import rename_agent
 from calfcord.cli._fields import FIELDS, FIELDS_BY_KEY, render_value, write_simple_field
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli._providers import configure_provider
+from calfcord.cli.agent_lifecycle import rename_agent
 
 # The menu's sentinel "I'm done" row value. Chosen with surrounding double
 # underscores so it can never collide with a real :class:`Field.key` (all of
