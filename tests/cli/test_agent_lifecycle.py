@@ -303,6 +303,20 @@ def test_rename_moves_md(tmp_path: Path) -> None:
     assert not (agents_dir / "scribe.md").exists()
 
 
+def test_run_rename_guides_agent_restart_and_live_mesh_invocation(tmp_path: Path, capsys) -> None:
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe")
+
+    assert agent_lifecycle.run_rename(agents_dir, "scribe", "penny") == 0
+
+    out = capsys.readouterr().out
+    assert "disco agent restart penny" in out
+    assert "!penny" in out
+    assert "thinking-effort overrides" in out
+    assert "sticky conversations" in out
+    assert "bridge" not in out.lower()
+
+
 def test_rename_onto_existing_name_raises_and_keeps_both(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     src = _seed_agent(agents_dir, "scribe")

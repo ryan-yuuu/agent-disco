@@ -25,11 +25,11 @@ Three design rules shape the loop:
   :func:`~calfcord.cli._fields.write_simple_field`; the provider+model pair rides
   the shared provider flow then :func:`calfcord.agents.md_writer._update_fields`;
   ``tools`` delegates to the existing :func:`calfcord.cli.agent_tools.run`
-  checkbox editor; ``prompt`` rides :func:`edit_system_prompt`. The menu never
-  re-encodes a field's validation — it routes to the seam that owns it.
+  checkbox editor; ``prompt`` rides :func:`edit_system_prompt`; and ``name``
+  delegates to the lifecycle module's validated, rollback-safe rename seam. The
+  menu never re-encodes a field's validation — it routes to the seam that owns it.
 
-Rename and delete are deliberately *not* in this menu — they change the agent's
-identity/existence (and its filename), so they are separate commands.
+Delete remains a separate command because it changes the agent's existence.
 """
 
 from __future__ import annotations
@@ -43,8 +43,9 @@ from pathlib import Path
 from calfcord.agents import md_writer
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import agent_tools
-from calfcord.cli._agents import detect_agents
+from calfcord.cli._agents import detect_agents, slug_stem
 from calfcord.cli._envfile import read_env
+from calfcord.cli.agent_lifecycle import rename_agent
 from calfcord.cli._fields import FIELDS, FIELDS_BY_KEY, render_value, write_simple_field
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli._providers import configure_provider
@@ -53,6 +54,7 @@ from calfcord.cli._providers import configure_provider
 # underscores so it can never collide with a real :class:`Field.key` (all of
 # which are plain frontmatter attribute names).
 _DONE = "__done__"
+_NAME = "__name__"
 
 
 def edit_system_prompt(md_path: Path) -> None:
@@ -290,6 +292,7 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
     agent_name = md_path.stem
 
     changed = False
+    renamed_from: str | None = None
     while True:
         try:
             defn = parse_agent_md(md_path)
@@ -299,13 +302,22 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
             print(f"error: cannot read agent {agent_name!r}: {e}")
             return 1
 
-        rows = [Choice(f.key, f"{f.label} — {render_value(defn, f)}") for f in FIELDS]
+        rows = [Choice(_NAME, f"Name — {agent_name}")]
+        rows.extend(Choice(f.key, f"{f.label} — {render_value(defn, f)}") for f in FIELDS)
         rows.append(Choice(_DONE, "✓ Done"))
         choice = prompter.select("What do you want to change?", rows)
         if choice == _DONE:
             break
 
         try:
+            if choice == _NAME:
+                new_name = prompter.text("Name:", default=agent_name)
+                rename_agent(agents_dir, agent_name, new_name)
+                renamed_from = agent_name
+                agent_name = slug_stem(new_name)
+                md_path = agents_dir / f"{agent_name}.md"
+                changed = True
+                continue
             if _edit_field(
                 prompter,
                 md_path=md_path,
@@ -324,7 +336,13 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
             # next calfkit-agent boot.)
             print(f"error: {e}")
 
-    if changed:
+    if renamed_from is not None:
+        print(
+            f"Restart {agent_name} to apply:\n\n  disco agent restart {agent_name}\n\n"
+            f"Then use !{agent_name} in Discord. Existing thinking-effort overrides and "
+            f"sticky conversations remain associated with {renamed_from!r}."
+        )
+    elif changed:
         # The terse next-step block (behavior #3): a sentence ending in a colon, a
         # blank line, the two-space-indented command. A config edit takes effect on
         # a running agent via the roster `restart` verb (the node bakes its config at

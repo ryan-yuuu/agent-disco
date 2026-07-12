@@ -423,7 +423,59 @@ def test_menu_offers_done_row_and_field_rows(tmp_path: Path) -> None:
     agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe")
 
     values = [c.value for c in (prompter.last_select_choices or [])]
-    assert values == [f.key for f in FIELDS] + [_DONE]
+    assert values == ["__name__"] + [f.key for f in FIELDS] + [_DONE]
+
+
+# --- name row ---------------------------------------------------------------
+
+
+def test_edit_name_moves_file_and_session_continues(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Renaming moves the file and subsequent menu edits target its new path."""
+    _seed_agent(tmp_path)
+    prompter = FakePrompter(
+        selects=["__name__", "description", _DONE],
+        texts=["Penny", "Edited after rename."],
+    )
+
+    assert agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe") == 0
+    assert not (tmp_path / "scribe.md").exists()
+    renamed = tmp_path / "penny.md"
+    assert parse_agent_md(renamed).agent_id == "penny"
+    assert parse_agent_md(renamed).description == "Edited after rename."
+    out = capsys.readouterr().out
+    assert "disco agent restart penny" in out
+    assert "!penny" in out
+    assert "bridge" not in out.lower()
+
+
+@pytest.mark.parametrize("new_name", ["scribe", "tools"])
+def test_edit_name_rejected_value_leaves_original_and_menu_continues(
+    tmp_path: Path, new_name: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unchanged and reserved names preserve the source and permit retrying in-menu."""
+    original = _seed_agent(tmp_path)
+    prompter = FakePrompter(
+        selects=["__name__", "description", _DONE],
+        texts=[new_name, "Still editable."],
+    )
+
+    assert agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe") == 0
+    assert original.exists()
+    assert parse_agent_md(original).description == "Still editable."
+    assert "error:" in capsys.readouterr().out
+
+
+def test_edit_name_duplicate_leaves_both_files_intact(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source = _seed_agent(tmp_path, "scribe")
+    target = _seed_agent(tmp_path, "penny")
+    source_before = source.read_text(encoding="utf-8")
+    target_before = target.read_text(encoding="utf-8")
+    prompter = FakePrompter(selects=["__name__", _DONE], texts=["penny"])
+
+    assert agent_edit.run(prompter, agents_dir=tmp_path, env_path=tmp_path / ".env", name="scribe") == 0
+    assert source.read_text(encoding="utf-8") == source_before
+    assert target.read_text(encoding="utf-8") == target_before
+    assert "error:" in capsys.readouterr().out
 
 
 def test_fake_prompter_satisfies_protocol() -> None:

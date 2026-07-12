@@ -146,7 +146,7 @@ disco agent restart scribe       # reload a running agent after editing its .md
 
 ```bash
 disco agent tools scribe
-disco agent rename scribe penny  # moves the file, the /command, and saved state
+disco agent rename scribe penny  # moves the file and its name; restart it, then use !penny
 disco agent delete scribe        # --yes to skip the confirmation
 ```
 
