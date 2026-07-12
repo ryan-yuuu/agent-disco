@@ -24,9 +24,10 @@ Two invariants shape this module:
 The ``run_*`` wrappers map every operator-recoverable failure to an ``error:``
 line + exit code 1 (per the CLI error convention — no traceback escapes); the
 reusable ``rename_agent`` / ``delete_agent`` file-ops raise so other callers can
-compose them. Mutations take effect on the next ``calfkit-agent`` (and, for
-identity changes, ``calfkit-bridge``) boot — the node bakes its config at
-construction — so each success line tells the operator to restart.
+compose them. Mutations take effect on the next ``calfkit-agent`` boot — the
+node bakes its config at construction — so each success line tells the operator
+to restart the affected agent. The bridge discovers agent identities from the
+live mesh, so an identity change does not require restarting it.
 
 This module imports only the lightweight ``calfcord.agents`` / ``calfcord.cli``
 seams (no provider SDK), so it stays importable from the argparse entry point.
@@ -272,17 +273,21 @@ def run_rename(agents_dir: Path, old: str, new: str) -> int:
     Thin wrapper over :func:`rename_agent` that maps any ``ValueError``/``OSError``
     to an ``error:`` line + return 1 (per the CLI convention — no traceback
     escapes). On success it reports the rename and tells the operator to restart
-    both the agent runner and the bridge, since the agent id (and thus its
-    ``/<name>`` slash command and Kafka identity) changed. Returns 0.
+    the renamed agent. The bridge discovers the replacement identity through its
+    live mesh roster; invocation uses ``!<name>`` mentions (not per-agent slash
+    commands). Returns 0.
     """
     try:
         rename_agent(agents_dir, old, new)
     except (ValueError, OSError) as e:
         print(f"error: {e}")
         return 1
+    new_stem = slug_stem(new)
     print(
-        f"Renamed {old!r} -> {slug_stem(new)!r}. Restart `disco calfkit-agent` and "
-        f"`disco calfkit-bridge` (the /<name> slash command and agent id changed)."
+        f"Renamed {old!r} -> {new_stem!r}. Restart the renamed agent:\n\n"
+        f"  disco agent restart {new_stem}\n\n"
+        f"Then use !{new_stem} in Discord. Existing thinking-effort overrides and "
+        f"sticky conversations remain associated with {old!r}."
     )
     return 0
 
