@@ -92,6 +92,9 @@ def _gateway(
         bridge_settings=bridge_settings,
         sticky_store=sticky_store,
     )
+    gateway._transcript_store.upsert_discord_message = AsyncMock()
+    gateway._transcript_store.update_discord_message_content = AsyncMock()
+    gateway._transcript_store.delete_discord_message = AsyncMock()
     gateway._client.add_view = MagicMock()  # type: ignore[method-assign]
     return gateway
 
@@ -505,9 +508,83 @@ class TestOnMessageDedup:
         await gateway._on_message(msg)
         await gateway._on_message(msg)  # redelivery of the SAME id
         await _settle(gateway)
-
+        
         assert len(handler.calls) == 1
 
+
+class TestDiscordMessagePersistence:
+    async def test_all_messages_are_persisted_before_ambient_drop(self, fake_message) -> None:
+        gateway = _gateway()
+        _ready(gateway)
+
+        # Mock owns_webhook
+        gateway._owns_webhook = MagicMock(return_value=False)
+
+        # This is an ambient message (no mentions) so it gets dropped from handling
+        msg = fake_message(
+            message_id=42,
+            channel_id=200,
+            guild_id=_GUILD_ID,
+            author_id=_OWNER_USER_ID,
+            author_display_name="Alice",
+            content="just an ambient message",
+        )
+        msg.webhook_id = None
+
+        await gateway._on_message(msg)
+
+        # The handler is not called
+        await _settle(gateway)
+
+        # BUT it must be persisted to the store
+        gateway._transcript_store.upsert_discord_message.assert_called_once()
+        record = gateway._transcript_store.upsert_discord_message.call_args.args[0]
+        assert record.message_id == "42"
+        assert record.channel_id == "200"
+        assert record.content == "just an ambient message"
+        assert record.author_id == str(_OWNER_USER_ID)
+        assert record.author_name == "Alice"
+        assert record.is_agent is False
+
+    async def test_agent_webhook_message_is_persisted_as_agent(self, fake_message) -> None:
+        gateway = _gateway()
+        _ready(gateway)
+        gateway._owns_webhook = MagicMock(return_value=True)
+
+        msg = fake_message(
+            message_id=43,
+            channel_id=200,
+            guild_id=_GUILD_ID,
+            author_id=_BOT_USER_ID,
+            author_display_name="AgentName",
+            content="agent reply",
+        )
+        msg.webhook_id = 777
+
+        await gateway._on_message(msg)
+        gateway._transcript_store.upsert_discord_message.assert_called_once()
+        record = gateway._transcript_store.upsert_discord_message.call_args.args[0]
+        assert record.is_agent is True
+
+    async def test_raw_message_edit_updates_content(self) -> None:
+        gateway = _gateway()
+        payload = MagicMock()
+        payload.message_id = 99
+        payload.data = {"content": "new text"}
+        
+        await gateway._client.on_raw_message_edit(payload)
+        gateway._transcript_store.update_discord_message_content.assert_called_once()
+        call_kwargs = gateway._transcript_store.update_discord_message_content.call_args.kwargs
+        assert call_kwargs["message_id"] == "99"
+        assert call_kwargs["new_content"] == "new text"
+
+    async def test_raw_message_delete_deletes_from_store(self) -> None:
+        gateway = _gateway()
+        payload = MagicMock()
+        payload.message_id = 99
+        
+        await gateway._client.on_raw_message_delete(payload)
+        gateway._transcript_store.delete_discord_message.assert_called_once_with("99")
 
 class TestRunHandlerErrorHandling:
     """``_run_handler`` isolates handler crashes from the Discord event loop."""

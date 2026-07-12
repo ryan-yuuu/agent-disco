@@ -57,6 +57,7 @@ from calfcord.bridge.settings import (
 )
 from calfcord.bridge.slash import SlashCommandManager
 from calfcord.bridge.transcripts import (
+    DiscordMessageRecord,
     NullTranscriptStore,
     TranscriptStore,
     TranscriptStoreLike,
@@ -224,6 +225,7 @@ class DiscordIngressGateway:
         # client is safe. Agent turns are recognized by bot-owned ``webhook_id``
         # (R-A3) via the persona sender's id set.
         fetcher = ChannelHistoryFetcher(self._client, persona_sender.owns_webhook)
+        self._owns_webhook = persona_sender.owns_webhook
         history = DiscordHistoryProvider(fetcher, transcript_store)
         handler_sticky = (
             sticky_store if self._bridge_settings.sticky_replies.enabled else None
@@ -351,6 +353,23 @@ class DiscordIngressGateway:
             return
         if self._message_normalizer is None:
             return  # pre-ready; defensive
+            
+        # 1. Evaluate agent authorship and persist message
+        is_agent = message.webhook_id is not None and self._owns_webhook(message.webhook_id)
+        try:
+            record = DiscordMessageRecord(
+                message_id=str(message.id),
+                channel_id=str(message.channel.id),
+                content=message.content,
+                author_id=str(message.author.id),
+                author_name=getattr(message.author, "display_name", None) or message.author.name,
+                is_agent=is_agent,
+                created_at=message.created_at.timestamp(),
+            )
+            await self._transcript_store.upsert_discord_message(record)
+        except Exception:
+            logger.exception("failed to persist message_id=%s to local db", message.id)
+
         # Skip the bot's own non-webhook posts (e.g. /clear markers, notices).
         # Webhook posts (the bot acting as an agent persona) flow through so the
         # author-stamping / peer-visibility paths see them.
@@ -550,6 +569,24 @@ class _GatewayClient(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         await self._gateway._on_message(message)
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        if "content" not in payload.data:
+            return
+        try:
+            await self._gateway._transcript_store.update_discord_message_content(
+                message_id=str(payload.message_id),
+                new_content=payload.data["content"],
+                updated_at=time.time(),
+            )
+        except Exception:
+            logger.exception("failed to update message_id=%s in local db", payload.message_id)
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        try:
+            await self._gateway._transcript_store.delete_discord_message(str(payload.message_id))
+        except Exception:
+            logger.exception("failed to delete message_id=%s from local db", payload.message_id)
 
 
 def main() -> None:
