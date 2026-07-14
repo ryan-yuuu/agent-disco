@@ -433,6 +433,50 @@ class DiscordPersonaSender:
         )
         return SentMessage(id=sent.id, channel_id=message_channel)
 
+    async def edit_components(
+        self,
+        channel_id: int,
+        message_id: int,
+        view: discord.ui.LayoutView,
+        *,
+        thread_id: int | None = None,
+    ) -> None:
+        """Edit a previously posted Components-V2 message's ``LayoutView`` in place.
+
+        Used by the live step trace to grow one aggregate message as steps
+        stream in. The message's identity (``username``/``avatar_url``) is
+        frozen at :meth:`send_components` time — Discord webhook edits cannot
+        change it — and the ``components_v2`` flag forbids ``content``/
+        ``embeds``, so this passes the new view and nothing else.
+
+        Args:
+            channel_id: ID of the *parent* text channel that hosts the webhook
+                (the same one the message was sent through).
+            message_id: The v2 message to edit.
+            view: The replacement ``LayoutView`` (its ``TextDisplay`` content
+                is the new message body).
+            thread_id: When the message lives in a thread, that thread's id —
+                required by Discord to locate a thread message via the webhook.
+
+        Raises:
+            RuntimeError: If :meth:`start` has not been called.
+            TypeError: If ``channel_id`` does not refer to a text channel.
+            discord.NotFound: If the message is gone.
+            discord.HTTPException: For other Discord-side failures.
+        """
+        if self._client is None:
+            raise RuntimeError("DiscordPersonaSender not started; call start() or use as an async context manager.")
+
+        webhook = await self._get_or_create_webhook(channel_id)
+        thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
+
+        await webhook.edit_message(message_id, view=view, thread=thread)
+        logger.debug(
+            "edited persona v2 step message id=%s channel=%s",
+            message_id,
+            thread_id if thread_id is not None else channel_id,
+        )
+
     def owns_webhook(self, webhook_id: int) -> bool:
         """Return ``True`` iff ``webhook_id`` is one of this sender's persona webhooks.
 
