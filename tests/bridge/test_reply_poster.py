@@ -1,4 +1,11 @@
-"""Unit tests for the reply poster (re-homed outbox posting; calfkit-012 B3)."""
+"""Unit tests for the reply poster (unified chunked delivery).
+
+Every reply is chunk-split (1 chunk for normal-length replies) and posted
+chunk-by-chunk; there is no retry-with-feedback. ``post_reply`` returns
+``"posted"`` (≥1 chunk delivered), ``"empty"`` (nothing to post), or
+``"lost"`` (every chunk failed) so the handler can set the sticky owner or
+surface an operator notice.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +27,7 @@ from calfcord.bridge import reply_poster as rp
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.reply_poster import ReplyPoster
 from calfcord.bridge.wire import WireAuthor, WireMessage
+from calfcord.discord.chunking import chunk_split
 from calfcord.discord.messages import SentMessage
 from calfcord.discord.persona import Persona
 
@@ -140,25 +148,26 @@ def _poster(
     return ReplyPoster(p, s), p, s  # type: ignore[arg-type]
 
 
-# --- tests -----------------------------------------------------------------
-class TestPostReply:
-    async def test_happy_path_posts_and_returns_ok(self) -> None:
+# --- single-chunk replies ----------------------------------------------------
+class TestPostReplySingleChunk:
+    async def test_happy_path_posts_and_returns_posted(self) -> None:
         poster, personas, store = _poster()
         out = await poster.post_reply(
             _req(), Persona(name="scribe"), _result("done"), initial_len=0, correlation_id="c1"
         )
-        assert out.status == "ok"
+        assert out == "posted"
         assert len(personas.sends) == 1
         assert personas.sends[0]["persona"].name == "scribe"
         assert personas.sends[0]["content"] == "done"
+        assert personas.sends[0]["reply_to"] is not None  # anchored to the trigger
         assert store.rows == []  # pure-text turn: no transcript row
 
-    async def test_empty_output_is_ok_without_sending(self) -> None:
+    async def test_empty_output_returns_empty_without_sending(self) -> None:
         poster, personas, _ = _poster()
         out = await poster.post_reply(
             _req(), Persona(name="scribe"), _result("   "), initial_len=0, correlation_id="c1"
         )
-        assert out.status == "ok"
+        assert out == "empty"
         assert personas.sends == []
 
     async def test_tool_turn_writes_transcript(self) -> None:
@@ -170,7 +179,7 @@ class TestPostReply:
             initial_len=1,
             correlation_id="c1",
         )
-        assert out.status == "ok"
+        assert out == "posted"
         # A turn that used tools persists its transcript (for tool-call replay).
         assert len(store.rows) == 1
         assert store.rows[0].agent_id == "scribe" and store.rows[0].correlation_id == "c1"
@@ -197,6 +206,43 @@ class TestPostReply:
         assert len(personas.sends) == 1  # the reply still posts
         assert store.rows == []  # disabled store: no transcript row
 
+    async def test_render_fault_degrades_to_no_transcript_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A step-render bug must not block delivery: the reply still posts, only
+        # the transcript row (tool-call replay for this turn) is skipped.
+        def _boom(delta: Any) -> list[str]:
+            raise RuntimeError("render boom")
+
+        monkeypatch.setattr(rp, "_render_tree_blocks", _boom)
+        poster, personas, store = _poster()
+        out = await poster.post_reply(
+            _req(),
+            Persona(name="scribe"),
+            _result("final", message_history=_tool_history()),
+            initial_len=1,
+            correlation_id="c1",
+        )
+        assert out == "posted"
+        assert len(personas.sends) == 1
+        assert store.rows == []
+
+    async def test_transcript_store_failure_does_not_fail_the_post(self) -> None:
+        # The reply is already on Discord when the row write fails; the loss is
+        # replay data for this turn, never the delivery result.
+        class _BoomStore(_FakeStore):
+            async def write_turn(self, row: Any) -> None:
+                raise RuntimeError("store down")
+
+        poster, personas, _ = _poster(store=_BoomStore())
+        out = await poster.post_reply(
+            _req(),
+            Persona(name="scribe"),
+            _result("final", message_history=_tool_history()),
+            initial_len=1,
+            correlation_id="c1",
+        )
+        assert out == "posted"
+        assert len(personas.sends) == 1
+
     async def test_thread_routing(self) -> None:
         poster, personas, _ = _poster()
         await poster.post_reply(
@@ -209,15 +255,78 @@ class TestPostReply:
         assert personas.sends[0]["thread_id"] == 99999
 
 
-class TestFailureClassification:
-    async def test_agent_fixable_returns_retry(self) -> None:
-        personas = _FakePersonas()
-        personas.errors = [_http(400, "too long")]
-        poster, _, _ = _poster(personas)
-        out = await poster.post_reply(_req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1")
-        assert out.status == "retry" and out.failed_text == "x" and out.error is not None
+# --- multi-chunk replies -----------------------------------------------------
+class TestPostReplyMultiChunk:
+    async def test_long_reply_splits_first_chunk_anchored_and_writes_row(self) -> None:
+        poster, personas, store = _poster()
+        big = "x" * 4500
+        out = await poster.post_reply(
+            _req(),
+            Persona(name="scribe"),
+            _result(big, message_history=_tool_history()),
+            initial_len=1,
+            correlation_id="c1",
+        )
+        assert out == "posted"
+        assert len(personas.sends) >= 3  # >2 chunks
+        assert personas.sends[0]["reply_to"] is not None  # anchor on first chunk only
+        assert all(s["reply_to"] is None for s in personas.sends[1:])
+        assert len(store.rows) == 1  # the turn used tools → one transcript row
 
-    async def test_forbidden_returns_dropped_and_logs_error(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_chunks_post_in_original_order(self) -> None:
+        poster, personas, _ = _poster()
+        big = ("paragraph one " * 100 + "\n\n") * 3  # forces boundary-aware splits
+        out = await poster.post_reply(
+            _req(), Persona(name="scribe"), _result(big), initial_len=0, correlation_id="c1"
+        )
+        assert out == "posted"
+        assert [s["content"] for s in personas.sends] == chunk_split(big.strip())
+
+    async def test_partial_failure_still_posts_remaining_and_returns_posted(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        personas = _FakePersonas()
+        personas.errors = [None, _http(400, "bad chunk"), None]  # middle chunk fails
+        poster, _, _ = _poster(personas)
+        with caplog.at_level("WARNING"):
+            out = await poster.post_reply(
+                _req(), Persona(name="scribe"), _result("x" * 4500), initial_len=0, correlation_id="c1"
+            )
+        assert out == "posted"
+        assert len(personas.sends) == 2  # chunks 1 and 3 delivered despite the gap
+        failed = [r for r in caplog.records if "chunk" in r.message and "failed" in r.message]
+        assert len(failed) == 1
+
+    async def test_first_chunk_failure_skips_transcript_row(self) -> None:
+        personas = _FakePersonas()
+        personas.errors = [_http(400), None, None]  # anchor chunk fails
+        poster, _, store = _poster(personas)
+        out = await poster.post_reply(
+            _req(),
+            Persona(name="scribe"),
+            _result("x" * 4500, message_history=_tool_history()),
+            initial_len=1,
+            correlation_id="c1",
+        )
+        assert out == "posted"  # later chunks still delivered
+        assert store.rows == []  # row is keyed to the anchor chunk's message id
+
+    async def test_all_chunks_fail_returns_lost(self) -> None:
+        personas = _FakePersonas()
+        personas.errors = [_http(403)] * 10
+        poster, _, store = _poster(personas)
+        # must not raise even though every chunk fails, and must signal total loss
+        # so the handler surfaces an operator notice.
+        out = await poster.post_reply(
+            _req(), Persona(name="scribe"), _result("x" * 4500), initial_len=0, correlation_id="c1"
+        )
+        assert out == "lost"
+        assert store.rows == []
+
+
+# --- failure logging and transport smoothing ----------------------------------
+class TestFailureHandling:
+    async def test_forbidden_chunk_logs_error(self, caplog: pytest.LogCaptureFixture) -> None:
         personas = _FakePersonas()
         personas.errors = [discord.Forbidden(_Resp(403), "no perms")]
         poster, _, _ = _poster(personas)
@@ -225,12 +334,12 @@ class TestFailureClassification:
             out = await poster.post_reply(
                 _req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1"
             )
-        assert out.status == "dropped"
+        assert out == "lost"
         # 403 (missing Manage Webhooks) is an operator-actionable misconfiguration → ERROR.
-        drops = [r for r in caplog.records if "dropping" in r.message]
-        assert len(drops) == 1 and drops[0].levelname == "ERROR"
+        failed = [r for r in caplog.records if "chunk" in r.message and "failed" in r.message]
+        assert len(failed) == 1 and failed[0].levelname == "ERROR"
 
-    async def test_rate_limited_returns_dropped_and_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_rate_limited_chunk_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         personas = _FakePersonas()
         personas.errors = [discord.RateLimited(1.0)]
         poster, _, _ = _poster(personas)
@@ -238,17 +347,28 @@ class TestFailureClassification:
             out = await poster.post_reply(
                 _req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1"
             )
-        assert out.status == "dropped"
+        assert out == "lost"
         # Rate-limit is transient noise → WARNING, not ERROR.
-        drops = [r for r in caplog.records if "dropping" in r.message]
-        assert len(drops) == 1 and drops[0].levelname == "WARNING"
+        failed = [r for r in caplog.records if "chunk" in r.message and "failed" in r.message]
+        assert len(failed) == 1 and failed[0].levelname == "WARNING"
 
-    async def test_non_discord_sender_error_returns_dropped(self) -> None:
+    async def test_total_loss_logs_summary(self, caplog: pytest.LogCaptureFixture) -> None:
+        personas = _FakePersonas()
+        personas.errors = [_http(403)] * 10
+        poster, _, _ = _poster(personas)
+        with caplog.at_level("ERROR"):
+            await poster.post_reply(
+                _req(), Persona(name="scribe"), _result("x" * 4500), initial_len=0, correlation_id="c1"
+            )
+        summaries = [r for r in caplog.records if "fully lost" in r.message]
+        assert len(summaries) == 1 and summaries[0].levelname == "ERROR"
+
+    async def test_non_discord_sender_error_returns_lost(self) -> None:
         personas = _FakePersonas()
         personas.errors = [TypeError("not a text channel")]
         poster, _, _ = _poster(personas)
         out = await poster.post_reply(_req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1")
-        assert out.status == "dropped"
+        assert out == "lost"
 
     async def test_5xx_once_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(rp, "_SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
@@ -256,10 +376,28 @@ class TestFailureClassification:
         personas.errors = [discord.DiscordServerError(_Resp(503), "down"), None]  # fail then succeed
         poster, _, _ = _poster(personas)
         out = await poster.post_reply(_req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1")
-        assert out.status == "ok"
-        assert len(personas.sends) == 1  # the successful retry
+        assert out == "posted"
+        assert len(personas.sends) == 1  # the successful re-send
 
-    async def test_persistent_5xx_is_dropped_as_transient(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_5xx_smoothing_applies_per_chunk(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(rp, "_SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
+        personas = _FakePersonas()
+        # Chunk 1: 503 then success; chunk 2: 503 then success; chunk 3: clean.
+        personas.errors = [
+            discord.DiscordServerError(_Resp(503), "down"),
+            None,
+            discord.DiscordServerError(_Resp(503), "down"),
+            None,
+            None,
+        ]
+        poster, _, _ = _poster(personas)
+        out = await poster.post_reply(
+            _req(), Persona(name="scribe"), _result("x" * 4500), initial_len=0, correlation_id="c1"
+        )
+        assert out == "posted"
+        assert len(personas.sends) == 3  # every chunk delivered despite the blips
+
+    async def test_persistent_5xx_returns_lost(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(rp, "_SERVER_ERROR_RETRY_DELAY_SECONDS", 0)
         personas = _FakePersonas()
         personas.errors = [
@@ -268,37 +406,7 @@ class TestFailureClassification:
         ]
         poster, _, _ = _poster(personas)
         out = await poster.post_reply(_req(), Persona(name="scribe"), _result("x"), initial_len=0, correlation_id="c1")
-        assert out.status == "dropped"
-
-
-class TestPostChunked:
-    async def test_long_reply_splits_first_chunk_anchored_and_writes_row(self) -> None:
-        poster, personas, store = _poster()
-        big = "x" * 4500
-        posted = await poster.post_chunked(
-            _req(),
-            Persona(name="scribe"),
-            _result(big, message_history=_tool_history()),
-            initial_len=1,
-            correlation_id="c1",
-        )
-        assert posted is True  # at least one chunk delivered
-        assert len(personas.sends) >= 3  # >2 chunks
-        assert personas.sends[0]["reply_to"] is not None  # anchor on first chunk only
-        assert all(s["reply_to"] is None for s in personas.sends[1:])
-        assert len(store.rows) == 1  # the turn used tools → one transcript row
-
-    async def test_all_chunks_fail_returns_false(self) -> None:
-        personas = _FakePersonas()
-        personas.errors = [_http(403)] * 10
-        poster, _, store = _poster(personas)
-        # must not raise even though every chunk fails, and must signal total loss
-        # (False) so the handler surfaces an operator notice.
-        posted = await poster.post_chunked(
-            _req(), Persona(name="scribe"), _result("x" * 4500), initial_len=0, correlation_id="c1"
-        )
-        assert posted is False
-        assert store.rows == []
+        assert out == "lost"
 
 
 class TestPostNotice:

@@ -7,7 +7,6 @@ Drives :class:`MentionHandler` through a ``FakeHandle`` (scripted ``stream()`` +
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,14 +18,8 @@ from calfkit.models.payload import TextPart
 from calfkit.models.state import State
 
 from calfcord.agents.thinking import build_model_settings_union
-from calfcord.bridge.mention_handler import MentionHandler, MentionRequest, ReplyOutcome
+from calfcord.bridge.mention_handler import MentionHandler, MentionRequest
 from calfcord.bridge.wire import WireAuthor, WireMessage
-
-
-def _fixable_error() -> Any:
-    """A stand-in for a Discord 4xx the agent can fix (build_retry_reminder reads
-    only ``.status``/``.code``/``.text``)."""
-    return SimpleNamespace(status=400, code=0, text="Must be 2000 or fewer in length.")
 
 
 # --- fakes -----------------------------------------------------------------
@@ -77,8 +70,8 @@ class _FakeGateway:
 
     async def start(self, prompt: str, **kwargs: Any) -> _FakeHandle:
         self.starts.append({"prompt": prompt, **kwargs})
-        # Successive start()s (retries) consume successive handles; the last
-        # handle is reused if start() is called more times than handles given.
+        # Successive start()s consume successive handles; the last handle is
+        # reused if start() is called more times than handles given.
         return self._handles[min(len(self.starts) - 1, len(self._handles) - 1)]
 
 
@@ -150,34 +143,21 @@ class _FakeProgress:
 
 
 class _FakeReply:
-    def __init__(
-        self, outcomes: list[ReplyOutcome] | None = None, *, chunked_ok: bool = True
-    ) -> None:
+    def __init__(self, outcomes: list[str] | None = None) -> None:
         self.replies: list[tuple[Any, str]] = []
-        self.chunked: list[tuple[Any, str]] = []
         self.notices: list[str] = []
-        # Every correlation_id the handler passed, across retries + chunk fallback.
-        # Pins the D-13 guarantee that retries reuse the ORIGINAL run's id (one
-        # transcript row), not each retry handle's id.
+        # Every correlation_id the handler passed — the post must be keyed on the
+        # run's id so the transcript row matches the posted reply.
         self.correlation_ids: list[str] = []
-        # Scripted per-post_reply outcomes; defaults to "ok" once exhausted.
+        # Scripted per-post_reply outcomes; defaults to "posted" once exhausted.
         self._outcomes = list(outcomes or [])
-        # Whether post_chunked reports a successful delivery (False => fully lost).
-        self._chunked_ok = chunked_ok
 
     async def post_reply(
         self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
-    ) -> ReplyOutcome:
+    ) -> str:
         self.replies.append((persona, result.output))
         self.correlation_ids.append(correlation_id)
-        return self._outcomes.pop(0) if self._outcomes else ReplyOutcome("ok")
-
-    async def post_chunked(
-        self, req: MentionRequest, persona: Any, result: Any, *, initial_len: int, correlation_id: str
-    ) -> bool:
-        self.chunked.append((persona, result.output))
-        self.correlation_ids.append(correlation_id)
-        return self._chunked_ok
+        return self._outcomes.pop(0) if self._outcomes else "posted"
 
     async def post_notice(self, req: MentionRequest, text: str) -> None:
         self.notices.append(text)
@@ -282,8 +262,7 @@ def _make(
     handle: _FakeHandle | None = None,
     handles: list[_FakeHandle] | None = None,
     overrides: dict[str, str] | None = None,
-    reply_outcomes: list[ReplyOutcome] | None = None,
-    chunked_ok: bool = True,
+    reply_outcomes: list[str] | None = None,
     progress: Any = None,
     sticky: _FakeSticky | None = None,
 ) -> tuple[MentionHandler, _FakeClient, dict[str, Any]]:
@@ -293,7 +272,7 @@ def _make(
     fakes = {
         "a2a": _FakeA2A(),
         "progress": progress if progress is not None else _FakeProgress(),
-        "reply": _FakeReply(reply_outcomes, chunked_ok=chunked_ok),
+        "reply": _FakeReply(reply_outcomes),
         "history": _FakeHistory(),
         "sticky": sticky if sticky is not None else _FakeSticky(),
     }
@@ -340,32 +319,16 @@ class TestRouting:
         await handler.handle(_req(mentions=("scribe",)))
         assert fakes["sticky"].sets == [("10", "conan")]
 
-    async def test_empty_no_post_reply_does_not_set_sticky_owner(self) -> None:
+    async def test_empty_reply_does_not_set_sticky_owner(self) -> None:
         handler, _client, fakes = _make(
             handle=_FakeHandle(result=_result("", "scribe")),
-            reply_outcomes=[ReplyOutcome("ok", posted=False)],
+            reply_outcomes=["empty"],
         )
         await handler.handle(_req(mentions=("scribe",)))
         assert fakes["sticky"].sets == []
 
-    async def test_dropped_reply_does_not_set_sticky_owner(self) -> None:
-        handler, _client, fakes = _make(reply_outcomes=[ReplyOutcome("dropped")])
-        await handler.handle(_req(mentions=("scribe",)))
-        assert fakes["sticky"].sets == []
-
-    async def test_chunk_fallback_success_sets_sticky_owner(self) -> None:
-        handler, _client, fakes = _make(
-            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="too long")] * 3,
-            chunked_ok=True,
-        )
-        await handler.handle(_req(mentions=("scribe",)))
-        assert fakes["sticky"].sets == [("10", "scribe")]
-
-    async def test_chunk_fallback_total_failure_does_not_set_sticky_owner(self) -> None:
-        handler, _client, fakes = _make(
-            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="too long")] * 3,
-            chunked_ok=False,
-        )
+    async def test_lost_reply_does_not_set_sticky_owner(self) -> None:
+        handler, _client, fakes = _make(reply_outcomes=["lost"])
         await handler.handle(_req(mentions=("scribe",)))
         assert fakes["sticky"].sets == []
 
@@ -501,59 +464,49 @@ async def test_output_text_round_trips(output: str) -> None:
     assert fakes["reply"].replies[0][1] == output
 
 
-class TestRetryWithFeedback:
-    async def test_agent_fixable_failure_retries_then_succeeds(self) -> None:
-        # First post is rejected (agent-fixable); a second start() (the retry) yields
-        # a corrected reply that posts OK.
-        h1 = _FakeHandle(result=_result("too long", "scribe"))
-        h2 = _FakeHandle(result=_result("concise", "scribe"))
-        handler, client, fakes = _make(
-            handles=[h1, h2],
-            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="too long"), ReplyOutcome("ok")],
-        )
+class TestDelivery:
+    async def test_lost_reply_posts_notice_without_reinvoking(self) -> None:
+        handler, client, fakes = _make(reply_outcomes=["lost"])
         await handler.handle(_req())
-        # original invocation + exactly one retry start()
-        assert len(client.gw.starts) == 2
-        # the retry carried the corrective reminder as its prompt
-        assert "<system-reminder>" in client.gw.starts[1]["prompt"]
-        # the retry preserved deps/author/model_settings
-        assert client.gw.starts[1]["author"] == "alice"
-        assert client.gw.starts[1]["deps"]["memory_prompt"] == "tmpl"
-        # two post attempts; the second posted the corrected text; no chunk fallback
-        assert [t for _, t in fakes["reply"].replies] == ["too long", "concise"]
-        assert fakes["reply"].chunked == []
-
-    async def test_exhausted_retries_fall_back_to_chunked(self) -> None:
-        # Every post is agent-fixable → 1 original + MAX_REPLY_RETRY_ATTEMPTS (2)
-        # retries = 3 posts, then a chunk-split fallback of the last attempt.
-        handler, client, fakes = _make(
-            handles=[_FakeHandle(result=_result("x", "scribe"))],
-            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")] * 3,
-        )
-        await handler.handle(_req())
-        assert len(fakes["reply"].replies) == 3
-        assert len(fakes["reply"].chunked) == 1
-        assert len(client.gw.starts) == 3  # original + 2 retries
-
-    async def test_dropped_outcome_does_not_retry_but_notifies(self) -> None:
-        handler, client, fakes = _make(reply_outcomes=[ReplyOutcome("dropped")])
-        await handler.handle(_req())
-        assert len(client.gw.starts) == 1  # infra failure → no retry
-        assert fakes["reply"].chunked == []
-        # I-2: a dropped reply must surface an operator notice, not ghost the user.
+        # Delivery is single-pass: one invocation, one post attempt, no retry.
+        assert len(client.gw.starts) == 1
+        assert len(fakes["reply"].replies) == 1
+        # I-2: a lost reply must surface an operator notice, not ghost the user.
         assert len(fakes["reply"].notices) == 1 and "couldn't post" in fakes["reply"].notices[0].lower()
 
-    async def test_chunk_total_loss_posts_notice(self) -> None:
-        # Retries exhausted → chunk-split fallback, and every chunk also fails
-        # (post_chunked returns False) → the user gets an operator notice.
+    async def test_empty_reply_is_silent(self) -> None:
         handler, _client, fakes = _make(
-            handles=[_FakeHandle(result=_result("x", "scribe"))],
-            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")] * 3,
-            chunked_ok=False,
+            handle=_FakeHandle(result=_result("", "scribe")),
+            reply_outcomes=["empty"],
         )
         await handler.handle(_req())
-        assert len(fakes["reply"].chunked) == 1
-        assert len(fakes["reply"].notices) == 1 and "couldn't post" in fakes["reply"].notices[0].lower()
+        # Nothing to deliver is a no-op, not a loss — no operator notice.
+        assert fakes["reply"].notices == []
+
+    async def test_posted_reply_without_sticky_store_is_fine(self) -> None:
+        # The sticky store is an optional collaborator — a bridge configured
+        # without one still delivers replies (it just tracks no owner).
+        client = _FakeClient([_FakeHandle(result=_result("done", "scribe"))])
+        reply = _FakeReply()
+        handler = MentionHandler(
+            client=client,
+            roster=_FakeRoster(frozenset({"scribe"})),
+            history=_FakeHistory(),
+            overrides=_FakeOverrides(),
+            a2a=_FakeA2A(),
+            progress=_FakeProgress(),
+            reply=reply,
+            sticky=None,
+        )
+        await handler.handle(_req())  # must not raise on the sticky-owner step
+        assert [t for _, t in reply.replies] == ["done"]
+
+    async def test_post_keyed_on_run_correlation_id(self) -> None:
+        # The post must carry the run's correlation_id so the transcript row
+        # written by the poster matches the run that produced the reply.
+        handler, _client, fakes = _make(handle=_FakeHandle(result=_result("x", "scribe"), correlation_id="c1"))
+        await handler.handle(_req())
+        assert fakes["reply"].correlation_ids == ["c1"]
 
     async def test_fault_logs_full_error_report_at_error(self, caplog: pytest.LogCaptureFixture) -> None:
         # I-1: the fault log must carry the ErrorReport calfkit shipped (error_type,
@@ -566,34 +519,6 @@ class TestRetryWithFeedback:
         assert len(faults) == 1
         assert "error_type=billing.quota_exceeded" in faults[0].message
         assert "message=boom" in faults[0].message
-
-    async def test_all_attempts_reuse_original_correlation_id(self) -> None:
-        # D-13: retries (and the chunk fallback) must key the transcript on the
-        # ORIGINAL run's correlation_id so they UPSERT one row, not orphan a fresh
-        # row per attempt. Give the retry handles a DIFFERENT id so a regression to
-        # retry_handle.correlation_id would be caught.
-        original = _FakeHandle(result=_result("x", "scribe"), correlation_id="c1")
-        retry1 = _FakeHandle(result=_result("x", "scribe"), correlation_id="c2")
-        retry2 = _FakeHandle(result=_result("x", "scribe"), correlation_id="c2")
-        handler, _client, fakes = _make(
-            handles=[original, retry1, retry2],
-            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")] * 3,
-        )
-        await handler.handle(_req())
-        # 3 post_reply + 1 post_chunked, every one under the original run's id.
-        assert fakes["reply"].correlation_ids == ["c1", "c1", "c1", "c1"]
-
-    async def test_retry_reinvocation_fault_posts_notice(self) -> None:
-        # The retry re-invocation itself faults → user-facing notice, no crash.
-        h1 = _FakeHandle(result=_result("x", "scribe"))
-        h2 = _FakeHandle(fault=NodeFaultError("peer_fault", message="boom"))
-        handler, _client, fakes = _make(
-            handles=[h1, h2],
-            reply_outcomes=[ReplyOutcome("retry", error=_fixable_error(), failed_text="x")],
-        )
-        await handler.handle(_req())
-        assert len(fakes["reply"].notices) == 1
-        assert fakes["reply"].chunked == []
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +638,32 @@ class TestFaultRootCauses:
         notice = fakes["reply"].notices[0]
         assert "hit an error" in notice  # the honest generic anchor
         assert "monthly quota exhausted" in notice  # the report message adds actionable context
+
+    async def test_nested_fault_group_surfaces_leaf_causes(self) -> None:
+        """A fault_group can nest another fault_group (a fan-out inside a fan-out);
+        the walk recurses so the notice names the actual leaves, not the inner
+        group's summary line."""
+        leaf = _leaf_exception_fault("WebFetchError", "Failed to fetch https://x.test/: 403 Forbidden")
+        inner_group = ErrorReport.build_safe(
+            error_type=FaultTypes.FAULT_GROUP,
+            message="fan-out batch closed with 1 unhandled fault(s)",
+            origin_node_id="scribe",
+            causes=[leaf],
+        )
+        exc = _fault_group("scribe", [inner_group])
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=exc))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "WebFetchError" in notice and "403 Forbidden" in notice
+
+    async def test_minted_fault_without_message_stays_generic(self) -> None:
+        """A minted typed fault with an empty ``message`` has nothing to add —
+        the notice is the honest generic form with no dangling detail clause."""
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError("billing.quota_exceeded")))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "hit an error" in notice
+        assert notice.rstrip().endswith("Please try again.")
 
     async def test_many_leaves_are_bounded_under_discord_limit(self) -> None:
         """A pathological fault_group (many causes with long messages) must not blow

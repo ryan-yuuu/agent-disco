@@ -35,8 +35,8 @@ from calfcord.bridge.a2a_dispatch import (
 )
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.bridge.persona_resolve import persona_for
+from calfcord.discord.chunking import chunk_split
 from calfcord.discord.persona import DiscordPersonaSender, Persona
-from calfcord.discord.retry_feedback import chunk_split
 
 logger = logging.getLogger(__name__)
 

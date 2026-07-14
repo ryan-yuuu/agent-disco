@@ -417,9 +417,9 @@ every request re-sends the dead bearer and fails with `401 token_revoked`. The
 error surfaces as an uncaught `ModelHTTPError` — nothing in the Codex path
 catches it — so the agent's response is aborted instead of recovered.
 
-> The retry-with-feedback machinery (`discord/retry_feedback.py`, used by the
-> bridge's reply poster) only handles Discord-side HTTP errors on the
-> *reply-send* path. It does not cover model-request failures like this one.
+> The bridge's reply poster only handles Discord-side HTTP errors on the
+> *reply-send* path (chunked delivery with per-chunk failure logging). It
+> does not cover model-request failures like this one.
 
 **Common triggers** (anything that revokes the grant server-side while the
 service holds a still-"fresh" token):
