@@ -1,6 +1,10 @@
 # Persistent Components-V2 step messages replace the transient progress + reply toggle
 
-**Status**: accepted (reverses decision **D-1a** in
+**Status**: partially superseded by
+[ADR-0017](0017-aggregated-step-messages-throttled-edits.md) — the
+one-message-per-step posting model is replaced by aggregated throttled-edit
+messages; the Components-V2 message type and the history-exclusion invariant
+below still stand. (Originally: accepted, reversing decision **D-1a** in
 [`docs/design/step-transcripts-and-live-streaming-plan.md`](../design/step-transcripts-and-live-streaming-plan.md);
 see also [`docs/design/live-step-messages-v2-plan.md`](../design/live-step-messages-v2-plan.md))
 
