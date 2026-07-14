@@ -11,3 +11,7 @@ _Avoid_: Sticky session, sticky replies session, cached agent
 **Sticky owner**:
 The agent currently assigned to receive ambient human messages for a sticky conversation.
 _Avoid_: Assigned agent, cached sticky name
+
+**Chunked reply**:
+An agent reply delivered as one or more consecutive Discord messages, each within Discord's message length limit; the first message is anchored to the triggering message. Chunking is the only delivery mechanism for agent replies — there is no retry that asks the agent to shorten its reply.
+_Avoid_: Chunk-split fallback, retry-with-feedback

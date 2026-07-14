@@ -350,7 +350,7 @@ src/calfcord/
 │                  # progress + steps_*, a2a_dispatch, a2a_project, egress,
 │                  # reply_poster, transcripts, wire
 ├── discord/       # client wrappers (sender, persona, avatar, receiver,
-│                  # settings, messages, typing, retry_feedback)
+│                  # settings, messages, typing, chunking)
 ├── tools/
 │   ├── __init__.py       # explicit tool surface (ALL_TOOLS) — all
 │   │                     # vendored calfkit-tools nodes (no first-party tools)

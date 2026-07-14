@@ -1,17 +1,20 @@
-"""Post an agent's final reply to Discord under its persona (re-homed from outbox).
+"""Post an agent's final reply to Discord under its persona, chunk by chunk.
 
 On the calfkit 0.12 caller surface the final reply is the return value of
 ``handle.result()`` (awaited by the :class:`~calfcord.bridge.mention_handler.MentionHandler`),
-not a Kafka outbox message. This module re-homes the *posting* half of the old
-``bridge/outbox.py`` — persona webhook send with 5xx smoothing, the durable
-transcript write (for tool-call replay), the chunk-split fallback — minus the
-consumer / ``pending_wires`` / registry plumbing.
+not a Kafka outbox message. Every reply is delivered as consecutive
+≤ :data:`~calfcord.discord.chunking.CHUNK_SAFE_SIZE` chunks — one chunk for a
+normal-length reply — with the first chunk carrying the inline-reply anchor and
+(if the turn used tools) the durable transcript row (for tool-call replay).
+Chunking is the only delivery mechanism: there is no retry that re-invokes the
+agent to shorten a rejected reply.
 
-The retry-with-feedback *loop* lives in the handler (spec §9): :meth:`post_reply`
-only attempts a single post and classifies the outcome (:class:`ReplyOutcome`)
-so the handler can decide to re-invoke the agent, fall back to chunk-splitting,
-or stop. ``post_notice`` posts a plain bridge-authored message (no persona) for
-operator-facing notices (roster unavailable, no agent online, agent error).
+Per-chunk failures are logged independently so partial delivery survives; a
+single Discord 5xx per chunk is smoothed with one delayed re-send.
+:meth:`post_reply` reports ``"posted"`` / ``"empty"`` / ``"lost"`` so the
+handler can set the sticky owner or surface an operator notice. ``post_notice``
+posts a plain bridge-authored message (no persona) for operator-facing notices
+(roster unavailable, no agent online, agent error).
 """
 
 from __future__ import annotations
@@ -19,17 +22,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import discord
 from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
-from calfcord.bridge.mention_handler import MentionRequest, ReplyOutcome
+from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.steps_render import _render_tree_blocks
 from calfcord.bridge.transcripts import TranscriptRow, TranscriptStoreLike
 from calfcord.bridge.wire import WireMessage
+from calfcord.discord.chunking import chunk_split
 from calfcord.discord.persona import DiscordPersonaSender, Persona, ReplyContext
-from calfcord.discord.retry_feedback import chunk_split, classify_error
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ _SERVER_ERROR_RETRY_DELAY_SECONDS = 2.0
 old outbox value; a single-worker poster can't afford a long sleep)."""
 
 _OPERATOR_ACTIONABLE_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
-"""Discord drop statuses that mean the bot is *misconfigured* — 401 (bad token)
+"""Discord statuses that mean the bot is *misconfigured* — 401 (bad token)
 and 403 (missing Manage Webhooks) — not transient. They silently break EVERY
 reply, so they log at ERROR (surfacing in alerting); rate-limit / 404 / 5xx are
 transient or environmental and stay at WARNING."""
@@ -71,7 +74,7 @@ def _render_step_count(delta: list[ModelMessage]) -> int:
 
 
 class ReplyPoster:
-    """Posts agent replies under their persona; classifies failures for the handler."""
+    """Posts agent replies under their persona as chunked messages."""
 
     def __init__(self, persona_sender: DiscordPersonaSender, transcript_store: TranscriptStoreLike) -> None:
         self._personas = persona_sender
@@ -85,151 +88,81 @@ class ReplyPoster:
         *,
         initial_len: int,
         correlation_id: str,
-    ) -> ReplyOutcome:
-        """Attempt a single post of ``result``'s final answer under ``persona``.
+    ) -> Literal["posted", "empty", "lost"]:
+        """Chunk-split ``result``'s final answer and post each chunk under ``persona``.
 
-        Returns :class:`ReplyOutcome`: ``"ok"`` on success (or empty reply —
-        nothing to post or retry); ``"dropped"`` for an infra failure the agent
-        can't fix (auth/permission/rate-limit, persistent 5xx, or a non-Discord
-        sender error); ``"retry"`` for a Discord rejection the agent can plausibly
-        fix (carrying the error + the failed text for the handler's retry).
+        The first chunk carries the inline-reply anchor + (if the turn used
+        tools) the persisted transcript row; later chunks are bare
+        continuations. Per-chunk failures are logged independently so partial
+        delivery survives.
+
+        Returns ``"posted"`` if at least one chunk was delivered, ``"empty"``
+        if there was nothing to post (Discord rejects an empty webhook send;
+        nothing to deliver is a no-op, not a loss), or ``"lost"`` if every
+        chunk failed so the handler can surface an operator notice rather than
+        ghost the user.
         """
-        text = (result.output or "").strip()
-        if not text:
-            # Discord rejects an empty webhook send; there is nothing to post and
-            # nothing the agent can fix, so treat it as a (no-op) success.
-            return ReplyOutcome("ok", posted=False)
-        wire = req.wire  # already a validated WireMessage (built at the gateway)
-        delta = _turn_delta(result, initial_len)
-        rendered = _render_step_count(delta)
-        write_transcript = bool(rendered) and self._store.enabled
-        try:
-            sent = await _send_with_one_retry_on_outage(
-                self._personas,
-                persona=persona,
-                channel_id=wire.channel_id,
-                content=text,
-                reply_to=ReplyContext.from_wire(wire),
-                thread_id=wire.thread_id,
-            )
-        except discord.DiscordException as e:
-            # ``DiscordException`` (not just ``HTTPException``) so RateLimited is
-            # funneled to classify_error too (it treats it as a non-retryable drop).
-            kind = classify_error(e)
-            if kind == "agent_fixable":
-                # classify_error only returns "agent_fixable" for an HTTPException
-                # (a 4xx); assert it so the ReplyOutcome.error: HTTPException | None
-                # contract the handler's build_retry_reminder relies on is explicit.
-                assert isinstance(e, discord.HTTPException)
-                return ReplyOutcome("retry", error=e, failed_text=text)
-            # Auth/permission drops are operator-actionable misconfigurations that
-            # silently break every reply -> ERROR (so alerting sees them); rate-limit
-            # / 5xx are transient -> WARNING. Either way the handler surfaces an
-            # operator notice via the native-reply path.
-            status = getattr(e, "status", None)
-            log = logger.error if status in _OPERATOR_ACTIONABLE_STATUSES else logger.warning
-            log(
-                "reply post failed channel_id=%s correlation_id=%s: %s reply (status=%s); dropping",
-                wire.channel_id,
-                correlation_id,
-                kind,
-                status,
-                exc_info=True,
-            )
-            return ReplyOutcome("dropped")
-        except (TypeError, RuntimeError) as e:
-            # Non-Discord, operator-actionable sender errors (non-text channel /
-            # sender not started) — not agent-fixable or transient. Keep the stack
-            # (exc_info) so an unexpected RuntimeError source is diagnosable.
-            logger.error(
-                "reply post failed channel_id=%s correlation_id=%s: non-retryable sender error %s (%s); dropping",
-                wire.channel_id,
-                correlation_id,
-                type(e).__name__,
-                e,
-                exc_info=True,
-            )
-            return ReplyOutcome("dropped")
-        if write_transcript:
-            await _write_transcript(
-                self._store,
-                correlation_id=correlation_id,
-                wire=wire,
-                agent_id=persona.name,
-                final_message_id=sent.id,
-                delta=delta,
-            )
-        return ReplyOutcome("ok")
-
-    async def post_chunked(
-        self,
-        req: MentionRequest,
-        persona: Persona,
-        result: Any,
-        *,
-        initial_len: int,
-        correlation_id: str,
-    ) -> bool:
-        """Final fallback (retries exhausted): split the reply into ≤2000-char
-        chunks and post each under ``persona``. The first chunk carries the
-        inline-reply anchor + (if the turn used tools) the persisted transcript
-        row; later chunks are bare continuations. Per-chunk failures are logged
-        independently so partial delivery survives.
-
-        Returns ``True`` if at least one chunk posted (or there was nothing to
-        post), ``False`` if the reply was fully lost (every chunk failed) so the
-        handler can surface an operator notice rather than ghost the user."""
-        wire = req.wire  # already a validated WireMessage (built at the gateway)
         text = (result.output or "").strip()
         chunks = chunk_split(text)
         if not chunks:
-            # Nothing to deliver (empty reply); not a loss to surface — mirrors
-            # post_reply treating an empty reply as a no-op success.
-            logger.warning("chunk-split fallback received empty text correlation_id=%s", correlation_id)
-            return True
+            return "empty"
+        wire = req.wire  # already a validated WireMessage (built at the gateway)
         delta = _turn_delta(result, initial_len)
         rendered = _render_step_count(delta)
         write_transcript = bool(rendered) and self._store.enabled
         total = len(chunks)
+        posted_any = False
         failures: list[int | None] = []
         for i, chunk in enumerate(chunks):
             try:
-                sent = await self._personas.send(
+                sent = await _send_with_one_retry_on_outage(
+                    self._personas,
                     persona=persona,
                     channel_id=wire.channel_id,
                     content=chunk,
                     reply_to=ReplyContext.from_wire(wire) if i == 0 else None,
                     thread_id=wire.thread_id,
                 )
-                if i == 0 and write_transcript:
-                    await _write_transcript(
-                        self._store,
-                        correlation_id=correlation_id,
-                        wire=wire,
-                        agent_id=persona.name,
-                        final_message_id=sent.id,
-                        delta=delta,
-                    )
             except (discord.DiscordException, TypeError, RuntimeError) as e:
-                failures.append(getattr(e, "status", None))
-                logger.error(
-                    "chunk-split failed chunk %d/%d correlation_id=%s status=%s: %s",
+                # TypeError/RuntimeError cover non-Discord sender errors (non-text
+                # channel / sender not started). Auth/permission failures are
+                # operator-actionable misconfigurations that silently break every
+                # reply -> ERROR (so alerting sees them); rate-limit / 404 / 5xx
+                # are transient -> WARNING.
+                status = getattr(e, "status", None)
+                failures.append(status)
+                log = logger.error if status in _OPERATOR_ACTIONABLE_STATUSES else logger.warning
+                log(
+                    "reply chunk %d/%d failed channel_id=%s correlation_id=%s status=%s: %s",
                     i + 1,
                     total,
+                    wire.channel_id,
                     correlation_id,
-                    getattr(e, "status", None),
+                    status,
                     e,
+                    exc_info=True,
                 )
-        if failures and len(failures) == total:
+                continue
+            posted_any = True
+            if i == 0 and write_transcript:
+                await _write_transcript(
+                    self._store,
+                    correlation_id=correlation_id,
+                    wire=wire,
+                    agent_id=persona.name,
+                    final_message_id=sent.id,
+                    delta=delta,
+                )
+        if not posted_any:
             dominant = max(set(failures), key=failures.count)
             logger.error(
-                "chunk-split delivered 0/%d chunks correlation_id=%s dominant_status=%s; reply fully lost",
+                "reply delivered 0/%d chunks correlation_id=%s dominant_status=%s; reply fully lost",
                 total,
                 correlation_id,
                 dominant,
             )
-            return False
-        return True
+            return "lost"
+        return "posted"
 
     async def post_notice(self, req: MentionRequest, text: str) -> None:
         """Post a plain operator-facing notice as an inline reply (no persona).
@@ -255,7 +188,8 @@ async def _send_with_one_retry_on_outage(
 ) -> Any:
     """Send via the persona webhook with exactly one extra attempt on a first-try
     5xx (after a short delay). Any other first-try error, or a second-try error,
-    is re-raised for the caller to triage."""
+    is re-raised for the caller to triage. This is transport smoothing for a
+    Discord-side blip — the same bytes are re-sent; no agent is involved."""
     try:
         return await persona_sender.send(
             persona=persona,

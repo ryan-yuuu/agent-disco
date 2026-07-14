@@ -1,6 +1,6 @@
 # Discord Reply Retry With Feedback — Implementation Plan
 
-**Status**: Awaiting approval (drafted 2026-05-23)
+**Status**: Superseded (drafted 2026-05-23; feature removed 2026-07-13 — agent replies are now always chunk-split via `discord/chunking.py`, with no retry that re-invokes the agent)
 **Scope**: When the bridge's outbox consumer fails to post an agent's reply to Discord, surface the raw Discord error to the agent via a tagged system-reminder prompt injection so the agent can revise and retry. Chunk-split as the final fallback when retries are exhausted.
 **Touches**: bridge process only.
 

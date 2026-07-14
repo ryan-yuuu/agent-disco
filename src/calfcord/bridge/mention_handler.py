@@ -21,7 +21,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-import discord
 from calfkit._vendor.pydantic_ai.messages import ModelMessage
 from calfkit.exceptions import NodeFaultError
 from calfkit.models.error_report import ErrorReport, FaultTypes
@@ -33,11 +32,6 @@ from calfcord.bridge.persona_resolve import persona_for
 from calfcord.bridge.step_events import StepEvent, normalize_run_event
 from calfcord.bridge.wire import WireMessage
 from calfcord.discord.persona import Persona
-from calfcord.discord.retry_feedback import (
-    MAX_REPLY_RETRY_ATTEMPTS,
-    build_retry_history,
-    build_retry_reminder,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +162,7 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
     return "\n".join(lines)
 
 
-def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> None:
+def _log_agent_fault(exc: NodeFaultError, target: str) -> None:
     """Log the full ``ErrorReport`` calfkit shipped, plus each root cause.
 
     Agents run on other hosts, so the report the bridge received on the fault
@@ -187,8 +181,7 @@ def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> None:
     exception = getattr(report, "exception", None)
     upstream = f"{exception.type}: {exception.attrs}" if exception is not None else None
     logger.error(
-        "agent %s faulted target=%s origin=%s error_type=%s retryable=%s message=%s upstream=%s",
-        phase,
+        "agent run faulted target=%s origin=%s error_type=%s retryable=%s message=%s upstream=%s",
         target,
         origin,
         getattr(report, "error_type", None),
@@ -204,8 +197,7 @@ def _log_agent_fault(exc: NodeFaultError, target: str, *, phase: str) -> None:
     for i, failure in enumerate(failures, 1):
         failure_exc = failure.exception
         logger.error(
-            "agent %s root cause [%d/%d] origin=%s type=%s message=%s attrs=%s",
-            phase,
+            "agent run root cause [%d/%d] origin=%s type=%s message=%s attrs=%s",
             i,
             len(failures),
             failure.origin_node_id,
@@ -266,35 +258,15 @@ class StickyStore(Protocol):
     async def set_sticky_owner(self, conversation_key: str, owner_agent_id: str) -> None: ...
 
 
-@dataclass(frozen=True)
-class ReplyOutcome:
-    """The result of a reply-post attempt — drives the retry-with-feedback loop.
-
-    ``"ok"`` posted (or the reply was empty and dropped — nothing to retry);
-    ``"dropped"`` an infra failure the agent can't fix (auth/permission/rate-limit
-    or a persistent 5xx — logged + abandoned, no retry); ``"retry"`` a Discord
-    rejection the agent can plausibly fix (e.g. too long), carrying the rejecting
-    ``error`` and the ``failed_text`` for the corrective retry envelope.
-
-    ``error`` is typed ``discord.HTTPException | None`` (not ``Any``) because the
-    retry branch feeds it straight into ``build_retry_reminder``, which reads
-    ``.status``/``.code``/``.text`` and requires a non-``None`` HTTPException — the
-    only producer sets it exactly when ``status == "retry"``.
-    """
-
-    status: Literal["ok", "dropped", "retry"]
-    error: discord.HTTPException | None = None
-    failed_text: str = ""
-    posted: bool = True
-
-
 class ReplyPoster(Protocol):
+    """``post_reply`` chunk-splits the reply and posts every chunk, reporting
+    ``"posted"`` (≥1 chunk delivered — set the sticky owner), ``"empty"``
+    (nothing to post — a no-op), or ``"lost"`` (every chunk failed — surface
+    an operator notice)."""
+
     async def post_reply(
         self, req: MentionRequest, persona: Persona, result: Any, *, initial_len: int, correlation_id: str
-    ) -> ReplyOutcome: ...
-    async def post_chunked(
-        self, req: MentionRequest, persona: Persona, result: Any, *, initial_len: int, correlation_id: str
-    ) -> bool: ...
+    ) -> Literal["posted", "empty", "lost"]: ...
     async def post_notice(self, req: MentionRequest, text: str) -> None: ...
 
 
@@ -354,7 +326,7 @@ class MentionHandler:
         # Serialize the typed wire into deps once per turn (the agent reads
         # ``deps["discord"]`` as JSON); the reply poster uses ``req.wire`` typed.
         deps = {"discord": req.wire.model_dump(mode="json"), **self._memory_deps()}
-        # Compute the C11 effort override once and reuse it on every retry.
+        # The C11 effort override for this turn (provider-blind union).
         model_settings = build_model_settings_union(self._overrides.effort_for(target))
         handle = await self._client.agent(target).start(
             req.content,
@@ -398,7 +370,7 @@ class MentionHandler:
         finally:
             await self._progress.finish(handle.correlation_id)
 
-        await self._deliver(req, handle, dispatcher, target, history, deps, model_settings)
+        await self._deliver(req, handle, dispatcher, target, history)
 
     async def _deliver(
         self,
@@ -407,76 +379,29 @@ class MentionHandler:
         dispatcher: A2ADispatcher,
         target: str,
         history: list[ModelMessage],
-        deps: dict[str, Any],
-        model_settings: dict[str, Any] | None,
     ) -> None:
-        """Post the agent's reply, with retry-with-feedback (spec §9).
+        """Post the agent's reply as chunked persona messages (single-pass).
 
-        Re-homes the old outbox re-publish as an in-process loop: when Discord
-        rejects a reply for a reason the agent can fix (e.g. too long), re-invoke
-        the agent with a corrective ``<system-reminder>`` + the failed attempt in
-        ``message_history`` (same ``deps``/``author``/``model_settings``), bounded
-        by ``MAX_REPLY_RETRY_ATTEMPTS``; on exhaustion fall back to chunk-splitting
-        the last attempt. The retry re-invocation is "quiet" — it awaits
-        ``result()`` only (no second progress/A2A drain), matching the old
-        blocking-RPC retry. The original run's ``correlation_id`` keys the
-        transcript across attempts so retries upsert one row.
+        The poster chunk-splits the reply and posts every chunk — there is no
+        retry that re-invokes the agent. ``"posted"`` (≥1 chunk delivered)
+        sets the sticky owner. ``"lost"`` (every chunk failed — e.g. missing
+        Manage Webhooks, bad token, persistent 5xx) would otherwise ghost the
+        user — the progress message was already deleted in ``handle()`` — so
+        surface an operator notice via the native-reply path, which needs only
+        Send Messages and is independent of the failing webhook path.
         """
         result = await self._await_terminal(req, handle, dispatcher, target)
         if result is None:
             return  # faulted — notice already posted
 
-        attempt_history = history
-        attempts = 0
-        while True:
-            persona = persona_for(result.emitter_node_id or target)
-            outcome = await self._reply.post_reply(
-                req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
-            )
-            if outcome.status == "ok":
-                if outcome.posted:
-                    await self._set_sticky_owner(req, persona.name)
-                return
-            if outcome.status == "dropped":
-                # A Discord error the agent can't fix (missing Manage Webhooks, bad
-                # token, persistent 5xx) blocked the persona-webhook post. The reply
-                # is otherwise lost silently — the progress message was already
-                # deleted in handle() — so surface an operator notice via the
-                # native-reply path, which needs only Send Messages and is
-                # independent of the failing webhook path.
-                await self._reply.post_notice(req, _REPLY_DROPPED)
-                return
-            if attempts >= MAX_REPLY_RETRY_ATTEMPTS:
-                # Budget exhausted: post the last attempt chunk-split rather than
-                # losing the reply entirely; if every chunk also fails, notice.
-                posted = await self._reply.post_chunked(
-                    req, persona, result, initial_len=len(attempt_history), correlation_id=handle.correlation_id
-                )
-                if posted:
-                    await self._set_sticky_owner(req, persona.name)
-                else:
-                    await self._reply.post_notice(req, _REPLY_DROPPED)
-                return
-            attempts += 1
-            retry_history = build_retry_history(
-                original_history=attempt_history,
-                original_user_prompt=req.content,
-                failed_text=outcome.failed_text,
-            )
-            reminder = build_retry_reminder(outcome.error, outcome.failed_text)
-            try:
-                retry_handle = await self._client.agent(target).start(
-                    reminder,
-                    message_history=retry_history,
-                    deps=deps,
-                    author=req.author_label,
-                    model_settings=model_settings,
-                )
-                result = await retry_handle.result()
-            except NodeFaultError as exc:
-                await self._post_fault_notice(req, exc, target, phase="retry")
-                return
-            attempt_history = retry_history
+        persona = persona_for(result.emitter_node_id or target)
+        outcome = await self._reply.post_reply(
+            req, persona, result, initial_len=len(history), correlation_id=handle.correlation_id
+        )
+        if outcome == "posted":
+            await self._set_sticky_owner(req, persona.name)
+        elif outcome == "lost":
+            await self._reply.post_notice(req, _REPLY_DROPPED)
 
     async def _set_sticky_owner(self, req: MentionRequest, owner_agent_id: str) -> None:
         """Persist the visible terminal responder as this conversation's owner."""
@@ -484,14 +409,14 @@ class MentionHandler:
             return
         await self._sticky.set_sticky_owner(str(req.source_channel_id or req.channel_id), owner_agent_id)
 
-    async def _post_fault_notice(self, req: MentionRequest, exc: NodeFaultError, target: str, *, phase: str) -> None:
+    async def _post_fault_notice(self, req: MentionRequest, exc: NodeFaultError, target: str) -> None:
         """Log the fault's full report (I-1) and post the user-facing error notice.
 
         Surfaces root-cause exceptions (the 403s behind a fault_group) in BOTH the
         log and the notice — pass the whole report so ``_agent_error_text`` can
         walk ``report.causes`` rather than read only the top-level origin.
         """
-        _log_agent_fault(exc, target, phase=phase)
+        _log_agent_fault(exc, target)
         await self._reply.post_notice(req, _agent_error_text(target, getattr(exc, "report", None)))
 
     async def _await_terminal(
@@ -511,5 +436,5 @@ class MentionHandler:
         except NodeFaultError as exc:
             for call in dispatcher.dangling():
                 await self._a2a.project_fault(call)
-            await self._post_fault_notice(req, exc, target, phase="run")
+            await self._post_fault_notice(req, exc, target)
             return None
