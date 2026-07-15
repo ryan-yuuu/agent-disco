@@ -58,11 +58,12 @@
 | src/calfcord/cli/setup\_state.py              |       44 |        0 |        4 |        0 |    100% |           |
 | src/calfcord/cli/tool\_aliases.py             |       60 |        0 |        8 |        0 |    100% |           |
 | src/calfcord/cli/tui/keys.py                  |       24 |        2 |        2 |        1 |     88% |  129, 135 |
-| src/calfcord/cli/tui/prompter.py              |       25 |        0 |        0 |        0 |    100% |           |
+| src/calfcord/cli/tui/line\_input.py           |       71 |        4 |       16 |        3 |     92% |55, 58-\>64, 121-122, 123-\>126, 147 |
+| src/calfcord/cli/tui/prompter.py              |       27 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/cli/tui/render.py                |       41 |        0 |        6 |        0 |    100% |           |
-| src/calfcord/cli/tui/state.py                 |       51 |        0 |       10 |        0 |    100% |           |
+| src/calfcord/cli/tui/state.py                 |       54 |        0 |       10 |        0 |    100% |           |
 | src/calfcord/cli/tui/theme.py                 |       16 |        0 |        0 |        0 |    100% |           |
-| src/calfcord/cli/tui/widgets.py               |      120 |        0 |       30 |        0 |    100% |           |
+| src/calfcord/cli/tui/widgets.py               |      125 |        0 |       28 |        0 |    100% |           |
 | src/calfcord/discord/avatar.py                |        3 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/discord/chunking.py              |       32 |        0 |       18 |        1 |     98% |   60-\>85 |
 | src/calfcord/discord/messages.py              |       18 |        0 |        0 |        0 |    100% |           |
@@ -99,7 +100,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |603-604, 670-672 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **8270** |  **498** | **2194** |  **103** | **93%** |           |
+| **TOTAL**                                     | **8351** |  **502** | **2208** |  **106** | **93%** |           |
 
 
 ## Setup coverage badge
