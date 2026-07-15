@@ -8,6 +8,8 @@ The two aliasing rules pinned here are the ones readchar gets wrong for our use
 
 from __future__ import annotations
 
+import errno
+
 import pytest
 import readchar
 
@@ -87,8 +89,11 @@ class TestReadKeyOnANonTerminal:
             raise termios.error(25, "Inappropriate ioctl for device")
 
         monkeypatch.setattr(readchar, "readkey", _not_a_terminal)
-        with pytest.raises(OSError):
+        with pytest.raises(OSError) as caught:
             read_key()
+        # Pin the errno, not just the type: a bare OSError("boom") would satisfy
+        # `raises(OSError)` while saying nothing about what went wrong.
+        assert caught.value.errno == errno.ENOTTY
 
     def test_keeps_the_interrupt_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Ctrl-C must still surface as KeyboardInterrupt → the CLI's exit 130."""

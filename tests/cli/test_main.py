@@ -8,6 +8,7 @@ honours the native (``$CALFCORD_HOME``) vs dev layouts and the
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -285,10 +286,21 @@ def test_main_traps_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch, capsys: 
 def test_main_maps_oserror_to_clean_exit_when_stdin_not_a_tty(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """InquirerPy's raw-mode ``OSError`` (EINVAL) on a non-TTY stdin → exit 1 + a hint."""
+    """A raw-mode ``OSError`` on a non-TTY stdin → exit 1 + a hint.
+
+    Synthetic by design: this pins ``main``'s *handler*, not the reader. The
+    handler cares only that the exception is an ``OSError`` and that stdin is not
+    a TTY, so the errno is arbitrary here.
+
+    It therefore CANNOT prove the real path works — the reader's exception has to
+    reach this branch in the first place, and the shipped bug was that it did not
+    (``termios.error`` does not subclass ``OSError``). ``tests/cli/tui/
+    test_non_tty_end_to_end.py`` covers that join against a real closed stdin;
+    this one keeps its own half honest.
+    """
 
     def _raise(parser: object, args: object) -> int:
-        raise OSError(22, "Invalid argument")
+        raise OSError(errno.ENOTTY, "stdin is not an interactive terminal")
 
     monkeypatch.setattr(main_mod, "_dispatch", _raise)
     monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: False)
