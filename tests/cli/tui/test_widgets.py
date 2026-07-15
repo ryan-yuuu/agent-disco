@@ -221,6 +221,20 @@ class TestCheckbox:
         rows = [Choice("a", "A", checked=True), Choice("b", "B")]
         assert widgets.checkbox("Tools", rows, read=keys(SPACE, ENTER), console=silent()) == []
 
+    def test_the_instruction_is_shown_when_given(self) -> None:
+        """The Protocol declares ``instruction``, so it must not vanish silently.
+
+        A parameter a widget accepts and drops is a lie to the next caller: they
+        pass guidance, see nothing, and have no way to tell it was ignored.
+        """
+        out = paint(widgets.checkbox_panel("Tools", CheckboxState(CHOICES), instruction="pick carefully"))
+        assert "pick carefully" in out
+
+    def test_no_instruction_line_when_none_is_given(self) -> None:
+        """The hint already states the mechanics; an empty line would be noise."""
+        out = paint(widgets.checkbox_panel("Tools", CheckboxState(CHOICES)))
+        assert out.count("\n") == paint(widgets.select_panel("Tools", SelectState(CHOICES))).count("\n")
+
     def test_panel_distinguishes_checked_from_unchecked(self) -> None:
         rows = [Choice("a", "A", checked=True), Choice("b", "B")]
         out = paint(widgets.checkbox_panel("Tools", CheckboxState(rows)))

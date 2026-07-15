@@ -214,7 +214,6 @@ def run(
     selected = prompter.checkbox(
         f"Tools for {agent_name}",
         choices,
-        instruction="space toggles, enter confirms",
     )
 
     try:

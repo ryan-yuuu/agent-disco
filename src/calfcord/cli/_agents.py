@@ -314,7 +314,6 @@ def pick_tools(
     selected = prompter.checkbox(
         f"Tools for {name} (all selected — deselect any you don't want):",
         choices,
-        instruction="space toggles, enter confirms",
     )
 
     if _DANGEROUS_TOOLS.intersection(selected):

@@ -95,8 +95,17 @@ def select_panel(message: str, state: SelectState) -> Panel:
     return _panel(message, _rows(state, lambda _c: ""), theme.HINT_SELECT)
 
 
-def checkbox_panel(message: str, state: CheckboxState) -> Panel:
-    body = _rows(state, lambda c: theme.CHECK_ON if state.is_checked(c.value) else theme.CHECK_OFF)
+def checkbox_panel(message: str, state: CheckboxState, *, instruction: str = "") -> Panel:
+    """The multi-select frame.
+
+    ``instruction`` is caller-supplied guidance rendered above the rows. It is
+    rendered rather than dropped because the Protocol declares it: a widget that
+    accepts a parameter and silently ignores it lies to the next caller, who
+    passes guidance and has no way to learn it went nowhere. The key mechanics
+    are NOT its job — the hint in the bottom border states those for every list.
+    """
+    rows = _rows(state, lambda c: theme.CHECK_ON if state.is_checked(c.value) else theme.CHECK_OFF)
+    body = Group(Text(instruction, style=theme.MUTED), rows) if instruction else rows
     return _panel(message, body, theme.HINT_CHECKBOX)
 
 
@@ -196,7 +205,12 @@ def checkbox(
             state.toggle()
         return key is Key.ENTER
 
-    _loop(lambda: checkbox_panel(message, state), step, read=read, console=console)
+    _loop(
+        lambda: checkbox_panel(message, state, instruction=instruction),
+        step,
+        read=read,
+        console=console,
+    )
     render.answer(message, f"{len(state.selected)} selected", console=console)
     return state.selected
 
