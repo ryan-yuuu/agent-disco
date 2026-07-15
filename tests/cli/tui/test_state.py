@@ -54,6 +54,90 @@ class TestSelectState:
             SelectState([])
 
 
+class TestViewport:
+    """A list taller than the terminal must scroll, not overflow it.
+
+    Rich's Live renders content taller than the screen anyway (vertical_overflow
+    defaults to "visible"), so the terminal scrolls and Live's transient teardown
+    cannot erase the lines that scrolled off — leaving wreckage behind and
+    repainting the whole list on every keypress. InquirerPy paged its lists, so
+    shipping without a viewport would be a REGRESSION, not just a rough edge.
+    ``disco agent tools`` reaches it: a row per builtin, per MCP server, and per
+    live MCP tool.
+    """
+
+    def _rows(self, count: int) -> list[Choice]:
+        return [Choice(f"v{i}", f"row {i}") for i in range(count)]
+
+    def test_a_short_list_is_shown_whole(self) -> None:
+        assert SelectState(self._rows(3), viewport=10).window() == (0, 3)
+
+    def test_a_long_list_is_capped_to_the_viewport(self) -> None:
+        assert SelectState(self._rows(30), viewport=10).window() == (0, 10)
+
+    def test_the_window_follows_the_cursor_down(self) -> None:
+        state = SelectState(self._rows(30), viewport=10)
+        for _ in range(12):
+            state.down()
+        start, stop = state.window()
+        assert start <= state.cursor < stop
+
+    def test_the_window_follows_the_cursor_back_up(self) -> None:
+        state = SelectState(self._rows(30), viewport=10)
+        for _ in range(20):
+            state.down()
+        for _ in range(15):
+            state.up()
+        start, stop = state.window()
+        assert start <= state.cursor < stop
+
+    def test_the_cursor_stays_visible_after_wrapping_to_the_end(self) -> None:
+        """Wrapping up from row 0 jumps to the last row — the window must follow."""
+        state = SelectState(self._rows(30), viewport=10)
+        state.up()
+        start, stop = state.window()
+        assert state.cursor == 29
+        assert start <= state.cursor < stop
+
+    def test_the_cursor_stays_visible_after_wrapping_to_the_start(self) -> None:
+        state = SelectState(self._rows(30), viewport=10)
+        for _ in range(30):
+            state.down()
+        start, stop = state.window()
+        assert state.cursor == 0
+        assert start <= state.cursor < stop
+
+    def test_the_window_never_runs_past_the_end(self) -> None:
+        state = SelectState(self._rows(12), viewport=10)
+        for _ in range(11):
+            state.down()
+        start, stop = state.window()
+        assert stop <= 12
+        assert stop - start == 10
+
+    def test_a_viewport_larger_than_the_list_does_not_pad(self) -> None:
+        assert SelectState(self._rows(2), viewport=10).window() == (0, 2)
+
+    def test_a_default_deep_in_a_long_list_opens_on_screen(self) -> None:
+        """The saved value must be visible on open, not somewhere below the fold.
+
+        ``agent edit`` and ``_providers.pick_model`` pass a stored default into a
+        list that can be far longer than the viewport; opening scrolled to the top
+        would show the operator a cursor they cannot see.
+        """
+        state = SelectState(self._rows(30), default="v25", viewport=10)
+        start, stop = state.window()
+        assert state.cursor == 25
+        assert start <= state.cursor < stop
+
+    def test_the_checkbox_scrolls_too(self) -> None:
+        state = CheckboxState(self._rows(30), viewport=10)
+        for _ in range(15):
+            state.down()
+        start, stop = state.window()
+        assert start <= state.cursor < stop
+
+
 class TestCheckboxState:
     def test_preselects_rows_marked_checked(self) -> None:
         rows = [Choice("a", "A", checked=True), Choice("b", "B"), Choice("c", "C", checked=True)]

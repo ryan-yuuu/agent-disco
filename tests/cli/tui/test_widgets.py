@@ -135,6 +135,48 @@ class TestSelect:
         assert "esc" not in out.lower()
 
 
+class TestScrolling:
+    """A long list paints only its window, and says what it is hiding."""
+
+    def _rows(self, count: int) -> list[Choice]:
+        return [Choice(f"v{i}", f"row_{i}") for i in range(count)]
+
+    def test_only_the_window_is_painted(self) -> None:
+        """The whole point: 40 rows must not paint 40 lines into a 24-line terminal."""
+        out = paint(widgets.select_panel("Pick", SelectState(self._rows(40), viewport=10)))
+        assert "row_0" in out
+        assert "row_39" not in out
+
+    def test_a_short_list_shows_no_scroll_markers(self) -> None:
+        out = paint(widgets.select_panel("Pick", SelectState(self._rows(3), viewport=10)))
+        assert "more" not in out
+
+    def test_a_long_list_reports_what_is_hidden_below(self) -> None:
+        out = paint(widgets.select_panel("Pick", SelectState(self._rows(40), viewport=10)))
+        assert "30 more" in out
+
+    def test_scrolling_down_reports_what_is_hidden_above(self) -> None:
+        state = SelectState(self._rows(40), viewport=10)
+        for _ in range(15):
+            state.down()
+        assert "6 more" in paint(widgets.select_panel("Pick", state))
+
+    def test_the_cursor_row_is_painted_after_scrolling(self) -> None:
+        state = SelectState(self._rows(40), viewport=10)
+        for _ in range(15):
+            state.down()
+        assert "row_15" in paint(widgets.select_panel("Pick", state))
+
+    def test_the_panel_height_is_steady_across_the_ends(self) -> None:
+        """A frame that changes height as the cursor moves reads as a jump."""
+        state = SelectState(self._rows(40), viewport=10)
+        top = len(paint(widgets.select_panel("Pick", state)).splitlines())
+        for _ in range(39):
+            state.down()
+        bottom = len(paint(widgets.select_panel("Pick", state)).splitlines())
+        assert top == bottom
+
+
 class TestMarkupIsNeverInterpreted:
     """Operator-supplied text must never be parsed as Rich markup.
 

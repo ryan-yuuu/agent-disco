@@ -28,7 +28,7 @@ from rich.text import Text
 from calfcord.cli._prompts import Choice
 from calfcord.cli.tui import render, theme
 from calfcord.cli.tui.keys import Key, read_key, resolve
-from calfcord.cli.tui.state import CheckboxState, SelectState
+from calfcord.cli.tui.state import CheckboxState, SelectState, _ListState
 
 Reader = Callable[[], str]
 
@@ -47,29 +47,56 @@ def _panel(message: str, body: RenderableType, hint: str) -> Panel:
     )
 
 
-def _rows(choices: list[Choice], cursor: int, marker: Callable[[Choice], str]) -> Group:
-    """Render the choice list, dimming everything the cursor is not on."""
-    lines = []
-    for index, choice in enumerate(choices):
-        active = index == cursor
-        text = Text(f"{theme.POINTER if active else ' '} ", style=theme.ACCENT if active else theme.MUTED)
-        text.append(f"{marker(choice)} " if marker(choice) else "", style=theme.ACCENT if active else theme.MUTED)
+def _more(count: int, arrow: str) -> Text:
+    """A dim "<n> more" marker, or a blank line holding that row's height.
+
+    Blank rather than omitted when the count is zero: dropping the line would
+    change the panel's height as the cursor reaches either end, making the whole
+    frame jump. A steady frame is half the point of the viewport.
+    """
+    return Text(f"  {arrow} {count} more" if count else "", style=theme.MUTED)
+
+
+def _rows(state: _ListState, marker: Callable[[Choice], str]) -> Group:
+    """Render the visible window of the list, dimming all but the cursor row.
+
+    Only ``state.window()`` is painted. Rich's Live renders content taller than
+    the terminal rather than clipping it (``vertical_overflow`` defaults to
+    "visible"), so painting every row of a long list scrolls the terminal on each
+    keypress and leaves wreckage that the transient teardown cannot erase. The
+    viewport is what keeps a long ``agent tools`` list usable on a 24-line
+    terminal — InquirerPy paged its lists, so losing this would be a regression.
+    """
+    start, stop = state.window()
+    lines: list[Text] = []
+
+    # An honest count of what is off-screen. Without it a scrolled list is
+    # indistinguishable from a complete one, and an operator would never learn
+    # that the rows they want exist at all.
+    if state.scrolled:
+        lines.append(_more(start, "↑"))
+
+    for index in range(start, stop):
+        choice = state.choices[index]
+        active = index == state.cursor
+        style = theme.ACCENT if active else theme.MUTED
+        text = Text(f"{theme.POINTER if active else ' '} ", style=style)
+        if marker(choice):
+            text.append(f"{marker(choice)} ", style=style)
         text.append(choice.label, style=theme.ACCENT if active else "")
         lines.append(text)
+
+    if state.scrolled:
+        lines.append(_more(len(state.choices) - stop, "↓"))
     return Group(*lines)
 
 
 def select_panel(message: str, state: SelectState) -> Panel:
-    body = _rows(state.choices, state.cursor, lambda _c: "")
-    return _panel(message, body, theme.HINT_SELECT)
+    return _panel(message, _rows(state, lambda _c: ""), theme.HINT_SELECT)
 
 
 def checkbox_panel(message: str, state: CheckboxState) -> Panel:
-    body = _rows(
-        state.choices,
-        state.cursor,
-        lambda c: theme.CHECK_ON if state.is_checked(c.value) else theme.CHECK_OFF,
-    )
+    body = _rows(state, lambda c: theme.CHECK_ON if state.is_checked(c.value) else theme.CHECK_OFF)
     return _panel(message, body, theme.HINT_CHECKBOX)
 
 
