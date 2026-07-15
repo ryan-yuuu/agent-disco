@@ -32,7 +32,7 @@ from calfcord.cli import (
     logs,
     mcp_admin,
 )
-from calfcord.cli._agents import detect_agents
+from calfcord.cli._agents import detect_agents, pick_agent
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._mcp import configured_mcp_servers_or_none
 from calfcord.cli._prompts import make_prompter
@@ -126,7 +126,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ("restart", "Restart a running agent after editing its .md."),
     ):
         _p = agent_sub.add_parser(_verb, help=_help)
-        _p.add_argument("name", nargs="?", help="Agent name (or pass --all).")
+        _p.add_argument(
+            "name",
+            nargs="?",
+            # ``start`` alone opens a picker over the defined agents; stop/restart
+            # still require a target, since their honest list is the RUNNING roster.
+            help=(
+                "Agent name (omit to pick interactively, or pass --all)."
+                if _verb == "start"
+                else "Agent name (or pass --all)."
+            ),
+        )
         _p.add_argument(
             "--all",
             dest="all",
@@ -358,8 +368,28 @@ def _collect_set_updates(args: argparse.Namespace) -> dict[str, str]:
 _ROSTER_COMMANDS = frozenset({"start", "stop", "restart", "ps"})
 
 
-def _require_one_roster_target(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Enforce exactly one of ``<name>`` | ``--all`` for an agent roster verb.
+def _resolve_start_target(args: argparse.Namespace, *, agents_dir: Path) -> str | None:
+    """Return the agent ``agent start`` should start, picking one if none was named.
+
+    A bare ``disco agent start`` used to be a parser error. That told the operator
+    what they did wrong but not what they could do instead — while the CLI already
+    knew the entire answer, since the defined roster is just the ``.md`` files
+    ``agent list`` reads. So it now offers them, the same way ``agent tools`` and
+    ``agent edit`` always have.
+
+    ``None`` means "nothing to start" (an empty roster, already explained) — the
+    caller returns 1. ``--all`` and an explicit name never reach here; both are
+    already complete answers.
+    """
+    if args.name is not None:
+        return args.name
+    return pick_agent(make_prompter(), agents_dir=agents_dir, message="Which agent do you want to start?")
+
+
+def _require_one_roster_target(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, *, name_optional: bool = False
+) -> None:
+    """Reject a contradictory roster target; optionally allow an absent one.
 
     ``name`` is ``nargs="?"`` and ``--all`` is a flag, so argparse alone would
     accept BOTH (contradictory: one targets a single agent, the other every agent
@@ -371,7 +401,7 @@ def _require_one_roster_target(parser: argparse.ArgumentParser, args: argparse.N
     """
     if args.all and args.name is not None:
         parser.error("name and --all are mutually exclusive")
-    if not args.all and args.name is None:
+    if not name_optional and not args.all and args.name is None:
         parser.error("give an agent name or --all")
 
 
@@ -404,12 +434,17 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
     command = args.agent_command
 
     # Argument validity comes BEFORE the native-install guard: an invalid invocation
-    # (no target, or both a name and --all) is an operator error to flag with the
-    # parser (exit 2) regardless of whether a home is configured — so a dev run's
-    # bare `agent start` still errors at the parser, not the home check. ``ps`` takes
-    # no target and skips this.
+    # (both a name and --all, or — for stop/restart — neither) is an operator error
+    # to flag with the parser (exit 2) regardless of whether a home is configured, so
+    # a dev run still errors at the parser rather than the home check. ``ps`` takes no
+    # target and skips this. A bare ``start`` is NOT invalid: it is answered by the
+    # picker below, once a home has been resolved to read the roster from.
     if command != "ps":
-        _require_one_roster_target(parser, args)
+        # ``start`` may omit BOTH: the picker answers it (_resolve_start_target).
+        # stop/restart may not — their honest pick-list is the RUNNING roster,
+        # which needs a broker probe, and a DEFINED-agent picker there would
+        # invite choosing an agent that is already stopped.
+        _require_one_roster_target(parser, args, name_optional=command == "start")
 
     home = _require_home(f"agent {command}")
     if home is None:
@@ -437,10 +472,18 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
     # every DEFINED agent — the ids come from the agents dir here so roster.py
     # stays off the disk read.
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+    _, agents_dir = init.resolve_paths(home)
     if args.all:
-        _, agents_dir = init.resolve_paths(home)
         return asyncio.run(roster.agent_start_all(home, agent_ids=detect_agents(agents_dir), server_urls=server_urls))
-    return asyncio.run(roster.agent_start(home, name=args.name, server_urls=server_urls))
+
+    # A bare `agent start` picks from the defined roster. Resolved on the SYNC side,
+    # before asyncio.run — the same ask-everything-first shape the rest of the CLI
+    # keeps (see agent_create._finish_create): no longer forced now that the prompter
+    # owns no event loop, but the flow reads better for it.
+    name = _resolve_start_target(args, agents_dir=agents_dir)
+    if name is None:
+        return 1
+    return asyncio.run(roster.agent_start(home, name=name, server_urls=server_urls))
 
 
 def _run_agent(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
