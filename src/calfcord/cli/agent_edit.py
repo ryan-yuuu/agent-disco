@@ -35,14 +35,13 @@ Delete remains a separate command because it changes the agent's existence.
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import tempfile
 from pathlib import Path
 
 from calfcord.agents import md_writer
 from calfcord.agents.definition import parse_agent_md
-from calfcord.cli import agent_tools
+from calfcord.cli import _editor, agent_tools
 from calfcord.cli._agents import detect_agents, slug_stem
 from calfcord.cli._envfile import read_env
 from calfcord.cli._fields import FIELDS, FIELDS_BY_KEY, render_value, write_simple_field
@@ -63,9 +62,13 @@ def edit_system_prompt(md_path: Path) -> None:
 
     The system prompt is free-form prose, so an inline single-line prompt is the
     wrong tool — we hand the operator their real editor. The current body is
-    written to a temp ``.md`` file, ``$EDITOR`` (or ``vi`` when unset) is launched
-    on it, and the edited contents are read back and persisted via the
+    written to a temp ``.md`` file (the suffix earns markdown highlighting, the
+    same trick aider uses), the editor :mod:`calfcord.cli._editor` resolves is
+    launched on it, and the result is read back and persisted via the
     validate-before-write :func:`calfcord.agents.md_writer.update_system_prompt`.
+
+    The editor is **named to the operator before it opens**. Which editor, and
+    whether it must be told to wait, are :mod:`calfcord.cli._editor`'s problem.
 
     Defensive on every failure mode that an interactive editor invites, because
     this runs inside the edit menu and must never let an exception escape and
@@ -74,9 +77,9 @@ def edit_system_prompt(md_path: Path) -> None:
     * **No change / emptied.** If the operator saves without changes, or empties
       the file (a whitespace-only body the validator would reject anyway), print
       a note and return without writing — leaving the existing prompt intact.
-    * **Editor can't be launched.** A missing ``$EDITOR`` binary
-      (:class:`FileNotFoundError`) prints a clear hint to set ``$EDITOR`` and
-      returns, rather than surfacing a raw stack trace.
+    * **Editor can't be launched.** A missing binary (:class:`FileNotFoundError`)
+      prints a clear hint to set ``$VISUAL``/``$EDITOR`` and returns, rather than
+      surfacing a raw stack trace.
     * **Validation / OS error.** A rejected body or a filesystem error during the
       atomic write prints one ``error:`` line and returns; the on-disk file is
       left untouched by the validate-before-write seam.
@@ -101,18 +104,25 @@ def edit_system_prompt(md_path: Path) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(current_body)
 
-        # ``shlex.split`` so an EDITOR carrying args ("code --wait", "emacs -nw")
-        # is honoured rather than treated as one impossible binary name.
-        editor = os.environ.get("EDITOR") or "vi"
-        argv = [*shlex.split(editor), str(tmp_path)]
+        # VISUAL/EDITOR precedence, GUI --wait injection, and the probe all live
+        # in _editor — each is a rule with a reason, and none of them fits in a
+        # line here (see that module).
+        command = _editor.resolve()
+        name = _editor.describe(command)
+
+        # Name the editor BEFORE it takes the screen. An operator dropped into an
+        # unannounced modal editor has no idea what it is or how to leave — the
+        # single most-reported way a CLI strands a newcomer. gh solved it the same
+        # way, by naming the editor in the prompt.
+        render.note(f"opening {name} to edit the system prompt — save and quit to continue.")
         try:
-            subprocess.run(argv, check=True)
+            subprocess.run(_editor.argv(command, tmp_path), check=True)
         except FileNotFoundError:
             # The configured editor binary doesn't exist on PATH — the single
             # failure that a generic "error:" line would leave the operator
             # unable to act on, so hint at the concrete fix.
             print(
-                f"error: could not launch editor {editor!r}; set $EDITOR to an "
+                f"error: could not launch editor {name!r}; set $VISUAL or $EDITOR to an "
                 f"installed editor (e.g. EDITOR=nano) and try again."
             )
             return
