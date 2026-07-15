@@ -1,14 +1,18 @@
 """Output helpers for the interactive flows.
 
-Every helper that prints a raw ``str`` funnels through :func:`line`, which pins
-the two rules that make it safe to route existing operator prose through Rich:
+Two rules make it safe to route existing operator prose through Rich, and it is
+worth being precise about which mechanism enforces which:
 
-* ``markup=False`` — the prose contains bracketed text and ``$``-sigils that Rich
-  would otherwise parse as style tags and delete.
+* **The prose is wrapped in ``Text()`` before printing.** *That* — not
+  ``markup=False`` — is what keeps bracketed text and ``$``-sigils literal, because
+  Rich parses markup only when converting a ``str`` into a Text. Delete the
+  ``Text()`` wrapper and the brackets get eaten as style tags no matter what the
+  flags say. ``markup=False``/``highlight=False`` are passed as belt-and-braces so
+  the contract survives someone later handing :func:`line` a bare string.
 * ``soft_wrap=True`` — disables wrapping and cropping, so a line reaches the
   terminal byte-identical to what ``print`` would have emitted. Rich's default
   is to wrap at the console width (80 off-TTY), which would bisect the phrases
-  the CLI's existing tests match on.
+  the CLI's existing tests match on. This one is genuinely load-bearing.
 
 Both are passed **per call**, never set on the console. As constructor defaults
 they would apply to every render — including the widgets', where ``soft_wrap``
@@ -52,7 +56,7 @@ def make_console(*, width: int | None = None, record: bool = False) -> Console:
 def console() -> Console:
     """The shared stdout console.
 
-    Module-level rather than injected per call site: the flows print from ~40
+    Module-level rather than injected per call site: the flows print from many
     places, and threading a console through every signature would churn the
     command modules this migration is meant to leave alone. Tests capture stdout
     as they already do.
@@ -75,7 +79,6 @@ def target(explicit: Console | None) -> Console:
 
 
 def line(text: str = "", *, style: str = "", console: Console | None = None) -> None:
-    """Print one line verbatim — no markup parsing, no wrapping, no highlighting."""
     target(console).print(Text(text, style=style), markup=False, highlight=False, soft_wrap=True)
 
 
@@ -139,8 +142,8 @@ def header(
             right = f"{right} {theme.BULLET} {label}"
 
     # A leading blank line so a header never butts against whatever preceded it
-    # (a collapsed answer record, a note). Owned here rather than left to each of
-    # the ~7 call sites, which would drift.
+    # (a collapsed answer record, a note). Owned here rather than left to each
+    # call site, which would drift.
     out = target(console)
     body = Text(subtitle, style=theme.MUTED) if subtitle else Text("")
     out.print()

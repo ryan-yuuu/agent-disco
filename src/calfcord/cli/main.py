@@ -876,6 +876,22 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     return 2  # unreachable; parser.error exits
 
 
+def _stdin_is_a_tty() -> bool:
+    """Is stdin an interactive terminal? Never raises.
+
+    This is the check that DIAGNOSES a broken stdin, so it must not break on one.
+    A bare ``sys.stdin.isatty()`` raises AttributeError when fd 0 was closed at
+    exec (CPython sets ``sys.stdin`` to None) and ValueError on a closed file
+    object — turning a clean "needs a terminal" message into a "during handling
+    of the above exception, another exception occurred" double traceback. Every
+    failure to answer means the same thing: not a terminal.
+    """
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except ValueError:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -905,14 +921,15 @@ def main(argv: list[str] | None = None) -> int:
                 "Re-run the installer if not.)"
             )
             return 1
-        # A non-TTY stdin (piped / CI) can't be put into raw mode, so the TUI's
-        # key reader fails there. It reaches us as OSError(ENOTTY) only because
-        # ``calfcord.cli.tui.keys.read_key`` translates it: the underlying
-        # ``termios.error`` does NOT subclass OSError and would otherwise sail
-        # past this handler and dump a traceback. Surface it cleanly, but only
-        # when stdin genuinely isn't a TTY — re-raise anything else rather than
-        # masking a real bug behind a friendly message.
-        if not sys.stdin.isatty():
+        # A non-TTY stdin (piped / CI / no stdin at all) can't be put into raw
+        # mode, so the TUI's key reader fails there. It reaches us as
+        # OSError(ENOTTY) only because ``calfcord.cli.tui.keys.read_key``
+        # translates it: the underlying failures are termios.error (which does
+        # NOT subclass OSError), AttributeError, and ValueError, each of which
+        # would otherwise sail past this handler and dump a traceback. Surface it
+        # cleanly, but only when stdin genuinely isn't a TTY — re-raise anything
+        # else rather than masking a real bug behind a friendly message.
+        if not _stdin_is_a_tty():
             print("error: this command needs an interactive terminal (stdin is not a TTY).")
             return 1
         raise

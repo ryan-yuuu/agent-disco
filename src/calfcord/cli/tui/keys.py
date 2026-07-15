@@ -1,10 +1,12 @@
 """Semantic key vocabulary over :mod:`readchar`.
 
-readchar owns the parts that are genuinely hard — putting the terminal into raw
-mode, restoring it on the way out, and parsing multi-byte escape sequences into
-one string. This module owns only the mapping from those raw strings onto the
-:class:`Key` vocabulary the widgets navigate by, plus the two aliases readchar
-does not cover for our use (see ``docs/design/cli-tui-migration.md`` §4.1).
+readchar owns the parts that are genuinely hard — reconfiguring the terminal,
+restoring it on the way out, and parsing multi-byte escape sequences into one
+string. (Not *raw* mode: it clears ICANON/ECHO from c_lflag and leaves c_iflag
+alone, so input translation such as CR->LF stays on. That distinction matters —
+see the CR note below.) This module owns only the mapping from those raw strings
+onto the :class:`Key` vocabulary the widgets navigate by, plus the aliases
+readchar does not cover for our use (``docs/design/cli-tui-migration.md`` §4.1).
 
 :func:`read_key` is the single input seam: widgets take it as an injectable, so
 every widget is testable by feeding a scripted key list with no TTY.
@@ -13,6 +15,7 @@ every widget is testable by feeding a scripted key list with no TTY.
 from __future__ import annotations
 
 import errno
+import sys
 import termios
 from enum import Enum, auto
 
@@ -37,15 +40,24 @@ class Key(Enum):
     EOF = auto()
 
 
-# Raw sequence -> Key. Two entries here are deliberate corrections to readchar's
-# constants rather than restatements of them:
+# Raw sequence -> Key. Some entries are hand-written literals rather than
+# readchar constants, for three different reasons:
 #
-# * CR ("\r") maps to ENTER alongside LF ("\n"). A POSIX terminal in raw mode
-#   sends CR when Enter is pressed, but ``readchar.key.ENTER`` is LF — binding
-#   only to the constant would leave the Enter key dead in a real terminal.
 # * "\x1bOA"/"\x1bOB" are the application-cursor-mode (DECCKM) arrow forms.
 #   readchar defines only the normal-mode "\x1b[A"/"\x1b[B" forms, so a terminal
-#   that has switched modes would navigate nowhere without these.
+#   that has switched modes would navigate nowhere without these. THIS is the
+#   load-bearing alias.
+# * CR ("\r") maps to ENTER alongside LF. On POSIX this is belt-and-braces, NOT
+#   a correction: readchar is not in raw mode — it clears only c_lflag bits
+#   (ICANON/ECHO) and never touches ICRNL in c_iflag — so the tty driver still
+#   translates CR to LF and ``readchar.key.ENTER`` ("\n") matches on its own.
+#   The "\r" binding covers the cases where that is not true (Windows, or a
+#   terminal already in true raw mode). An earlier version of this comment
+#   claimed Enter would be "dead" without it; that was inferred from the
+#   termios call without checking which flag word it touched, and a pty probe
+#   disproved it.
+# * "\x08" is Ctrl-H / the Windows backspace. readchar's BACKSPACE is "\x7f" on
+#   POSIX, so this is a genuinely separate binding, not a restatement.
 #
 # Esc is deliberately absent: ``readchar.readkey`` blocks after "\x1b" waiting to
 # disambiguate an escape sequence, so a lone Esc press cannot be observed. Ctrl-C
@@ -89,15 +101,35 @@ def read_key() -> str:
     point maps to a clean "aborted." exit 130). This is the seam widgets inject
     in tests.
 
-    The one translation: on a piped / CI stdin, ``termios.tcgetattr`` raises
-    :exc:`termios.error` — which, despite being an OS-level failure, does **not**
-    subclass :exc:`OSError`. Left raw it would sail past the entry point's
-    non-TTY handler and dump a traceback at an operator whose only mistake was
-    running an interactive command without a terminal. Re-raising it as an
-    ``OSError`` carrying ``ENOTTY`` routes it into that existing handler, which
-    prints "this command needs an interactive terminal" and exits 1.
+    Everything below funnels a broken stdin into one ``OSError(ENOTTY)``, because
+    the entry point's non-TTY handler catches ``OSError`` and nothing else — and
+    a broken stdin breaks in three different ways, on three different lines:
+
+    * **fd 0 closed at exec** (a supervisor or daemon spawning us with no stdin):
+      CPython sets ``sys.stdin`` to ``None``, and readchar reaches
+      ``sys.stdin.fileno()`` *before* ``termios``, so this raises
+      :exc:`AttributeError` — checked first, since the later guards never see it.
+    * **piped / CI stdin**: ``termios.tcgetattr`` raises :exc:`termios.error`,
+      which despite being an OS-level failure does **not** subclass ``OSError``.
+    * **a closed file object**: ``ValueError: I/O operation on closed file``.
+
+    Only the second of those was handled at first, and the end-to-end test used
+    ``DEVNULL`` — a real fd — so it exercised that one path and missed the rest.
+    Each raw exception dumps a traceback at an operator whose only mistake was
+    running an interactive command without a terminal.
+
+    ``ValueError`` is caught but :exc:`io.UnsupportedOperation` is deliberately
+    NOT special-cased: it already subclasses ``OSError``, so it reaches the
+    handler on its own. That is an accident of CPython's hierarchy rather than a
+    guarantee, which is why the explicit guards exist around it.
     """
+    # Not a broad `except AttributeError` around readkey(): that would mask
+    # genuine readchar bugs. The condition is knowable up front, so ask.
+    if sys.stdin is None:
+        raise OSError(errno.ENOTTY, "stdin is not available (fd 0 is closed)")
     try:
         return readchar.readkey()
     except termios.error as exc:
         raise OSError(errno.ENOTTY, "stdin is not an interactive terminal") from exc
+    except ValueError as exc:
+        raise OSError(errno.ENOTTY, "stdin is closed") from exc

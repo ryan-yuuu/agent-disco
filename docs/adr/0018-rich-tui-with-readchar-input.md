@@ -58,18 +58,38 @@ verified false by probe. `Application.run_async()` never calls `asyncio.run()`, 
 The real reason those were rejected is **fit** — the async API would make `Prompter`
 async, turning ~32 call sites into `await` and breaking the 8 Protocol guards.
 
-**Two readchar traps are pinned by tests**, because both are silent:
-`readchar.key.ENTER` is LF while a POSIX terminal in raw mode sends CR (binding only to
-the constant leaves Enter dead), and a lone Esc **blocks** because `readkey()` waits on
-the next byte to disambiguate an escape sequence. Ctrl-C is therefore the advertised
-cancel — which `main()` already maps to exit 130 and `init` already teaches as safe and
-resumable.
+**One readchar trap is pinned by tests**, because it is silent: a lone Esc **blocks** —
+`readkey()` reads `\x1b` and then waits on the next byte to disambiguate an escape
+sequence, so a lone Esc press cannot be observed at all. Ctrl-C is therefore the
+advertised cancel, which `main()` already maps to exit 130 and `init` already teaches as
+safe and resumable.
 
-**Non-TTY behaviour moved.** readchar surfaces a non-terminal as `termios.error`, which
-does **not** subclass `OSError` and so escaped `main()`'s non-TTY handler as a raw
-traceback. `keys.read_key` re-raises it as `OSError(ENOTTY)` to route it back into that
-existing handler. The unit test monkeypatches the exception and stayed green while the
-product broke, so this class of bug needs the CLI actually run with piped stdin.
+**A retracted claim, recorded rather than quietly deleted.** Earlier revisions of this
+ADR, the design doc, the code comments, and the PR description all asserted that
+`readchar.key.ENTER` is LF while a terminal in raw mode sends CR — so binding only to the
+constant would leave the Enter key "dead". **That is false.** readchar is *not* in raw
+mode: it clears only c_lflag bits (ICANON/ECHO) and never touches `ICRNL` in c_iflag, so
+the tty driver still translates CR→LF and `readchar.key.ENTER` matches on its own. A pty
+probe disproved it; the `"\r"` binding is kept as belt-and-braces for Windows / true raw
+mode, not as a correction.
+
+It is worth knowing *how* it survived: the claim was reached by reading a `termios` call
+and inferring "raw mode" without checking **which flag word** it modified — and it was
+labelled "found by inspection" in the design doc, next to a section that had already
+learned to say "verified by probe". Library behaviour in this area must be probed, not
+read.
+
+**Non-TTY behaviour moved.** A broken stdin breaks in three ways, on three different lines, and
+none of them reach `main()`'s `except OSError` unaided: `termios.error` (piped/CI) does not
+subclass `OSError`; `AttributeError` (fd 0 closed at exec, so CPython sets `sys.stdin = None` and
+readchar hits `sys.stdin.fileno()` *before* termios); and `ValueError` (closed file object).
+`keys.read_key` funnels all three into `OSError(ENOTTY)`, and `main`'s own `isatty` check is
+guarded too — the code that diagnoses a broken stdin must not break on one.
+
+Twice now the *test* was the problem, not the fix: first a unit test monkeypatched the exception
+and stayed green while the product broke; then the end-to-end test used `subprocess.DEVNULL`, which
+opens a **real fd**, so it proved only the one path already handled while a genuinely closed fd 0
+still tracebacked. This class of bug requires running the CLI against each real stdin state.
 
 **Palette is monochrome by decision** (`theme.py`): weight and dimming carry all
 hierarchy, no accent hue. An off-white accent is only off-white on a dark terminal;

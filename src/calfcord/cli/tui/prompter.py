@@ -46,11 +46,19 @@ class RichPrompter:
         """A press-Enter gate — deliberately a bare ``input()``, not a widget.
 
         There is nothing to render and nothing to navigate, so a Live frame and a
-        key loop would be pure overhead. Swallowing EOFError keeps the never-crash-
-        once-live contract: this gate runs *after* the workspace is up, and a
-        closed or piped stdin must not turn a working org into a traceback.
+        key loop would be pure overhead.
+
+        All three failures are swallowed because this gate runs *after* the
+        workspace is up: the answer is discarded, so there is nothing a failure
+        could cost, and a traceback here would turn a working org into an apparent
+        crash. That is the never-crash-once-live contract, and honouring it for
+        only one of the three ways stdin can be missing honoured it for none:
+
+        * piped / EOF        -> ``EOFError``
+        * fd 0 closed        -> ``RuntimeError: input(): lost sys.stdin``
+        * closed file object -> ``ValueError: I/O operation on closed file``
         """
         try:
             input(message)
-        except EOFError:
+        except (EOFError, RuntimeError, ValueError):
             print()

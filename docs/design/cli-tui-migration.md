@@ -147,11 +147,19 @@ Rendering is Rich either way (§3.1), so this decision is only about **input**.
 | E. `questionary` / keep `InquirerPy` | Both prompt_toolkit-based (§3.2). Styling cannot reach the target design. |
 | F. `Textual` | Full-screen + async app model — rejected with §5. |
 
-### 4.1 Two readchar facts found by inspection (both are traps)
+### 4.1 readchar facts (verify by probe — inspection got one of these wrong)
 
-1. **`readchar.key.ENTER` is `"\n"` (LF), but POSIX raw mode delivers `"\r"` (CR) when Enter is
-   pressed.** Binding only to `key.ENTER` leaves the Enter key silently dead. `keys.py` must accept
-   **both**. This is exactly why the thin semantic layer below earns its place.
+1. ~~**`readchar.key.ENTER` is LF but raw mode delivers CR, so binding only to the constant leaves
+   Enter dead.**~~ **RETRACTED — this was false, and it shipped in the code, the ADR, and the PR
+   description before a pty probe caught it.** readchar is **not** in raw mode: it clears only
+   c_lflag bits (ICANON/ECHO) and never touches `ICRNL` in c_iflag, so the tty driver still
+   translates CR->LF and `readchar.key.ENTER` (`"\n"`) matches on its own. The `"\r"` binding is
+   kept as belt-and-braces for Windows / true-raw-mode, not as a correction.
+
+   **Note how it failed**, because §3.2 already learned this lesson and this section did not: the
+   claim was labelled "found by inspection" — I saw a `termios` call and inferred "raw mode" without
+   checking *which flag word* it modified. Every library claim in this document needs a probe, not a
+   reading.
 2. **A bare Esc blocks.** `readkey()` reads `\x1b` and then *blocks* on the next byte to
    disambiguate an escape sequence, so a lone Esc press hangs until another key arrives.
    **"esc cancel" is therefore unimplementable** and must not be advertised in the hint line.

@@ -1,4 +1,7 @@
-"""The six prompt shapes, rendered with Rich and driven by readchar.
+"""The five rendered prompt shapes, drawn with Rich and driven by readchar.
+
+(The Protocol's sixth shape, ``pause``, is deliberately NOT here: it is a bare
+``input()`` with nothing to render and nothing to navigate — see ``prompter.py``.)
 
 Each widget is split in two: a ``*_panel`` function that is a pure function of
 state (so what the operator sees is directly assertable), and the widget itself,
@@ -48,7 +51,10 @@ def _panel(message: str, body: RenderableType, hint: str) -> Panel:
 
 
 # What a list panel costs beyond its rows: two borders, the two scroll markers,
-# and a line of slack so the frame does not sit flush against the terminal edge.
+# and one row that is EITHER slack OR checkbox_panel's optional instruction line.
+# Do not trim that fifth row as cosmetic padding — a checkbox with an instruction
+# needs it, and without it the panel is cropped by exactly the overflow the
+# viewport exists to prevent.
 _PANEL_OVERHEAD = 5
 
 

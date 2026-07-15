@@ -83,10 +83,18 @@ class Prompter(Protocol):
 def make_prompter() -> Prompter:
     """Return the production prompter — the Rich TUI.
 
-    A factory (rather than instantiating at import time) keeps the heavy imports
-    off the argparse startup path, gives every flow one place to swap the backend,
-    and breaks the import cycle with :mod:`calfcord.cli.tui`, which depends on
-    :class:`Choice` from this module.
+    A factory rather than an import-time instance for two reasons that hold:
+    it gives every flow one place to swap the backend, and it breaks the import
+    cycle with :mod:`calfcord.cli.tui`, which needs :class:`Choice` from here.
+
+    It also keeps **readchar** off the startup path — verified: importing
+    ``calfcord.cli.main`` pulls in no readchar. It does **not** keep Rich off it:
+    the command modules import :mod:`calfcord.cli.tui.render` at module scope for
+    their chrome, so Rich lands on every ``disco --help``. (An earlier version of
+    this docstring claimed it kept "the heavy imports" off startup, which was
+    measurably false for Rich.) The narrower claim in the module docstring —
+    importing *this module alone* pulls in neither — is true, and is what the
+    lazy import here actually buys.
     """
     from calfcord.cli.tui.prompter import RichPrompter
 
