@@ -46,7 +46,7 @@ from calfcord.bridge.history import (
     build_message_history,
     is_clear_marker,
 )
-from calfcord.bridge.settings import HISTORY_MAX_JSON_BYTES
+from calfcord.bridge.settings import DEFAULT_HISTORY_MAX_JSON_BYTES
 
 
 def _record(
@@ -240,7 +240,7 @@ class TestBuildMessageHistory:
 
 
 # ---------------------------------------------------------------------------
-# _bound_history_bytes — serialized-size budget + head repair
+# _trim_history_to_budget — serialized-size budget + head repair
 # ---------------------------------------------------------------------------
 
 
@@ -281,11 +281,11 @@ class TestTrimHistoryToBudget:
     """
 
     def test_empty_input(self) -> None:
-        assert _trim_history_to_budget([], max_json_bytes=HISTORY_MAX_JSON_BYTES) == []
+        assert _trim_history_to_budget([], max_json_bytes=DEFAULT_HISTORY_MAX_JSON_BYTES) == []
 
     def test_under_budget_is_unchanged(self) -> None:
         msgs = [_user("how do I X?"), _agent_text("here's how")]
-        assert _trim_history_to_budget(msgs, max_json_bytes=HISTORY_MAX_JSON_BYTES) == msgs
+        assert _trim_history_to_budget(msgs, max_json_bytes=DEFAULT_HISTORY_MAX_JSON_BYTES) == msgs
 
     def test_exactly_at_budget_is_unchanged(self) -> None:
         """The bound is inclusive: a history whose JSON is exactly the budget
@@ -389,7 +389,7 @@ class TestTrimHistoryToBudget:
         with an already-legal head — but the contract must not depend on that.)
         """
         msgs = [_agent_text("a1"), _user("q1")]
-        out = _trim_history_to_budget(msgs, max_json_bytes=HISTORY_MAX_JSON_BYTES)
+        out = _trim_history_to_budget(msgs, max_json_bytes=DEFAULT_HISTORY_MAX_JSON_BYTES)
         assert out == [msgs[1]]
 
     def test_does_not_mutate_input(self) -> None:

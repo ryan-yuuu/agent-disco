@@ -9,7 +9,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
 
-HISTORY_MAX_JSON_BYTES: Final[int] = 800_000
+DEFAULT_HISTORY_MAX_JSON_BYTES: Final[int] = 800_000
 """Default ceiling on the serialized size of an outgoing ``message_history``.
 
 Sized against the envelope the history rides in: aiokafka's default
@@ -18,13 +18,11 @@ Sized against the envelope the history rides in: aiokafka's default
 not history. See ADR 0018 for what this does and does not guarantee."""
 
 HISTORY_MIN_JSON_BYTES: Final[int] = 10_000
-"""Floor for the configurable budget.
+"""Floor for the configurable budget — a footgun guard, not a technical limit.
 
-Not a technical limit — a footgun guard. A single minimal message serializes to
-~200 bytes, so any budget in the low hundreds silently empties EVERY history and
-turns every agent amnesiac, one WARNING at a time. ``> 0`` accepts all of those.
-This floor converts that whole class of misconfiguration into a loud startup
-:class:`SettingsConfigError`."""
+A budget too small to hold one message empties every history instead of trimming
+it. See ADR 0018 for why that class of misconfiguration is rejected at startup
+rather than warned about once per turn."""
 
 _SETTINGS_ENV_VAR = "CALFCORD_SETTINGS"
 _HOME_ENV_VAR = "CALFCORD_HOME"
@@ -50,7 +48,7 @@ class MessageHistorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_json_bytes: StrictInt = Field(
-        default=HISTORY_MAX_JSON_BYTES, ge=HISTORY_MIN_JSON_BYTES
+        default=DEFAULT_HISTORY_MAX_JSON_BYTES, ge=HISTORY_MIN_JSON_BYTES
     )
     """Ceiling on the serialized history; oldest turns are dropped to fit. Lower
     it when the envelope's non-history terms are unusually large, raise it when

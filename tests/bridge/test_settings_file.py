@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from calfcord.bridge.settings import (
-    HISTORY_MAX_JSON_BYTES,
+    DEFAULT_HISTORY_MAX_JSON_BYTES,
     HISTORY_MIN_JSON_BYTES,
     SettingsConfigError,
     load_settings,
@@ -52,7 +52,7 @@ def test_load_settings_reads_sticky_replies_flag(tmp_path: Path) -> None:
 def test_missing_settings_file_defaults_message_history_budget(tmp_path: Path) -> None:
     settings = load_settings(tmp_path / "missing.json")
 
-    assert settings.message_history.max_json_bytes == HISTORY_MAX_JSON_BYTES
+    assert settings.message_history.max_json_bytes == DEFAULT_HISTORY_MAX_JSON_BYTES
 
 
 def test_load_settings_reads_message_history_budget(tmp_path: Path) -> None:
@@ -66,13 +66,12 @@ def test_load_settings_reads_message_history_budget(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("budget", [0, -1, 2, HISTORY_MIN_JSON_BYTES - 1])
 def test_load_settings_rejects_budget_below_the_floor(tmp_path: Path, budget: int) -> None:
-    """A budget too small to hold a single message silently empties EVERY
-    history and makes every agent amnesiac — one warning per turn, forever.
+    """``2`` is the case ``gt=0`` would have let through — a budget that empties
+    every history rather than trimming it (ADR 0018).
 
-    ``> 0`` accepts most of that class (a minimal message is ~200 bytes), so the
-    floor is what turns it into a loud startup failure. Matches the CONSTRAINT
-    error, not the generic wrapper: an ``extra="forbid"`` rejection of an unknown
-    key would otherwise satisfy this without the field existing at all.
+    Matches the CONSTRAINT error, not the generic wrapper: an ``extra="forbid"``
+    rejection of an unknown key would otherwise satisfy this without the field
+    existing at all.
     """
     path = tmp_path / "settings.json"
     path.write_text(

@@ -36,14 +36,19 @@ budget.
   "first message is a `ModelRequest` carrying a `UserPromptPart`", extracted as
   `_drop_until_user_request` and shared with `build_message_history`.
 - **Replay-delta atomicity falls out of that rule, but rests on where user
-  prompts sit.** A delta's only user-prompt `ModelRequest` is its *first* message
-  (calfkit commits the staged prompt at `initial_len` — `nodes/agent.py` — and
-  `_turn_delta` slices from there, `bridge/reply_poster.py`), so a cut either
-  keeps a delta whole or is walked past it entirely. No explicit turn model
-  needed. This holds only while user prompts appear at delta *boundaries*: a
-  mid-delta user prompt would become a legal-looking head with its `tool_use`
-  dropped, and 400 the provider. Worth re-checking if calfkit ever stages a
-  prompt mid-turn.
+  prompts sit.** A delta's only user-prompt `ModelRequest` is its *first*
+  message: calfkit appends the staged prompt to the history before the model loop
+  (`nodes/agent.py`), and our `_turn_delta` slices from that index onward
+  (`bridge/reply_poster.py`). So a cut either keeps a delta whole or is walked
+  past it entirely — no explicit turn model needed. This holds only while user
+  prompts appear at delta *boundaries*; a mid-delta user prompt would present as
+  a legal head with its `tool_use` dropped, and 400 the provider. Worth
+  re-checking if calfkit ever stages a prompt mid-turn.
+- **Trimming cannot desynchronise that index.** `initial_len` is ours
+  (`bridge/mention_handler.py`) and is `len(history)` of the *already-trimmed*
+  list that is sent, so the prefix the delta slice skips is by construction the
+  prefix the agent received. A budget applied anywhere later — inside calfkit,
+  say — would break that pairing.
 - **Bytes, not tokens.** The failure being prevented is a broker rejection,
   which is measured in bytes; a token bound would need a provider-specific
   tokenizer to prevent a byte-denominated failure. Model context-window

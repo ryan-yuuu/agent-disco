@@ -22,7 +22,7 @@ projection (``nodes/_projection.py``) re-roles it per viewer at read time
   builder into the ``MentionRequest`` → ``list[ModelMessage]`` seam the
   bridge's ``MentionHandler`` calls, and trims the result to the configured
   serialized-size budget (``message_history.max_json_bytes``, defaulting to
-  :data:`~calfcord.bridge.settings.HISTORY_MAX_JSON_BYTES`) — see ADR 0018.
+  :data:`~calfcord.bridge.settings.DEFAULT_HISTORY_MAX_JSON_BYTES`) — see ADR 0018.
 
 **Why building deliberately does NOT merge adjacent same-role**
 messages: pydantic-ai's :func:`_clean_message_history`
@@ -100,7 +100,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from calfcord.bridge.settings import HISTORY_MAX_JSON_BYTES
+from calfcord.bridge.settings import DEFAULT_HISTORY_MAX_JSON_BYTES
 from calfcord.bridge.transcripts import TranscriptStoreLike
 
 if TYPE_CHECKING:
@@ -821,7 +821,7 @@ def build_message_history(
     :func:`_drop_until_user_request`.
 
     Says nothing about SIZE: the result is as big as the fetched window plus its
-    replay deltas. :func:`_bound_history_bytes` (applied by
+    replay deltas. :func:`_trim_history_to_budget` (applied by
     :class:`DiscordHistoryProvider`, not here) is what bounds the payload — this
     stays a pure semantic build, testable without serializing anything.
     """
@@ -862,7 +862,7 @@ display budget: this bounds the *LLM context* a replayed turn re-injects, not a
 *display*. Reusing a display-sized cap would lobotomize the tool context the
 model reasons over on the next turn (the whole point of replay). Only oversized
 individual tool returns are trimmed. Composes with — and does not replace —
-:data:`HISTORY_MAX_JSON_BYTES`: this caps ONE return, that caps the whole
+:data:`DEFAULT_HISTORY_MAX_JSON_BYTES`: this caps ONE return, that caps the whole
 history (N returns under this cap still sum past any envelope)."""
 
 _REPLAY_TRUNCATION_MARKER: Final[str] = "\n…(truncated)"
@@ -948,8 +948,9 @@ def _trim_history_to_budget(
     :func:`_drop_until_user_request`. Repair only ever removes, so it cannot push
     the result back over budget: one pass, no settle loop.
 
-    Returns ``[]`` if a single message exceeds ``max_json_bytes`` — dropping
-    cannot shrink it, and going out over budget is not an option.
+    Returns ``[]`` when nothing legal fits: one message alone over budget
+    (dropping cannot shrink it, and going out over budget is not an option), or a
+    surviving suffix with no user turn in it.
 
     Pure and silent: the caller owns the "we lost context" log, because it is the
     one that knows WHICH conversation lost it. Design rationale (why bytes not
@@ -981,7 +982,7 @@ class DiscordHistoryProvider:
         transcript_store: TranscriptStoreLike,
         *,
         limit: int = _DISCORD_HISTORY_MAX_LIMIT,
-        max_json_bytes: int = HISTORY_MAX_JSON_BYTES,
+        max_json_bytes: int = DEFAULT_HISTORY_MAX_JSON_BYTES,
     ) -> None:
         self._fetcher = fetcher
         self._transcript_store = transcript_store
@@ -1019,12 +1020,12 @@ class DiscordHistoryProvider:
             logger.error(
                 "channel_id=%d: message_history is EMPTY after trimming to the "
                 "%d-byte budget (all %d messages dropped); this turn runs with NO "
-                "conversation context. A single message likely exceeds the whole "
-                "budget. Raise message_history.max_json_bytes in settings.json.",
+                "conversation context. Either one message exceeds the whole budget "
+                "or no user turn survived the cut. Raise "
+                "message_history.max_json_bytes in settings.json.",
                 req.source_channel_id,
                 self._max_json_bytes,
                 built,
-
             )
             return
         logger.warning(

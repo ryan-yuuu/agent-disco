@@ -104,9 +104,9 @@ history and leave every agent with no context. Omit the block to keep the
 default — an existing `settings.json` needs no change.
 
 When a history is trimmed, the bridge logs a warning naming the channel and how
-many messages were sent. If a history is emptied outright — one message alone
-exceeded the whole budget — it logs an error instead, because every reply in
-that channel then runs with no context:
+many messages were sent. If a history is emptied outright it logs an error
+instead, because every reply in that channel then runs with no context. Raising
+the budget is the fix in either case:
 
 ```bash
 disco logs bridge
