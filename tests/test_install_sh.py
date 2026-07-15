@@ -694,13 +694,19 @@ def test_seed_config_creates_new_env_at_mode_600(tmp_path: Path) -> None:
 # files" approach silently wrote nothing. These tests point ``$HOME`` at a temp
 # dir so the developer's real profiles are never touched.
 
-_PROFILES = (".profile", ".bashrc", ".zprofile")
+_PROFILES = (".profile", ".bashrc", ".zshenv")
 
 
 def _run_ensure_path(home: Path, fake_home: Path, *, path: str | None = None) -> subprocess.CompletedProcess:
     """Run ``ensure_path`` with ``$HOME`` redirected to ``fake_home`` (and an
-    optional ``$PATH`` override to exercise the already-on-PATH short-circuit)."""
-    extra = {"HOME": str(fake_home)}
+    optional ``$PATH`` override to exercise the already-on-PATH short-circuit).
+
+    ``$PATH`` defaults to a hermetic ``/usr/bin:/bin`` so ``link_onto_path``'s
+    real candidates (``$HOME/.local/bin``, ``/usr/local/bin``) are never on it:
+    without this a CI runner with a writable ``/usr/local/bin`` (macOS images
+    ship one) would have a real ``disco`` symlink planted in it by the suite.
+    """
+    extra = {"HOME": str(fake_home), "PATH": "/usr/bin:/bin"}
     if path is not None:
         extra["PATH"] = path
     return _source_and_run("ensure_path", home=home, extra_env=extra)
@@ -831,6 +837,459 @@ def test_ensure_path_leaves_legacy_export_line_and_adds_hook(tmp_path: Path) -> 
     text = profile.read_text()
     assert legacy in text  # old line untouched
     assert f'. "{home}/env"' in text  # new hook added
+
+
+def test_ensure_path_wires_zsh_via_zshenv_not_zprofile(tmp_path: Path) -> None:
+    """zsh reads ``.zprofile`` ONLY for login shells, so the hook was invisible
+    in a non-login interactive zsh — VS Code's integrated terminal spawns
+    ``/bin/zsh -i``, and restarting it never helped. ``.zshenv`` is the only zsh
+    startup file read unconditionally (login, interactive, and scripts alike),
+    so it is the one target that always gets us on PATH. rustup picks it for the
+    same reason. It is not free: ``.zshenv`` runs before /etc/zprofile's
+    path_helper, which reorders PATH and costs us the prepend ``.zprofile`` got
+    — a precedence loss in exchange for a reachability win."""
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+
+    result = _run_ensure_path(home, fake_home)
+    assert result.returncode == 0, result.stderr
+
+    hook = f'. "{home}/env"'
+    assert hook in (fake_home / ".zshenv").read_text()
+    assert not (fake_home / ".zprofile").exists()
+
+
+def test_ensure_path_writes_zshenv_under_zdotdir(tmp_path: Path) -> None:
+    """When ZDOTDIR is set, zsh reads ``$ZDOTDIR/.zshenv`` and NEVER looks at
+    ``~/.zshenv`` — so writing $HOME would be dead code for those users. ZDOTDIR
+    is also typically not exported, so the installer (a bash child) cannot read
+    it from its own env; it must ask zsh."""
+    if shutil.which("zsh") is None:
+        pytest.skip("zsh not available")
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    zdotdir = tmp_path / "zdotdir"
+    fake_home.mkdir()
+    zdotdir.mkdir()
+
+    result = _source_and_run(
+        "ensure_path",
+        home=home,
+        extra_env={"HOME": str(fake_home), "PATH": "/usr/bin:/bin", "ZDOTDIR": str(zdotdir)},
+    )
+    assert result.returncode == 0, result.stderr
+
+    hook = f'. "{home}/env"'
+    assert hook in (zdotdir / ".zshenv").read_text()
+    assert not (fake_home / ".zshenv").exists()
+
+
+def test_ensure_path_survives_an_unwritable_rc_file(tmp_path: Path) -> None:
+    """A read-only startup file must not abort the install.
+
+    The installer runs under `set -Eeuo pipefail` with an ERR trap, and the
+    append sits in an `if` BODY — only the condition is exempt from `set -e`.
+    So a 444 `~/.zshenv` (nix home-manager, chezmoi, stow all produce one) made
+    `printf >>` fail, fired the trap, and killed the run with "install failed"
+    — AFTER the symlink had already been planted and `disco` genuinely worked.
+    The other files must still get their hook.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses write permission checks")
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    locked = fake_home / ".zshenv"
+    locked.write_text("# managed elsewhere, read-only\n")
+    locked.chmod(0o444)
+    try:
+        result = _run_ensure_path(home, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        # The install survived and said something useful about the file it skipped.
+        assert "zshenv" in result.stderr
+        # The writable ones are still wired.
+        hook = f'. "{home}/env"'
+        assert hook in (fake_home / ".profile").read_text()
+        assert hook in (fake_home / ".bashrc").read_text()
+        # And the activation file — the one `source` needs — exists regardless.
+        assert (home / "env").exists()
+    finally:
+        locked.chmod(0o644)
+
+
+def test_ensure_path_symlinks_and_still_wires_profiles(tmp_path: Path) -> None:
+    """The symlink covers the CURRENT shell; the profile hooks cover every
+    future one. They are not alternatives — a user who removes the symlink, or
+    whose PATH is rebuilt, still needs the hook. Both always run."""
+    home = tmp_path / "home"
+    (home / "shims").mkdir(parents=True)
+    shim = home / "shims" / "disco"
+    shim.write_text("#!/usr/bin/env bash\n")
+    shim.chmod(0o755)  # link_onto_path verifies the link resolves to a RUNNABLE disco
+    fake_home = tmp_path / "fakehome"
+    local_bin = fake_home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+
+    result = _source_and_run(
+        'ensure_path; printf "SYMLINK_CREATED=%s" "$SYMLINK_CREATED"',
+        home=home,
+        extra_env={"HOME": str(fake_home), "PATH": f"{local_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+
+    # current shell: reachable now
+    assert (local_bin / "disco").is_symlink()
+    assert f"SYMLINK_CREATED={local_bin}" in result.stdout
+    # future shells: still wired
+    assert (home / "env").exists()
+    for name in _PROFILES:
+        assert f'. "{home}/env"' in (fake_home / name).read_text()
+
+
+# ------------------------------------------------------------ link_onto_path ---
+# A `curl | bash` installer is a CHILD of the caller's shell, so it can never
+# mutate the caller's PATH — which is why the env-file/profile hooks above only
+# take effect in a NEW shell. The one escape is to land the command in a
+# directory the running shell ALREADY searches: PATH is resolved at lookup time,
+# so a new file in an already-listed dir is found with no env change and no
+# rehash. That makes `disco` usable in the CURRENT terminal, with the profile
+# hooks as the fallback for machines where no candidate qualifies.
+
+
+def _run_link_onto_path(home: Path, candidates: list[Path], *, path: str) -> subprocess.CompletedProcess:
+    """Run ``link_onto_path`` over ``candidates`` with an explicit ``$PATH``."""
+    args = " ".join(f'"{c}"' for c in candidates)
+    return _source_and_run(
+        f'link_onto_path {args}; printf "SYMLINK_CREATED=%s" "$SYMLINK_CREATED"',
+        home=home,
+        extra_env={"PATH": path},
+    )
+
+
+def _shim_home(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a home with a real ``shims/disco`` in it; return (home, shim_dir).
+
+    The shim is made executable because ``link_onto_path`` verifies the link it
+    just made actually resolves to a runnable command before claiming READY.
+    """
+    home = tmp_path / "home"
+    shim_dir = home / "shims"
+    shim_dir.mkdir(parents=True)
+    shim = shim_dir / "disco"
+    shim.write_text("#!/usr/bin/env bash\n")
+    shim.chmod(0o755)
+    return home, shim_dir
+
+
+def test_link_onto_path_does_not_claim_ready_when_shadowed(tmp_path: Path) -> None:
+    """READY must mean "typing `disco` runs ours", not "we called ln".
+
+    Candidates are tried in preference order, but the SHELL resolves in PATH
+    order. With another tool's `disco` earlier on PATH, linking into a later dir
+    leaves the foreign one winning — claiming READY there would silently point
+    `disco init` at someone else's program.
+    """
+    home, _ = _shim_home(tmp_path)
+    foreign_dir = tmp_path / "foreign"
+    foreign_dir.mkdir()
+    foreign = foreign_dir / "disco"
+    foreign.write_text("#!/bin/sh\necho foreign\n")
+    foreign.chmod(0o755)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+
+    # foreign_dir comes FIRST on PATH; cand is our (later) candidate.
+    result = _run_link_onto_path(home, [cand], path=f"{foreign_dir}:{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert "SYMLINK_CREATED=" in result.stdout
+    assert str(cand) not in result.stdout
+
+
+def test_link_onto_path_warns_when_another_disco_shadows_ours(tmp_path: Path) -> None:
+    """Being shadowed is the one case NEITHER message can fix, so it must be
+    said out loud.
+
+    Declining READY is necessary but not sufficient: the ACTIVATE fallback tells
+    the operator to source `env`, which prepends SHIM_DIR — but on a macOS login
+    shell /etc/zprofile's path_helper(8) then reorders PATH and demotes SHIM_DIR
+    to last, so a foreign `disco` in /usr/local/bin keeps winning even after the
+    restart. Silently printing a fallback that cannot work is worse than saying
+    what is actually in the way.
+    """
+    home, _ = _shim_home(tmp_path)
+    foreign_dir = tmp_path / "foreign"
+    foreign_dir.mkdir()
+    foreign = foreign_dir / "disco"
+    foreign.write_text("#!/bin/sh\necho foreign\n")
+    foreign.chmod(0o755)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+
+    result = _run_link_onto_path(home, [cand], path=f"{foreign_dir}:{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert str(foreign) in result.stderr  # names what is in the way
+    assert "SYMLINK_CREATED=" in result.stdout
+    assert str(cand) not in result.stdout
+
+
+def test_link_onto_path_removes_a_link_that_does_not_resolve(tmp_path: Path) -> None:
+    """A correctly-SHAPED link can still be non-functional — a relative
+    CALFCORD_HOME makes the target resolve against the LINK's directory, not
+    ours. Claiming READY there yields `command not found` with no instructions,
+    so the link is torn back out rather than left as garbage on PATH."""
+    home = tmp_path / "home"
+    shim_dir = home / "shims"
+    shim_dir.mkdir(parents=True)
+    (shim_dir / "disco").write_text("#!/usr/bin/env bash\n")  # deliberately NOT executable
+    cand = tmp_path / "bin"
+    cand.mkdir()
+
+    result = _run_link_onto_path(home, [cand], path=f"{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert not (cand / "disco").exists()
+    assert not (cand / "disco").is_symlink()  # cleaned up, not left dangling
+    assert "SYMLINK_CREATED=" in result.stdout
+    assert str(cand) not in result.stdout
+
+
+def test_link_onto_path_creates_a_missing_candidate_already_on_path(tmp_path: Path) -> None:
+    """A dir on PATH but absent is still searched by the shell — Fedora/RHEL put
+    ~/.local/bin on PATH unconditionally. Creating it honours PATH rather than
+    inventing policy, and turns a needless ACTIVATE into a READY."""
+    home, _ = _shim_home(tmp_path)
+    cand = tmp_path / "not-yet"  # deliberately not created
+
+    result = _run_link_onto_path(home, [cand], path=f"{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert (cand / "disco").is_symlink()
+    assert f"SYMLINK_CREATED={cand}" in result.stdout
+
+
+def test_link_onto_path_skips_a_dangling_foreign_symlink(tmp_path: Path) -> None:
+    """A broken link is still someone else's `disco` if it doesn't point at our
+    shim. ``-e`` is false for a dangling link, so the ownership guard has to test
+    ``-L`` too or it would silently replace another tool's link."""
+    home, _ = _shim_home(tmp_path)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+    gone = tmp_path / "someone-elses" / "disco"
+    (cand / "disco").symlink_to(gone)
+    assert not (cand / "disco").exists()  # dangling
+    assert (cand / "disco").is_symlink()
+
+    result = _run_link_onto_path(home, [cand], path=f"{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert os.readlink(cand / "disco") == str(gone)  # untouched
+    assert "SYMLINK_CREATED=" in result.stdout
+    assert str(cand) not in result.stdout
+
+
+# ------------------------------------------------------------- zsh_dotdir ---
+
+
+def test_zsh_dotdir_returns_home_when_zshenv_itself_sets_zdotdir(tmp_path: Path) -> None:
+    """The XDG idiom — a ``~/.zshenv`` whose only job is to point ZDOTDIR
+    elsewhere — is the case the probe must not get wrong.
+
+    zsh locates ``.zshenv`` from /etc/zshenv or the inherited env ONLY, then
+    reads it once. So a ``~/.zshenv`` that sets ZDOTDIR is still the only
+    ``.zshenv`` zsh ever reads. Probing with a plain ``zsh -c`` sources that file
+    first and reports the ZDOTDIR it sets, which would send our hook to a
+    ``$ZDOTDIR/.zshenv`` zsh has already finished looking for — a dead file, and
+    a permanently broken ACTIVATE. ``zsh -f`` reproduces zsh's own lookup.
+    """
+    if shutil.which("zsh") is None:
+        pytest.skip("zsh not available")
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".config" / "zsh").mkdir(parents=True)
+    (fake_home / ".zshenv").write_text('export ZDOTDIR="$HOME/.config/zsh"\n')
+
+    result = _source_and_run(
+        'printf "%s" "$(zsh_dotdir)"',
+        home=home,
+        extra_env={"HOME": str(fake_home), "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(fake_home)
+
+
+def test_zsh_dotdir_honours_an_exported_zdotdir(tmp_path: Path) -> None:
+    """An exported ZDOTDIR is inherited by the probe and must win."""
+    if shutil.which("zsh") is None:
+        pytest.skip("zsh not available")
+    home = tmp_path / "home"
+    fake_home = tmp_path / "fakehome"
+    zdotdir = tmp_path / "zdotdir"
+    fake_home.mkdir()
+    zdotdir.mkdir()
+
+    result = _source_and_run(
+        'printf "%s" "$(zsh_dotdir)"',
+        home=home,
+        extra_env={"HOME": str(fake_home), "PATH": "/usr/bin:/bin", "ZDOTDIR": str(zdotdir)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(zdotdir)
+
+
+# ------------------------------------------------------- activation_hint ---
+
+
+def _run_activation_hint(home: Path, *, symlinked: str = "", wired: int = 0) -> str:
+    result = _source_and_run(
+        f'SYMLINK_CREATED="{symlinked}"; PATH_WIRED={wired}; activation_hint',
+        home=home,
+        extra_env={"PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stderr
+
+
+def test_activation_hint_says_ready_when_disco_is_reachable_now(tmp_path: Path) -> None:
+    """The whole point of the symlink tier: when `disco` already works, telling
+    the operator to restart their terminal is noise, and untrue."""
+    out = _run_activation_hint(tmp_path / "home", symlinked="/somewhere/bin", wired=1)
+    assert "READY" in out
+    assert "ACTIVATE" not in out
+    assert "source" not in out
+
+
+def test_activation_hint_says_activate_only_when_it_had_to(tmp_path: Path) -> None:
+    """When nothing qualified, the operator genuinely must act — and gets the
+    one command that works in the shell they are already in."""
+    out = _run_activation_hint(tmp_path / "home", symlinked="", wired=1)
+    assert "ACTIVATE" in out
+    assert "source" in out
+    assert "READY" not in out
+
+
+def test_activation_hint_is_silent_when_nothing_was_needed(tmp_path: Path) -> None:
+    """An install whose shim dir was already on PATH needs no banner at all."""
+    assert _run_activation_hint(tmp_path / "home", symlinked="", wired=0).strip() == ""
+
+
+def test_link_onto_path_symlinks_into_writable_dir_already_on_path(tmp_path: Path) -> None:
+    """The headline behaviour: a candidate that is on PATH, is a dir, and is
+    writable gets a ``disco`` symlink — so the command works with no restart."""
+    home, shim_dir = _shim_home(tmp_path)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+
+    result = _run_link_onto_path(home, [cand], path=f"{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    link = cand / "disco"
+    assert link.is_symlink()
+    assert os.readlink(link) == str(shim_dir / "disco")
+    assert f"SYMLINK_CREATED={cand}" in result.stdout
+
+
+def test_link_onto_path_skips_candidate_not_on_path(tmp_path: Path) -> None:
+    """Writable and a real dir is NOT enough — a dir the shell does not search
+    buys nothing, so linking there would be a lie about immediate availability."""
+    home, _ = _shim_home(tmp_path)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+
+    result = _run_link_onto_path(home, [cand], path="/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert not (cand / "disco").exists()
+    assert "SYMLINK_CREATED=" in result.stdout
+    assert str(cand) not in result.stdout
+
+
+def test_link_onto_path_skips_unwritable_candidate(tmp_path: Path) -> None:
+    """An on-PATH dir we cannot write (a root-owned /usr/local/bin on a stock
+    Mac) is skipped rather than escalating — a piped installer has no stdin to
+    prompt for sudo on."""
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses write permission checks")
+    home, _ = _shim_home(tmp_path)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+    cand.chmod(0o555)
+    try:
+        result = _run_link_onto_path(home, [cand], path=f"{cand}:/usr/bin:/bin")
+        assert result.returncode == 0, result.stderr
+        assert not (cand / "disco").exists()
+        assert "SYMLINK_CREATED=" in result.stdout
+        assert str(cand) not in result.stdout
+    finally:
+        cand.chmod(0o755)
+
+
+def test_link_onto_path_stops_at_first_qualifying_candidate(tmp_path: Path) -> None:
+    """Candidates are a preference order, not a fan-out: the first hit wins and
+    no second copy is planted."""
+    home, _ = _shim_home(tmp_path)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    result = _run_link_onto_path(home, [first, second], path=f"{first}:{second}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert (first / "disco").is_symlink()
+    assert not (second / "disco").exists()
+    assert f"SYMLINK_CREATED={first}" in result.stdout
+
+
+def test_link_onto_path_falls_through_to_later_candidate(tmp_path: Path) -> None:
+    """When the preferred candidate does not qualify, a later one still can."""
+    home, _ = _shim_home(tmp_path)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    # Only `second` is on PATH.
+    result = _run_link_onto_path(home, [first, second], path=f"{second}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert not (first / "disco").exists()
+    assert (second / "disco").is_symlink()
+    assert f"SYMLINK_CREATED={second}" in result.stdout
+
+
+def test_link_onto_path_never_clobbers_a_foreign_disco(tmp_path: Path) -> None:
+    """A `disco` we did not create is someone else's command. Overwriting it
+    would hijack an unrelated tool, so the candidate is skipped untouched."""
+    home, _ = _shim_home(tmp_path)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+    foreign = cand / "disco"
+    foreign.write_text("#!/bin/sh\necho not ours\n")
+
+    result = _run_link_onto_path(home, [cand], path=f"{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert not foreign.is_symlink()
+    assert foreign.read_text() == "#!/bin/sh\necho not ours\n"
+    assert "SYMLINK_CREATED=" in result.stdout
+    assert str(cand) not in result.stdout
+
+
+def test_link_onto_path_refreshes_its_own_symlink(tmp_path: Path) -> None:
+    """Re-running the installer (or `disco self update`) must be idempotent: a
+    link we already own is refreshed, not treated as a foreign command."""
+    home, shim_dir = _shim_home(tmp_path)
+    cand = tmp_path / "bin"
+    cand.mkdir()
+    (cand / "disco").symlink_to(shim_dir / "disco")
+
+    result = _run_link_onto_path(home, [cand], path=f"{cand}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+
+    assert os.readlink(cand / "disco") == str(shim_dir / "disco")
+    assert f"SYMLINK_CREATED={cand}" in result.stdout
 
 
 # -------------------------------------------------- meta() parses, never sources ---

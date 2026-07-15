@@ -55,6 +55,7 @@ PREVIOUS_SHA=""     # set by activate_version (for GC)
 SEEDED_STARTER=0    # set by seed_agents when it drops in the starter agent
 PROCESS_COMPOSE_OK=0  # set by ensure_process_compose when the supervisor binary is in place
 PATH_WIRED=0        # set by ensure_path when it wires PATH (so activation is needed)
+SYMLINK_CREATED=""  # set by link_onto_path to the dir where `disco` became reachable now
 
 # ---------------------------------------------------------------------- ui ---
 if [ -t 2 ]; then
@@ -647,20 +648,124 @@ CALF_SELF
   rm -f "$SHIM_DIR"/calfcord* 2>/dev/null || true
 }
 
-# Put $SHIM_DIR on PATH the rustup/uv way: write ONE canonical sh-compatible env
-# file at $CALFCORD_HOME/env and source it from each login shell's profile with a
-# single hook line, CREATING profiles that don't exist. This is the fresh-account
-# fix — the previous "append only to already-existing rc files" wrote nothing on a
-# clean box (no dotfiles), leaving `disco` off PATH after the documented "restart
-# your terminal". Idempotent by construction, so it's safe on every re-run
-# (including `disco self update`, which re-execs this installer).
+# True when DIR is already a component of the caller's $PATH.
+path_has_dir() {
+  case ":$PATH:" in
+    *":$1:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Symlink the `disco` shim into the first candidate dir (args, in preference
+# order) that the caller's shell ALREADY searches and that we can write.
+#
+# This is the only way a `curl | bash` installer can make its command usable in
+# the CURRENT terminal: the installer is a child process, so it can never mutate
+# its parent's PATH — but PATH is resolved at *lookup* time, so a file appearing
+# in an already-listed dir is found by the running shell with no env change and
+# no `rehash`. When nothing qualifies (a stock macOS has no writable dir on
+# PATH), this is a no-op and the profile hooks below carry the install instead.
+#
+# Best-effort throughout: every rejection just leaves SYMLINK_CREATED empty. We
+# never escalate to sudo — a piped installer has no stdin to prompt on.
+#
+# The `-x` / `command -v` checks below assert "the shell that ran the installer
+# can run this", so they are only as true as that shell's identity. Under a
+# `curl | sudo bash` they run as root (whose $HOME sudo may reset to /root),
+# which is not the operator's shell — an unsupported way to install this, and
+# the reason nothing here tries to earn root in the first place.
+link_onto_path() {
+  local candidate link resolved
+  for candidate in "$@"; do
+    path_has_dir "$candidate" || continue
+    # PATH says the shell searches here, so creating the dir honours that rather
+    # than inventing policy: Fedora/RHEL put ~/.local/bin on PATH whether or not
+    # it exists. A failure (a root-owned /usr/local) just tries the next.
+    [ -d "$candidate" ] || mkdir -p "$candidate" 2>/dev/null || continue
+    [ -w "$candidate" ] || continue
+    link="$candidate/disco"
+    # Only ever replace a link we already own. Anything else is another tool's
+    # `disco` on the operator's PATH, and clobbering it would hijack an
+    # unrelated command. `-e` is false for a dangling link, so `-L` is tested
+    # too — otherwise a broken foreign link would look like an empty slot.
+    if [ -e "$link" ] || [ -L "$link" ]; then
+      [ "$(readlink "$link" 2>/dev/null || true)" = "$SHIM_DIR/disco" ] || continue
+    fi
+    ln -sfn "$SHIM_DIR/disco" "$link" 2>/dev/null || continue
+    # Claiming READY means "typing `disco` runs THIS", which is a stronger fact
+    # than "ln succeeded" — and the only one the operator cares about. A link
+    # that resolves to nothing (a relative CALFCORD_HOME makes the target
+    # relative to the LINK's dir, not ours) is our own garbage, so remove it.
+    if [ ! -x "$link" ]; then
+      rm -f "$link" 2>/dev/null || true
+      continue
+    fi
+    # ...and the shell resolves in PATH order, not our preference order, so an
+    # earlier PATH entry holding another `disco` shadows us.
+    hash -r 2>/dev/null || true
+    resolved="$(command -v disco 2>/dev/null || true)"
+    if [ "$resolved" != "$link" ]; then
+      # Say it out loud: this is the one case NEITHER message can fix. READY
+      # would drive someone else's tool, and the ACTIVATE fallback is no better
+      # — sourcing `env` prepends SHIM_DIR, but a macOS login shell then runs
+      # /etc/zprofile's path_helper(8), which reorders PATH and demotes SHIM_DIR
+      # to LAST, so the other `disco` keeps winning even after a restart. The
+      # link stays (it is correct, and wins the moment the other one goes).
+      warn "another 'disco' at $resolved takes precedence on your PATH — remove it, or run $link directly"
+      continue
+    fi
+    SYMLINK_CREATED="$candidate"
+    log "linked $link -> $SHIM_DIR/disco"
+    return 0
+  done
+  return 0
+}
+
+# Where zsh actually reads .zshenv from. ZDOTDIR redirects it, and ZDOTDIR is
+# typically not exported, so the installer's own (bash) env cannot answer this —
+# ask zsh, as rustup does.
+#
+# `-f` is load-bearing. zsh locates .zshenv from /etc/zshenv or the inherited
+# env ONLY, then reads it once; it never re-reads .zshenv from a ZDOTDIR that
+# file set. `-f` (NO_RCS) skips the user's rc files while still reading
+# /etc/zshenv, which is exactly zsh's own lookup context. A plain `zsh -c` would
+# instead source ~/.zshenv and report the ZDOTDIR *it* sets — the widespread XDG
+# idiom of a stub ~/.zshenv that only does `export ZDOTDIR=~/.config/zsh` — and
+# we would write the hook to a file zsh has already finished looking for. Dead
+# code, and a permanently broken ACTIVATE. `-f` also keeps the probe from
+# executing (or hanging on) arbitrary rc code just to learn a directory name.
+# `-f` cannot skip /etc/zshenv (nothing can — that is where a fleet-managed Mac
+# sets ZDOTDIR, so losing it would defeat the probe). A site /etc/zshenv that
+# also prints would prepend noise to the capture, so take the last line only:
+# `printf %s` emits no trailing newline, making the value always the final line.
+# `</dev/null` matters because under `curl | bash` stdin IS the install script —
+# a child that reads it would eat the rest of the installer.
+zsh_dotdir() {
+  local d=""
+  if have zsh; then
+    d="$(zsh -f -c 'printf %s "${ZDOTDIR:-$HOME}"' </dev/null 2>/dev/null | tail -n 1 || true)"
+  fi
+  { [ -n "$d" ] && [ -d "$d" ]; } || d="$HOME"
+  printf '%s' "$d"
+}
+
+# Make `disco` reachable, in two tiers:
+#   1. link_onto_path — usable in the shell that ran the installer, no restart.
+#   2. the rustup/uv env-file + profile hooks — every future shell, and the sole
+#      mechanism on boxes where tier 1 found nothing to link into.
+# Both always run: the symlink is one command in one dir and says nothing about
+# future shells, so it does not replace the hooks. Idempotent by construction,
+# so it's safe on every re-run (including `disco self update`, which re-execs
+# this installer).
 ensure_path() {
   # Already reachable — an active hook from a prior install, or a hand-wired
   # PATH. Skip everything (this also covers the migration case where an old
   # direct `export PATH=` line is already in effect).
-  case ":$PATH:" in
-    *":$SHIM_DIR:"*) return 0 ;;
-  esac
+  if path_has_dir "$SHIM_DIR"; then
+    return 0
+  fi
+
+  link_onto_path "$HOME/.local/bin" "/usr/local/bin"
 
   # The canonical activation file. The installer owns it, so overwriting on every
   # run keeps it correct. The `case` guard makes it idempotent when sourced and
@@ -676,19 +781,53 @@ case ":\$PATH:" in
 esac
 EOF
 
-  # Source the env file from the login shells' profiles, creating any that are
-  # missing (>> creates). macOS zsh login shells read ~/.zprofile — the file the
-  # old candidate list omitted entirely. Guard on the exact hook line so re-runs
-  # never duplicate it; a pre-existing legacy `export PATH=` line is left alone.
+  # Source the env file from each shell's startup file, creating any that are
+  # missing (>> creates). zsh gets .zshenv, NOT .zprofile: .zprofile is read only
+  # by *login* shells, which left the hook invisible to a non-login interactive
+  # zsh — VS Code's integrated terminal spawns `/bin/zsh -i`, where restarting
+  # the terminal never helped. .zshenv is the only zsh startup file read
+  # unconditionally, so it is the one target that always gets us on PATH.
+  #
+  # The trade: .zshenv runs BEFORE /etc/zprofile, whose path_helper(8) rewrites
+  # PATH on every macOS login shell and moves SHIM_DIR to the end — so we win on
+  # reachability and lose the prepend that .zprofile used to get. That costs
+  # nothing unless something else on PATH is also called `disco`, in which case
+  # it outranks us here AND after a restart; link_onto_path detects exactly that
+  # and warns, because no message this installer prints can fix it.
+  #
+  # Guard on the exact hook line so re-runs never duplicate it; a pre-existing
+  # legacy `export PATH=` line is left alone.
+  # The append sits in an `if` BODY, where `set -e` and the ERR trap still bite:
+  # a read-only rc file (nix home-manager, chezmoi and stow all produce 444
+  # dotfiles, and .zshenv is far likelier to be tool-managed than .zprofile was)
+  # would fail the redirect and abort an install that had ALREADY succeeded.
+  # Guard it and warn instead — `source $CALFCORD_HOME/env` still activates.
   local rc hook
   hook='. "'"$CALFCORD_HOME"'/env"'
-  for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zprofile"; do
-    if ! grep -qsF "$hook" "$rc"; then
-      printf '\n# Agent Disco\n%s\n' "$hook" >> "$rc"
+  for rc in "$HOME/.profile" "$HOME/.bashrc" "$(zsh_dotdir)/.zshenv"; do
+    grep -qsF "$hook" "$rc" && continue
+    # `2>/dev/null` precedes the append deliberately: redirections are applied
+    # left to right, and a failing `>>` is reported by the SHELL, not by printf
+    # — so putting it second would let bash's raw "Permission denied" through
+    # ahead of the warning that actually tells the operator what to do.
+    if printf '\n# Agent Disco\n%s\n' "$hook" 2>/dev/null >> "$rc"; then
       log "wired $SHIM_DIR onto PATH via $rc"
+    else
+      warn "could not write $rc (read-only?) — activate with: source $CALFCORD_HOME/env"
     fi
   done
   PATH_WIRED=1
+}
+
+# The one line the operator must act on — or not. Conditional by design: when
+# `disco` already resolves in the shell that ran the installer there is nothing
+# to activate, and demanding a restart anyway is both noise and untrue.
+activation_hint() {
+  if [ -n "$SYMLINK_CREATED" ]; then
+    note "  READY: 'disco' is on your PATH now — run  disco init"
+  elif [ "$PATH_WIRED" -eq 1 ]; then
+    note "  ACTIVATE: run  source $CALFCORD_HOME/env   now, or open a new terminal — then 'disco' is on your PATH"
+  fi
 }
 
 # -------------------------------------------------------------------- main ---
@@ -710,9 +849,7 @@ main() {
   write_shims
   ensure_path
   log "done."
-  if [ "$PATH_WIRED" -eq 1 ]; then
-    note "  ACTIVATE: run  source $CALFCORD_HOME/env   now, or open a new terminal — then 'disco' is on your PATH"
-  fi
+  activation_hint
   log "  version:  disco self version"
   log "  config:   $CONFIG_ENV  (set CALF_HOST_URL, or: disco self set-broker <url>)"
   log "  broker:   disco broker   (Tansu via calfkit-mesh, ephemeral memory, localhost:9092)"

@@ -46,7 +46,10 @@ Message your agent team and watch them work in real time. When an agent needs a 
 curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/install.sh | bash
 ```
 
-When it finishes, **restart your terminal**.
+Read the last line it prints. On a machine with a dev toolchain already set up,
+`disco` is usually ready **right away, in the same terminal** (`READY`). If the
+installer can't reach the shell you're in, it says `ACTIVATE` and gives you the
+one command that fixes it — `source ~/.agent-disco/env`, or open a new terminal.
 
 ## Quickstart
 

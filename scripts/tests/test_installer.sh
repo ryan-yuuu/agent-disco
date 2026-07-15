@@ -270,14 +270,16 @@ resolve_check abcabc die                                   && pass "resolve_sha 
 resolve_check "Not Found" die                              && pass "resolve_sha rejects non-hex" || fail "resolve non-hex"
 
 # ensure_path (env-file model): a fresh account with NO dotfiles gets
-# ~/.profile, ~/.bashrc and ~/.zprofile CREATED, each sourcing $CALFCORD_HOME/env,
+# ~/.profile, ~/.bashrc and ~/.zshenv CREATED, each sourcing $CALFCORD_HOME/env,
 # and the canonical env file is written. This is the quickstart fix — the old
 # "append only to already-existing rc files" wrote nothing on a clean box.
+# zsh is wired via .zshenv (read by EVERY zsh) rather than .zprofile (login
+# shells only), which a non-login `zsh -i` — VS Code's terminal — never reads.
 H2="$BASE/home2"; mkdir -p "$H2"
 CALFCORD_HOME="$TD" HOME="$H2" PATH="/usr/bin:/bin" "$B" -c "source '$LIB'; ensure_path" >/dev/null 2>&1
 hook=". \"$TD/env\""
 fresh_ok=1
-for f in .profile .bashrc .zprofile; do
+for f in .profile .bashrc .zshenv; do
   grep -qsF "$hook" "$H2/$f" || fresh_ok=0
 done
 [ "$fresh_ok" -eq 1 ] && pass "ensure_path creates missing profiles with env hook" || fail "ensure_path fresh profiles"
@@ -293,10 +295,36 @@ p="$(PATH="/usr/bin:/bin" "$B" -c ". '$TD/env'; . '$TD/env'; printf %s \"\$PATH\
 # Re-run must not duplicate the hook line in any profile.
 CALFCORD_HOME="$TD" HOME="$H2" PATH="/usr/bin:/bin" "$B" -c "source '$LIB'; ensure_path" >/dev/null 2>&1
 dup=0
-for f in .profile .bashrc .zprofile; do
+for f in .profile .bashrc .zshenv; do
   [ "$(grep -cF "$hook" "$H2/$f")" -eq 1 ] || dup=1
 done
 [ "$dup" -eq 0 ] && pass "ensure_path idempotent across re-runs" || fail "ensure_path duplicate hooks"
+
+# link_onto_path: the no-restart tier. A candidate that is already on PATH, is a
+# dir, and is writable gets a `disco` symlink — the only way a piped installer
+# can reach the shell that ran it. Exercised here (not just in pytest) because
+# CI runs this suite under macOS's bash 3.2.
+LB="$BASE/linkbin"; mkdir -p "$LB" "$TD/shims"
+: > "$TD/shims/disco"
+out="$(CALFCORD_HOME="$TD" PATH="$LB:/usr/bin:/bin" "$B" -c \
+  "source '$LIB'; link_onto_path '$LB'; printf %s \"\$SYMLINK_CREATED\"" 2>&1)"
+{ [ -L "$LB/disco" ] && [ "$out" = "$LB" ]; } \
+  && pass "link_onto_path symlinks into an on-PATH writable dir" || fail "link_onto_path symlink: $out"
+
+# A dir NOT on PATH buys nothing, so it must be skipped (no symlink, no claim).
+NB="$BASE/nolinkbin"; mkdir -p "$NB"
+out="$(CALFCORD_HOME="$TD" PATH="/usr/bin:/bin" "$B" -c \
+  "source '$LIB'; link_onto_path '$NB'; printf %s \"\$SYMLINK_CREATED\"" 2>&1)"
+{ [ ! -e "$NB/disco" ] && [ -z "$out" ]; } \
+  && pass "link_onto_path skips a dir not on PATH" || fail "link_onto_path off-path: $out"
+
+# A foreign `disco` on PATH is another tool's command — never clobber it.
+FB="$BASE/foreignbin"; mkdir -p "$FB"
+printf '#!/bin/sh\necho foreign\n' > "$FB/disco"
+out="$(CALFCORD_HOME="$TD" PATH="$FB:/usr/bin:/bin" "$B" -c \
+  "source '$LIB'; link_onto_path '$FB'; printf %s \"\$SYMLINK_CREATED\"" 2>&1)"
+{ [ ! -L "$FB/disco" ] && grep -qF foreign "$FB/disco" && [ -z "$out" ]; } \
+  && pass "link_onto_path never clobbers a foreign disco" || fail "link_onto_path clobber: $out"
 
 # When the shim dir is already on PATH, ensure_path is a no-op: no env file, no
 # profiles created (honors an active hook / hand-wired PATH).

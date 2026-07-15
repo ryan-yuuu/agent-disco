@@ -15,8 +15,37 @@ curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/
 
 You don't need Python, Docker, or git installed first — the installer handles
 everything, including a native **Tansu** broker and a process supervisor (more
-on both below). When it finishes, **restart your shell** (or open a new terminal)
-so the `disco` command is on your `PATH`.
+on both below).
+
+**Getting `disco` on your `PATH`.** A `curl | bash` installer runs as a *child*
+of your shell, so it can never change your shell's `PATH` directly. This is why
+tools installed this way (rustup, uv, nvm) traditionally ask you to restart your
+terminal. Agent Disco tries to avoid that first.
+
+It looks for a directory your shell **already searches** — the first of
+`~/.local/bin` or `/usr/local/bin` that is on your `PATH` and writable — and
+links `disco` into it. `PATH` is resolved at lookup time, so a command appearing
+in a directory already on it is found by the running shell with no restart. When
+this works, the installer prints `READY` and `disco` is usable **immediately, in
+the same terminal**. It's the same trick `brew install` and `npm install -g`
+rely on; they just inherit a directory someone else already put on your `PATH`.
+
+It won't always work. On a machine with no dev toolchain there may be no
+writable directory on `PATH` at all — on a stock macOS, `/usr/local/bin` is
+root-owned and `~/.local/bin` isn't on `PATH`. The installer never uses `sudo`
+to force it. Instead it falls back to writing `~/.agent-disco/env` and sourcing
+it from `~/.profile`, `~/.bashrc`, and `~/.zshenv` (or `$ZDOTDIR/.zshenv`).
+Those take effect in a *new* shell, so it prints `ACTIVATE` — either open a new
+terminal, or activate the one you're in:
+
+```bash
+source ~/.agent-disco/env
+```
+
+Either way it only ever asks for the step it actually needs. One case it can't
+solve and will warn about instead: if some *other* tool on your `PATH` is also
+called `disco`, that one takes precedence and neither route changes it — remove
+it, or run `~/.agent-disco/shims/disco` directly.
 
 ## 2. Configure — `disco init`
 
@@ -259,17 +288,29 @@ mv ~/.calfcord ~/.agent-disco
 . ~/.agent-disco/env
 ```
 
-Edit the `# Agent Disco` block in `~/.profile`, `~/.bashrc`, or `~/.zprofile`
-if it still points at `~/.calfcord/env`.
+Edit the `# Agent Disco` block if it still points at `~/.calfcord/env`. Look in
+`~/.profile`, `~/.bashrc`, and `~/.zshenv` — plus `~/.zprofile`, which is where
+installers before this one wired zsh.
 
 ## Uninstall
 
 ```bash
-rm -rf ~/.agent-disco
+disco stop
+rm -rf ~/.agent-disco ~/.calfkit/bin
+for d in ~/.local/bin /usr/local/bin; do
+  case "$(readlink "$d/disco" 2>/dev/null)" in */.agent-disco/shims/disco) rm -f "$d/disco" ;; esac
+done
 ```
 
-Then remove the `# Agent Disco` block the installer added to your shell profile
-(`~/.profile`, `~/.bashrc`, or `~/.zprofile`).
+The loop removes the `disco` symlink if the installer placed one in a directory
+already on your `PATH` — but only when it still points into `~/.agent-disco`, so
+an unrelated tool's `disco` is never destroyed. (`ls -l "$(command -v disco)"`
+shows what yours is.) Skipping it leaves a dangling link, not a working command.
+`~/.calfkit/bin` is the extracted Tansu broker, cached outside the install home.
+
+Then remove the `# Agent Disco` block the installer added to your shell startup
+files (`~/.profile`, `~/.bashrc`, and `~/.zshenv` — or `$ZDOTDIR/.zshenv` if you
+set `ZDOTDIR`).
 
 ---
 
