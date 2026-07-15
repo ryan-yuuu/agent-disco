@@ -19,7 +19,6 @@ from calfcord.cli.tui.keys import Key, read_key, resolve
     [
         (readchar.key.UP, Key.UP),
         (readchar.key.DOWN, Key.DOWN),
-        (" ", Key.SPACE),
         ("\x7f", Key.BACKSPACE),
         ("\x04", Key.EOF),
     ],
@@ -54,6 +53,17 @@ def test_resolve_accepts_application_cursor_mode_arrows(raw: str, expected: Key)
 def test_resolve_returns_none_for_a_printable_character() -> None:
     """Printable text is not a control key — the caller keeps the raw character."""
     assert resolve("a") is None
+
+
+def test_space_is_text_not_a_control_key() -> None:
+    """Regression guard for a shipped-shaped bug: a bound space is swallowed.
+
+    Space is the character at the centre of every prose answer. Binding it to a
+    Key made it a command EVERYWHERE, so text fields — which only append input
+    that resolves to no Key — silently dropped it, turning "npx -y pkg" into
+    "npx-ypkg". The checkbox matches the raw character instead.
+    """
+    assert resolve(" ") is None
 
 
 def test_enter_is_not_confused_with_ctrl_j() -> None:

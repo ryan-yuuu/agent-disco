@@ -87,13 +87,25 @@ class TestSharedConsole:
         finally:
             render._console = None
 
-    def test_the_shared_console_does_not_wrap_or_highlight(self) -> None:
-        """The production console must carry the same guarantees the helpers rely on."""
+    def test_the_shared_console_does_not_highlight(self) -> None:
+        """Rich's highlighter would colour numbers and paths inside plain prose."""
         render._console = None
         try:
-            console = render.console()
-            assert console.soft_wrap is True
-            assert console._highlight is False
+            assert render.console()._highlight is False
+        finally:
+            render._console = None
+
+    def test_the_shared_console_does_not_force_soft_wrap(self) -> None:
+        """soft_wrap belongs per-call, not on the console.
+
+        As a constructor default it applies no_wrap to EVERY render, and the
+        option propagates into a Panel's children — cutting long choice labels at
+        the panel edge instead of wrapping them. The prose helpers opt in per
+        call; the widgets must be free to wrap.
+        """
+        render._console = None
+        try:
+            assert render.console().soft_wrap is False
         finally:
             render._console = None
 

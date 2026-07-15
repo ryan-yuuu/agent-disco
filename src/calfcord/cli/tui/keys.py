@@ -20,12 +20,19 @@ import readchar
 
 
 class Key(Enum):
-    """A control key a widget acts on. Printable input never becomes a ``Key``."""
+    """A control key a widget acts on. Printable input never becomes a ``Key``.
+
+    Space is deliberately absent. It is *printable text* — the character at the
+    centre of every prose answer — and only the checkbox reads it as a command.
+    Binding it here would make it a control key everywhere, which is exactly the
+    bug that silently turned "npx -y pkg" into "npx-ypkg": the text field asks
+    for literal input, sees a Key, and drops it. A widget that wants space as a
+    command matches the raw character itself, the way ``confirm`` matches y/n.
+    """
 
     UP = auto()
     DOWN = auto()
     ENTER = auto()
-    SPACE = auto()
     BACKSPACE = auto()
     EOF = auto()
 
@@ -51,7 +58,6 @@ _BINDINGS: dict[str, Key] = {
     "\x1bOB": Key.DOWN,
     "\r": Key.ENTER,
     "\n": Key.ENTER,
-    readchar.key.SPACE: Key.SPACE,
     readchar.key.BACKSPACE: Key.BACKSPACE,
     "\x08": Key.BACKSPACE,
     readchar.key.CTRL_D: Key.EOF,

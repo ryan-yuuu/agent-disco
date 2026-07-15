@@ -60,11 +60,19 @@ def _more(count: int, arrow: str) -> Text:
 def _rows(state: _ListState, marker: Callable[[Choice], str]) -> Group:
     """Render the visible window of the list, dimming all but the cursor row.
 
-    Only ``state.window()`` is painted. Rich's Live renders content taller than
-    the terminal rather than clipping it (``vertical_overflow`` defaults to
-    "visible"), so painting every row of a long list scrolls the terminal on each
-    keypress and leaves wreckage that the transient teardown cannot erase. The
-    viewport is what keeps a long ``agent tools`` list usable on a 24-line
+    Only ``state.window()`` is painted, because Live CROPS anything taller than
+    the terminal: ``vertical_overflow`` defaults to ``"ellipsis"``, so a 60-row
+    list on a 24-line terminal paints roughly the first 22 rows, a centred
+    ``...``, and nothing else — no bottom border, no hint, and no cursor at all
+    once it moves past the fold. The operator is left navigating a list they
+    cannot see.
+
+    Do NOT "verify" that default by reading ``live.vertical_overflow`` after the
+    ``with`` block: ``Live.stop`` sets it to ``"visible"`` for the final frame, so
+    a probe that reads it afterwards reports the wrong value. An earlier revision
+    of this comment claimed "visible" for exactly that reason and was wrong.
+
+    The viewport is what keeps a long ``agent tools`` list usable on a 24-line
     terminal — InquirerPy paged its lists, so losing this would be a regression.
     """
     start, stop = state.window()
@@ -196,12 +204,15 @@ def checkbox(
 ) -> list[str]:
     state = CheckboxState(choices)
 
-    def step(key: Key | None, _raw: str) -> bool:
+    def step(key: Key | None, raw: str) -> bool:
         if key is Key.UP:
             state.up()
         elif key is Key.DOWN:
             state.down()
-        elif key is Key.SPACE:
+        elif raw == " ":
+            # Matched raw rather than bound as a Key: space is printable text
+            # everywhere else, and only this widget reads it as a command. Same
+            # shape as ``confirm`` matching y/n.
             state.toggle()
         return key is Key.ENTER
 

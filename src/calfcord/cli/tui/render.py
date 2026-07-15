@@ -10,6 +10,12 @@ safe to route existing operator prose through Rich:
   is to wrap at the console width (80 off-TTY), which would bisect the phrases
   the CLI's existing tests match on.
 
+Both are passed **per call**, never set on the console. As constructor defaults
+they would apply to every render — including the widgets', where ``soft_wrap``
+propagates into a Panel's children and cuts long choice labels at the panel edge
+instead of wrapping them. Prose wants no wrapping; a menu row wants wrapping. The
+console must not decide for both.
+
 ``highlight=False`` is part of the same contract: Rich's automatic highlighter
 would otherwise colour numbers, paths, and URLs inside plain sentences.
 """
@@ -27,7 +33,14 @@ _console: Console | None = None
 
 def make_console(*, width: int | None = None, record: bool = False) -> Console:
     """Build a console. ``record`` + ``width`` are for tests; production uses neither."""
-    return Console(width=width, record=record, highlight=False, soft_wrap=True)
+    # soft_wrap is NOT set here. As a constructor default it sets no_wrap +
+    # overflow="ignore" for EVERY render, and those options propagate into a
+    # Panel's children — so a long choice label is cut at the panel edge rather
+    # than wrapping onto a second line, losing the end of the sentence that says
+    # what the row is. The prose helpers below pass soft_wrap per call instead,
+    # which keeps their byte-identical-to-print contract without imposing it on
+    # the widgets.
+    return Console(width=width, record=record, highlight=False)
 
 
 def console() -> Console:

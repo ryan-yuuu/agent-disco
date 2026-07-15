@@ -260,6 +260,56 @@ class TestCheckbox:
         assert "○ B" in out
 
 
+class TestTypingRealProse:
+    """Space is TEXT in a text field, not a command.
+
+    The whole suite typed single non-space characters ("a", "b", "x"), so a space
+    binding that swallowed the key passed every test while making prose prompts
+    unusable: "Agent description:" and mcp add's "Command (e.g. npx -y ...)" both
+    take input where spaces are the point. shlex.split("npx-ypkg") yields one
+    garbage token, so a swallowed space silently produces a broken MCP server.
+    """
+
+    def test_a_space_is_typed_into_a_text_field(self) -> None:
+        assert widgets.text("Desc", read=keys(*"hello world", ENTER), console=silent()) == "hello world"
+
+    def test_a_command_line_with_flags_survives(self) -> None:
+        got = widgets.text("Command", read=keys(*"npx -y pkg", ENTER), console=silent())
+        assert got == "npx -y pkg"
+
+    def test_a_space_is_typed_into_a_secret(self) -> None:
+        """A mangled token fails auth with no hint as to why."""
+        assert widgets.secret("Token", read=keys(*"a b", ENTER), console=silent()) == "a b"
+
+    def test_leading_and_trailing_spaces_are_preserved_for_the_caller(self) -> None:
+        """Callers .strip() themselves; the widget must not decide for them."""
+        assert widgets.text("Desc", read=keys(*" hi ", ENTER), console=silent()) == " hi "
+
+
+class TestLongLabels:
+    """A label longer than the panel must wrap, never be cut.
+
+    Real builtin tool descriptions run to 88 characters — 5 of the 11 overflow an
+    80-column panel — so a cut label loses the end of the sentence that says what
+    the tool does, in the very prompt that asks you to choose it.
+    """
+
+    LONG = "execute_code — Run a Python script that can call Hermes tools programmatically"
+
+    def _paint80(self, renderable) -> str:
+        console = make_console(width=80, record=True)
+        console.print(renderable)
+        return console.export_text()
+
+    def test_a_long_choice_label_is_not_truncated(self) -> None:
+        out = self._paint80(widgets.select_panel("Tools", SelectState([Choice("x", self.LONG)])))
+        assert "programmatically" in out
+
+    def test_a_long_checkbox_label_is_not_truncated(self) -> None:
+        out = self._paint80(widgets.checkbox_panel("Tools", CheckboxState([Choice("x", self.LONG)])))
+        assert "programmatically" in out
+
+
 class TestText:
     def test_typed_characters_are_returned_on_enter(self) -> None:
         assert widgets.text("Name", read=keys("a", "b", ENTER), console=silent()) == "ab"
