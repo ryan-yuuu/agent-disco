@@ -905,8 +905,11 @@ def main(argv: list[str] | None = None) -> int:
                 "Re-run the installer if not.)"
             )
             return 1
-        # InquirerPy/prompt_toolkit raises OSError (EINVAL) when it can't put a
-        # non-TTY stdin (piped / CI) into raw mode. Surface that cleanly, but only
+        # A non-TTY stdin (piped / CI) can't be put into raw mode, so the TUI's
+        # key reader fails there. It reaches us as OSError(ENOTTY) only because
+        # ``calfcord.cli.tui.keys.read_key`` translates it: the underlying
+        # ``termios.error`` does NOT subclass OSError and would otherwise sail
+        # past this handler and dump a traceback. Surface it cleanly, but only
         # when stdin genuinely isn't a TTY — re-raise anything else rather than
         # masking a real bug behind a friendly message.
         if not sys.stdin.isatty():

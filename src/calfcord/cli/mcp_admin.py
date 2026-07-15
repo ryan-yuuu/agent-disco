@@ -2,7 +2,7 @@
 
 ``add`` is dual-mode, picked by the flags:
 
-* **Wizard** (no ``--command``/``--url``): an InquirerPy flow over the
+* **Wizard** (no ``--command``/``--url``): a TUI flow over the
   injected :class:`Prompter` seam — name, transport, command/URL,
   env/header loop, a JSON preview confirm, then an optional start. This is
   the onboarding-grade path (``disco mcp add`` and you're done).

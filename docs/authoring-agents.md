@@ -213,7 +213,7 @@ The full MCP workflow — `mcp.json` schema, `disco mcp add`, lifecycle — is i
 
 Besides hand-editing this array, you can edit a deployed agent's tool
 list interactively with `disco agent tools [<name>]` (an
-InquirerPy multi-select over the builtin tool universe — plus `mcp/<server>`
+multi-select over the builtin tool universe — plus `mcp/<server>`
 UI rows from `mcp.json` and live `mcp/<server>/<tool>` UI rows from the broker
 when it's reachable; omit `<name>` to pick from a list). It writes split
 `tools:` and `mcp:` fields back to the `.md`. The same checkbox is reachable as
