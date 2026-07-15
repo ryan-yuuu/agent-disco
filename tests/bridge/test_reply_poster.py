@@ -21,6 +21,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     TextPart,
     ToolCallPart,
     ToolReturnPart,
+    UserPromptPart,
 )
 
 from calfcord.bridge import reply_poster as rp
@@ -79,13 +80,56 @@ def _result(output: str, *, message_history: list[Any] | None = None, emitter: s
 
 
 def _tool_history() -> list[Any]:
-    """A history whose [1:-1] slice is a single tool call+return (one step block)."""
+    """One turn's real cumulative ``message_history``, as calfkit builds it.
+
+    The shape is load-bearing and was previously modelled wrong here (the
+    committed prompt was omitted, which hid the duplication bug this fixture now
+    pins). ``Client.start`` unconditionally stages the user prompt
+    (``client/caller.py``) and the agent commits it BEFORE the model loop
+    (``nodes/agent.py``), so it lands at exactly ``initial_len`` — i.e. the
+    turn's own prompt is the first thing after the channel-history prefix, not
+    the agent's first tool call.
+    """
     return [
-        ModelRequest(parts=[TextPart(content="prefix")]),  # channel-history prefix (initial_len=1)
+        # channel-history prefix (initial_len=1)
+        ModelRequest(parts=[UserPromptPart(content="prefix", name="ryan")]),
+        # the turn's OWN prompt, committed by calfkit at index initial_len
+        ModelRequest(parts=[UserPromptPart(content="do a search", name="ryan")]),
         ModelResponse(parts=[ToolCallPart(tool_name="search", args={"q": "x"}, tool_call_id="t1")]),
         ModelRequest(parts=[ToolReturnPart(tool_name="search", content="res", tool_call_id="t1")]),
-        ModelResponse(parts=[TextPart(content="final")]),  # trailing final answer (dropped by [:-1])
+        ModelResponse(parts=[TextPart(content="final")]),  # trailing final answer (dropped)
     ]
+
+
+class TestTurnDelta:
+    """The slice persisted for next-turn tool-call replay."""
+
+    def test_excludes_the_turns_own_prompt(self) -> None:
+        """The delta is the turn's STEPS. calfkit commits the staged prompt at
+        ``initial_len``, so a naive ``[initial_len:-1]`` captures it — and replay
+        then re-injects a prompt the channel history already supplies, so the
+        model sees it twice and the envelope carries it twice.
+        """
+        delta = rp._turn_delta(_result("final", message_history=_tool_history()), 1)
+
+        assert not any(
+            isinstance(p, UserPromptPart) for m in delta for p in m.parts
+        ), "delta must not carry the turn's own user prompt"
+        assert [type(m).__name__ for m in delta] == ["ModelResponse", "ModelRequest"]
+        assert isinstance(delta[0].parts[0], ToolCallPart)
+        assert isinstance(delta[1].parts[0], ToolReturnPart)
+
+    def test_pure_text_turn_has_an_empty_delta(self) -> None:
+        """A turn with no tool calls has no steps to replay. The prompt alone is
+        not a step — with it included the delta was length-1, which the docstring
+        already (correctly) claimed should be empty."""
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="prefix", name="ryan")]),
+            ModelRequest(parts=[UserPromptPart(content="hi", name="ryan")]),
+            ModelResponse(parts=[TextPart(content="hello")]),
+        ]
+
+        assert rp._turn_delta(_result("hello", message_history=history), 1) == []
 
 
 class _FakePersonas:

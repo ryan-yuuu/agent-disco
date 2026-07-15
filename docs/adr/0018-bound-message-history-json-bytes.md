@@ -36,13 +36,15 @@ budget.
   "first message is a `ModelRequest` carrying a `UserPromptPart`", extracted as
   `_drop_until_user_request` and shared with `build_message_history`.
 - **Replay-delta atomicity falls out of that rule, but rests on where user
-  prompts sit.** A delta's only user-prompt `ModelRequest` is its *first*
-  message: calfkit appends the staged prompt to the history before the model loop
-  (`nodes/agent.py`), and our `_turn_delta` slices from that index onward
-  (`bridge/reply_poster.py`). So a cut either keeps a delta whole or is walked
-  past it entirely — no explicit turn model needed. This holds only while user
-  prompts appear at delta *boundaries*; a mid-delta user prompt would present as
-  a legal head with its `tool_use` dropped, and 400 the provider. Worth
+  prompts sit.** A delta holds no user-prompt `ModelRequest`, so a cut landing
+  inside one finds no legal head until it has walked past the whole delta — no
+  explicit turn model needed. Two shapes are in play and both are safe: deltas
+  written after the `_turn_delta` fix in this PR carry only tool calls/returns,
+  and rows persisted *before* it open with the turn's own prompt (calfkit commits
+  the staged prompt at `initial_len`, and the old slice started there), so a cut
+  either keeps such a row whole or is walked past it. What would break the
+  property is a user prompt appearing *mid*-delta: it would present as a legal
+  head with its `tool_use` already dropped, and 400 the provider. Worth
   re-checking if calfkit ever stages a prompt mid-turn.
 - **Trimming cannot desynchronise that index.** `initial_len` is ours
   (`bridge/mention_handler.py`) and is `len(history)` of the *already-trimmed*
