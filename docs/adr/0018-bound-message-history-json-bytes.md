@@ -36,9 +36,10 @@ budget.
   "first message is a `ModelRequest` carrying a `UserPromptPart`", extracted as
   `_drop_until_user_request` and shared with `build_message_history`.
 - **Replay-delta atomicity falls out of that rule, but rests on where user
-  prompts sit.** A delta holds no user-prompt `ModelRequest`, so a cut landing
-  inside one finds no legal head until it has walked past the whole delta — no
-  explicit turn model needed. Two shapes are in play and both are safe: deltas
+  prompts sit.** A user prompt never appears in the *interior* of a delta, so a
+  cut landing inside one finds no legal head until it has walked past the whole
+  delta — no explicit turn model needed. Two shapes are in play and both are
+  safe: deltas
   written after the `_turn_delta` fix in this PR carry only tool calls/returns,
   and rows persisted *before* it open with the turn's own prompt (calfkit commits
   the staged prompt at `initial_len`, and the old slice started there), so a cut
