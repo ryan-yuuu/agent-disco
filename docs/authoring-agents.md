@@ -232,10 +232,13 @@ into the calfkit `Agent` at boot, the edit takes effect on the next
 | `handoff` | bool \| list of names   | `true`  | Whether this agent can **hand off** the turn to a peer.                   |
 
 **There is no `history_turns` field.** Per-agent history windows are gone:
-the bridge passes the recent channel history it fetches (bounded by
-Discord's per-call REST cap of ~100 messages), scoped to the thread when
-the message is in a thread and to the channel otherwise. Use `/clear` in a
-channel to draw a context boundary the history fetcher truncates at (see
+the bridge passes the recent channel history it fetches, scoped to the thread
+when the message is in a thread and to the channel otherwise. Two bridge-wide
+bounds apply, neither of them per-agent: Discord's per-call REST cap of ~100
+messages, and a byte budget on the serialized history
+(`message_history.max_json_bytes`, 800000 by default) that drops the oldest
+messages to fit — see [`bridge-settings.md`](bridge-settings.md). Use `/clear`
+in a channel to draw a context boundary the history fetcher truncates at (see
 §6 / [`using-disco.md`](using-disco.md)).
 
 `a2a` and `handoff` both **default to `true`**, so out of the box every
