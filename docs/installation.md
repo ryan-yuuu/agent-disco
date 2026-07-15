@@ -15,8 +15,15 @@ curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/
 
 You don't need Python, Docker, or git installed first — the installer handles
 everything, including a native **Tansu** broker and a process supervisor (more
-on both below). When it finishes, **restart your shell** (or open a new terminal)
-so the `disco` command is on your `PATH`.
+on both below).
+
+It finishes on one of two lines. `READY` means `disco` already works in this
+terminal. `ACTIVATE` means it couldn't reach your current shell — open a new
+terminal, or:
+
+```bash
+source ~/.agent-disco/env
+```
 
 ## 2. Configure — `disco init`
 
@@ -259,17 +266,25 @@ mv ~/.calfcord ~/.agent-disco
 . ~/.agent-disco/env
 ```
 
-Edit the `# Agent Disco` block in `~/.profile`, `~/.bashrc`, or `~/.zprofile`
-if it still points at `~/.calfcord/env`.
+Edit the `# Agent Disco` block if it still points at `~/.calfcord/env` — in
+`~/.profile`, `~/.bashrc`, `~/.zshenv`, or `~/.zprofile` (older installs).
 
 ## Uninstall
 
 ```bash
-rm -rf ~/.agent-disco
+disco stop
+rm -rf ~/.agent-disco ~/.calfkit/bin
+for d in ~/.local/bin /usr/local/bin; do
+  case "$(readlink "$d/disco" 2>/dev/null)" in */.agent-disco/shims/disco) rm -f "$d/disco" ;; esac
+done
 ```
 
-Then remove the `# Agent Disco` block the installer added to your shell profile
-(`~/.profile`, `~/.bashrc`, or `~/.zprofile`).
+The loop removes the `disco` symlink the installer may have put on your `PATH`,
+but only while it still points into `~/.agent-disco` — another tool's `disco` is
+never touched.
+
+Then remove the `# Agent Disco` block the installer added to `~/.profile`,
+`~/.bashrc`, and `~/.zshenv` (or `$ZDOTDIR/.zshenv`).
 
 ---
 
