@@ -77,3 +77,28 @@ def test_answer_records_the_label_and_value() -> None:
     out = _render(render.answer, "Model provider", "Anthropic")
     assert "Model provider" in out
     assert "Anthropic" in out
+
+
+class TestAnswerHierarchy:
+    """The chosen value is the point of the record — it must not come out muted.
+
+    A ``Text`` built with a base style passes that style down to every appended
+    span, so a dim base silently dims the value too, however it is styled on
+    append. In a monochrome design that erases the only signal the record has.
+    """
+
+    def _style_of(self, needle: str):
+        console = render.make_console(width=60)
+        for segment in console.render(render.answer_text("Model provider", "Anthropic")):
+            if segment.text and needle in segment.text and segment.style is not None:
+                return segment.style
+        raise AssertionError(f"nothing rendered for {needle!r}")
+
+    def test_the_value_is_not_dimmed(self) -> None:
+        assert self._style_of("Anthropic").dim is not True
+
+    def test_the_value_is_emphasised(self) -> None:
+        assert self._style_of("Anthropic").bold is True
+
+    def test_the_label_stays_subordinate_to_the_value(self) -> None:
+        assert self._style_of("Model provider").dim is True

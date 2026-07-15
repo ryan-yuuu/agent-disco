@@ -67,16 +67,29 @@ def error(text: str, *, console: Console | None = None) -> None:
     line(text, style=theme.ERROR, console=console)
 
 
+def answer_text(label: str, value: str) -> Text:
+    """Build the collapsed record: a dim tick and label, then the value, bright.
+
+    Built with **no base style** on purpose. A ``Text``'s base style is inherited
+    by every appended span, so a dim base drags the value down with it — the
+    value renders bold *and* dimmed however it was appended, and the one thing
+    the record exists to show becomes the quietest thing on the line. Each span
+    therefore carries its own style and nothing else.
+    """
+    text = Text()
+    text.append(f"{theme.TICK} ", style=theme.MUTED)
+    text.append(f"{label}  ", style=theme.MUTED)
+    text.append(value, style=theme.ACCENT)
+    return text
+
+
 def answer(label: str, value: str, *, console: Console | None = None) -> None:
-    """The one-line record a widget collapses to once answered.
+    """Print the one-line record a widget collapses to once answered.
 
     This is what makes the inline model read as a transcript: the live widget is
     torn down and replaced by this, so scrollback shows decisions, not dead UI.
     """
-    text = Text(f"{theme.TICK} ", style=theme.MUTED)
-    text.append(f"{label}  ", style=theme.MUTED)
-    text.append(value, style=theme.ACCENT)
-    _target(console).print(text, soft_wrap=True)
+    _target(console).print(answer_text(label, value), soft_wrap=True)
 
 
 def header(

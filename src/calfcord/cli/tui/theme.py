@@ -23,8 +23,15 @@ from rich import box
 ACCENT = "bold"  # the pointer, the row under the cursor, the focused field
 MUTED = "dim"  # descriptions, hints, secondary detail
 BORDER = "dim"  # panel edges — present, never loud
-TITLE = "bold"
 ERROR = "red"
+
+# "not dim" is load-bearing, not redundant. Rich renders a Panel's title inside
+# the border row, so the title inherits ``border_style`` — and BORDER is dim.
+# Without the explicit override the question comes out bold-and-dimmed: the most
+# important text in the frame, washed out by its own frame. In a monochrome
+# design, where weight carries all of the hierarchy, that is a real defect
+# rather than a nicety.
+TITLE = "bold not dim"
 
 # --- glyphs -----------------------------------------------------------------
 # The pointer is a heavy right-pointing angle ORNAMENT, not a plain greater-than.

@@ -54,6 +54,37 @@ def paint(renderable) -> str:
     return console.export_text()
 
 
+def style_of(renderable, needle: str):
+    """The style Rich will actually paint ``needle`` with.
+
+    ``export_text`` drops styling, so it cannot see a washed-out title. Reading
+    the rendered segments is the only way to assert on emphasis — and in a
+    monochrome design, emphasis carries all of the hierarchy.
+    """
+    for segment in make_console(width=60).render(renderable):
+        if segment.text and needle in segment.text and segment.style is not None:
+            return segment.style
+    raise AssertionError(f"nothing rendered for {needle!r}")
+
+
+class TestVisualHierarchy:
+    """Monochrome means weight IS the hierarchy — so a washed-out title is a bug.
+
+    Rich applies a Panel's ``border_style`` to its title, so a dim border silently
+    dims the question with it. Nothing in an export_text assertion can see that.
+    """
+
+    def test_the_question_is_not_dimmed_by_the_border(self) -> None:
+        assert style_of(widgets.select_panel("Model provider", SelectState(CHOICES)), "Model provider").dim is not True
+
+    def test_the_question_is_emphasised(self) -> None:
+        assert style_of(widgets.select_panel("Model provider", SelectState(CHOICES)), "Model provider").bold is True
+
+    def test_the_hint_stays_subordinate(self) -> None:
+        """The hint is reference text; it must never compete with the question."""
+        assert style_of(widgets.select_panel("Model provider", SelectState(CHOICES)), "enter select").dim is True
+
+
 class TestSelect:
     def test_enter_returns_the_row_under_the_cursor(self) -> None:
         assert widgets.select("Provider", CHOICES, read=keys(ENTER), console=silent()) == "a"
