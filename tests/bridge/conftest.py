@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import discord
 import pytest
 
 
@@ -39,6 +40,7 @@ def fake_message():
         webhook_id: int | None = None,
         content: str = "hello",
         created_at: datetime | None = None,
+        message_type: discord.MessageType = discord.MessageType.default,
     ) -> Any:
         if thread_parent_id is not None:
             channel = SimpleNamespace(id=channel_id, parent_id=thread_parent_id)
@@ -60,6 +62,7 @@ def fake_message():
             webhook_id=webhook_id,
             content=content,
             created_at=created_at or datetime.now(UTC),
+            type=message_type,
         )
 
     return _build
