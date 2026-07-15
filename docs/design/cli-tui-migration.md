@@ -247,7 +247,7 @@ Per CLAUDE.md this is TDD: tests first, via `/test-driven-development`.
 2. The `cli/tui/` package + tests.
 3. `make_prompter()` returns `RichPrompter`.
 4. Chrome migration for the 7 interactive flows.
-5. **ADR-0018** — "Rich TUI with an in-house key reader; drop InquirerPy/prompt_toolkit",
+5. **ADR-0019** — "Rich TUI with an in-house key reader; drop InquirerPy/prompt_toolkit",
    recording the §3.2 rationale (this qualifies under `.agents/skills/grill-with-docs/ADR-FORMAT.md`).
 6. Docs refresh where InquirerPy is named (`docs/authoring-agents.md:216`,
    `docs/design/mcp-reintroduction.md:176`).
