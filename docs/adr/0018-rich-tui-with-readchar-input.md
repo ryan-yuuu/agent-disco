@@ -91,6 +91,33 @@ and stayed green while the product broke; then the end-to-end test used `subproc
 opens a **real fd**, so it proved only the one path already handled while a genuinely closed fd 0
 still tracebacked. This class of bug requires running the CLI against each real stdin state.
 
+**The `$EDITOR` shell-out stays, but it was wrong in three ways** (`_editor.py`). It
+ignored `$VISUAL`, which every implementation surveyed honours first (click, gh,
+gemini-cli, Codex, aider — 5/5). It never passed `--wait`, so `EDITOR=code` returned
+instantly and the operator's edit was **silently discarded**. And it fell back to bare
+`vi`, unannounced. Now: `VISUAL` → `EDITOR` → probe(`sensible-editor`, `nano`, `vim`,
+`vi`), wait-flag injected for known GUI editors, and the editor **named before it opens**.
+
+The fallback is a **probe, not a constant**, because the field genuinely disagrees — gh
+(`defaultEditor = "nano" // EXTENDED to switch from vim`) and jj ship nano, click prefers
+vim, aider and gemini-cli use vi, Codex refuses to guess and errors. Any hardcoded name is
+a guess that fails where it is absent; prompt_toolkit hardcodes `/usr/bin/*` and silently
+breaks under Homebrew and Nix. Note the "nano is the beginner-friendly choice" story is
+largely folklore: jj's pico default was an accident (avoiding editor backup files in a VCS
+with no ignore support), and Debian's nano default arose because vim's own maintainers
+rescaled vim *below* a nano priority nobody was looking at.
+
+**A pre-filled field can no longer be cleared to empty — a deliberate trade, recorded
+because it is a capability loss.** InquirerPy pre-filled the default into the *editable
+buffer*, so backspacing it all away and pressing Enter returned `""`. Our `text` widget
+shows the default as a dim **placeholder** instead, so there is no buffer to clear and
+`typed or default` returns the default. Placeholder semantics are the better fit for the
+wizard — its own prose promises "press Enter to accept it, **or type a new one**", which
+with a pre-fill would mean clearing the field first — but the cost is that "" is now
+inexpressible. Harmless today (no call site treats `""` as meaningful: `agent create`
+coerces a blank description to `DEFAULT_DESCRIPTION`, and the broker step handles unset),
+and if a field ever needs a real empty, it needs a pre-filled buffer, not a placeholder.
+
 **Palette is monochrome by decision** (`theme.py`): weight and dimming carry all
 hierarchy, no accent hue. An off-white accent is only off-white on a dark terminal;
 bold-on-default-foreground is the one accent that renders on every theme. Red is

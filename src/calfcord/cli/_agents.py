@@ -339,8 +339,14 @@ def pick_tools(
     )
 
     selected = prompter.checkbox(
-        f"Tools for {name} (all selected — deselect any you don't want):",
+        f"Tools for {name}",
         choices,
+        # The title asks; the instruction explains. This guidance used to be a
+        # parenthetical inside the title, which turned the question into a
+        # paragraph — and left ``instruction`` unused and looking like dead
+        # speculation. It deliberately does NOT restate the key mechanics: the
+        # hint in the panel's border already says space/enter for every list.
+        instruction="All selected — deselect any you don't want.",
     )
 
     if _DANGEROUS_TOOLS.intersection(selected):
