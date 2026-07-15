@@ -49,6 +49,7 @@ from calfcord.cli._fields import FIELDS, FIELDS_BY_KEY, render_value, write_simp
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli._providers import configure_provider
 from calfcord.cli.agent_lifecycle import rename_agent
+from calfcord.cli.tui import render
 
 # The menu's sentinel "I'm done" row value. Chosen with surrounding double
 # underscores so it can never collide with a real :class:`Field.key` (all of
@@ -286,6 +287,7 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
     Returns 1 (with an already-printed message) when no agent can be resolved;
     otherwise 0, printing the restart hint when at least one field was changed.
     """
+    render.header("disco agent edit", subtitle="Change an agent's configuration.")
     md_path = _resolve_agent(prompter, agents_dir=agents_dir, name=name)
     if md_path is None:
         return 1

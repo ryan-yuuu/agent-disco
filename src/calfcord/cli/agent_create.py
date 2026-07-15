@@ -51,6 +51,7 @@ from calfcord.cli._agents import (
 from calfcord.cli._envfile import read_env
 from calfcord.cli._providers import configure_provider
 from calfcord.cli._supervisor import default_pc_binary, open_workspace, supervisor_unavailable_reason
+from calfcord.cli.tui import render
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -339,6 +340,11 @@ def run(
     if server_urls is _ENV_DEFAULT:
         server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
+    # The header belongs to the standalone command, not to ``create_agent`` —
+    # ``init`` draws its own phase headers around that same shared flow, so
+    # putting it inside would print two headers back to back there.
+    render.header("disco agent create", subtitle="Add a teammate to your org.")
+
     try:
         created = create_agent(
             prompter,
@@ -357,7 +363,7 @@ def run(
         print(f"error: could not create agent {(name or '?')!r}: {e}")
         return 1
 
-    print(f"Created agent {created.name!r}.")
+    render.success(f"Created agent {created.name!r}.")
     return _finish_create(
         prompter,
         name=created.name,

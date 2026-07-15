@@ -113,8 +113,13 @@ def header(
         if label:
             right = f"{right} {theme.BULLET} {label}"
 
+    # A leading blank line so a header never butts against whatever preceded it
+    # (a collapsed answer record, a note). Owned here rather than left to each of
+    # the ~7 call sites, which would drift.
+    target = _target(console)
     body = Text(subtitle, style=theme.MUTED) if subtitle else Text("")
-    _target(console).print(
+    target.print()
+    target.print(
         Panel(
             body,
             title=Text(title, style=theme.TITLE),

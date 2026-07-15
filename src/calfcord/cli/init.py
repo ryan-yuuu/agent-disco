@@ -68,12 +68,18 @@ from typing import TYPE_CHECKING
 from calfcord.cli import _envfile, _supervisor, discord_discovery, setup_state
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli.agent_create import create_agent
+from calfcord.cli.tui import render, theme
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from datetime import datetime
 
     from calfcord.cli.discord_discovery import BotIdentity, ChannelListing, Guild, PostableChannel
+
+# The wizard's four phases, surfaced as "n/4" in each phase header so a long
+# flow always says where the operator is and how much is left. One constant so
+# the headers cannot drift out of step with each other.
+_PHASES = 4
 
 _DEFAULT_PROVIDER_VAR = "CALFKIT_AGENT_DEFAULT_PROVIDER"
 _BROKER_VAR = "CALF_HOST_URL"
@@ -249,7 +255,6 @@ def run(
     checkpoint_file = setup_state.checkpoint_path(home)
     checkpoint = setup_state.load(checkpoint_file) or setup_state.SetupCheckpoint()
 
-    print("disco init — configuring", env_path)
     # Advisory resume greeting: only when the checkpoint claims the agent step is
     # done AND the real .md still parses (re-verify, never trust the flag alone).
     resuming = (
@@ -257,12 +262,13 @@ def run(
         and checkpoint.agent_name is not None
         and _agent_md_parses(agents_dir, checkpoint.agent_name)
     )
+    render.header("disco init", subtitle=f"configuring {env_path}", step=(1, _PHASES), label="agent")
     if resuming:
         # Honest wording (nit #18a): the resume RE-WALKS the create flow rather
         # than skipping it, so don't claim the agent step is settled. We pre-fill
         # the create defaults from the saved agent (a blank answer keeps it) — the
         # re-walk confirms/edits in place, it doesn't restart from scratch.
-        print(
+        render.line(
             f"Welcome back — picking up where you left off (agent {checkpoint.agent_name}). "
             "Press enter to keep each saved answer."
         )
@@ -272,13 +278,13 @@ def run(
         # bare "? Agent name:" gives no hint that the shown value is an editable
         # suggestion or why it is being asked — spell out the Enter-to-accept /
         # type-to-change mechanic once, up front, for the whole wizard.
-        print("Now we'll create your agent — its name, description, and model.")
-        print("It starts with all builtin tools enabled; use `disco agent tools` later to restrict them.")
-        print(
+        render.line("Now we'll create your agent — its name, description, and model.")
+        render.note("It starts with all builtin tools enabled; use `disco agent tools` later to restrict them.")
+        render.note(
             "Each prompt shows a suggested value: press Enter to accept it, or type a "
             "new one and press Enter."
         )
-    print()
+    render.line()
 
     # --- Phase 1: agent identity + provider + model + all-builtins write ---
     # Delegated wholesale to the shared create flow so ``agent create`` and
@@ -419,7 +425,12 @@ def _run_discord(
     returns what progress it could make rather than aborting the wizard.
     """
     current = _envfile.read_env(env_path)
-    print("Discord setup (the wizard discovers your server — no IDs to paste).")
+    render.header(
+        "disco init",
+        subtitle="Discord setup (the wizard discovers your server — no IDs to paste).",
+        step=(2, _PHASES),
+        label="discord",
+    )
 
     token, app_id = _capture_token(prompter, env_path, current, verify_identity_fn)
     if not token:
@@ -640,6 +651,12 @@ def _run_broker(prompter: Prompter, *, env_path: Path) -> None:
     branch keeps-existing-on-empty and warns only when a fresh install ends with
     no broker (the processes can't start without one).
     """
+    render.header(
+        "disco init",
+        subtitle="The agent mesh — the message bus every process talks through.",
+        step=(3, _PHASES),
+        label="broker",
+    )
     current = _envfile.read_env(env_path)
     choice = prompter.select(
         "Start the agent mesh",
@@ -709,6 +726,13 @@ def _run_finish(
     whenever registration lands — before or after the watch opens.
     """
     pc_binary_fn = pc_binary_fn or _supervisor.default_pc_binary
+
+    render.header(
+        "disco init",
+        subtitle="Bringing the workspace up and waiting for your agent to come online.",
+        step=(4, _PHASES),
+        label="finish",
+    )
 
     # Two distinct degrades, not one path: a dev run (``home is None`` — no
     # install-scoped supervisor by design) is benign and degrades silently; a native
@@ -896,7 +920,12 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
             print("  your organization is live — but the tools host isn't up, so tool calls will hang.")
         print("  Bring it up with `disco tools start` (see `disco logs tools`), then retry a tool.")
     elif detected:
-        print(f"🎉 {name} is online — your organization is live!")
+        # Emphasised via render.line rather than render.success: this line keeps its
+        # 🎉 and must not also carry success()'s ✓ — two markers on the payoff line
+        # of the whole wizard reads as clutter. The emoji is deliberately left in
+        # place; it is the onboarding win moment, not decoration, and dropping it to
+        # suit the monochrome palette would be a product change wearing a style hat.
+        render.line(f"🎉 {name} is online — your organization is live!", style=theme.ACCENT)
     else:
         # Bounded fallback (§12.6): never promise more than we detected.
         print(

@@ -30,6 +30,7 @@ from calfcord.agents.definition import parse_agent_md
 from calfcord.agents.md_writer import update_tool_grants
 from calfcord.cli._agents import _split_tool_selection, detect_agents
 from calfcord.cli._prompts import Choice, Prompter
+from calfcord.cli.tui import render
 
 
 def first_line(desc: str | None) -> str:
@@ -185,6 +186,7 @@ def run(
     letting a raw traceback escape. All prompting goes through the injected
     :class:`Prompter`, so the flow is testable without a TTY.
     """
+    render.header("disco agent tools", subtitle="Choose which tools this agent can use.")
     md_path = _resolve_agent(prompter, agents_dir=agents_dir, name=name)
     if md_path is None:
         return 1
