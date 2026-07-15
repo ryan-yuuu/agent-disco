@@ -26,9 +26,11 @@ Coverage:
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from calfkit._vendor.pydantic_ai.messages import (
     BuiltinToolReturnPart,
     ModelMessage,
@@ -345,6 +347,81 @@ class TestDiscordHistoryProvider:
         # Final answer text last.
         assert isinstance(message_history[3], ModelResponse)
         assert message_history[3].parts[0].content == "It's 18C."
+
+    async def test_history_is_bounded_by_max_json_bytes(self) -> None:
+        """The provider applies the serialized-size bound before handing the
+        history back — it is the last bridge-side point where the outgoing
+        payload is still assembled and typed.
+
+        The oversized opening turn cannot fit the budget, so it is dropped; the
+        agent reply it stranded at the head goes with it (assistant-first is a
+        provider 400), leaving the newest question.
+        """
+        records = [
+            _record(message_id=10, content="x" * 4000, author_display_name="ryan"),
+            _record(message_id=20, content="a reply", author_display_name="Scribe", is_agent=True),
+            _record(message_id=25, content="newest question", author_display_name="ryan"),
+        ]
+        provider = DiscordHistoryProvider(
+            _fake_fetcher(records), _fake_store({}), max_json_bytes=1000
+        )
+
+        message_history = await provider.message_history(_req(message_id=30))
+
+        assert len(ModelMessagesTypeAdapter.dump_json(message_history)) <= 1000
+        assert len(message_history) == 1
+        assert isinstance(message_history[0], ModelRequest)
+        assert message_history[0].parts[0].content == "newest question"
+
+    async def test_trim_is_logged_with_the_channel_and_the_knob(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The warning is the ONLY artifact of a lossy turn, so it has to carry
+        the channel (an operator's join to "the agent forgot what we said") and
+        name the setting that fixes it."""
+        records = [
+            _record(message_id=10, content="x" * 4000, author_display_name="ryan"),
+            _record(message_id=25, content="newest", author_display_name="ryan"),
+        ]
+        provider = DiscordHistoryProvider(
+            _fake_fetcher(records), _fake_store({}), max_json_bytes=1000
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await provider.message_history(_req(message_id=30, source_channel_id=6789))
+
+        assert "channel_id=6789" in caplog.text
+        assert "1 of 2 messages sent" in caplog.text
+        assert "message_history.max_json_bytes" in caplog.text
+
+    async def test_total_context_loss_is_logged_at_error_not_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An empty history is not a trim — every reply in the channel is now
+        context-free. It must not read as routine shedding."""
+        records = [_record(message_id=10, content="x" * 4000, author_display_name="ryan")]
+        provider = DiscordHistoryProvider(
+            _fake_fetcher(records), _fake_store({}), max_json_bytes=1000
+        )
+
+        with caplog.at_level(logging.WARNING):
+            history = await provider.message_history(_req(message_id=30))
+
+        assert history == []
+        assert [r.levelno for r in caplog.records] == [logging.ERROR]
+        assert "EMPTY" in caplog.text
+
+    async def test_history_within_budget_is_not_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No cry-wolf on the overwhelmingly common path."""
+        records = [_record(message_id=10, content="hi", author_display_name="ryan")]
+        provider = DiscordHistoryProvider(_fake_fetcher(records), _fake_store({}))
+
+        with caplog.at_level(logging.WARNING):
+            await provider.message_history(_req(message_id=30))
+
+        assert caplog.records == []
 
     async def test_fetch_is_anchored_on_the_request(self) -> None:
         """The provider fetches ``source_channel_id`` and anchors ``before=`` on

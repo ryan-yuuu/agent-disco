@@ -20,7 +20,9 @@ projection (``nodes/_projection.py``) re-roles it per viewer at read time
   ``name`` before any provider sees it.
 * :class:`DiscordHistoryProvider` — wires the fetcher + transcript store +
   builder into the ``MentionRequest`` → ``list[ModelMessage]`` seam the
-  bridge's ``MentionHandler`` calls.
+  bridge's ``MentionHandler`` calls, and trims the result to the configured
+  serialized-size budget (``message_history.max_json_bytes``, defaulting to
+  :data:`~calfcord.bridge.settings.DEFAULT_HISTORY_MAX_JSON_BYTES`) — see ADR 0018.
 
 **Why building deliberately does NOT merge adjacent same-role**
 messages: pydantic-ai's :func:`_clean_message_history`
@@ -33,15 +35,15 @@ provider. Our constructed messages have ``instructions=None`` and no
 provider metadata, so the merge conditions are always met. Doing our
 own merge would be duplicate work.
 
-**Why projection DOES drop leading**
-:class:`~calfkit._vendor.pydantic_ai.messages.ModelResponse` entries:
-pydantic-ai's ``_clean_message_history`` merges but never drops. If
-the oldest fetched record is the agent's own webhook reply, the
-projected history would start with a ``ModelResponse``, and Anthropic
-rejects request bodies whose first message is ``assistant`` role. Drop
-is iterative — we keep popping leading responses until we either hit
-a request or the list is empty (the latter is fine; empty
-``message_history`` is valid).
+**Why we DO enforce a legal head** (:func:`_drop_until_user_request`):
+pydantic-ai's ``_clean_message_history`` merges but never drops. A
+history must open with a ``ModelRequest`` carrying a ``UserPromptPart``
+— Anthropic rejects a body whose first message is ``assistant`` role
+(which is what the oldest fetched record being an agent's own webhook
+reply would produce), and every provider rejects a leading
+``tool_result`` with no matching ``tool_use`` (which trimming to the
+byte budget can strand mid-replay-delta). Dropping to empty is fine;
+an empty ``message_history`` is valid.
 
 **Why projection DOES drop empty-content** records: Discord lets
 through messages with empty ``content`` (system messages like
@@ -98,6 +100,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from calfcord.bridge.settings import DEFAULT_HISTORY_MAX_JSON_BYTES
 from calfcord.bridge.transcripts import TranscriptStoreLike
 
 if TYPE_CHECKING:
@@ -751,6 +754,33 @@ class ChannelHistoryFetcher:
         )
 
 
+def _drop_until_user_request(messages: Sequence[ModelMessage]) -> list[ModelMessage]:
+    """Drop from the head until the first message is a genuine user turn.
+
+    The module's single definition of "legal head". A history may only open with
+    a :class:`ModelRequest` carrying a :class:`UserPromptPart`; two distinct
+    heads are illegal and both are dropped:
+
+    * a leading :class:`ModelResponse` — calfkit's projection keeps a
+      self-authored leading response as a response, and Anthropic rejects a
+      history whose first message is ``assistant``;
+    * a leading :class:`ModelRequest` whose parts are all tool returns — a
+      ``tool_result`` with no matching ``tool_use``, which every provider 400s.
+
+    Matches on ANY :class:`UserPromptPart`, not ``parts[0]``: a request
+    deserialized from the transcript store may open with a
+    :class:`SystemPromptPart`, which is still a legal head.
+
+    Returns ``[]`` when no user turn survives.
+    """
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, ModelRequest) and any(
+            isinstance(p, UserPromptPart) for p in msg.parts
+        ):
+            return list(messages[idx:])
+    return []
+
+
 def build_message_history(
     records: Sequence[HistoryRecord],
     *,
@@ -787,10 +817,13 @@ def build_message_history(
     ``_clean_message_history`` (``_agent_graph.py:1386``) does that before any
     provider mapper runs (our messages satisfy its merge conditions). It DOES
     drop empty/whitespace-only content (Anthropic skips zero-block user messages;
-    OpenAI wastes tokens) and DOES drop leading :class:`ModelResponse` entries
-    iteratively — calfkit's projection keeps a self-authored leading response as
-    a response, and Anthropic rejects a history whose first message is
-    ``assistant``.
+    OpenAI wastes tokens) and DOES enforce a legal head via
+    :func:`_drop_until_user_request`.
+
+    Says nothing about SIZE: the result is as big as the fetched window plus its
+    replay deltas. :func:`_trim_history_to_budget` (applied by
+    :class:`DiscordHistoryProvider`, not here) is what bounds the payload — this
+    stays a pure semantic build, testable without serializing anything.
     """
     out: list[ModelMessage] = []
     seen_request = False
@@ -817,9 +850,7 @@ def build_message_history(
                 ModelRequest(parts=[UserPromptPart(content=r.content, name=r.author_display_name)])
             )
             seen_request = True
-    while out and isinstance(out[0], ModelResponse):
-        out.pop(0)
-    return out
+    return _drop_until_user_request(out)
 
 
 REPLAY_TOOL_RETURN_MAX_CHARS: Final[int] = 6000
@@ -830,9 +861,9 @@ Deliberately distinct from — and much larger than — the 2000-char Discord
 display budget: this bounds the *LLM context* a replayed turn re-injects, not a
 *display*. Reusing a display-sized cap would lobotomize the tool context the
 model reasons over on the next turn (the whole point of replay). Only oversized
-individual tool returns are trimmed; per R-A5 there is no global history ceiling,
-and this per-return cap is the one backstop kept (it bounds the realistic
-envelope blow-up — a giant tool output spliced back in)."""
+individual tool returns are trimmed. Composes with — and does not replace —
+:data:`DEFAULT_HISTORY_MAX_JSON_BYTES`: this caps ONE return, that caps the whole
+history (N returns under this cap still sum past any envelope)."""
 
 _REPLAY_TRUNCATION_MARKER: Final[str] = "\n…(truncated)"
 """Visible marker appended to a tool return truncated to
@@ -889,6 +920,53 @@ def _stamp_response_names(messages: list[ModelMessage], name: str) -> list[Model
     return out
 
 
+def _message_json_cost(message: ModelMessage) -> int:
+    """Bytes ``message`` adds to a serialized list: its own JSON plus the single
+    ``[`` or ``,`` byte preceding it.
+
+    ``dump_json([message])`` wraps the message in ``[]``; keeping one of those
+    two bracket bytes is exactly the punctuation the message owes in a longer
+    list (``[`` when first, ``,`` otherwise — the adapter emits no whitespace).
+    Costs are therefore uniform and additive, with no special case for the first
+    message: a list serializes to ``sum(costs) + 1`` bytes, the trailing ``]``.
+
+    Sizing each message once keeps the trim linear. The alternative — re-dumping
+    the whole list per dropped message — is ~40x slower on an over-budget
+    history (~40ms at 200 messages), and that is synchronous CPU inside the
+    coroutine serving every other channel's gateway events.
+    """
+    return len(ModelMessagesTypeAdapter.dump_json([message])) - 1
+
+
+def _trim_history_to_budget(
+    messages: list[ModelMessage], *, max_json_bytes: int
+) -> list[ModelMessage]:
+    """Trim ``messages`` to ``max_json_bytes`` of serialized JSON, dropping oldest.
+
+    Keeps the largest suffix (newest turns — the ones worth spending budget on)
+    that fits ``max_json_bytes`` inclusive, then enforces a legal head via
+    :func:`_drop_until_user_request`. Repair only ever removes, so it cannot push
+    the result back over budget: one pass, no settle loop.
+
+    Returns ``[]`` when nothing legal fits: one message alone over budget
+    (dropping cannot shrink it, and going out over budget is not an option), or a
+    surviving suffix with no user turn in it.
+
+    Pure and silent: the caller owns the "we lost context" log, because it is the
+    one that knows WHICH conversation lost it. Design rationale (why bytes not
+    tokens, why no re-grow after repair): ADR 0018.
+    """
+    total = 1  # the trailing "]"; each message below pays for the byte before it
+    start = len(messages)
+    for idx in reversed(range(len(messages))):
+        cost = _message_json_cost(messages[idx])
+        if total + cost > max_json_bytes:
+            break
+        total += cost
+        start = idx
+    return _drop_until_user_request(messages[start:])
+
+
 class DiscordHistoryProvider:
     """Bridge-side ``MentionRequest`` → ``list[ModelMessage]`` history seam.
 
@@ -904,12 +982,15 @@ class DiscordHistoryProvider:
         transcript_store: TranscriptStoreLike,
         *,
         limit: int = _DISCORD_HISTORY_MAX_LIMIT,
+        max_json_bytes: int = DEFAULT_HISTORY_MAX_JSON_BYTES,
     ) -> None:
         self._fetcher = fetcher
         self._transcript_store = transcript_store
-        # Per R-A5 there is no global history ceiling; ``limit`` is just the
-        # Discord per-call REST cap (≤100). The fetched window is used as-is.
+        # ``limit`` is the Discord per-call REST cap (≤100), not a context
+        # bound: 100 records of replayed tool returns still blow an envelope,
+        # which is what ``max_json_bytes`` is for.
         self._limit = limit
+        self._max_json_bytes = max_json_bytes
 
     async def message_history(self, req: MentionRequest) -> list[ModelMessage]:
         records = await self._fetcher.fetch(
@@ -918,7 +999,44 @@ class DiscordHistoryProvider:
             limit=self._limit,
         )
         hydration = await self._build_replay_hydration(records)
-        return build_message_history(records, hydration=hydration)
+        history = build_message_history(records, hydration=hydration)
+        # Trim LAST: replay hydration is what makes a history big, so the budget
+        # has to see the spliced result, not the pre-splice records.
+        trimmed = _trim_history_to_budget(history, max_json_bytes=self._max_json_bytes)
+        if len(trimmed) < len(history):
+            self._log_trim(req, sent=len(trimmed), built=len(history))
+        return trimmed
+
+    def _log_trim(self, req: MentionRequest, *, sent: int, built: int) -> None:
+        """Record that this turn went out with less context than the channel has.
+
+        The only artifact of a lossy operation, so it carries the channel (an
+        operator's only join to the "the agent forgot what we said" report) and
+        names the knob that fixes it.
+        """
+        if not sent:
+            # Every reply in this channel is now context-free and will visibly
+            # contradict the conversation: an alerting-grade break, not a trim.
+            logger.error(
+                "channel_id=%d: message_history is EMPTY after trimming to the "
+                "%d-byte budget (all %d messages dropped); this turn runs with NO "
+                "conversation context. Either one message exceeds the whole budget "
+                "or no user turn survived the cut. Raise "
+                "message_history.max_json_bytes in settings.json.",
+                req.source_channel_id,
+                self._max_json_bytes,
+                built,
+            )
+            return
+        logger.warning(
+            "channel_id=%d: message_history trimmed to the %d-byte budget: %d of "
+            "%d messages sent, oldest dropped. Raise "
+            "message_history.max_json_bytes in settings.json to send more.",
+            req.source_channel_id,
+            self._max_json_bytes,
+            sent,
+            built,
+        )
 
     async def _build_replay_hydration(
         self, records: Sequence[HistoryRecord]

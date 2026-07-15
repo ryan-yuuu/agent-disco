@@ -199,6 +199,9 @@ and the current tree. Where these conflict with a pinned decision above, **these
   **no** global token/byte cap; `message_history` is whatever the Discord fetch returns, used
   directly. Keep the existing `REPLAY_TOOL_RETURN_MAX_CHARS` replay truncation (it already bounds the
   one realistic envelope blow-up).
+  > **Superseded in part by [ADR 0018](../adr/0018-bound-message-history-json-bytes.md).** The
+  > parenthetical above is wrong: the per-return cap does not compose into a total, so a global byte
+  > budget (`message_history.max_json_bytes`) was added after all. Dropping `history_turns` stands.
 - **R-A6 (stale_after = ~90s).** Use the calfkit default (90s = 3×30s heartbeat) for both `agent ps`
   and the duplicate-start guard; graceful stops tombstone immediately, so only a crash-restart is
   gated.

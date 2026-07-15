@@ -36,7 +36,11 @@ from pydantic import SecretStr
 from calfcord.bridge.gateway import DiscordIngressGateway
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.normalizer import MessageNormalizer
-from calfcord.bridge.settings import BridgeSettings, StickyRepliesSettings
+from calfcord.bridge.settings import (
+    BridgeSettings,
+    MessageHistorySettings,
+    StickyRepliesSettings,
+)
 from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.discord.settings import DiscordSettings
 
@@ -301,6 +305,24 @@ class TestStickyRouting:
 
         assert store.gets == []
         assert handler.calls == []
+
+
+class TestMessageHistoryBudgetWiring:
+    """``message_history.max_json_bytes`` must reach the history provider.
+
+    The knob is inert unless the gateway threads it into the provider it builds,
+    and a silently-ignored budget looks identical to a working one until an
+    envelope is rejected — so pin the wiring itself.
+    """
+
+    def test_budget_is_wired_from_settings(self) -> None:
+        gateway = _gateway(
+            bridge_settings=BridgeSettings(
+                message_history=MessageHistorySettings(max_json_bytes=12_345)
+            )
+        )
+
+        assert gateway._handler._history._max_json_bytes == 12_345
 
 
 class TestNewThreadCommand:

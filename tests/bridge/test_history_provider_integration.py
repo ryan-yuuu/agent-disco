@@ -42,10 +42,19 @@ from datetime import UTC, datetime
 
 import pytest
 from calfkit._vendor.pydantic_ai.messages import (
+    ModelMessagesTypeAdapter,
     ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
 )
 
-from calfcord.bridge.history import HistoryRecord, build_message_history
+from calfcord.bridge.history import (
+    HistoryRecord,
+    _trim_history_to_budget,
+    build_message_history,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -134,6 +143,136 @@ async def test_pydantic_ai_anthropic_auto_merges_adjacent_user_messages() -> Non
         message_history=history,
     )
     assert result.output, "Anthropic returned an empty response"
+
+
+def _rec(message_id: int, content: str, author: str, *, is_agent: bool = False) -> HistoryRecord:
+    return HistoryRecord(
+        message_id=message_id,
+        created_at=datetime.now(UTC),
+        content=content,
+        author_display_name=author,
+        is_agent=is_agent,
+    )
+
+
+def _replay_delta() -> list:
+    """A persisted turn delta: the agent's tool call and its return."""
+    return [
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="get_weather", args={"city": "Tokyo"}, tool_call_id="t1"
+                )
+            ],
+            name="Scribe",
+        ),
+        ModelRequest(
+            parts=[ToolReturnPart(tool_name="get_weather", content="18C", tool_call_id="t1")]
+        ),
+    ]
+
+
+def _history_with_replay_delta() -> list:
+    """A canonical history whose middle holds a spliced replay delta — the
+    production shape the byte trim actually has to cut through."""
+    records = [
+        _rec(1, "hey, got a second?", "ryan"),
+        _rec(2, "sure, what's up?", "Scribe", is_agent=True),
+        _rec(3, "what's the weather in Tokyo?", "ryan"),
+        _rec(4, "It's 18C.", "Scribe", is_agent=True),
+        _rec(5, "thanks!", "ryan"),
+    ]
+    return build_message_history(records, hydration={4: _replay_delta()})
+
+
+def _agent(provider: str):
+    """A pydantic-ai Agent on ``provider``'s cheapest current model."""
+    from calfkit._vendor.pydantic_ai import Agent
+
+    if provider == "anthropic":
+        from calfkit._vendor.pydantic_ai.models.anthropic import AnthropicModel
+
+        model = AnthropicModel("claude-haiku-4-5")
+    else:
+        from calfkit._vendor.pydantic_ai.models.openai import OpenAIChatModel
+
+        model = OpenAIChatModel("gpt-4o-mini")
+    return Agent(model=model, system_prompt="You are Scribe. Be concise.")
+
+
+_PROVIDERS = [
+    pytest.param(
+        "anthropic",
+        marks=pytest.mark.skipif(not _has_anthropic(), reason="ANTHROPIC_API_KEY not set"),
+    ),
+    pytest.param(
+        "openai",
+        marks=pytest.mark.skipif(not _has_openai(), reason="OPENAI_API_KEY not set"),
+    ),
+]
+
+
+@pytest.mark.parametrize("provider", _PROVIDERS)
+async def test_provider_accepts_a_byte_trimmed_history(provider: str) -> None:
+    """The positive half: a history trimmed to a byte budget is still a shape
+    Anthropic accepts.
+
+    The budget drops the opening turns and strands the agent reply that follows
+    them at the head; repair removes it, leaving a user turn with the replay
+    delta intact behind it. Every unit test asserts this shape is *legal* by
+    reading the provider's rules — this asserts the provider agrees.
+    """
+    history = _history_with_replay_delta()
+    # Drop the first two turns: the cut lands on a ModelResponse, so head repair
+    # must run for the result to be sendable at all.
+    budget = len(ModelMessagesTypeAdapter.dump_json(history[1:]))
+    trimmed = _trim_history_to_budget(history, max_json_bytes=budget)
+
+    # Test invariant: this must actually exercise a trim + a repair, or it
+    # vacuously proves nothing.
+    assert 0 < len(trimmed) < len(history), "expected a real trim"
+    assert isinstance(trimmed[0], ModelRequest)
+    assert any(isinstance(p, UserPromptPart) for p in trimmed[0].parts)
+
+    result = await _agent(provider).run("what did I just ask about?", message_history=trimmed)
+    assert result.output, f"{provider} returned an empty response"
+
+
+@pytest.mark.parametrize("provider", _PROVIDERS)
+async def test_provider_rejects_an_orphaned_tool_return_head(provider: str) -> None:
+    """The negative control — the reason head repair exists at all.
+
+    Cut a history mid-replay-delta and DON'T repair: the head is a
+    ``ModelRequest`` of tool returns whose ``tool_call`` was just dropped. The
+    whole design rests on the claim that a provider rejects this. If a provider
+    ever accepts it, ``_drop_until_user_request``'s tool-return rule is
+    unnecessary complexity and this test is the alarm that says so.
+
+    Observed from OpenAI (gpt-4o-mini), naming the head explicitly::
+
+        400 invalid_request_error, param 'messages.[0].role':
+        "messages with role 'tool' must be a response to a preceeding
+         message with 'tool_calls'."
+    """
+    from calfkit._vendor.pydantic_ai.exceptions import ModelHTTPError
+    history = _history_with_replay_delta()
+    # [MR(q1), MResp(a1), MR(q2), MResp(ToolCall), MR(ToolReturn), MResp(18C), MR(thanks)]
+    # Cut at 4: the ToolReturn survives, its ToolCall at 3 does not.
+    orphaned = list(history[4:])
+
+    # Test invariant: the head really is an orphaned tool return.
+    assert isinstance(orphaned[0], ModelRequest)
+    assert any(isinstance(p, ToolReturnPart) for p in orphaned[0].parts)
+    assert not any(isinstance(p, UserPromptPart) for p in orphaned[0].parts)
+
+    with pytest.raises(ModelHTTPError) as exc:
+        await _agent(provider).run("and tomorrow?", message_history=orphaned)
+
+    assert exc.value.status_code == 400
+    # Pin the REASON, not just any 400 — a bad model name is also a 400, and
+    # would let this pass while proving nothing. Both providers name the tool
+    # pairing in the body ("tool_calls" / "tool_use_id").
+    assert "tool" in str(exc.value.body).lower()
 
 
 @pytest.mark.skipif(not _has_openai(), reason="OPENAI_API_KEY not set")

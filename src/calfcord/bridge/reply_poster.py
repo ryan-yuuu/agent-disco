@@ -25,7 +25,12 @@ import time
 from typing import Any, Final, Literal
 
 import discord
-from calfkit._vendor.pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    UserPromptPart,
+)
 
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.steps_render import _render_tree_blocks
@@ -48,13 +53,37 @@ transient or environmental and stay at WARNING."""
 
 
 def _turn_delta(result: Any, initial_len: int) -> list[ModelMessage]:
-    """THIS turn's structured slice: the cumulative ``message_history`` minus the
-    channel-history prefix (``initial_len``) and the trailing final-answer
-    ``ModelResponse`` (``[initial_len:-1]``). Empty for a pure-text turn."""
+    """THIS turn's structured slice — its tool calls/returns, for next-turn replay.
+
+    The cumulative ``message_history`` minus three things: the channel-history
+    prefix (``initial_len``), the turn's own committed user prompt, and the
+    trailing final-answer ``ModelResponse``. Empty for a pure-text turn.
+
+    The prompt has to go. ``Client.start`` unconditionally stages it
+    (``client/caller.py``) and the agent commits it to the history BEFORE the
+    model loop (``nodes/agent.py``), so it sits at exactly ``initial_len`` — a
+    plain ``[initial_len:-1]`` captures it, and replay then splices it back into
+    a history that already carries that turn as a channel record. The model sees
+    the prompt twice (pydantic-ai merges the adjacent requests, so it reads as
+    one doubled message) and the envelope pays for it twice.
+
+    Skipped by inspection rather than ``initial_len + 1``: if calfkit ever stops
+    committing the prompt, this degrades to keeping the whole delta rather than
+    silently eating the turn's first tool call.
+    """
     history = result.message_history
     if not history:
         return []
-    return list(history[initial_len:-1])
+    start = initial_len
+    if start < len(history) and _is_user_prompt(history[start]):
+        start += 1
+    return list(history[start:-1])
+
+
+def _is_user_prompt(message: ModelMessage) -> bool:
+    return isinstance(message, ModelRequest) and any(
+        isinstance(p, UserPromptPart) for p in message.parts
+    )
 
 
 def _render_step_count(delta: list[ModelMessage]) -> int:
