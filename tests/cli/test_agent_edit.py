@@ -272,6 +272,49 @@ def _editor_writing(new_body: str):
     return _run
 
 
+class TestTheDraftPathIsAnnounced:
+    """The temp file's path is printed before the editor takes the screen.
+
+    It is the escape hatch out of a hostile editor, and it works because the body
+    is read back *after* the editor exits: an operator stranded in vi can open
+    that path in a GUI app, save there, quit vi WITHOUT saving, and their edit
+    still lands. Without the path, they have a draft they cannot reach.
+    """
+
+    def test_the_path_handed_to_the_editor_is_printed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        md = _seed_agent(tmp_path)
+        monkeypatch.setenv("EDITOR", "fake-editor")
+        handed: list[str] = []
+
+        def _run(argv: list[str], *, check: bool = False):
+            # The editor is always handed the file last, so this IS the draft path.
+            handed.append(argv[-1])
+            Path(argv[-1]).write_text("edited body", encoding="utf-8")
+
+            class _Completed:
+                returncode = 0
+
+            return _Completed()
+
+        monkeypatch.setattr(agent_edit.subprocess, "run", _run)
+        agent_edit.edit_system_prompt(md)
+
+        assert handed, "the editor should have been launched"
+        assert handed[0] in capsys.readouterr().out, "the operator must be told where the draft is"
+
+    def test_the_editor_is_still_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Naming the editor and giving the path are both needed, not either/or."""
+        md = _seed_agent(tmp_path)
+        monkeypatch.setenv("EDITOR", "fake-editor")
+        monkeypatch.setattr(agent_edit.subprocess, "run", _editor_writing("new body"))
+        agent_edit.edit_system_prompt(md)
+        assert "fake-editor" in capsys.readouterr().out
+
+
 def test_edit_system_prompt_saves_new_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A changed body is saved via update_system_prompt without launching a real editor."""
     md = _seed_agent(tmp_path)

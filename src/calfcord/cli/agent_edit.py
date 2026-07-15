@@ -67,8 +67,14 @@ def edit_system_prompt(md_path: Path) -> None:
     launched on it, and the result is read back and persisted via the
     validate-before-write :func:`calfcord.agents.md_writer.update_system_prompt`.
 
-    The editor is **named to the operator before it opens**. Which editor, and
-    whether it must be told to wait, are :mod:`calfcord.cli._editor`'s problem.
+    Before the editor takes the screen the operator is told **which editor is
+    opening** and **where the draft lives**. The path is the way out of a hostile
+    editor: the body is read back *after* the editor exits, so someone stranded
+    in vi can open that path in any other app, save there, quit vi without
+    saving, and their edit still lands. (The file is a temp file and is removed
+    once the editor returns — the path is live for the editing session, not
+    after it.) Which editor, and whether it must be told to wait, are
+    :mod:`calfcord.cli._editor`'s problem.
 
     Defensive on every failure mode that an interactive editor invites, because
     this runs inside the edit menu and must never let an exception escape and
@@ -115,6 +121,14 @@ def edit_system_prompt(md_path: Path) -> None:
         # single most-reported way a CLI strands a newcomer. gh solved it the same
         # way, by naming the editor in the prompt.
         render.note(f"opening {name} to edit the system prompt — save and quit to continue.")
+
+        # The draft's path, because naming the editor only helps someone who can
+        # USE it. This is the way out: the body is read back AFTER the editor
+        # exits, so an operator stranded in vi can open this path in any other
+        # app, save there, quit vi without saving, and their edit still lands.
+        # Printed unconditionally rather than only on failure — by the time the
+        # editor owns the screen, we can no longer tell them anything.
+        render.note(f"  draft: {tmp_path}")
         try:
             subprocess.run(_editor.argv(command, tmp_path), check=True)
         except FileNotFoundError:
