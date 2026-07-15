@@ -47,6 +47,27 @@ def _panel(message: str, body: RenderableType, hint: str) -> Panel:
     )
 
 
+# What a list panel costs beyond its rows: two borders, the two scroll markers,
+# and a line of slack so the frame does not sit flush against the terminal edge.
+_PANEL_OVERHEAD = 5
+
+
+def viewport_for(console: Console | None) -> int:
+    """How many rows this terminal can show without the panel being cropped.
+
+    Measured rather than assumed. A fixed row count is wrong in both directions:
+    it crops in a short tmux pane — the exact failure the viewport exists to
+    prevent, since Live clips at ``vertical_overflow="ellipsis"`` — and wastes
+    most of a tall terminal.
+
+    Floors at 1: a list with no visible rows cannot be answered at all, so a
+    pathologically short terminal gets a cramped prompt rather than an impossible
+    one.
+    """
+    height = (console or render.console()).size.height
+    return max(1, height - _PANEL_OVERHEAD)
+
+
 def _more(count: int, arrow: str) -> Text:
     """A dim "<n> more" marker, or a blank line holding that row's height.
 
@@ -180,7 +201,7 @@ def select(
     read: Reader = read_key,
     console: Console | None = None,
 ) -> str:
-    state = SelectState(choices, default=default)
+    state = SelectState(choices, default=default, viewport=viewport_for(console))
 
     def step(key: Key | None, _raw: str) -> bool:
         if key is Key.UP:
@@ -202,7 +223,7 @@ def checkbox(
     read: Reader = read_key,
     console: Console | None = None,
 ) -> list[str]:
-    state = CheckboxState(choices)
+    state = CheckboxState(choices, viewport=viewport_for(console))
 
     def step(key: Key | None, raw: str) -> bool:
         if key is Key.UP:

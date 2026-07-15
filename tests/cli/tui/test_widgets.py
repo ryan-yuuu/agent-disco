@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import pytest
 import readchar
+from rich.console import Console
 
 from calfcord.cli._prompts import Choice
 from calfcord.cli.tui import widgets
@@ -133,6 +134,36 @@ class TestSelect:
         out = paint(widgets.select_panel("Provider", SelectState(CHOICES)))
         assert "ctrl-c" in out
         assert "esc" not in out.lower()
+
+
+class TestViewportFollowsTheTerminal:
+    """The viewport is measured, not assumed.
+
+    A fixed 10 rows crops anyway in a short tmux pane — the exact failure the
+    viewport exists to prevent — and wastes two thirds of a tall terminal.
+    """
+
+    def _rows(self, count: int) -> list[Choice]:
+        return [Choice(f"v{i}", f"row_{i}") for i in range(count)]
+
+    def test_a_short_terminal_gets_a_small_viewport(self) -> None:
+        assert widgets.viewport_for(make_console(width=60)) > 0
+
+    def test_the_panel_fits_inside_a_short_terminal(self) -> None:
+        """The whole point: the frame must not be taller than the screen."""
+        console = Console(width=60, height=12)
+        state = SelectState(self._rows(40), viewport=widgets.viewport_for(console))
+        painted = paint(widgets.select_panel("Pick", state))
+        assert len(painted.rstrip("\n").splitlines()) <= 12
+
+    def test_a_tall_terminal_shows_more_rows_than_a_short_one(self) -> None:
+        tall = widgets.viewport_for(Console(width=60, height=50))
+        short = widgets.viewport_for(Console(width=60, height=12))
+        assert tall > short
+
+    def test_a_tiny_terminal_still_shows_at_least_one_row(self) -> None:
+        """Never zero or negative — a list with nothing visible is unanswerable."""
+        assert widgets.viewport_for(Console(width=60, height=3)) >= 1
 
 
 class TestScrolling:
