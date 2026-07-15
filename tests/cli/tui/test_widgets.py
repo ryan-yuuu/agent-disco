@@ -88,8 +88,8 @@ class TestSelect:
 
     def test_panel_marks_the_cursor_row_and_only_that_row(self) -> None:
         out = paint(widgets.select_panel("Provider", SelectState(CHOICES)))
-        assert "❯ Anthropic" in out
-        assert "❯ OpenAI" not in out
+        assert "❯ Anthropic" in out  # noqa: RUF001
+        assert "❯ OpenAI" not in out  # noqa: RUF001
 
     def test_panel_shows_the_message_and_every_label(self) -> None:
         out = paint(widgets.select_panel("Provider", SelectState(CHOICES)))
@@ -102,6 +102,34 @@ class TestSelect:
         out = paint(widgets.select_panel("Provider", SelectState(CHOICES)))
         assert "ctrl-c" in out
         assert "esc" not in out.lower()
+
+
+class TestMarkupIsNeverInterpreted:
+    """Operator-supplied text must never be parsed as Rich markup.
+
+    Agent names, tool descriptions, and MCP server names are arbitrary strings.
+    Rich eats any ``[...]`` in them as a style tag, so an agent named
+    ``[bot] ops`` would paint as `` ops`` — text silently deleted from a prompt
+    the operator is trying to answer. Every label and message therefore goes
+    through ``Text``, which does not parse markup.
+    """
+
+    def test_a_bracketed_choice_label_survives(self) -> None:
+        rows = [Choice("b", "[bot] ops"), Choice("p", "plain")]
+        assert "[bot] ops" in paint(widgets.select_panel("Agent", SelectState(rows)))
+
+    def test_a_bracketed_message_survives(self) -> None:
+        assert "Pick [one]" in paint(widgets.select_panel("Pick [one]", SelectState(CHOICES)))
+
+    def test_a_bracketed_checkbox_label_survives(self) -> None:
+        rows = [Choice("b", "[bot] ops", checked=True)]
+        assert "[bot] ops" in paint(widgets.checkbox_panel("Tools", CheckboxState(rows)))
+
+    def test_a_bracketed_text_default_survives(self) -> None:
+        assert "[bot] ops" in paint(widgets.text_panel("Name", "", default="[bot] ops"))
+
+    def test_a_bracketed_typed_value_survives(self) -> None:
+        assert "[x]" in paint(widgets.text_panel("Name", "[x]"))
 
 
 class TestCheckbox:

@@ -700,9 +700,10 @@ def _run_finish(
     The pause is a blocking, synchronous terminal read (:meth:`Prompter.pause` →
     ``input()``) — so it must never run inside a loop of ours, which it would block.
     Keeping it BETWEEN two independent ``asyncio.run`` calls (rather than awaited
-    inside one) satisfies that by construction; it also sidesteps the historical
+    inside one) satisfies that by construction. It historically also sidestepped a
     crash where an InquirerPy ``confirm`` here drove its own ``asyncio.run()`` from
-    inside our loop. Running the presence watch AFTER the pause (rather than
+    inside our loop; the Rich/readchar prompter owns no event loop, so only the
+    first reason still binds. Running the presence watch AFTER the pause (rather than
     concurrently) is safe for the reason :func:`_wait_for_agent_online` documents: it
     is a level-triggered mesh read backed by a bounded poll, so it detects the agent
     whenever registration lands — before or after the watch opens.

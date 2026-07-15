@@ -400,12 +400,20 @@ def _finish_create(
 
     The workspace probe and the "Start now?" confirm are both run HERE, on the
     sync side of the asyncio boundary, NOT inside ``asyncio.run(_start_now(...))``.
-    The prompter is the real ``InquirerPrompter`` in production, whose
-    ``.execute()`` calls ``asyncio.run()`` internally (via prompt_toolkit's
-    ``Application.prompt()``); nesting it inside our own ``asyncio.run`` raises
-    ``RuntimeError: asyncio.run() cannot be called from a running event loop`` —
-    the exact crash users hit at the end of ``disco agent create``. Architectural
-    rule (mirroring ``init``): ask everything first, THEN ``asyncio.run`` the work.
+
+    History, because the reason has changed: this used to be *mandatory*. The old
+    InquirerPy prompter's ``.execute()`` called ``asyncio.run()`` internally (via
+    prompt_toolkit's ``Application.prompt()``), so nesting a prompt inside our own
+    ``asyncio.run`` raised ``RuntimeError: asyncio.run() cannot be called from a
+    running event loop`` — the exact crash users hit at the end of
+    ``disco agent create``. The Rich/readchar prompter that replaced it owns no
+    event loop, so that constraint is gone.
+
+    The shape is kept anyway, now as a preference rather than a rule: asking
+    everything first, THEN doing the work, keeps the prompts out of the middle of
+    an orchestration and the failure modes separable. Don't reintroduce a prompt
+    inside the async section on the grounds that it "works now" — it would, but
+    the flow reads worse.
     """
     pc_binary_fn = pc_binary_fn or default_pc_binary
     # Dev run (``home is None`` — no install-scoped supervisor by design) degrades

@@ -40,7 +40,7 @@ all. Verified against current Rich docs, not memory.
 reader we own.** This is the central architectural consequence: "use Rich" settles
 rendering and says nothing about input.
 
-### 3.2 The asyncio landmine — the strongest argument in this document
+### 3.2 The asyncio landmine — real, but narrower than it first looks
 
 InquirerPy's `.execute()` internally calls `asyncio.run()` (via prompt_toolkit's
 `Application`). A prompt nested inside the CLI's own `asyncio.run()` therefore raises
@@ -49,17 +49,26 @@ real shipped crash** at the end of `disco agent create`.
 
 The codebase's fix is an unwritten architectural rule — *ask everything first, THEN
 `asyncio.run` the work* — and it is load-bearing structure today, visible at
-`agent_create.py:404-408`, `init.py:700-708`, and in `pause` using bare `input()`
-(`_prompts.py:118-122`) precisely to avoid driving a second loop. `init._run_finish`
-sandwiches `pause` *between* two separate `asyncio.run` calls for this reason alone.
+`agent_create.py`'s `_finish_create`, `init._run_finish`, and in `pause` using bare
+`input()` precisely to avoid driving a second loop.
 
-A **synchronous** key reader has no event loop, so it can be called from anywhere and
-this entire bug class disappears. A prompt_toolkit-based TUI would reintroduce it; a
-full-screen TUI (which owns a persistent loop) would *invert* the rule and force
-`_bring_online` / `_await_presence` / `_start_now` to be re-architected into awaitable
-prompts.
+**Correction — verified by probe; do not repeat the stronger claim.** It is *not* true
+that prompt_toolkit cannot run inside a live loop. `Application.run_async()` is an
+ordinary coroutine that never calls `asyncio.run()`, and both wrappers expose it:
+`InquirerPy.execute_async()` and `questionary.ask_async()` each run fine inside a
+running loop — no `nest_asyncio`, no worker thread. The crash is specific to the
+**synchronous** API, which is the one this codebase used.
 
-This is a correctness argument, not a cosmetic one.
+So the landmine is real, but it does not by itself disqualify prompt_toolkit. What
+disqualifies it is **fit**: taking the async escape hatch makes `Prompter` async, which
+turns ~32 call sites into `await`, makes all 7 flows async, and breaks the 8
+`isinstance(..., Prompter)` guards §3.3 says must not move — a large cost for a
+capability the current structure does not need.
+
+The honest benefit of a loop-free reader is therefore narrower, and still worth having:
+it removes a latent footgun (any future prompt reached from async code) at **zero**
+architectural cost, and lets the sync `Prompter` stay exactly as it is. A full-screen
+TUI, by contrast, owns a persistent loop and would *invert* the rule outright — see §5.
 
 ### 3.3 The `Prompter` seam is clean, complete — and pinned by tests
 
@@ -90,6 +99,22 @@ Both are solved by `console.print(msg, markup=False, highlight=False, soft_wrap=
 — `soft_wrap` disables wrapping and cropping, making Rich byte-identical to `print()`
 for plain lines while still allowing styling where we want it. This is the key that
 makes migrating the interleaved prints safe.
+
+### 3.4a InquirerPy is abandoned — an independent reason to move
+
+Last PyPI release **0.3.4, 2022-06-27**; last commit 2022-11-19. It carries an unfixed
+memory leak (kazhala/InquirerPy#88), has no viable fork (the leading one has 1 star),
+and its own README now points users at questionary. It works today, but nobody will fix
+it when prompt_toolkit next breaks it.
+
+This matters because it holds independently of the design argument: even a "do nothing
+visually" plan would eventually need to leave InquirerPy. Worth stating plainly in the
+ADR rather than resting the case on aesthetics.
+
+For calibration: **the whole category is low-velocity.** prompt_toolkit has no release
+in ~11 months, questionary likewise, and readchar itself had a 17-month gap before
+4.2.2. "Actively maintained" is not a useful tiebreaker here; readchar's claim is that
+it is *small, feature-complete and zero-dependency*, not that it is bustling.
 
 ### 3.5 Smaller facts
 

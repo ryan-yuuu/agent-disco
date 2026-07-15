@@ -12,6 +12,8 @@ every widget is testable by feeding a scripted key list with no TTY.
 
 from __future__ import annotations
 
+import errno
+import termios
 from enum import Enum, auto
 
 import readchar
@@ -69,7 +71,19 @@ def read_key() -> str:
     """Block for one keypress and return its raw string.
 
     Delegates to :func:`readchar.readkey`, which handles raw mode and escape
-    sequences and raises :exc:`KeyboardInterrupt` on Ctrl-C. This is the seam
-    widgets inject in tests.
+    sequences and raises :exc:`KeyboardInterrupt` on Ctrl-C (which the CLI entry
+    point maps to a clean "aborted." exit 130). This is the seam widgets inject
+    in tests.
+
+    The one translation: on a piped / CI stdin, ``termios.tcgetattr`` raises
+    :exc:`termios.error` — which, despite being an OS-level failure, does **not**
+    subclass :exc:`OSError`. Left raw it would sail past the entry point's
+    non-TTY handler and dump a traceback at an operator whose only mistake was
+    running an interactive command without a terminal. Re-raising it as an
+    ``OSError`` carrying ``ENOTTY`` routes it into that existing handler, which
+    prints "this command needs an interactive terminal" and exits 1.
     """
-    return readchar.readkey()
+    try:
+        return readchar.readkey()
+    except termios.error as exc:
+        raise OSError(errno.ENOTTY, "stdin is not an interactive terminal") from exc

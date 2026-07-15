@@ -19,6 +19,7 @@ of decisions rather than a graveyard of dead UI.
 from __future__ import annotations
 
 from collections.abc import Callable
+
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel

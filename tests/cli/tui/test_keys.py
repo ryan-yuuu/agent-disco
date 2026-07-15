@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import readchar
 
-from calfcord.cli.tui.keys import Key, resolve
+from calfcord.cli.tui.keys import Key, read_key, resolve
 
 
 @pytest.mark.parametrize(
@@ -59,3 +59,33 @@ def test_resolve_returns_none_for_a_printable_character() -> None:
 def test_enter_is_not_confused_with_ctrl_j() -> None:
     """Ctrl-J and LF share a byte; treating Enter as text would break every prompt."""
     assert resolve(readchar.key.CTRL_J) == Key.ENTER
+
+
+class TestReadKeyOnANonTerminal:
+    """A piped / CI stdin must produce the CLI's clean error, never a traceback.
+
+    ``termios.tcgetattr`` raises ``termios.error`` there, and ``termios.error``
+    does NOT subclass ``OSError`` — so raw, it would sail straight past ``main``'s
+    non-TTY handler and dump a traceback. Translating it to ``OSError`` is what
+    lets that existing handler print "needs an interactive terminal" and exit 1.
+    """
+
+    def test_translates_termios_error_to_oserror(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import termios
+
+        def _not_a_terminal() -> str:
+            raise termios.error(25, "Inappropriate ioctl for device")
+
+        monkeypatch.setattr(readchar, "readkey", _not_a_terminal)
+        with pytest.raises(OSError):
+            read_key()
+
+    def test_keeps_the_interrupt_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Ctrl-C must still surface as KeyboardInterrupt → the CLI's exit 130."""
+
+        def _interrupt() -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(readchar, "readkey", _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            read_key()

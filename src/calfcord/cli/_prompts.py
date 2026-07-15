@@ -6,12 +6,14 @@ never touch a prompting library directly. Instead they take a
 :class:`Prompter` — a small Protocol covering the six prompt shapes we use
 (single-select, free text, masked secret, yes/no, multi-select checkbox, and a
 press-Enter-to-continue pause). Tests inject a scripted fake; production injects
-:class:`InquirerPrompter`.
+:class:`~calfcord.cli.tui.prompter.RichPrompter`.
 
-:class:`InquirerPrompter` imports InquirerPy **lazily inside each method** so
-that merely importing this module (which the argparse entry point does at
-startup, and which tests do) never requires InquirerPy or a TTY. The import
-cost is paid only when a real prompt is actually shown.
+This module holds the *contract* only — the Protocol, :class:`Choice`, and the
+factory. The implementation lives in :mod:`calfcord.cli.tui`, imported lazily
+inside :func:`make_prompter` so that merely importing this module (which the
+argparse entry point does at startup, and which tests do) pulls in neither Rich
+nor readchar, and needs no TTY. That lazy import also breaks the cycle: the TUI
+imports :class:`Choice` from here.
 
 Both ``select`` and ``checkbox`` take a ``list[Choice]`` — a named
 ``(value, label, checked)`` triple — rather than two unnamed tuple shapes, so a
@@ -78,74 +80,14 @@ class Prompter(Protocol):
         ...
 
 
-class InquirerPrompter:
-    """Real :class:`Prompter` backed by InquirerPy.
-
-    InquirerPy is imported inside each method on purpose — see the module
-    docstring. Each method maps one-to-one onto an ``InquirerPy.inquirer``
-    constructor and immediately ``.execute()``s it. InquirerPy's own ``Choice``
-    is imported as ``InquirerChoice`` to avoid clashing with our :class:`Choice`.
-    """
-
-    def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
-        from InquirerPy import inquirer
-        from InquirerPy.base.control import Choice as InquirerChoice
-
-        return inquirer.select(
-            message=message,
-            choices=[InquirerChoice(value=c.value, name=c.label) for c in choices],
-            default=default,
-        ).execute()
-
-    def text(self, message: str, *, default: str = "") -> str:
-        from InquirerPy import inquirer
-
-        return inquirer.text(message=message, default=default).execute()
-
-    def secret(self, message: str) -> str:
-        from InquirerPy import inquirer
-
-        # transformer hides the typed length from the post-answer echo; an empty
-        # answer (operator skips) must come back as "" so callers can keep an
-        # existing value rather than clobber it.
-        return inquirer.secret(message=message, transformer=lambda _: "******").execute()
-
-    def confirm(self, message: str, *, default: bool = False) -> bool:
-        from InquirerPy import inquirer
-
-        return inquirer.confirm(message=message, default=default).execute()
-
-    def pause(self, message: str) -> None:
-        # A plain blocking ``input()`` — NOT an InquirerPy widget — is deliberate: a
-        # press-Enter gate needs no prompt_toolkit ``Application.run()`` (→ its own
-        # ``asyncio.run()``), so it cannot raise "asyncio.run() cannot be called from
-        # a running event loop" the way ``confirm`` could. The typed line is discarded.
-        try:
-            input(message)
-        except EOFError:
-            # No stdin to read (Ctrl-D, or a closed / piped non-TTY): treat the gate
-            # as acknowledged and continue. This is a discarded-answer pause, and the
-            # finish flow must never crash *after* the workspace is already up — the
-            # same never-crash-once-live contract ``_await_presence`` upholds.
-            print()
-
-    def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
-        from InquirerPy import inquirer
-        from InquirerPy.base.control import Choice as InquirerChoice
-
-        # ``enabled`` pre-checks a row; ``.execute()`` on a checkbox returns the
-        # list of selected ``Choice.value``s — i.e. our :attr:`Choice.value`.
-        return inquirer.checkbox(
-            message=message,
-            choices=[InquirerChoice(value=c.value, name=c.label, enabled=c.checked) for c in choices],
-            instruction=instruction,
-        ).execute()
-
-
 def make_prompter() -> Prompter:
-    """Return the production prompter.
+    """Return the production prompter — the Rich TUI.
 
-    A factory (rather than instantiating at import time) gives both interactive
-    flows / future flows a single place to swap the backend if needed.
+    A factory (rather than instantiating at import time) keeps the heavy imports
+    off the argparse startup path, gives every flow one place to swap the backend,
+    and breaks the import cycle with :mod:`calfcord.cli.tui`, which depends on
+    :class:`Choice` from this module.
     """
-    return InquirerPrompter()
+    from calfcord.cli.tui.prompter import RichPrompter
+
+    return RichPrompter()

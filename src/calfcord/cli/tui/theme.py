@@ -27,7 +27,11 @@ TITLE = "bold"
 ERROR = "red"
 
 # --- glyphs -----------------------------------------------------------------
-POINTER = "❯"
+# The pointer is a heavy right-pointing angle ORNAMENT, not a plain greater-than.
+# Ruff flags it as confusable; the distinction is the point. A greater-than reads
+# as a quote marker or a shell prompt, where the ornament reads as a cursor — and
+# it is the one glyph the whole selection language rests on.
+POINTER = "❯"  # noqa: RUF001
 CHECK_ON = "◉"
 CHECK_OFF = "○"
 TICK = "✓"
