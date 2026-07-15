@@ -5,11 +5,26 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
 
-from calfcord.bridge.history import HISTORY_MAX_JSON_BYTES
+HISTORY_MAX_JSON_BYTES: Final[int] = 800_000
+"""Default ceiling on the serialized size of an outgoing ``message_history``.
+
+Sized against the envelope the history rides in: aiokafka's default
+``max_request_size`` is 1 MiB, and the envelope also carries the current prompt,
+``deps`` and headers — so this leaves ~250 KB of headroom for everything that is
+not history. See ADR 0018 for what this does and does not guarantee."""
+
+HISTORY_MIN_JSON_BYTES: Final[int] = 10_000
+"""Floor for the configurable budget.
+
+Not a technical limit — a footgun guard. A single minimal message serializes to
+~200 bytes, so any budget in the low hundreds silently empties EVERY history and
+turns every agent amnesiac, one WARNING at a time. ``> 0`` accepts all of those.
+This floor converts that whole class of misconfiguration into a loud startup
+:class:`SettingsConfigError`."""
 
 _SETTINGS_ENV_VAR = "CALFCORD_SETTINGS"
 _HOME_ENV_VAR = "CALFCORD_HOME"
@@ -34,7 +49,9 @@ class MessageHistorySettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_json_bytes: StrictInt = Field(default=HISTORY_MAX_JSON_BYTES, gt=0)
+    max_json_bytes: StrictInt = Field(
+        default=HISTORY_MAX_JSON_BYTES, ge=HISTORY_MIN_JSON_BYTES
+    )
     """Ceiling on the serialized history; oldest turns are dropped to fit. Lower
     it when the envelope's non-history terms are unusually large, raise it when
     the broker's ``max_request_size`` has been raised to match."""

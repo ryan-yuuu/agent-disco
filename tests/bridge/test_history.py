@@ -31,6 +31,7 @@ from calfkit._vendor.pydantic_ai.messages import (
     ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
+    SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -39,13 +40,13 @@ from calfkit._vendor.pydantic_ai.messages import (
 
 from calfcord.bridge.history import (
     CLEAR_MARKER_TEXT,
-    HISTORY_MAX_JSON_BYTES,
     ChannelHistoryFetcher,
     HistoryRecord,
-    _bound_history_bytes,
+    _trim_history_to_budget,
     build_message_history,
     is_clear_marker,
 )
+from calfcord.bridge.settings import HISTORY_MAX_JSON_BYTES
 
 
 def _record(
@@ -270,44 +271,68 @@ def _json_len(messages: list[ModelMessage]) -> int:
     return len(ModelMessagesTypeAdapter.dump_json(messages))
 
 
-class TestBoundHistoryBytes:
-    """The serialized-size bound applied to a built history before it goes out.
+class TestTrimHistoryToBudget:
+    """The serialized-size trim applied to a built history before it goes out.
 
-    Budgets in these tests are derived from :func:`_json_len` of the exact slice
-    that should survive, so they pin the boundary rather than a magic number.
+    Budgets are derived from :func:`_json_len` of the exact slice that should
+    survive, so they pin the real boundary rather than a magic number — and they
+    cross-check the implementation's additive cost model against a whole-list
+    dump, which is the ground truth the bound actually has to satisfy.
     """
 
     def test_empty_input(self) -> None:
-        assert _bound_history_bytes([], max_bytes=HISTORY_MAX_JSON_BYTES) == []
+        assert _trim_history_to_budget([], max_json_bytes=HISTORY_MAX_JSON_BYTES) == []
 
     def test_under_budget_is_unchanged(self) -> None:
         msgs = [_user("how do I X?"), _agent_text("here's how")]
-        assert _bound_history_bytes(msgs, max_bytes=HISTORY_MAX_JSON_BYTES) == msgs
+        assert _trim_history_to_budget(msgs, max_json_bytes=HISTORY_MAX_JSON_BYTES) == msgs
 
     def test_exactly_at_budget_is_unchanged(self) -> None:
         """The bound is inclusive: a history whose JSON is exactly the budget
         fits and must not lose its oldest turn."""
         msgs = [_user("how do I X?"), _agent_text("here's how")]
-        assert _bound_history_bytes(msgs, max_bytes=_json_len(msgs)) == msgs
+        assert _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs)) == msgs
+
+    def test_one_byte_under_the_exact_fit_sheds_the_oldest(self) -> None:
+        """The inclusive bound's other side.
+
+        Probing only the "fits" side lets an implementation that under-counts by
+        a byte per message (e.g. forgetting the ``,`` separators) pass every
+        other test while shipping payloads OVER budget — the exact envelope
+        rejection this trim exists to prevent.
+        """
+        msgs = [_user("oldest"), _user("middle"), _user("newest")]
+        out = _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs) - 1)
+        assert out == msgs[1:]
 
     def test_drops_oldest_first(self) -> None:
         """Over budget sheds from the OLD end — the newest turns are the ones
         worth keeping."""
         msgs = [_user("oldest"), _user("middle"), _user("newest")]
-        out = _bound_history_bytes(msgs, max_bytes=_json_len(msgs[1:]))
+        out = _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs[1:]))
         assert out == msgs[1:]
 
     def test_output_never_exceeds_budget(self) -> None:
         msgs = [_user(f"turn {i}" * 20) for i in range(10)]
         budget = _json_len(msgs) // 3
-        out = _bound_history_bytes(msgs, max_bytes=budget)
+        out = _trim_history_to_budget(msgs, max_json_bytes=budget)
         assert _json_len(out) <= budget
         assert out  # a budget this size still admits several turns
+
+    def test_budget_is_bytes_not_characters(self) -> None:
+        """``dump_json`` emits raw UTF-8, not ``\\u`` escapes, so one CJK or
+        emoji character costs 3-4 bytes. Discord traffic is exactly where that
+        bites: a char-counting implementation overflows the budget on the
+        messages most likely to be large."""
+        msgs = [_user("日本語のテキスト🎉" * 30) for _ in range(4)]
+        budget = _json_len(msgs) // 2
+        out = _trim_history_to_budget(msgs, max_json_bytes=budget)
+        assert _json_len(out) <= budget
 
     def test_single_oversized_message_yields_empty(self) -> None:
         """One turn bigger than the whole budget cannot be shrunk by dropping,
         so the history empties rather than going out over budget."""
-        assert _bound_history_bytes([_user("x" * 5000)], max_bytes=200) == []
+        assert _trim_history_to_budget([_user("x" * 5000)], max_json_bytes=200) == []
 
     def test_head_repair_drops_orphaned_tool_return(self) -> None:
         """A cut landing INSIDE a replay delta must not leave the delta's
@@ -326,7 +351,7 @@ class TestBoundHistoryBytes:
             _user("q2"),
         ]
         # A budget admitting [tool_return, a1, q2] but NOT the tool_call ahead of it.
-        out = _bound_history_bytes(msgs, max_bytes=_json_len(msgs[2:]))
+        out = _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs[2:]))
         assert out == [msgs[4]]
 
     def test_head_repair_drops_leading_response(self) -> None:
@@ -334,19 +359,43 @@ class TestBoundHistoryBytes:
         whose first message is ``assistant`` (the same rule
         :func:`build_message_history` enforces)."""
         msgs = [_user("q1"), _agent_text("a1"), _user("q2")]
-        out = _bound_history_bytes(msgs, max_bytes=_json_len(msgs[1:]))
+        out = _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs[1:]))
         assert out == [msgs[2]]
 
     def test_head_repair_can_empty_the_history(self) -> None:
         """If nothing user-authored survives the cut, the result is empty rather
         than a head the provider would reject."""
         msgs = [_user("q1"), _tool_call(), _tool_return()]
-        assert _bound_history_bytes(msgs, max_bytes=_json_len(msgs[2:])) == []
+        assert _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs[2:])) == []
+
+    def test_system_plus_user_head_is_a_legal_head(self) -> None:
+        """A replay delta is deserialized from the transcript store, so it can
+        carry pydantic-ai's canonical opening request — ``[SystemPromptPart,
+        UserPromptPart]``. That IS a legal head: the rule matches on ANY
+        UserPromptPart, not on ``parts[0]``."""
+        sys_user = ModelRequest(
+            parts=[
+                SystemPromptPart(content="you are a bot"),
+                UserPromptPart(content="q1", name="ryan"),
+            ]
+        )
+        msgs = [_agent_text("pad" * 50), sys_user]
+        out = _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs[1:]))
+        assert out == msgs[1:]
+
+    def test_repairs_the_head_even_when_nothing_is_over_budget(self) -> None:
+        """One postcondition, not two: a history that fits still comes back with
+        a legal head. (Reachable only via direct calls — the provider builds
+        with an already-legal head — but the contract must not depend on that.)
+        """
+        msgs = [_agent_text("a1"), _user("q1")]
+        out = _trim_history_to_budget(msgs, max_json_bytes=HISTORY_MAX_JSON_BYTES)
+        assert out == [msgs[1]]
 
     def test_does_not_mutate_input(self) -> None:
         msgs = [_user("oldest"), _user("newest")]
         before = list(msgs)
-        _bound_history_bytes(msgs, max_bytes=_json_len(msgs[1:]))
+        _trim_history_to_budget(msgs, max_json_bytes=_json_len(msgs[1:]))
         assert msgs == before
 
 

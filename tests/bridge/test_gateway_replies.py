@@ -34,7 +34,6 @@ import pytest
 from pydantic import SecretStr
 
 from calfcord.bridge.gateway import DiscordIngressGateway
-from calfcord.bridge.history import HISTORY_MAX_JSON_BYTES
 from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.normalizer import MessageNormalizer
 from calfcord.bridge.settings import (
@@ -324,11 +323,6 @@ class TestMessageHistoryBudgetWiring:
         )
 
         assert gateway._handler._history._max_json_bytes == 12_345
-
-    def test_budget_defaults_when_settings_omit_the_block(self) -> None:
-        gateway = _gateway(bridge_settings=BridgeSettings())
-
-        assert gateway._handler._history._max_json_bytes == HISTORY_MAX_JSON_BYTES
 
 
 class TestNewThreadCommand:

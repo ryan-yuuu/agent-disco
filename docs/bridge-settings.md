@@ -98,11 +98,15 @@ Then restart the bridge:
 disco bridge restart
 ```
 
-The value must be a JSON integer greater than zero. Omit the block to keep the
+The value must be a JSON integer of at least `10000`. The bridge refuses to
+start below that: a budget too small to hold one message would empty every
+history and leave every agent with no context. Omit the block to keep the
 default — an existing `settings.json` needs no change.
 
-When a history is trimmed, the bridge logs a warning naming how many messages
-were sent and how many were dropped:
+When a history is trimmed, the bridge logs a warning naming the channel and how
+many messages were sent. If a history is emptied outright — one message alone
+exceeded the whole budget — it logs an error instead, because every reply in
+that channel then runs with no context:
 
 ```bash
 disco logs bridge
@@ -144,4 +148,4 @@ disco logs bridge
 | `$CALFCORD_HOME/config/settings.json` | Default native install location. |
 | `./settings.json` | Development fallback when neither `CALFCORD_SETTINGS` nor `CALFCORD_HOME` is set. |
 | `sticky_replies.enabled` | `true` by default. When `false`, ambient messages do not route to sticky owners and successful replies do not update sticky owner state. |
-| `message_history.max_json_bytes` | `800000` by default. Ceiling in bytes on the serialized message history sent to an agent. The bridge drops the oldest messages until the history fits. Must be an integer greater than zero. |
+| `message_history.max_json_bytes` | `800000` by default. Ceiling in bytes on the serialized message history sent to an agent. The bridge drops the oldest messages until the history fits. Must be an integer of at least `10000`. |

@@ -5,8 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from calfcord.bridge.history import HISTORY_MAX_JSON_BYTES
-from calfcord.bridge.settings import SettingsConfigError, load_settings, resolve_settings_path
+from calfcord.bridge.settings import (
+    HISTORY_MAX_JSON_BYTES,
+    HISTORY_MIN_JSON_BYTES,
+    SettingsConfigError,
+    load_settings,
+    resolve_settings_path,
+)
 
 
 def test_resolve_settings_path_honors_explicit_override(tmp_path: Path) -> None:
@@ -59,19 +64,33 @@ def test_load_settings_reads_message_history_budget(tmp_path: Path) -> None:
     assert settings.message_history.max_json_bytes == 250_000
 
 
-def test_load_settings_rejects_non_positive_message_history_budget(tmp_path: Path) -> None:
-    """A zero/negative budget would silently empty every history — reject it at
-    load rather than degrade every turn.
+@pytest.mark.parametrize("budget", [0, -1, 2, HISTORY_MIN_JSON_BYTES - 1])
+def test_load_settings_rejects_budget_below_the_floor(tmp_path: Path, budget: int) -> None:
+    """A budget too small to hold a single message silently empties EVERY
+    history and makes every agent amnesiac — one warning per turn, forever.
 
-    Matches the CONSTRAINT error, not the generic wrapper: an ``extra="forbid"``
-    rejection of an unknown ``message_history`` key would otherwise satisfy this
-    test without the field existing at all.
+    ``> 0`` accepts most of that class (a minimal message is ~200 bytes), so the
+    floor is what turns it into a loud startup failure. Matches the CONSTRAINT
+    error, not the generic wrapper: an ``extra="forbid"`` rejection of an unknown
+    key would otherwise satisfy this without the field existing at all.
     """
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"message_history": {"max_json_bytes": 0}}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"message_history": {"max_json_bytes": budget}}), encoding="utf-8"
+    )
 
-    with pytest.raises(SettingsConfigError, match="greater than 0"):
+    with pytest.raises(SettingsConfigError, match="greater than or equal to"):
         load_settings(path)
+
+
+def test_load_settings_accepts_the_floor_exactly(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps({"message_history": {"max_json_bytes": HISTORY_MIN_JSON_BYTES}}),
+        encoding="utf-8",
+    )
+
+    assert load_settings(path).message_history.max_json_bytes == HISTORY_MIN_JSON_BYTES
 
 
 def test_load_settings_rejects_non_int_message_history_budget(tmp_path: Path) -> None:

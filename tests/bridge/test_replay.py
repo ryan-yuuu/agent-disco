@@ -26,9 +26,11 @@ Coverage:
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from calfkit._vendor.pydantic_ai.messages import (
     BuiltinToolReturnPart,
     ModelMessage,
@@ -42,7 +44,6 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 
 from calfcord.bridge.history import (
-    HISTORY_MAX_JSON_BYTES,
     REPLAY_TOOL_RETURN_MAX_CHARS,
     DiscordHistoryProvider,
     HistoryRecord,
@@ -372,13 +373,55 @@ class TestDiscordHistoryProvider:
         assert isinstance(message_history[0], ModelRequest)
         assert message_history[0].parts[0].content == "newest question"
 
-    async def test_budget_defaults_to_the_module_constant(self) -> None:
-        """An unconfigured provider uses the shipped default, so a deployment
-        with no ``message_history`` settings block is still bounded."""
+    async def test_trim_is_logged_with_the_channel_and_the_knob(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The warning is the ONLY artifact of a lossy turn, so it has to carry
+        the channel (an operator's join to "the agent forgot what we said") and
+        name the setting that fixes it."""
+        records = [
+            _record(message_id=10, content="x" * 4000, author_display_name="ryan"),
+            _record(message_id=25, content="newest", author_display_name="ryan"),
+        ]
+        provider = DiscordHistoryProvider(
+            _fake_fetcher(records), _fake_store({}), max_json_bytes=1000
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await provider.message_history(_req(message_id=30, source_channel_id=6789))
+
+        assert "channel_id=6789" in caplog.text
+        assert "1 of 2 messages sent" in caplog.text
+        assert "message_history.max_json_bytes" in caplog.text
+
+    async def test_total_context_loss_is_logged_at_error_not_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An empty history is not a trim — every reply in the channel is now
+        context-free. It must not read as routine shedding."""
+        records = [_record(message_id=10, content="x" * 4000, author_display_name="ryan")]
+        provider = DiscordHistoryProvider(
+            _fake_fetcher(records), _fake_store({}), max_json_bytes=1000
+        )
+
+        with caplog.at_level(logging.WARNING):
+            history = await provider.message_history(_req(message_id=30))
+
+        assert history == []
+        assert [r.levelno for r in caplog.records] == [logging.ERROR]
+        assert "EMPTY" in caplog.text
+
+    async def test_history_within_budget_is_not_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No cry-wolf on the overwhelmingly common path."""
         records = [_record(message_id=10, content="hi", author_display_name="ryan")]
         provider = DiscordHistoryProvider(_fake_fetcher(records), _fake_store({}))
 
-        assert provider._max_json_bytes == HISTORY_MAX_JSON_BYTES
+        with caplog.at_level(logging.WARNING):
+            await provider.message_history(_req(message_id=30))
+
+        assert caplog.records == []
 
     async def test_fetch_is_anchored_on_the_request(self) -> None:
         """The provider fetches ``source_channel_id`` and anchors ``before=`` on
