@@ -194,6 +194,38 @@ class TestViewportFollowsTheTerminal:
         console.print(widgets.select_panel("Pick", state))
         assert len(console.export_text().rstrip("\n").splitlines()) <= 12
 
+    def test_short_terminal_falls_back_to_one_compact_visible_row(self) -> None:
+        console = Console(width=20, height=5, record=True)
+        rows = [Choice(str(i), "a label much too long for this terminal") for i in range(20)]
+        state = SelectState(rows, viewport=20)
+        compact = widgets.fit_viewport(
+            state,
+            console,
+            lambda compact: widgets.select_panel("Pick", state, compact=compact),
+        )
+        console.print(widgets.select_panel("Pick", state, compact=compact))
+        output = console.export_text().rstrip("\n").splitlines()
+        assert compact is True
+        assert len(output) <= 5
+        assert "❯" in "\n".join(output)  # noqa: RUF001
+
+    def test_short_checkbox_drops_wrapping_instruction_but_keeps_active_row(self) -> None:
+        console = Console(width=20, height=5, record=True)
+        rows = [Choice(str(i), f"tool {i}") for i in range(20)]
+        state = CheckboxState(rows, viewport=20)
+        instruction = "A long optional instruction that cannot fit"
+        compact = widgets.fit_viewport(
+            state,
+            console,
+            lambda compact: widgets.checkbox_panel("Tools", state, instruction=instruction, compact=compact),
+        )
+        console.print(widgets.checkbox_panel("Tools", state, instruction=instruction, compact=compact))
+        output = console.export_text().rstrip("\n").splitlines()
+        assert compact is True
+        assert len(output) <= 5
+        assert instruction not in "\n".join(output)
+        assert "❯" in "\n".join(output)  # noqa: RUF001
+
 
 class TestScrolling:
     """A long list paints only its window, and says what it is hiding."""

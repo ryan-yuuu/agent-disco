@@ -1,6 +1,6 @@
 # Interactive CLI → Rich TUI migration
 
-**Status:** Design proposal — no code written yet.
+**Status:** Implemented; ADR-0019 records the final architecture and later hardening.
 **Scope:** The **7 interactive `disco` commands** only. Non-interactive commands
 (`doctor`, `agent list/show`, `status`, `logs`, `explain`, `deploy`, lifecycle verbs)
 are explicitly out of scope and keep their current plain-text output.
@@ -198,7 +198,7 @@ Only `make_prompter()`'s return value changes.
 src/calfcord/cli/tui/
   __init__.py    public surface
   theme.py       colors + glyphs — one source of truth
-  keys.py        Key enum, read_key(), raw_mode() context manager
+  keys.py        Key enum, read_key(), and raw-sequence resolution
   state.py       pure SelectState / CheckboxState reducers (move, toggle, filter)
   line_input.py  prompt_toolkit single-line editor and matching terminal frame
   widgets.py     Rich/readchar menus; text and secret delegation

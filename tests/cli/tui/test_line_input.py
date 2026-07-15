@@ -28,6 +28,14 @@ def test_frame_truncates_a_long_title_without_breaking_its_border(monkeypatch: p
     assert framed.endswith("╮")
 
 
+def test_narrow_terminal_uses_its_real_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(line_input, "_width", lambda: 10)
+    prompt = line_input._message("Agent description")()[0][1]
+    assert all(get_cwidth(row) <= 9 for row in prompt.splitlines())
+    assert line_input._rprompt() == []
+    assert get_cwidth(line_input._toolbar()[0][1]) <= 9
+
+
 def test_missing_terminal_is_reported_as_enotty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     with pytest.raises(OSError) as caught:

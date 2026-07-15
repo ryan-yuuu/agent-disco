@@ -37,17 +37,17 @@ from calfcord.cli.tui.state import CheckboxState, ListState, SelectState
 Reader = Callable[[], str]
 
 
-def _panel(message: str, body: RenderableType, hint: str) -> Panel:
+def _panel(message: str, body: RenderableType, hint: str, *, compact: bool = False) -> Panel:
     """The shared frame: the question as the title, the hint in the bottom border."""
     return Panel(
         body,
         title=Text(message, style=theme.TITLE),
         title_align="left",
-        subtitle=Text(hint, style=theme.MUTED),
+        subtitle=None if compact else Text(hint, style=theme.MUTED),
         subtitle_align="left",
         border_style=theme.BORDER,
         box=theme.BOX,
-        padding=(0, 1),
+        padding=(0, 0 if compact else 1),
     )
 
 
@@ -85,7 +85,7 @@ def _more(count: int, arrow: str) -> Text:
     return Text(f"  {arrow} {count} more" if count else "", style=theme.MUTED)
 
 
-def _rows(state: ListState, marker: Callable[[Choice], str]) -> Group:
+def _rows(state: ListState, marker: Callable[[Choice], str], *, compact: bool = False) -> Group:
     """Render the visible window of the list, dimming all but the cursor row.
 
     Only ``state.window()`` is painted, because Live CROPS anything taller than
@@ -109,7 +109,7 @@ def _rows(state: ListState, marker: Callable[[Choice], str]) -> Group:
     # An honest count of what is off-screen. Without it a scrolled list is
     # indistinguishable from a complete one, and an operator would never learn
     # that the rows they want exist at all.
-    if state.scrolled:
+    if state.scrolled and not compact:
         lines.append(_more(start, "↑"))
 
     for index in range(start, stop):
@@ -123,18 +123,26 @@ def _rows(state: ListState, marker: Callable[[Choice], str]) -> Group:
         if mark:
             text.append(f"{mark} ")
         text.append(choice.label)
+        if compact:
+            text.no_wrap = True
+            text.overflow = "ellipsis"
         lines.append(text)
 
-    if state.scrolled:
+    if state.scrolled and not compact:
         lines.append(_more(len(state.choices) - stop, "↓"))
     return Group(*lines)
 
 
-def select_panel(message: str, state: SelectState) -> Panel:
-    return _panel(message, _rows(state, lambda _c: ""), theme.HINT_SELECT)
+def select_panel(message: str, state: SelectState, *, compact: bool = False) -> Panel:
+    return _panel(
+        message,
+        _rows(state, lambda _c: "", compact=compact),
+        theme.HINT_SELECT,
+        compact=compact,
+    )
 
 
-def checkbox_panel(message: str, state: CheckboxState, *, instruction: str = "") -> Panel:
+def checkbox_panel(message: str, state: CheckboxState, *, instruction: str = "", compact: bool = False) -> Panel:
     """The multi-select frame.
 
     ``instruction`` is caller-supplied guidance rendered above the rows. It is
@@ -143,28 +151,33 @@ def checkbox_panel(message: str, state: CheckboxState, *, instruction: str = "")
     passes guidance and has no way to learn it went nowhere. The key mechanics
     are NOT its job — the hint in the bottom border states those for every list.
     """
-    rows = _rows(state, lambda c: theme.CHECK_ON if state.is_checked(c.value) else theme.CHECK_OFF)
-    body = Group(Text(instruction, style=theme.MUTED), rows) if instruction else rows
-    return _panel(message, body, theme.HINT_CHECKBOX)
+    rows = _rows(
+        state,
+        lambda c: theme.CHECK_ON if state.is_checked(c.value) else theme.CHECK_OFF,
+        compact=compact,
+    )
+    body = Group(Text(instruction, style=theme.MUTED), rows) if instruction and not compact else rows
+    return _panel(message, body, theme.HINT_CHECKBOX, compact=compact)
 
 
 def fit_viewport(
     state: ListState,
     console: Console | None,
-    build: Callable[[], RenderableType] | None = None,
-) -> None:
-    """Fit a list by rendered lines, recalculating after every terminal resize."""
+    build: Callable[[bool], RenderableType] | None = None,
+) -> bool:
+    """Fit by rendered lines; return whether the one-row compact fallback is needed."""
     out = render.target(console)
     capacity = min(len(state.choices), viewport_for(out))
     measure = Console(width=out.size.width, height=10_000, color_system=None)
-    build = build or (lambda: select_panel("", state))
+    build = build or (lambda compact: select_panel("", state, compact=compact))
 
     while capacity > 1:
         state.resize(capacity)
-        if len(measure.render_lines(build())) <= out.size.height:
-            return
+        if len(measure.render_lines(build(False))) <= out.size.height:
+            return False
         capacity -= 1
     state.resize(1)
+    return len(measure.render_lines(build(False))) > out.size.height
 
 
 def confirm_panel(message: str, *, default: bool) -> Panel:
@@ -231,11 +244,11 @@ def select(
         return _navigate(state, key)
 
     def build() -> Panel:
-        def panel() -> Panel:
-            return select_panel(message, state)
+        def panel(compact: bool) -> Panel:
+            return select_panel(message, state, compact=compact)
 
-        fit_viewport(state, console, panel)
-        return panel()
+        compact = fit_viewport(state, console, panel)
+        return panel(compact)
 
     _loop(build, step, read=read, console=console)
     render.answer(message, state.choices[state.cursor].label, console=console)
@@ -262,11 +275,11 @@ def checkbox(
         return _navigate(state, key)
 
     def build() -> Panel:
-        def panel() -> Panel:
-            return checkbox_panel(message, state, instruction=instruction)
+        def panel(compact: bool) -> Panel:
+            return checkbox_panel(message, state, instruction=instruction, compact=compact)
 
-        fit_viewport(state, console, panel)
-        return panel()
+        compact = fit_viewport(state, console, panel)
+        return panel(compact)
 
     _loop(build, step, read=read, console=console)
     render.answer(message, f"{len(state.selected)} selected", console=console)

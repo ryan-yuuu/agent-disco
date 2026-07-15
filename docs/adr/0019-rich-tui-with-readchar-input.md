@@ -125,8 +125,16 @@ the buffer returns `""`. This restores conventional line-editor semantics and re
 the ambiguity between displayed state and editable state.
 
 **Secret transcripts reveal neither content nor length.** The active field is masked
-by prompt_toolkit. After submission the permanent Rich transcript says only `provided`
-or `kept current`; a bullet count would leak credential length.
+by prompt_toolkit using conventional one-bullet-per-character feedback. After submission
+the permanent Rich transcript says only `provided` or `kept current`; retaining that
+bullet count in scrollback would leak credential length.
+
+**Pathologically small terminals use compact fallbacks.** Below 16 columns, text fields
+drop the decorative right border and use a truncated title plus plain input marker.
+List prompts first reduce their viewport by measured rendered height; if even one normal
+row cannot fit, they preserve a one-row rounded panel while omitting the optional
+instruction, scroll counters, and footer hint and ellipsizing the active label. Normal
+terminal dimensions retain the complete panel design.
 
 **Palette is monochrome by decision** (`theme.py`): weight and dimming carry all
 hierarchy, no accent hue. An off-white accent is only off-white on a dark terminal;

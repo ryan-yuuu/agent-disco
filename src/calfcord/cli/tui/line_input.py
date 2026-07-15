@@ -44,7 +44,7 @@ _STYLE = Style.from_dict(
 
 def _width() -> int:
     """Current terminal width while prompt_toolkit owns the application."""
-    return max(20, get_app().output.get_size().columns)
+    return max(1, get_app().output.get_size().columns)
 
 
 def _truncate(text: str, width: int) -> str:
@@ -75,6 +75,9 @@ def _framed_line(left: str, content: str, right: str, *, reserved: int = 1) -> s
 
 def _message(message: str) -> Callable[[], StyleAndTextTuples]:
     def render() -> StyleAndTextTuples:
+        if _width() < 16:
+            title = _truncate(message, max(1, _width() - 1))
+            return [("class:title", f"{title}\n> ")]
         # The input row's right prompt reserves two columns; use the same inner
         # width above it so both vertical edges align.
         top = _framed_line("╭─ ", f"{message} ", "╮", reserved=3)
@@ -83,8 +86,14 @@ def _message(message: str) -> Callable[[], StyleAndTextTuples]:
     return render
 
 
+def _rprompt() -> StyleAndTextTuples:
+    return [] if _width() < 16 else [("class:border", " │")]
+
+
 def _toolbar() -> StyleAndTextTuples:
     hint = theme.HINT_TEXT
+    if _width() < 16:
+        return [("class:hint", _truncate(hint, max(1, _width() - 1)))]
     line = _framed_line("╰─ ", f"{hint} ", "╯")
     return [("class:hint", line)]
 
@@ -117,7 +126,7 @@ class PromptToolkitLineInput:
         processors = [PasswordProcessor(char="•")] if secret else None
         session: PromptSession[str] = PromptSession(
             message=_message(message),
-            rprompt=[("class:border", " │")],
+            rprompt=_rprompt,
             bottom_toolbar=_toolbar,
             style=_STYLE,
             input_processors=processors,
