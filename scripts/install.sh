@@ -657,23 +657,15 @@ path_has_dir() {
 }
 
 # Symlink the `disco` shim into the first candidate dir (args, in preference
-# order) that the caller's shell ALREADY searches and that we can write.
+# order) that the caller's shell ALREADY searches and that we can write. A child
+# process cannot mutate its parent's PATH, but PATH resolves at *lookup* time —
+# so this is the only way to make `disco` work in the terminal that ran the
+# installer. Nothing qualifying is fine: the profile hooks below carry it
+# instead. See docs/adr/0018 for why this over sudo / a package manager.
 #
-# This is the only way a `curl | bash` installer can make its command usable in
-# the CURRENT terminal: the installer is a child process, so it can never mutate
-# its parent's PATH — but PATH is resolved at *lookup* time, so a file appearing
-# in an already-listed dir is found by the running shell with no env change and
-# no `rehash`. When nothing qualifies (a stock macOS has no writable dir on
-# PATH), this is a no-op and the profile hooks below carry the install instead.
-#
-# Best-effort throughout: every rejection just leaves SYMLINK_CREATED empty. We
-# never escalate to sudo — a piped installer has no stdin to prompt on.
-#
-# The `-x` / `command -v` checks below assert "the shell that ran the installer
-# can run this", so they are only as true as that shell's identity. Under a
-# `curl | sudo bash` they run as root (whose $HOME sudo may reset to /root),
-# which is not the operator's shell — an unsupported way to install this, and
-# the reason nothing here tries to earn root in the first place.
+# Best-effort throughout; every rejection just leaves SYMLINK_CREATED empty. No
+# sudo — a piped installer has no stdin to prompt on, and the checks below would
+# assert the wrong identity under a `curl | sudo bash` anyway.
 link_onto_path() {
   local candidate link resolved
   for candidate in "$@"; do
@@ -692,10 +684,9 @@ link_onto_path() {
       [ "$(readlink "$link" 2>/dev/null || true)" = "$SHIM_DIR/disco" ] || continue
     fi
     ln -sfn "$SHIM_DIR/disco" "$link" 2>/dev/null || continue
-    # Claiming READY means "typing `disco` runs THIS", which is a stronger fact
-    # than "ln succeeded" — and the only one the operator cares about. A link
-    # that resolves to nothing (a relative CALFCORD_HOME makes the target
-    # relative to the LINK's dir, not ours) is our own garbage, so remove it.
+    # READY must mean "typing `disco` runs THIS", not "ln succeeded". A link
+    # resolving to nothing (a relative CALFCORD_HOME resolves against the LINK's
+    # dir, not ours) is our own garbage, so take it back out.
     if [ ! -x "$link" ]; then
       rm -f "$link" 2>/dev/null || true
       continue
@@ -705,12 +696,11 @@ link_onto_path() {
     hash -r 2>/dev/null || true
     resolved="$(command -v disco 2>/dev/null || true)"
     if [ "$resolved" != "$link" ]; then
-      # Say it out loud: this is the one case NEITHER message can fix. READY
-      # would drive someone else's tool, and the ACTIVATE fallback is no better
-      # — sourcing `env` prepends SHIM_DIR, but a macOS login shell then runs
-      # /etc/zprofile's path_helper(8), which reorders PATH and demotes SHIM_DIR
-      # to LAST, so the other `disco` keeps winning even after a restart. The
-      # link stays (it is correct, and wins the moment the other one goes).
+      # The one case NEITHER message can fix, so say it. READY would drive the
+      # other tool; ACTIVATE is no better, because a macOS login shell runs
+      # /etc/zprofile's path_helper(8), which demotes SHIM_DIR to LAST and lets
+      # the other `disco` keep winning after a restart. Keep the link: it wins
+      # the moment the other one goes.
       warn "another 'disco' at $resolved takes precedence on your PATH — remove it, or run $link directly"
       continue
     fi
@@ -725,21 +715,14 @@ link_onto_path() {
 # typically not exported, so the installer's own (bash) env cannot answer this —
 # ask zsh, as rustup does.
 #
-# `-f` is load-bearing. zsh locates .zshenv from /etc/zshenv or the inherited
-# env ONLY, then reads it once; it never re-reads .zshenv from a ZDOTDIR that
-# file set. `-f` (NO_RCS) skips the user's rc files while still reading
-# /etc/zshenv, which is exactly zsh's own lookup context. A plain `zsh -c` would
-# instead source ~/.zshenv and report the ZDOTDIR *it* sets — the widespread XDG
-# idiom of a stub ~/.zshenv that only does `export ZDOTDIR=~/.config/zsh` — and
-# we would write the hook to a file zsh has already finished looking for. Dead
-# code, and a permanently broken ACTIVATE. `-f` also keeps the probe from
-# executing (or hanging on) arbitrary rc code just to learn a directory name.
-# `-f` cannot skip /etc/zshenv (nothing can — that is where a fleet-managed Mac
-# sets ZDOTDIR, so losing it would defeat the probe). A site /etc/zshenv that
-# also prints would prepend noise to the capture, so take the last line only:
-# `printf %s` emits no trailing newline, making the value always the final line.
-# `</dev/null` matters because under `curl | bash` stdin IS the install script —
-# a child that reads it would eat the rest of the installer.
+# `-f` is load-bearing: zsh locates .zshenv from /etc/zshenv or the inherited env
+# ONLY, then reads it once, and `-f` (NO_RCS) reproduces exactly that context. A
+# plain `zsh -c` would source ~/.zshenv and report the ZDOTDIR *it* sets, sending
+# the hook to a file zsh has already finished looking for. See docs/adr/0018.
+#
+# `tail -n 1` because /etc/zshenv still runs and may print (`printf %s` emits no
+# newline, so our value is always last). `</dev/null` because under `curl | bash`
+# stdin IS the install script — a child reading it would eat the rest.
 zsh_dotdir() {
   local d=""
   if have zsh; then
@@ -783,17 +766,11 @@ EOF
 
   # Source the env file from each shell's startup file, creating any that are
   # missing (>> creates). zsh gets .zshenv, NOT .zprofile: .zprofile is read only
-  # by *login* shells, which left the hook invisible to a non-login interactive
-  # zsh — VS Code's integrated terminal spawns `/bin/zsh -i`, where restarting
-  # the terminal never helped. .zshenv is the only zsh startup file read
-  # unconditionally, so it is the one target that always gets us on PATH.
-  #
-  # The trade: .zshenv runs BEFORE /etc/zprofile, whose path_helper(8) rewrites
-  # PATH on every macOS login shell and moves SHIM_DIR to the end — so we win on
-  # reachability and lose the prepend that .zprofile used to get. That costs
-  # nothing unless something else on PATH is also called `disco`, in which case
-  # it outranks us here AND after a restart; link_onto_path detects exactly that
-  # and warns, because no message this installer prints can fix it.
+  # by *login* shells, so the hook was invisible to a non-login interactive zsh —
+  # VS Code's terminal spawns `/bin/zsh -i`, where restarting never helped.
+  # .zshenv is the only zsh startup file read unconditionally. It costs us the
+  # prepend (see docs/adr/0018), which only matters against a same-named command
+  # that link_onto_path already warns about.
   #
   # Guard on the exact hook line so re-runs never duplicate it; a pre-existing
   # legacy `export PATH=` line is left alone.
