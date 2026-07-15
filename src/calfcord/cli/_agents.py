@@ -41,6 +41,11 @@ from calfcord.agents import md_writer
 from calfcord.agents.definition import AgentDefinition, parse_agent_md
 from calfcord.agents.identifier import AGENT_ID_PATTERN
 
+# ``Choice`` is needed at runtime (pick_agent builds rows); ``Prompter`` is only a
+# type. Importing the seam is cycle-free: ``_prompts`` holds only the Protocol and
+# a factory whose TUI import is lazy, so it never reaches back here.
+from calfcord.cli._prompts import Choice
+
 if TYPE_CHECKING:
     from calfcord.cli._prompts import Prompter
 
@@ -80,6 +85,28 @@ class ToolGrantSelection:
 
     tools: list[str] | None
     mcp: list[str]
+
+
+def pick_agent(prompter: Prompter, *, agents_dir: Path, message: str) -> str | None:
+    """Prompt for one of the DEFINED agents, or ``None`` after printing why not.
+
+    The shared "which agent?" pick-list. An empty roster returns ``None`` rather
+    than opening a prompt with nothing in it: a choice-less list is unanswerable
+    — there is no key meaning "none of these" — so it would strand the operator
+    with only Ctrl-C, when the honest answer is that they have no agents yet, and
+    here is the command that makes one. Callers map ``None`` onto exit 1; the
+    message is already printed.
+
+    This lists what is **defined** on disk, not what is **running**. That suits
+    ``start``; it would be wrong for ``stop``/``restart``, whose real question is
+    "which of the running agents?" — answerable only with a broker probe, and a
+    defined-agent list there would invite picking one that is already stopped.
+    """
+    agents = detect_agents(agents_dir)
+    if not agents:
+        print(f"no agents in {agents_dir} — create one with `disco agent create <name>`")
+        return None
+    return prompter.select(message, [Choice(a, a) for a in agents])
 
 
 def detect_agents(agents_dir: Path) -> list[str]:
@@ -312,9 +339,14 @@ def pick_tools(
     )
 
     selected = prompter.checkbox(
-        f"Tools for {name} (all selected — deselect any you don't want):",
+        f"Tools for {name}",
         choices,
-        instruction="space toggles, enter confirms",
+        # The title asks; the instruction explains. This guidance used to be a
+        # parenthetical inside the title, which turned the question into a
+        # paragraph — and left ``instruction`` unused and looking like dead
+        # speculation. It deliberately does NOT restate the key mechanics: the
+        # hint in the panel's border already says space/enter for every list.
+        instruction="All selected — deselect any you don't want.",
     )
 
     if _DANGEROUS_TOOLS.intersection(selected):

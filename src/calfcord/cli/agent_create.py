@@ -51,6 +51,7 @@ from calfcord.cli._agents import (
 from calfcord.cli._envfile import read_env
 from calfcord.cli._providers import configure_provider
 from calfcord.cli._supervisor import default_pc_binary, open_workspace, supervisor_unavailable_reason
+from calfcord.cli.tui import render
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -339,6 +340,11 @@ def run(
     if server_urls is _ENV_DEFAULT:
         server_urls = os.getenv("CALF_HOST_URL") or "localhost"
 
+    # The header belongs to the standalone command, not to ``create_agent`` —
+    # ``init`` draws its own phase headers around that same shared flow, so
+    # putting it inside would print two headers back to back there.
+    render.header("disco agent create", subtitle="Add a teammate to your org.")
+
     try:
         created = create_agent(
             prompter,
@@ -357,7 +363,7 @@ def run(
         print(f"error: could not create agent {(name or '?')!r}: {e}")
         return 1
 
-    print(f"Created agent {created.name!r}.")
+    render.success(f"Created agent {created.name!r}.")
     return _finish_create(
         prompter,
         name=created.name,
@@ -400,12 +406,20 @@ def _finish_create(
 
     The workspace probe and the "Start now?" confirm are both run HERE, on the
     sync side of the asyncio boundary, NOT inside ``asyncio.run(_start_now(...))``.
-    The prompter is the real ``InquirerPrompter`` in production, whose
-    ``.execute()`` calls ``asyncio.run()`` internally (via prompt_toolkit's
-    ``Application.prompt()``); nesting it inside our own ``asyncio.run`` raises
-    ``RuntimeError: asyncio.run() cannot be called from a running event loop`` —
-    the exact crash users hit at the end of ``disco agent create``. Architectural
-    rule (mirroring ``init``): ask everything first, THEN ``asyncio.run`` the work.
+
+    History, because the reason has changed: this used to be *mandatory*. The old
+    InquirerPy prompter's ``.execute()`` called ``asyncio.run()`` internally (via
+    prompt_toolkit's ``Application.prompt()``), so nesting a prompt inside our own
+    ``asyncio.run`` raised ``RuntimeError: asyncio.run() cannot be called from a
+    running event loop`` — the exact crash users hit at the end of
+    ``disco agent create``. The Rich/readchar prompter that replaced it owns no
+    event loop, so that constraint is gone.
+
+    The shape is kept anyway, now as a preference rather than a rule: asking
+    everything first, THEN doing the work, keeps the prompts out of the middle of
+    an orchestration and the failure modes separable. Don't reintroduce a prompt
+    inside the async section on the grounds that it "works now" — it would, but
+    the flow reads worse.
     """
     pc_binary_fn = pc_binary_fn or default_pc_binary
     # Dev run (``home is None`` — no install-scoped supervisor by design) degrades

@@ -2,7 +2,7 @@
 
 ``add`` is dual-mode, picked by the flags:
 
-* **Wizard** (no ``--command``/``--url``): an InquirerPy flow over the
+* **Wizard** (no ``--command``/``--url``): a TUI flow over the
   injected :class:`Prompter` seam — name, transport, command/URL,
   env/header loop, a JSON preview confirm, then an optional start. This is
   the onboarding-grade path (``disco mcp add`` and you're done).
@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from calfcord.cli._prompts import Choice, Prompter
+from calfcord.cli.tui import render
 from calfcord.mcp.config import McpConfigError, references_var
 from calfcord.mcp.config_write import add_server, remove_server
 from calfcord.mcp.selector import is_valid_server_name
@@ -203,6 +204,7 @@ def _add_from_wizard(
     prompter: Prompter, *, server: str | None
 ) -> tuple[str, dict[str, Any]] | None:
     """The interactive flow; ``None`` when the operator declines the preview."""
+    render.header("disco mcp add", subtitle="Add an MCP server to mcp.json.")
     name = server
     while name is None or not is_valid_server_name(name):
         if name is not None:

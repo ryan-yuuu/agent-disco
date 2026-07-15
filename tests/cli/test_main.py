@@ -8,6 +8,7 @@ honours the native (``$CALFCORD_HOME``) vs dev layouts and the
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -285,10 +286,21 @@ def test_main_traps_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch, capsys: 
 def test_main_maps_oserror_to_clean_exit_when_stdin_not_a_tty(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """InquirerPy's raw-mode ``OSError`` (EINVAL) on a non-TTY stdin → exit 1 + a hint."""
+    """A raw-mode ``OSError`` on a non-TTY stdin → exit 1 + a hint.
+
+    Synthetic by design: this pins ``main``'s *handler*, not the reader. The
+    handler cares only that the exception is an ``OSError`` and that stdin is not
+    a TTY, so the errno is arbitrary here.
+
+    It therefore CANNOT prove the real path works — the reader's exception has to
+    reach this branch in the first place, and the shipped bug was that it did not
+    (``termios.error`` does not subclass ``OSError``). ``tests/cli/tui/
+    test_non_tty_end_to_end.py`` covers that join against a real closed stdin;
+    this one keeps its own half honest.
+    """
 
     def _raise(parser: object, args: object) -> int:
-        raise OSError(22, "Invalid argument")
+        raise OSError(errno.ENOTTY, "stdin is not an interactive terminal")
 
     monkeypatch.setattr(main_mod, "_dispatch", _raise)
     monkeypatch.setattr(main_mod.sys.stdin, "isatty", lambda: False)
@@ -779,15 +791,150 @@ def test_main_agent_roster_help_exits_zero(verb: str) -> None:
     assert exc.value.code == 0
 
 
-@pytest.mark.parametrize("verb", ["start", "stop", "restart"])
+@pytest.mark.parametrize("verb", ["stop", "restart"])
 def test_main_agent_roster_requires_name_or_all(verb: str) -> None:
-    # Exactly one of <name> | --all is required: a bare `agent start` (neither)
+    # Exactly one of <name> | --all is required: a bare `agent stop` (neither)
     # must error (exit 2), never silently act on nothing. The name is now
     # optional (nargs="?") so the mutual-exclusion is enforced in the dispatcher
     # via parser.error (which exits 2), not by argparse's required-positional.
+    #
+    # ``start`` is deliberately absent from this list: a bare `agent start` opens
+    # a picker instead (TestBareAgentStartPicksInteractively). stop/restart keep
+    # erroring because their honest pick-list is the RUNNING roster, which needs a
+    # broker probe — a DEFINED-agent picker there would invite choosing an agent
+    # that is not running.
     with pytest.raises(SystemExit) as exc:
         main(["agent", verb])
     assert exc.value.code == 2
+
+
+class _PickingPrompter:
+    """A prompter that answers the agent picker and records what it was shown."""
+
+    def __init__(self, choose: str) -> None:
+        self._choose = choose
+        self.offered: list = []
+
+    def select(self, message: str, choices: list, *, default: str | None = None) -> str:
+        self.offered = choices
+        return self._choose
+
+    def text(self, message: str, *, default: str = "") -> str:
+        raise AssertionError("the picker only selects")
+
+    def secret(self, message: str) -> str:
+        raise AssertionError("the picker only selects")
+
+    def confirm(self, message: str, *, default: bool = False) -> bool:
+        raise AssertionError("the picker only selects")
+
+    def pause(self, message: str) -> None:
+        raise AssertionError("the picker only selects")
+
+    def checkbox(self, message: str, choices: list, *, instruction: str = "") -> list[str]:
+        raise AssertionError("the picker only selects")
+
+
+class TestBareAgentStartPicksInteractively:
+    """`disco agent start` with no name offers the defined agents.
+
+    The bare verb used to be a parser error, which told the operator what they did
+    wrong but not what to do instead — while the CLI already knew the whole answer,
+    since `agent list` reads it off disk. Same shape as `agent tools` / `agent
+    edit`, which have always picked.
+    """
+
+    def _wire(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agents: list[str]) -> list[str]:
+        home = tmp_path / "home"
+        (home / "agents").mkdir(parents=True)
+        for name in agents:
+            (home / "agents" / f"{name}.md").write_text(f"---\nname: {name}\n---\nbody\n")
+        monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+        started: list[str] = []
+
+        async def _start(_home: Path, *, name: str, server_urls: str) -> int:
+            started.append(name)
+            return 0
+
+        monkeypatch.setattr(roster, "agent_start", _start)
+        return started
+
+    def test_the_picked_agent_is_started(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        started = self._wire(monkeypatch, tmp_path, ["archivist", "scribe"])
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: _PickingPrompter("scribe"))
+        assert main(["agent", "start"]) == 0
+        assert started == ["scribe"]
+
+    def test_the_picker_offers_every_defined_agent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._wire(monkeypatch, tmp_path, ["archivist", "scribe"])
+        picker = _PickingPrompter("scribe")
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: picker)
+        main(["agent", "start"])
+        assert [c.value for c in picker.offered] == ["archivist", "scribe"]
+
+    def test_an_empty_roster_says_so_instead_of_opening_an_empty_picker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An empty list is an unanswerable prompt — say what to do instead.
+
+        Asserts that nothing is *prompted* and nothing is *started*, not that no
+        prompter object is constructed: building one only stores two references,
+        so that would pin an implementation detail rather than a behaviour.
+        """
+        started = self._wire(monkeypatch, tmp_path, [])
+        picker = _PickingPrompter("unreachable")
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: picker)
+
+        assert main(["agent", "start"]) == 1
+        assert picker.offered == [], "an empty roster must not open a picker"
+        assert started == []
+        out = capsys.readouterr().out
+        assert "no agents" in out
+        assert "disco agent create" in out, "say what to do next, not just what is missing"
+
+    def test_a_named_start_never_opens_the_picker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        started = self._wire(monkeypatch, tmp_path, ["archivist", "scribe"])
+
+        def _never() -> object:
+            raise AssertionError("an explicit name must not be second-guessed")
+
+        monkeypatch.setattr(main_mod, "make_prompter", _never)
+        assert main(["agent", "start", "archivist"]) == 0
+        assert started == ["archivist"]
+
+    def test_start_all_never_opens_the_picker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._wire(monkeypatch, tmp_path, ["archivist", "scribe"])
+        swept: list[list[str]] = []
+
+        async def _start_all(_home: Path, *, agent_ids: list[str], server_urls: str) -> int:
+            swept.append(agent_ids)
+            return 0
+
+        monkeypatch.setattr(roster, "agent_start_all", _start_all)
+
+        def _never() -> object:
+            raise AssertionError("--all is already a complete answer")
+
+        monkeypatch.setattr(main_mod, "make_prompter", _never)
+        assert main(["agent", "start", "--all"]) == 0
+        assert swept == [["archivist", "scribe"]]
+
+    def test_a_name_and_all_together_still_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The picker resolves 'neither'. 'Both' is still contradictory."""
+        self._wire(monkeypatch, tmp_path, ["scribe"])
+        with pytest.raises(SystemExit) as exc:
+            main(["agent", "start", "scribe", "--all"])
+        assert exc.value.code == 2
+        assert "mutually exclusive" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("verb", ["start", "stop", "restart"])

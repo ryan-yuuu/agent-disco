@@ -29,7 +29,20 @@ from pathlib import Path
 from calfcord.agents.definition import parse_agent_md
 from calfcord.agents.md_writer import update_tool_grants
 from calfcord.cli._agents import _split_tool_selection, detect_agents
+from calfcord.cli._fields import truncate
 from calfcord.cli._prompts import Choice, Prompter
+from calfcord.cli.tui import render
+
+# The longest tool summary shown in a checkbox row. Long enough to tell two tools
+# apart, short enough that "<pointer> <mark> <name> — <summary>" stays on ONE row
+# of a conventional 80-column terminal (the registry's longest name is 12 chars,
+# leaving ~57; 50 keeps headroom for narrower panes and the mcp/ rows).
+#
+# A row that WRAPS is worse than one that is clipped: the widget renders
+# continuation lines flush against the panel's left edge, so a wrapped row reads
+# as a new row and the list stops being scannable. Found by driving the real
+# command under a pty — no renderable-level test could see it.
+_SUMMARY_LEN = 50
 
 
 def first_line(desc: str | None) -> str:
@@ -39,8 +52,14 @@ def first_line(desc: str | None) -> str:
     a ``<summary>...</summary>`` tag and sprinkled with reStructuredText
     double-backtick inline-literal markup; neither renders usefully in a
     single-line checkbox label. We take the first non-empty line, drop the
-    summary wrapper, and collapse the double-backtick markup to plain text so
-    the label is readable.
+    summary wrapper, collapse the double-backtick markup to plain text, and clip
+    the result to :data:`_SUMMARY_LEN`.
+
+    Clipping is this module's call, not the widget's: only here do we know the
+    summary is a *hint* while the tool NAME is what the operator is choosing. The
+    widget must never silently cut a label it was handed — so it wraps — which is
+    exactly why the label handed to it has to arrive short. The trailing ``…``
+    keeps the clip visible; ``disco agent show`` has the full text.
     """
     if not desc:
         return ""
@@ -50,8 +69,10 @@ def first_line(desc: str | None) -> str:
             continue
         line = line.removeprefix("<summary>").removesuffix("</summary>").strip()
         # ``\`\`x\`\``` (RST inline literal) -> ``x``: drop the double-backtick
-        # markup so the label reads as plain prose.
-        return line.replace("``", "")
+        # markup so the label reads as plain prose. ``truncate`` is the shared
+        # clipper the edit menu and ``agent list`` already use, so the three
+        # surfaces cannot clip differently.
+        return truncate(line.replace("``", ""), _SUMMARY_LEN)
     return ""
 
 
@@ -185,6 +206,7 @@ def run(
     letting a raw traceback escape. All prompting goes through the injected
     :class:`Prompter`, so the flow is testable without a TTY.
     """
+    render.header("disco agent tools", subtitle="Choose which tools this agent can use.")
     md_path = _resolve_agent(prompter, agents_dir=agents_dir, name=name)
     if md_path is None:
         return 1
@@ -212,7 +234,6 @@ def run(
     selected = prompter.checkbox(
         f"Tools for {agent_name}",
         choices,
-        instruction="space toggles, enter confirms",
     )
 
     try:

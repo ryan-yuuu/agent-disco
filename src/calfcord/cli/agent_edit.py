@@ -35,20 +35,20 @@ Delete remains a separate command because it changes the agent's existence.
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import tempfile
 from pathlib import Path
 
 from calfcord.agents import md_writer
 from calfcord.agents.definition import parse_agent_md
-from calfcord.cli import agent_tools
+from calfcord.cli import _editor, agent_tools
 from calfcord.cli._agents import detect_agents, slug_stem
 from calfcord.cli._envfile import read_env
 from calfcord.cli._fields import FIELDS, FIELDS_BY_KEY, render_value, write_simple_field
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli._providers import configure_provider
 from calfcord.cli.agent_lifecycle import rename_agent
+from calfcord.cli.tui import render
 
 # The menu's sentinel "I'm done" row value. Chosen with surrounding double
 # underscores so it can never collide with a real :class:`Field.key` (all of
@@ -62,9 +62,19 @@ def edit_system_prompt(md_path: Path) -> None:
 
     The system prompt is free-form prose, so an inline single-line prompt is the
     wrong tool — we hand the operator their real editor. The current body is
-    written to a temp ``.md`` file, ``$EDITOR`` (or ``vi`` when unset) is launched
-    on it, and the edited contents are read back and persisted via the
+    written to a temp ``.md`` file (the suffix earns markdown highlighting, the
+    same trick aider uses), the editor :mod:`calfcord.cli._editor` resolves is
+    launched on it, and the result is read back and persisted via the
     validate-before-write :func:`calfcord.agents.md_writer.update_system_prompt`.
+
+    Before the editor takes the screen the operator is told **which editor is
+    opening** and **where the draft lives**. The path is the way out of a hostile
+    editor: the body is read back *after* the editor exits, so someone stranded
+    in vi can open that path in any other app, save there, quit vi without
+    saving, and their edit still lands. (The file is a temp file and is removed
+    once the editor returns — the path is live for the editing session, not
+    after it.) Which editor, and whether it must be told to wait, are
+    :mod:`calfcord.cli._editor`'s problem.
 
     Defensive on every failure mode that an interactive editor invites, because
     this runs inside the edit menu and must never let an exception escape and
@@ -73,9 +83,9 @@ def edit_system_prompt(md_path: Path) -> None:
     * **No change / emptied.** If the operator saves without changes, or empties
       the file (a whitespace-only body the validator would reject anyway), print
       a note and return without writing — leaving the existing prompt intact.
-    * **Editor can't be launched.** A missing ``$EDITOR`` binary
-      (:class:`FileNotFoundError`) prints a clear hint to set ``$EDITOR`` and
-      returns, rather than surfacing a raw stack trace.
+    * **Editor can't be launched.** A missing binary (:class:`FileNotFoundError`)
+      prints a clear hint to set ``$VISUAL``/``$EDITOR`` and returns, rather than
+      surfacing a raw stack trace.
     * **Validation / OS error.** A rejected body or a filesystem error during the
       atomic write prints one ``error:`` line and returns; the on-disk file is
       left untouched by the validate-before-write seam.
@@ -100,18 +110,33 @@ def edit_system_prompt(md_path: Path) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(current_body)
 
-        # ``shlex.split`` so an EDITOR carrying args ("code --wait", "emacs -nw")
-        # is honoured rather than treated as one impossible binary name.
-        editor = os.environ.get("EDITOR") or "vi"
-        argv = [*shlex.split(editor), str(tmp_path)]
+        # VISUAL/EDITOR precedence, GUI --wait injection, and the probe all live
+        # in _editor — each is a rule with a reason, and none of them fits in a
+        # line here (see that module).
+        command = _editor.resolve()
+        name = _editor.describe(command)
+
+        # Name the editor BEFORE it takes the screen. An operator dropped into an
+        # unannounced modal editor has no idea what it is or how to leave — the
+        # single most-reported way a CLI strands a newcomer. gh solved it the same
+        # way, by naming the editor in the prompt.
+        render.note(f"opening {name} to edit the system prompt — save and quit to continue.")
+
+        # The draft's path, because naming the editor only helps someone who can
+        # USE it. This is the way out: the body is read back AFTER the editor
+        # exits, so an operator stranded in vi can open this path in any other
+        # app, save there, quit vi without saving, and their edit still lands.
+        # Printed unconditionally rather than only on failure — by the time the
+        # editor owns the screen, we can no longer tell them anything.
+        render.note(f"  draft: {tmp_path}")
         try:
-            subprocess.run(argv, check=True)
+            subprocess.run(_editor.argv(command, tmp_path), check=True)
         except FileNotFoundError:
             # The configured editor binary doesn't exist on PATH — the single
             # failure that a generic "error:" line would leave the operator
             # unable to act on, so hint at the concrete fix.
             print(
-                f"error: could not launch editor {editor!r}; set $EDITOR to an "
+                f"error: could not launch editor {name!r}; set $VISUAL or $EDITOR to an "
                 f"installed editor (e.g. EDITOR=nano) and try again."
             )
             return
@@ -286,6 +311,7 @@ def run(prompter: Prompter, *, agents_dir: Path, env_path: Path, name: str | Non
     Returns 1 (with an already-printed message) when no agent can be resolved;
     otherwise 0, printing the restart hint when at least one field was changed.
     """
+    render.header("disco agent edit", subtitle="Change an agent's configuration.")
     md_path = _resolve_agent(prompter, agents_dir=agents_dir, name=name)
     if md_path is None:
         return 1
