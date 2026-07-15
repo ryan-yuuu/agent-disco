@@ -210,6 +210,24 @@ class TestCheckbox:
         got = widgets.checkbox("Tools", CHOICES, read=keys(SPACE, ENTER), console=silent())
         assert got == ["a"]
 
+    def test_down_moves_before_toggling(self) -> None:
+        """Navigation in a CHECKBOX, not just a select — its own key loop, its own bug.
+
+        Without this, a step() that called down() for both arrows (or dropped
+        navigation entirely) would ship: every other checkbox test toggles row 0,
+        where a broken cursor is invisible.
+        """
+        assert widgets.checkbox("Tools", CHOICES, read=keys(DOWN, SPACE, ENTER), console=silent()) == ["o"]
+
+    def test_up_moves_before_toggling(self) -> None:
+        assert widgets.checkbox("Tools", CHOICES, read=keys(UP, SPACE, ENTER), console=silent()) == ["c"]
+
+    def test_several_rows_can_be_toggled_in_one_pass(self) -> None:
+        got = widgets.checkbox(
+            "Tools", CHOICES, read=keys(SPACE, DOWN, DOWN, SPACE, ENTER), console=silent()
+        )
+        assert got == ["a", "c"]
+
     def test_enter_with_nothing_checked_returns_empty(self) -> None:
         assert widgets.checkbox("Tools", CHOICES, read=keys(ENTER), console=silent()) == []
 
@@ -257,6 +275,24 @@ class TestText:
     def test_backspace_deletes_the_last_character(self) -> None:
         got = widgets.text("Name", read=keys("a", "b", readchar.key.BACKSPACE, ENTER), console=silent())
         assert got == "a"
+
+    def test_arrow_keys_do_not_land_in_the_value(self) -> None:
+        """Operators press arrows in text fields constantly.
+
+        readchar delivers UP as the three-byte "\\x1b[A". Appending the raw string
+        would put an escape sequence inside the agent name and write it to disk.
+        """
+        got = widgets.text("Name", read=keys("a", UP, DOWN, "b", ENTER), console=silent())
+        assert got == "ab"
+
+    def test_unbound_escape_sequences_do_not_land_in_the_value(self) -> None:
+        """F1 and friends resolve to no Key at all, and are not printable text."""
+        got = widgets.text("Name", read=keys("a", "\x1bOP", ENTER), console=silent())
+        assert got == "a"
+
+    def test_arrow_keys_do_not_land_in_a_secret(self) -> None:
+        got = widgets.secret("Token", read=keys("s", UP, "3", ENTER), console=silent())
+        assert got == "s3"
 
     def test_backspace_on_an_empty_field_is_harmless(self) -> None:
         got = widgets.text("Name", read=keys(readchar.key.BACKSPACE, "a", ENTER), console=silent())

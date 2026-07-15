@@ -72,6 +72,32 @@ def test_header_omits_step_progress_when_not_given() -> None:
     assert "/" not in _render(render.header, "disco agent tools", width=60)
 
 
+def test_header_shows_step_progress_without_a_label() -> None:
+    """A phase can be counted without being named."""
+    assert "2/4" in _render(render.header, "disco init", step=(2, 4), width=60)
+
+
+class TestSharedConsole:
+    def test_console_is_memoised(self) -> None:
+        """One console for the process — a second would re-detect the terminal
+        and could disagree with the first about width or colour."""
+        render._console = None
+        try:
+            assert render.console() is render.console()
+        finally:
+            render._console = None
+
+    def test_the_shared_console_does_not_wrap_or_highlight(self) -> None:
+        """The production console must carry the same guarantees the helpers rely on."""
+        render._console = None
+        try:
+            console = render.console()
+            assert console.soft_wrap is True
+            assert console._highlight is False
+        finally:
+            render._console = None
+
+
 def test_answer_records_the_label_and_value() -> None:
     """The one-line record a widget collapses to once it is answered."""
     out = _render(render.answer, "Model provider", "Anthropic")
