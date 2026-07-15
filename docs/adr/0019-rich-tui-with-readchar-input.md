@@ -1,11 +1,12 @@
-# Rich TUI over readchar input; drop InquirerPy
+# Rich TUI with readchar menus and prompt_toolkit line editing
 
 **Status:** accepted
 
-The interactive CLI's prompts are now a Rich-rendered TUI (`src/calfcord/cli/tui/`)
-reading keys through **readchar**, replacing InquirerPy. `inquirerpy`,
-`prompt-toolkit`, `pfzy`, and `wcwidth` leave the dependency tree; `rich` (already
-resolved transitively) and `readchar` (zero dependencies) enter it.
+The interactive CLI is a Rich-rendered TUI (`src/calfcord/cli/tui/`) with two
+deliberately separate input backends. Select, checkbox, and confirm widgets read
+navigation keys through **readchar**. Text and secret fields use
+**prompt_toolkit** for mature line editing. InquirerPy and pfzy leave the dependency
+tree; Rich, readchar, prompt_toolkit, and its wcwidth dependency remain.
 
 The `Prompter` Protocol in `_prompts.py` is **unchanged** — only `make_prompter()`'s
 return value differs. All 7 interactive commands and the 8 test fakes that mirror the
@@ -30,7 +31,7 @@ only), zero-dependency, 13.8M downloads/month, and its POSIX reader is the same
 `termios` recipe we would have written — but maintained, and field-tested on the
 escape-sequence edge cases. Owning that code would have bought nothing.
 
-**readchar rather than a higher-level prompt library.** Every candidate
+**readchar rather than a higher-level prompt library for menus.** Every candidate
 (beaupy, questionary, questo, simple-term-menu, pick) formats rows internally: beaupy's
 only row hook is typed `Callable[[T], str]`, so it *cannot* accept a Rich renderable.
 None can express the chosen design — rounded panel, monochrome, hint rendered in the
@@ -40,6 +41,16 @@ plumbing, measured at ~60 lines. Textual was rejected separately: it inverts the
 model, and `run_async()` mutates the caller's loop task factory without restoring it —
 a hazard next to a calfkit loop.
 
+**prompt_toolkit rather than a hand-rolled line editor.** The first Rich migration
+incorrectly treated text as an append-only key stream and displayed defaults as
+placeholders. Rich `Live` hid the hardware cursor, the widget rendered no software
+caret, and users could neither see nor edit a position inside the value. Backspace
+also did nothing to a displayed default because the real buffer was empty.
+prompt_toolkit owns the difficult primitives here: editable defaults, cursor motion,
+Home/End/Delete, word editing, Unicode display width, bracketed paste, masking, and
+resize handling. Questionary adds no value for this use case; its text prompt is a
+thin PromptSession wrapper, so the TUI uses PromptSession directly.
+
 ## Consequences
 
 **The asyncio constraint is lifted, and the rule it forced is now only a preference.**
@@ -47,10 +58,11 @@ InquirerPy's `.execute()` called `asyncio.run()` internally, so a prompt nested 
 our own `asyncio.run()` raised `RuntimeError: asyncio.run() cannot be called from a
 running event loop` — a crash this project shipped at the end of `disco agent create`.
 That is why `agent_create._finish_create` and `init._run_finish` ask everything on the
-sync side first, and why `pause` uses a bare `input()`. readchar owns no event loop, so
-none of that is load-bearing any more. **The structure is kept as style, not
-necessity** — the code comments now say so rather than citing a constraint that no
-longer binds.
+sync side first, and why `pause` uses a bare `input()`. readchar owns no event loop;
+the line editor calls PromptSession with `in_thread=True`, which keeps the synchronous
+Prompter contract safe even from an active asyncio loop. **The structure is kept as
+style, not necessity** — the code comments now say so rather than citing a constraint
+that no longer binds.
 
 Do not restate this as "prompt_toolkit cannot run inside a loop": that is false, and
 verified false by probe. `Application.run_async()` never calls `asyncio.run()`, and
@@ -107,16 +119,14 @@ largely folklore: jj's pico default was an accident (avoiding editor backup file
 with no ignore support), and Debian's nano default arose because vim's own maintainers
 rescaled vim *below* a nano priority nobody was looking at.
 
-**A pre-filled field can no longer be cleared to empty — a deliberate trade, recorded
-because it is a capability loss.** InquirerPy pre-filled the default into the *editable
-buffer*, so backspacing it all away and pressing Enter returned `""`. Our `text` widget
-shows the default as a dim **placeholder** instead, so there is no buffer to clear and
-`typed or default` returns the default. Placeholder semantics are the better fit for the
-wizard — its own prose promises "press Enter to accept it, **or type a new one**", which
-with a pre-fill would mean clearing the field first — but the cost is that "" is now
-inexpressible. Harmless today (no call site treats `""` as meaningful: `agent create`
-coerces a blank description to `DEFAULT_DESCRIPTION`, and the broker step handles unset),
-and if a field ever needs a real empty, it needs a pre-filled buffer, not a placeholder.
+**Defaults are editable buffer content.** Enter accepts an unchanged default;
+Backspace, Delete, cursor movement, and ordinary insertion edit it in place; clearing
+the buffer returns `""`. This restores conventional line-editor semantics and removes
+the ambiguity between displayed state and editable state.
+
+**Secret transcripts reveal neither content nor length.** The active field is masked
+by prompt_toolkit. After submission the permanent Rich transcript says only `provided`
+or `kept current`; a bullet count would leak credential length.
 
 **Palette is monochrome by decision** (`theme.py`): weight and dimming carry all
 hierarchy, no accent hue. An off-white accent is only off-white on a dark terminal;

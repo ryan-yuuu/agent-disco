@@ -19,7 +19,10 @@ from calfcord.cli.tui.render import make_console
 from calfcord.cli.tui.state import CheckboxState, SelectState
 
 CHOICES = [
-    Choice("a", "Anthropic", ),
+    Choice(
+        "a",
+        "Anthropic",
+    ),
     Choice("o", "OpenAI"),
     Choice("c", "Codex"),
 ]
@@ -41,6 +44,18 @@ def keys(*sequence: str) -> Callable[[], str]:
             raise AssertionError("widget read more keys than the test scripted") from None
 
     return _read
+
+
+class FakeEditor:
+    """Return one answer while recording the line-editing contract."""
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, str, bool]] = []
+
+    def prompt(self, message: str, *, default: str = "", secret: bool = False) -> str:
+        self.calls.append((message, default, secret))
+        return self.answer
 
 
 def silent():
@@ -165,6 +180,20 @@ class TestViewportFollowsTheTerminal:
         """Never zero or negative — a list with nothing visible is unanswerable."""
         assert widgets.viewport_for(Console(width=60, height=3)) >= 1
 
+    def test_an_existing_state_is_refit_after_the_terminal_shrinks(self) -> None:
+        state = SelectState(self._rows(40), viewport=45)
+        widgets.fit_viewport(state, Console(width=60, height=12))
+        assert state.viewport == 7
+
+    def test_wrapped_labels_count_every_rendered_line(self) -> None:
+        """Choice count is not height: prose labels can wrap onto several lines."""
+        console = Console(width=30, height=12, record=True)
+        rows = [Choice(str(i), "a label long enough to wrap twice") for i in range(20)]
+        state = SelectState(rows, viewport=20)
+        widgets.fit_viewport(state, console)
+        console.print(widgets.select_panel("Pick", state))
+        assert len(console.export_text().rstrip("\n").splitlines()) <= 12
+
 
 class TestScrolling:
     """A long list paints only its window, and says what it is hiding."""
@@ -229,12 +258,6 @@ class TestMarkupIsNeverInterpreted:
         rows = [Choice("b", "[bot] ops", checked=True)]
         assert "[bot] ops" in paint(widgets.checkbox_panel("Tools", CheckboxState(rows)))
 
-    def test_a_bracketed_text_default_survives(self) -> None:
-        assert "[bot] ops" in paint(widgets.text_panel("Name", "", default="[bot] ops"))
-
-    def test_a_bracketed_typed_value_survives(self) -> None:
-        assert "[x]" in paint(widgets.text_panel("Name", "[x]"))
-
 
 class TestCheckbox:
     def test_space_toggles_and_enter_confirms(self) -> None:
@@ -254,9 +277,7 @@ class TestCheckbox:
         assert widgets.checkbox("Tools", CHOICES, read=keys(UP, SPACE, ENTER), console=silent()) == ["c"]
 
     def test_several_rows_can_be_toggled_in_one_pass(self) -> None:
-        got = widgets.checkbox(
-            "Tools", CHOICES, read=keys(SPACE, DOWN, DOWN, SPACE, ENTER), console=silent()
-        )
+        got = widgets.checkbox("Tools", CHOICES, read=keys(SPACE, DOWN, DOWN, SPACE, ENTER), console=silent())
         assert got == ["a", "c"]
 
     def test_enter_with_nothing_checked_returns_empty(self) -> None:
@@ -292,29 +313,22 @@ class TestCheckbox:
 
 
 class TestTypingRealProse:
-    """Space is TEXT in a text field, not a command.
-
-    The whole suite typed single non-space characters ("a", "b", "x"), so a space
-    binding that swallowed the key passed every test while making prose prompts
-    unusable: "Agent description:" and mcp add's "Command (e.g. npx -y ...)" both
-    take input where spaces are the point. shlex.split("npx-ypkg") yields one
-    garbage token, so a swallowed space silently produces a broken MCP server.
-    """
+    """Line input is returned byte-for-byte; callers own normalization."""
 
     def test_a_space_is_typed_into_a_text_field(self) -> None:
-        assert widgets.text("Desc", read=keys(*"hello world", ENTER), console=silent()) == "hello world"
+        assert widgets.text("Desc", editor=FakeEditor("hello world"), console=silent()) == "hello world"
 
     def test_a_command_line_with_flags_survives(self) -> None:
-        got = widgets.text("Command", read=keys(*"npx -y pkg", ENTER), console=silent())
+        got = widgets.text("Command", editor=FakeEditor("npx -y pkg"), console=silent())
         assert got == "npx -y pkg"
 
     def test_a_space_is_typed_into_a_secret(self) -> None:
         """A mangled token fails auth with no hint as to why."""
-        assert widgets.secret("Token", read=keys(*"a b", ENTER), console=silent()) == "a b"
+        assert widgets.secret("Token", editor=FakeEditor("a b"), console=silent()) == "a b"
 
     def test_leading_and_trailing_spaces_are_preserved_for_the_caller(self) -> None:
         """Callers .strip() themselves; the widget must not decide for them."""
-        assert widgets.text("Desc", read=keys(*" hi ", ENTER), console=silent()) == " hi "
+        assert widgets.text("Desc", editor=FakeEditor(" hi "), console=silent()) == " hi "
 
 
 class TestLongLabels:
@@ -342,56 +356,33 @@ class TestLongLabels:
 
 
 class TestText:
-    def test_typed_characters_are_returned_on_enter(self) -> None:
-        assert widgets.text("Name", read=keys("a", "b", ENTER), console=silent()) == "ab"
+    def test_delegates_the_default_as_editable_buffer_content(self) -> None:
+        editor = FakeEditor("scribre")
+        assert widgets.text("Name", default="scribe", editor=editor, console=silent()) == "scribre"
+        assert editor.calls == [("Name", "scribe", False)]
 
-    def test_enter_on_an_empty_field_returns_the_default(self) -> None:
-        """The wizard's press-Enter-to-accept contract depends on this."""
-        assert widgets.text("Name", default="scribe", read=keys(ENTER), console=silent()) == "scribe"
-
-    def test_typing_replaces_the_default(self) -> None:
-        got = widgets.text("Name", default="scribe", read=keys("x", ENTER), console=silent())
-        assert got == "x"
-
-    def test_backspace_deletes_the_last_character(self) -> None:
-        got = widgets.text("Name", read=keys("a", "b", readchar.key.BACKSPACE, ENTER), console=silent())
-        assert got == "a"
-
-    def test_arrow_keys_do_not_land_in_the_value(self) -> None:
-        """Operators press arrows in text fields constantly.
-
-        readchar delivers UP as the three-byte "\\x1b[A". Appending the raw string
-        would put an escape sequence inside the agent name and write it to disk.
-        """
-        got = widgets.text("Name", read=keys("a", UP, DOWN, "b", ENTER), console=silent())
-        assert got == "ab"
-
-    def test_unbound_escape_sequences_do_not_land_in_the_value(self) -> None:
-        """F1 and friends resolve to no Key at all, and are not printable text."""
-        got = widgets.text("Name", read=keys("a", "\x1bOP", ENTER), console=silent())
-        assert got == "a"
-
-    def test_arrow_keys_do_not_land_in_a_secret(self) -> None:
-        got = widgets.secret("Token", read=keys("s", UP, "3", ENTER), console=silent())
-        assert got == "s3"
-
-    def test_backspace_on_an_empty_field_is_harmless(self) -> None:
-        got = widgets.text("Name", read=keys(readchar.key.BACKSPACE, "a", ENTER), console=silent())
-        assert got == "a"
+    def test_returns_an_intentionally_empty_answer(self) -> None:
+        """The editor owns defaults; the widget must not silently restore one."""
+        assert widgets.text("Name", default="scribe", editor=FakeEditor(""), console=silent()) == ""
 
 
 class TestSecret:
     def test_returns_what_was_typed(self) -> None:
-        assert widgets.secret("Token", read=keys("s", "3", ENTER), console=silent()) == "s3"
+        editor = FakeEditor("s3")
+        assert widgets.secret("Token", editor=editor, console=silent()) == "s3"
+        assert editor.calls == [("Token", "", True)]
 
     def test_skipping_returns_empty_so_callers_keep_the_stored_value(self) -> None:
         """Every .env secret prompt treats '' as keep-what-is-there."""
-        assert widgets.secret("Token", read=keys(ENTER), console=silent()) == ""
+        assert widgets.secret("Token", editor=FakeEditor(""), console=silent()) == ""
 
-    def test_panel_never_paints_the_secret(self) -> None:
-        out = paint(widgets.secret_panel("Token", "hunter2"))
+    def test_transcript_never_reveals_the_secret_or_its_length(self) -> None:
+        console = silent()
+        widgets.secret("Token", editor=FakeEditor("hunter2"), console=console)
+        out = console.export_text()
         assert "hunter2" not in out
-        assert "•" in out
+        assert "•••••••" not in out
+        assert "provided" in out
 
 
 class TestConfirm:

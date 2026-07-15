@@ -31,6 +31,7 @@ from rich.text import Text
 from calfcord.cli._prompts import Choice
 from calfcord.cli.tui import render, theme
 from calfcord.cli.tui.keys import Key, read_key, resolve
+from calfcord.cli.tui.line_input import LineInput, PromptToolkitLineInput
 from calfcord.cli.tui.state import CheckboxState, ListState, SelectState
 
 Reader = Callable[[], str]
@@ -147,19 +148,23 @@ def checkbox_panel(message: str, state: CheckboxState, *, instruction: str = "")
     return _panel(message, body, theme.HINT_CHECKBOX)
 
 
-def _field_panel(message: str, shown: str, *, placeholder: str = "") -> Panel:
-    """A single-line entry frame. Every field shares one hint, so it is not a param."""
-    body = Text(shown, style=theme.ACCENT) if shown else Text(placeholder, style=theme.MUTED)
-    return _panel(message, body, theme.HINT_TEXT)
+def fit_viewport(
+    state: ListState,
+    console: Console | None,
+    build: Callable[[], RenderableType] | None = None,
+) -> None:
+    """Fit a list by rendered lines, recalculating after every terminal resize."""
+    out = render.target(console)
+    capacity = min(len(state.choices), viewport_for(out))
+    measure = Console(width=out.size.width, height=10_000, color_system=None)
+    build = build or (lambda: select_panel("", state))
 
-
-def text_panel(message: str, typed: str, *, default: str = "") -> Panel:
-    return _field_panel(message, typed, placeholder=default)
-
-
-def secret_panel(message: str, typed: str) -> Panel:
-    """Paint the *length* of the secret, never the secret."""
-    return _field_panel(message, "•" * len(typed), placeholder="skip to keep current")
+    while capacity > 1:
+        state.resize(capacity)
+        if len(measure.render_lines(build())) <= out.size.height:
+            return
+        capacity -= 1
+    state.resize(1)
 
 
 def confirm_panel(message: str, *, default: bool) -> Panel:
@@ -225,7 +230,14 @@ def select(
     def step(key: Key | None, _raw: str) -> bool:
         return _navigate(state, key)
 
-    _loop(lambda: select_panel(message, state), step, read=read, console=console)
+    def build() -> Panel:
+        def panel() -> Panel:
+            return select_panel(message, state)
+
+        fit_viewport(state, console, panel)
+        return panel()
+
+    _loop(build, step, read=read, console=console)
     render.answer(message, state.choices[state.cursor].label, console=console)
     return state.value
 
@@ -249,58 +261,27 @@ def checkbox(
             state.toggle()
         return _navigate(state, key)
 
-    _loop(
-        lambda: checkbox_panel(message, state, instruction=instruction),
-        step,
-        read=read,
-        console=console,
-    )
+    def build() -> Panel:
+        def panel() -> Panel:
+            return checkbox_panel(message, state, instruction=instruction)
+
+        fit_viewport(state, console, panel)
+        return panel()
+
+    _loop(build, step, read=read, console=console)
     render.answer(message, f"{len(state.selected)} selected", console=console)
     return state.selected
-
-
-def _typed_field(
-    build: Callable[[str], RenderableType],
-    *,
-    read: Reader,
-    console: Console | None,
-) -> str:
-    """The shared editing loop behind :func:`text` and :func:`secret`."""
-    buffer: list[str] = []
-
-    def step(key: Key | None, raw: str) -> bool:
-        if key is Key.ENTER:
-            return True
-        if key is Key.BACKSPACE:
-            if buffer:
-                buffer.pop()
-        elif key is None and raw.isprintable():
-            # ``resolve`` returning None means "not a control key"; anything
-            # printable is literal input. Unprintable leftovers (stray escape
-            # sequences, unbound control codes) are ignored rather than injected
-            # into the value.
-            buffer.append(raw)
-        return False
-
-    _loop(lambda: build("".join(buffer)), step, read=read, console=console)
-    return "".join(buffer)
 
 
 def text(
     message: str,
     *,
     default: str = "",
-    read: Reader = read_key,
+    editor: LineInput | None = None,
     console: Console | None = None,
 ) -> str:
-    typed = _typed_field(
-        lambda shown: text_panel(message, shown, default=default),
-        read=read,
-        console=console,
-    )
-    # Enter on an untouched field accepts the suggestion — the press-Enter-to-keep
-    # contract every pre-filled prompt in the wizard depends on.
-    value = typed or default
+    """Edit a line with a visible cursor and a genuinely editable default."""
+    value = (editor or PromptToolkitLineInput()).prompt(message, default=default)
     render.answer(message, value, console=console)
     return value
 
@@ -308,17 +289,13 @@ def text(
 def secret(
     message: str,
     *,
-    read: Reader = read_key,
+    editor: LineInput | None = None,
     console: Console | None = None,
 ) -> str:
-    typed = _typed_field(
-        lambda shown: secret_panel(message, shown),
-        read=read,
-        console=console,
-    )
+    typed = (editor or PromptToolkitLineInput()).prompt(message, secret=True)
     # "" means the operator skipped: callers read that as keep-what-is-stored, so
     # it must never be coerced to a default here.
-    render.answer(message, "•" * len(typed) if typed else "kept current", console=console)
+    render.answer(message, "provided" if typed else "kept current", console=console)
     return typed
 
 

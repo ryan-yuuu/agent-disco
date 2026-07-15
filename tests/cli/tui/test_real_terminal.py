@@ -41,7 +41,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 ROWS, COLS = 24, 80
-UP, DOWN, ENTER, SPACE, CTRL_C = "\x1b[A", "\x1b[B", "\r", " ", "\x03"
+UP, DOWN, LEFT, RIGHT = "\x1b[A", "\x1b[B", "\x1b[D", "\x1b[C"
+HOME, END, DELETE = "\x1b[H", "\x1b[F", "\x1b[3~"
+ENTER, SPACE, BACKSPACE, CTRL_C = "\r", " ", "\x7f", "\x03"
 
 # The child is a bare `python -c`, so the package must be put on its path
 # explicitly — it does not inherit this test run's environment.
@@ -116,6 +118,11 @@ def _spawn(body: str, keys: list[str], *, settle: float = 0.5) -> tuple[str, str
                 if not chunk:
                     return
                 out.extend(chunk)
+                # prompt_toolkit asks a real terminal where its cursor is before
+                # the first render. A pty is only a byte pipe, so the harness must
+                # provide the terminal's CPR response itself.
+                if b"\x1b[6n" in chunk:
+                    os.write(master, b"\x1b[1;1R")
             elif until_output and out:
                 return  # it has painted and gone quiet — that is the frame
 
@@ -184,7 +191,7 @@ class TestSelectInARealTerminal:
 
 class TestTypingInARealTerminal:
     CODE = """
-    print("RESULT=[" + widgets.text("Command", default="scribe") + "]")
+    print("RESULT=[" + widgets.text("Command") + "]")
     """
 
     def test_spaces_survive_real_keystrokes(self) -> None:
@@ -192,6 +199,53 @@ class TestTypingInARealTerminal:
         "npx -y pkg" became "npx-ypkg" — breaking `disco mcp add` outright."""
         _, seen, status = _spawn(self.CODE, [*"npx -y pkg", ENTER])
         assert "RESULT=[npx -y pkg]" in seen
+        assert status == 0
+
+    def test_a_default_is_editable_in_place(self) -> None:
+        """A default is initial buffer content, not a placeholder.
+
+        Moving left and typing must insert before the last character. This is the
+        smallest end-to-end proof that the field owns a real editing cursor.
+        """
+        code = 'print("RESULT=[" + widgets.text("Name", default="scribe") + "]")'
+        _, seen, status = _spawn(code, [LEFT, "r", ENTER])
+        assert "RESULT=[scribre]" in seen
+        assert status == 0
+
+    def test_backspace_edits_the_supplied_default(self) -> None:
+        code = 'print("RESULT=[" + widgets.text("Name", default="scribe") + "]")'
+        _, seen, status = _spawn(code, [BACKSPACE, ENTER])
+        assert "RESULT=[scrib]" in seen
+        assert status == 0
+
+    def test_home_end_and_delete_edit_at_the_cursor(self) -> None:
+        code = 'print("RESULT=[" + widgets.text("Name", default="scribe") + "]")'
+        _, seen, status = _spawn(code, [HOME, DELETE, END, "r", ENTER])
+        assert "RESULT=[criber]" in seen
+        assert status == 0
+
+    def test_a_pasted_burst_is_not_dropped(self) -> None:
+        _, seen, status = _spawn(self.CODE, ["npx -y package", ENTER], settle=0.05)
+        assert "RESULT=[npx -y package]" in seen
+        assert status == 0
+
+    def test_the_terminal_cursor_is_visible_while_editing(self) -> None:
+        raw, _, status = _spawn(self.CODE, [ENTER])
+        assert "\x1b[?25h" in raw
+        assert status == 0
+
+
+class TestSecretInARealTerminal:
+    CODE = """
+    value = widgets.secret("Token")
+    print("EDITED=" + str(value == "hunte32"))
+    """
+
+    def test_the_secret_is_editable_but_never_painted(self) -> None:
+        raw, seen, status = _spawn(self.CODE, [*"hunter2", LEFT, BACKSPACE, "3", ENTER])
+        assert "EDITED=True" in seen
+        assert "hunter2" not in raw
+        assert "hunte32" not in raw
         assert status == 0
 
 

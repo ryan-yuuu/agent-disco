@@ -50,6 +50,11 @@ class ListState:
         self.cursor = (self.cursor + 1) % len(self.choices)
         self._scroll_to_cursor()
 
+    def resize(self, viewport: int) -> None:
+        """Change visible capacity while keeping the active row on screen."""
+        self.viewport = max(1, viewport)
+        self._scroll_to_cursor()
+
     def _scroll_to_cursor(self) -> None:
         """Shift the window the minimum needed to keep the cursor inside it.
 
@@ -89,9 +94,7 @@ class SelectState(ListState):
     not make the command uncallable.
     """
 
-    def __init__(
-        self, choices: list[Choice], *, default: str | None = None, viewport: int = DEFAULT_VIEWPORT
-    ) -> None:
+    def __init__(self, choices: list[Choice], *, default: str | None = None, viewport: int = DEFAULT_VIEWPORT) -> None:
         super().__init__(choices, viewport=viewport)
         if default is not None:
             self.cursor = next((i for i, c in enumerate(choices) if c.value == default), 0)

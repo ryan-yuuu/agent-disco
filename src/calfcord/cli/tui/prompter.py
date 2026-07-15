@@ -16,31 +16,37 @@ from rich.console import Console
 from calfcord.cli._prompts import Choice
 from calfcord.cli.tui import widgets
 from calfcord.cli.tui.keys import read_key
+from calfcord.cli.tui.line_input import LineInput, PromptToolkitLineInput
 
 Reader = widgets.Reader
 
 
 class RichPrompter:
-    def __init__(self, *, read: Reader = read_key, console: Console | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        read: Reader = read_key,
+        editor: LineInput | None = None,
+        console: Console | None = None,
+    ) -> None:
         self._read = read
+        self._editor = editor or PromptToolkitLineInput()
         self._console = console
 
     def select(self, message: str, choices: list[Choice], *, default: str | None = None) -> str:
         return widgets.select(message, choices, default=default, read=self._read, console=self._console)
 
     def text(self, message: str, *, default: str = "") -> str:
-        return widgets.text(message, default=default, read=self._read, console=self._console)
+        return widgets.text(message, default=default, editor=self._editor, console=self._console)
 
     def secret(self, message: str) -> str:
-        return widgets.secret(message, read=self._read, console=self._console)
+        return widgets.secret(message, editor=self._editor, console=self._console)
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
         return widgets.confirm(message, default=default, read=self._read, console=self._console)
 
     def checkbox(self, message: str, choices: list[Choice], *, instruction: str = "") -> list[str]:
-        return widgets.checkbox(
-            message, choices, instruction=instruction, read=self._read, console=self._console
-        )
+        return widgets.checkbox(message, choices, instruction=instruction, read=self._read, console=self._console)
 
     def pause(self, message: str) -> None:
         """A press-Enter gate — deliberately a bare ``input()``, not a widget.

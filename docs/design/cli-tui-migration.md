@@ -129,20 +129,21 @@ it is *small, feature-complete and zero-dependency*, not that it is bustling.
 
 | Decision | Choice |
 |---|---|
-| Input layer | **A** — Rich `Live` + in-house POSIX key reader (§4) |
+| Input layer | Rich `Live` + readchar for menus; prompt_toolkit for text and secrets (§4) |
 | Presentation | **Panelled inline** — rounded panels, hint in the bottom border; scrollback preserved (§5) |
 | Accent | **Monochrome / off-white.** No chromatic accent. Hierarchy comes from weight and dim, not hue: off-white bold for the pointer / selected row / focus, dim grey for borders and hints. Red is reserved for genuine errors only (a safety signal, not an accent) and is one constant in `theme.py` if we later want it gone too. |
 | Scope | **Widgets + chrome** for the 7 interactive commands (§7) |
 
 ## 4. Decision 1 — the input layer
 
-Rendering is Rich either way (§3.1), so this decision is only about **input**.
+Rendering is Rich either way (§3.1), but navigation and line editing have different
+requirements and intentionally use different input backends.
 
 | Option | Verdict |
 |---|---|
-| **A. Rich `Live` + `readchar` for key reads** | **CHOSEN.** `readchar` is narrow (raw key reads only), 13.8M downloads/month, **zero dependencies**, last release 2026-04-06, `requires_python >=3.8`. Its POSIX reader is synchronous `termios` — no asyncio anywhere — so §3.2 dies. It owns the escape-sequence state machine and restores `termios` in a `finally`, and raises `KeyboardInterrupt` on Ctrl-C, which `main.py` already maps to exit 130. We keep full control of rendering, which the panelled monochrome design requires. |
+| **A. Rich `Live` + `readchar` for menu key reads** | **CHOSEN FOR MENUS.** `readchar` is narrow and lets the select/checkbox renderer retain full control of the panelled monochrome design. |
 | B. Hand-rolled `termios` reader | Rejected. It would be a near-copy of readchar's reader with none of the maintenance or field-testing. No reason to own this. |
-| C. Rich + prompt_toolkit key bindings | Reintroduces the §3.2 landmine the codebase already paid for. Very heavy dep for key reads. |
+| C. Direct prompt_toolkit `PromptSession` | **CHOSEN FOR TEXT/SECRETS.** It supplies a visible cursor, editable defaults, standard line-editing keys, Unicode widths, paste, masking, and resize behavior. `in_thread=True` preserves the synchronous Prompter API inside an active asyncio loop. It is unnecessary for menu navigation. |
 | D. `beaupy` (Rich + readchar, pre-assembled) | Rejected on **rendering**, not input: its look is fixed, so the panelled/monochrome/hint-in-border design is unreachable. 87k downloads/month vs readchar's 13.8M — we'd take a less-proven dep to get *less* control. |
 | E. `questionary` / keep `InquirerPy` | Both prompt_toolkit-based (§3.2). Styling cannot reach the target design. |
 | F. `Textual` | Full-screen + async app model — rejected with §5. |
@@ -199,7 +200,8 @@ src/calfcord/cli/tui/
   theme.py       colors + glyphs — one source of truth
   keys.py        Key enum, read_key(), raw_mode() context manager
   state.py       pure SelectState / CheckboxState reducers (move, toggle, filter)
-  widgets.py     select, checkbox, text, secret, confirm, pause on Live + keys
+  line_input.py  prompt_toolkit single-line editor and matching terminal frame
+  widgets.py     Rich/readchar menus; text and secret delegation
   render.py      console(), header(), step(), note(), success(), warn(), error()
   prompter.py    RichPrompter — implements Prompter
 ```
@@ -225,8 +227,10 @@ The widgets become far more testable than InquirerPy's were:
 - `keys.py` — decode byte sequences (`\x1b[A` → `Key.UP`) as pure table-driven tests.
 - `state.py` — pure reducers; wrap-around, toggle, select-all are unit tests with no
   terminal at all.
-- `widgets.py` — inject a scripted key iterator + `Console(record=True)`, then assert
-  on `export_text()`. No TTY, no subprocess.
+- `widgets.py` — inject a scripted key iterator or `LineInput` fake plus
+  `Console(record=True)`, then assert on `export_text()`.
+- `line_input.py` — pipe-input unit tests plus real-PTY tests for caret visibility,
+  editable defaults, navigation, paste, Unicode framing, and secret masking.
 - `RichPrompter` — driven end-to-end through the same injected seam.
 
 Per CLAUDE.md this is TDD: tests first, via `/test-driven-development`.
@@ -239,15 +243,15 @@ Per CLAUDE.md this is TDD: tests first, via `/test-driven-development`.
 | Non-TTY (CI, piped stdin) | Widgets check `isatty` and raise a clean error; `main.py`'s OSError/EOFError branches keep their contract (`test_main.py:294-331` pins the message). |
 | Rich markup eats `#general` / `$VAR` / `[...]` | `markup=False` by default in `render.py`; opt in explicitly. |
 | Wrap breaks a substring assertion | `soft_wrap=True` for plain lines (§3.4). |
-| Terminal resize mid-widget | `Live` re-renders on refresh; state is width-independent. |
+| Terminal resize mid-widget | Menus remeasure rendered row height on each redraw; prompt_toolkit owns line-editor resize. |
 
 ## 10. Deliverables
 
-1. `uv add rich`; drop `inquirerpy` (and prompt_toolkit with it).
+1. Add Rich, readchar, and prompt_toolkit directly; drop InquirerPy and pfzy.
 2. The `cli/tui/` package + tests.
 3. `make_prompter()` returns `RichPrompter`.
 4. Chrome migration for the 7 interactive flows.
-5. **ADR-0019** — "Rich TUI with an in-house key reader; drop InquirerPy/prompt_toolkit",
+5. **ADR-0019** — "Rich TUI with readchar menus and prompt_toolkit line editing",
    recording the §3.2 rationale (this qualifies under `.agents/skills/grill-with-docs/ADR-FORMAT.md`).
 6. Docs refresh where InquirerPy is named (`docs/authoring-agents.md:216`,
    `docs/design/mcp-reintroduction.md:176`).

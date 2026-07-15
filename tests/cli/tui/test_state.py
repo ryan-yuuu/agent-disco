@@ -149,6 +149,15 @@ class TestViewport:
     def test_a_viewport_larger_than_the_list_does_not_pad(self) -> None:
         assert SelectState(self._rows(2), viewport=10).window() == (0, 2)
 
+    def test_resizing_keeps_the_cursor_visible(self) -> None:
+        state = SelectState(self._rows(30), viewport=20)
+        for _ in range(15):
+            state.down()
+        state.resize(4)
+        start, stop = state.window()
+        assert stop - start == 4
+        assert start <= state.cursor < stop
+
     def test_a_default_deep_in_a_long_list_opens_on_screen(self) -> None:
         """The saved value must be visible on open, not somewhere below the fold.
 
