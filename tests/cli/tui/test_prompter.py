@@ -14,14 +14,18 @@ from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli.tui.prompter import RichPrompter
 from calfcord.cli.tui.render import make_console
 
-from .test_widgets import ENTER, keys
+from .test_widgets import ENTER, FakeEditor, keys
 
 CHOICES = [Choice("a", "Anthropic"), Choice("o", "OpenAI")]
 
 
-def prompter(*sequence: str) -> RichPrompter:
+def prompter(*sequence: str, answer: str = "") -> RichPrompter:
     """A prompter wired to a scripted keyboard and a console that paints nowhere."""
-    return RichPrompter(read=keys(*sequence), console=make_console(width=60, record=True))
+    return RichPrompter(
+        read=keys(*sequence),
+        editor=FakeEditor(answer),
+        console=make_console(width=60, record=True),
+    )
 
 
 def test_rich_prompter_satisfies_the_protocol() -> None:
@@ -38,15 +42,15 @@ def test_select_honours_the_default() -> None:
 
 
 def test_text_returns_the_typed_value() -> None:
-    assert prompter("h", "i", ENTER).text("Name") == "hi"
+    assert prompter(answer="hi").text("Name") == "hi"
 
 
 def test_text_returns_the_default_on_a_bare_enter() -> None:
-    assert prompter(ENTER).text("Name", default="scribe") == "scribe"
+    assert prompter(answer="scribe").text("Name", default="scribe") == "scribe"
 
 
 def test_secret_returns_empty_when_skipped() -> None:
-    assert prompter(ENTER).secret("Token") == ""
+    assert prompter(answer="").secret("Token") == ""
 
 
 def test_confirm_returns_the_answer() -> None:

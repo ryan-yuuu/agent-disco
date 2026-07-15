@@ -26,7 +26,7 @@ from rich.console import Console
 from calfcord.cli._prompts import Choice
 from calfcord.cli.tui import widgets
 
-from .test_widgets import ENTER, keys
+from .test_widgets import ENTER, FakeEditor, keys
 
 CHOICES = [Choice("a", "Anthropic"), Choice("o", "OpenAI")]
 
@@ -81,7 +81,8 @@ def test_a_checkbox_paints_its_markers() -> None:
 def test_a_secret_never_paints_its_value_through_the_live_path() -> None:
     """The masking must hold where it actually matters — on a real terminal."""
     buffer = io.StringIO()
-    widgets.secret("Token", read=keys(*"hunter2", ENTER), console=painting_console(buffer))
+    widgets.secret("Token", editor=FakeEditor("hunter2"), console=painting_console(buffer))
     painted = buffer.getvalue()
     assert "hunter2" not in painted
-    assert "•" in painted
+    assert "provided" in painted
+    assert "•" not in painted
