@@ -243,6 +243,44 @@ def test_first_line_strips_summary_and_backticks() -> None:
     assert agent_tools.first_line("``x``") == "x"
     assert agent_tools.first_line("") == ""
     assert agent_tools.first_line(None) == ""
+
+
+class TestSummariesStayOnOneRow:
+    """A checkbox row must not wrap — a wrapped row reads as a new one.
+
+    Found by driving the real command in a pty: the widget wraps rather than
+    silently cutting (correct), but Rich starts the continuation at the panel's
+    left edge with no hanging indent, so ``execute_code``'s 88-char label became
+    two rows and the list stopped being scannable. Nothing renderable-level
+    caught it; the fix belongs here, where we know the description is a *hint*
+    and the tool NAME is what the operator is choosing.
+    """
+
+    LONG = (
+        "Run a Python script that can call Hermes tools programmatically. "
+        "Use this for multi-step work."
+    )
+
+    def test_a_long_summary_is_clipped(self) -> None:
+        assert len(agent_tools.first_line(self.LONG)) <= agent_tools._SUMMARY_LEN
+
+    def test_the_clip_is_visible(self) -> None:
+        """An ellipsis says 'there is more' — a silent cut is the bug we fixed."""
+        assert agent_tools.first_line(self.LONG).endswith("…")
+
+    def test_a_short_summary_is_untouched(self) -> None:
+        assert agent_tools.first_line("Targeted find-and-replace edits in files.") == (
+            "Targeted find-and-replace edits in files."
+        )
+
+    def test_every_real_builtin_row_fits_a_conventional_terminal(self) -> None:
+        """The actual failure, pinned against the real registry rather than a fixture."""
+        from calfcord.tools import TOOL_REGISTRY
+
+        for name in sorted(TOOL_REGISTRY):
+            summary = agent_tools.first_line(TOOL_REGISTRY[name].tool_schema.description)
+            row = f"❯ ◉ {name} — {summary}"  # noqa: RUF001 - the real pointer glyph
+            assert len(row) <= 76, f"{name} would wrap an 80-column panel: {len(row)} cells"
     # The first NON-EMPTY line wins, with leading blank lines skipped.
     assert agent_tools.first_line("\n\n  <summary>second</summary>\nthird") == "second"
 
