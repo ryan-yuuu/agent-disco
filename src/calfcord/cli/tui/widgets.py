@@ -28,7 +28,7 @@ from rich.text import Text
 from calfcord.cli._prompts import Choice
 from calfcord.cli.tui import render, theme
 from calfcord.cli.tui.keys import Key, read_key, resolve
-from calfcord.cli.tui.state import CheckboxState, SelectState, _ListState
+from calfcord.cli.tui.state import CheckboxState, ListState, SelectState
 
 Reader = Callable[[], str]
 
@@ -64,7 +64,7 @@ def viewport_for(console: Console | None) -> int:
     pathologically short terminal gets a cramped prompt rather than an impossible
     one.
     """
-    height = (console or render.console()).size.height
+    height = render.target(console).size.height
     return max(1, height - _PANEL_OVERHEAD)
 
 
@@ -78,7 +78,7 @@ def _more(count: int, arrow: str) -> Text:
     return Text(f"  {arrow} {count} more" if count else "", style=theme.MUTED)
 
 
-def _rows(state: _ListState, marker: Callable[[Choice], str]) -> Group:
+def _rows(state: ListState, marker: Callable[[Choice], str]) -> Group:
     """Render the visible window of the list, dimming all but the cursor row.
 
     Only ``state.window()`` is painted, because Live CROPS anything taller than
@@ -108,11 +108,14 @@ def _rows(state: _ListState, marker: Callable[[Choice], str]) -> Group:
     for index in range(start, stop):
         choice = state.choices[index]
         active = index == state.cursor
-        style = theme.ACCENT if active else theme.MUTED
-        text = Text(f"{theme.POINTER if active else ' '} ", style=style)
-        if marker(choice):
-            text.append(f"{marker(choice)} ", style=style)
-        text.append(choice.label, style=theme.ACCENT if active else "")
+        # The row's base style carries the emphasis; appended spans inherit it.
+        # Do NOT restyle the label here — style="" does not RESET a dim base, it
+        # inherits it, so it would read as an undim that silently is not one.
+        text = Text(f"{theme.POINTER if active else ' '} ", style=theme.ACCENT if active else theme.MUTED)
+        mark = marker(choice)
+        if mark:
+            text.append(f"{mark} ")
+        text.append(choice.label)
         lines.append(text)
 
     if state.scrolled:
@@ -138,18 +141,19 @@ def checkbox_panel(message: str, state: CheckboxState, *, instruction: str = "")
     return _panel(message, body, theme.HINT_CHECKBOX)
 
 
-def _field_panel(message: str, shown: str, hint: str, *, placeholder: str = "") -> Panel:
+def _field_panel(message: str, shown: str, *, placeholder: str = "") -> Panel:
+    """A single-line entry frame. Every field shares one hint, so it is not a param."""
     body = Text(shown, style=theme.ACCENT) if shown else Text(placeholder, style=theme.MUTED)
-    return _panel(message, body, hint)
+    return _panel(message, body, theme.HINT_TEXT)
 
 
 def text_panel(message: str, typed: str, *, default: str = "") -> Panel:
-    return _field_panel(message, typed, theme.HINT_TEXT, placeholder=default)
+    return _field_panel(message, typed, placeholder=default)
 
 
 def secret_panel(message: str, typed: str) -> Panel:
     """Paint the *length* of the secret, never the secret."""
-    return _field_panel(message, "•" * len(typed), theme.HINT_TEXT, placeholder="skip to keep current")
+    return _field_panel(message, "•" * len(typed), placeholder="skip to keep current")
 
 
 def confirm_panel(message: str, *, default: bool) -> Panel:
@@ -164,7 +168,7 @@ def _live(build: Callable[[], RenderableType], console: Console | None) -> Live:
     record. A non-terminal console (tests, a piped run) renders nothing at all,
     which is why no test-only quiet switch is needed here.
     """
-    return Live(build(), console=console or render.console(), transient=True, auto_refresh=False)
+    return Live(build(), console=render.target(console), transient=True, auto_refresh=False)
 
 
 def _loop(
@@ -193,6 +197,15 @@ def _loop(
             live.update(build(), refresh=True)
 
 
+def _navigate(state: ListState, key: Key | None) -> bool:
+    """Apply the navigation both list widgets share; True when Enter confirms."""
+    if key is Key.UP:
+        state.up()
+    elif key is Key.DOWN:
+        state.down()
+    return key is Key.ENTER
+
+
 def select(
     message: str,
     choices: list[Choice],
@@ -204,11 +217,7 @@ def select(
     state = SelectState(choices, default=default, viewport=viewport_for(console))
 
     def step(key: Key | None, _raw: str) -> bool:
-        if key is Key.UP:
-            state.up()
-        elif key is Key.DOWN:
-            state.down()
-        return key is Key.ENTER
+        return _navigate(state, key)
 
     _loop(lambda: select_panel(message, state), step, read=read, console=console)
     render.answer(message, state.choices[state.cursor].label, console=console)
@@ -226,16 +235,13 @@ def checkbox(
     state = CheckboxState(choices, viewport=viewport_for(console))
 
     def step(key: Key | None, raw: str) -> bool:
-        if key is Key.UP:
-            state.up()
-        elif key is Key.DOWN:
-            state.down()
-        elif raw == " ":
+        if raw == " ":
             # Matched raw rather than bound as a Key: space is printable text
             # everywhere else, and only this widget reads it as a command. Same
-            # shape as ``confirm`` matching y/n.
+            # shape as ``confirm`` matching y/n. Space resolves to no Key, so
+            # _navigate below is a no-op on this press.
             state.toggle()
-        return key is Key.ENTER
+        return _navigate(state, key)
 
     _loop(
         lambda: checkbox_panel(message, state, instruction=instruction),
@@ -248,7 +254,6 @@ def checkbox(
 
 
 def _typed_field(
-    message: str,
     build: Callable[[str], RenderableType],
     *,
     read: Reader,
@@ -283,7 +288,6 @@ def text(
     console: Console | None = None,
 ) -> str:
     typed = _typed_field(
-        message,
         lambda shown: text_panel(message, shown, default=default),
         read=read,
         console=console,
@@ -302,7 +306,6 @@ def secret(
     console: Console | None = None,
 ) -> str:
     typed = _typed_field(
-        message,
         lambda shown: secret_panel(message, shown),
         read=read,
         console=console,

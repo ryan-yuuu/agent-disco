@@ -13,7 +13,7 @@ import errno
 import pytest
 import readchar
 
-from calfcord.cli.tui.keys import Key, read_key, resolve
+from calfcord.cli.tui.keys import _BINDINGS, Key, read_key, resolve
 
 
 @pytest.mark.parametrize(
@@ -55,6 +55,18 @@ def test_resolve_accepts_application_cursor_mode_arrows(raw: str, expected: Key)
 def test_resolve_returns_none_for_a_printable_character() -> None:
     """Printable text is not a control key — the caller keeps the raw character."""
     assert resolve("a") is None
+
+
+def test_no_printable_character_is_ever_bound() -> None:
+    """The rule behind the space bug, enforced instead of merely explained.
+
+    Binding a printable character makes it a control key EVERYWHERE, and text
+    fields only append input that resolves to no Key — so the character gets
+    silently swallowed ("npx -y pkg" -> "npx-ypkg"). Pinning space alone would
+    guard the one character that already bit us; this guards the RULE, so it
+    outlives everyone who remembers why it exists.
+    """
+    assert sorted(raw for raw in _BINDINGS if raw.isprintable()) == []
 
 
 def test_space_is_text_not_a_control_key() -> None:

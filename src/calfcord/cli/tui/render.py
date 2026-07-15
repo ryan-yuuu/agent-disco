@@ -1,7 +1,7 @@
 """Output helpers for the interactive flows.
 
-Every helper funnels through :func:`line`, which pins the two rules that make it
-safe to route existing operator prose through Rich:
+Every helper that prints a raw ``str`` funnels through :func:`line`, which pins
+the two rules that make it safe to route existing operator prose through Rich:
 
 * ``markup=False`` — the prose contains bracketed text and ``$``-sigils that Rich
   would otherwise parse as style tags and delete.
@@ -18,6 +18,12 @@ console must not decide for both.
 
 ``highlight=False`` is part of the same contract: Rich's automatic highlighter
 would otherwise colour numbers, paths, and URLs inside plain sentences.
+
+:func:`answer` and :func:`header` bypass :func:`line` and print directly. They are
+safe for a *different* reason — they build ``Text`` objects, which are never
+markup-parsed — not because they funnel. A future helper that prints a raw ``str``
+must use :func:`line`, or it inherits the markup-eating bug these rules exist to
+prevent.
 """
 
 from __future__ import annotations
@@ -57,14 +63,20 @@ def console() -> Console:
     return _console
 
 
-def _target(explicit: Console | None) -> Console:
-    """Resolve the console to print on — the injected one, else the shared one."""
+def target(explicit: Console | None) -> Console:
+    """Resolve the console to print on — the injected one, else the shared one.
+
+    Public because :mod:`calfcord.cli.tui.widgets` needs the same rule, and two
+    modules re-deriving it invites drift: the ``or`` spelling widgets used is
+    equivalent only because ``Console`` happens to define no ``__bool__``, which
+    is an accident rather than a guarantee.
+    """
     return explicit if explicit is not None else console()
 
 
 def line(text: str = "", *, style: str = "", console: Console | None = None) -> None:
     """Print one line verbatim — no markup parsing, no wrapping, no highlighting."""
-    _target(console).print(Text(text, style=style), markup=False, highlight=False, soft_wrap=True)
+    target(console).print(Text(text, style=style), markup=False, highlight=False, soft_wrap=True)
 
 
 def note(text: str, *, console: Console | None = None) -> None:
@@ -102,7 +114,7 @@ def answer(label: str, value: str, *, console: Console | None = None) -> None:
     This is what makes the inline model read as a transcript: the live widget is
     torn down and replaced by this, so scrollback shows decisions, not dead UI.
     """
-    _target(console).print(answer_text(label, value), soft_wrap=True)
+    target(console).print(answer_text(label, value), soft_wrap=True)
 
 
 def header(
@@ -129,10 +141,10 @@ def header(
     # A leading blank line so a header never butts against whatever preceded it
     # (a collapsed answer record, a note). Owned here rather than left to each of
     # the ~7 call sites, which would drift.
-    target = _target(console)
+    out = target(console)
     body = Text(subtitle, style=theme.MUTED) if subtitle else Text("")
-    target.print()
-    target.print(
+    out.print()
+    out.print(
         Panel(
             body,
             title=Text(title, style=theme.TITLE),

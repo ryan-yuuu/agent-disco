@@ -65,10 +65,18 @@ _BINDINGS: dict[str, Key] = {
 
 
 def resolve(raw: str) -> Key | None:
-    """Map a raw readchar string onto a :class:`Key`, or ``None`` if it is text.
+    """Map a raw readchar string onto a :class:`Key`, or ``None`` if unbound.
 
-    ``None`` means "not a control key" — the caller treats ``raw`` as literal
-    input (a character typed into a text field, say).
+    ``None`` means **"not a bound key"** — which is a superset of text, not a
+    synonym for it. Tab, Ctrl-A, Home and the left/right arrows all return
+    ``None`` while being unprintable, so a caller must still ask whether ``raw``
+    is printable before treating it as input. A caller that skips that check
+    injects raw escape sequences into the value.
+
+    (An earlier version of this docstring said ``None`` meant the caller could
+    treat ``raw`` as literal input. That was wrong, and it is the same shape as
+    the space bug: input filed under the wrong category. The check lives at
+    ``widgets._typed_field``.)
     """
     return _BINDINGS.get(raw)
 

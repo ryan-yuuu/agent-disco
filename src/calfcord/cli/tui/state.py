@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from calfcord.cli._prompts import Choice
 
-# How many rows a list widget shows before it scrolls. Sized to leave room for
-# the panel's borders, the question, and the hint inside a conventional 24-line
-# terminal, with slack for whatever the flow already printed above.
+# Fallback for direct construction (and tests). Production never reaches it —
+# the widgets measure the terminal via ``widgets.viewport_for``, whose docstring
+# explains why any fixed count is wrong in both directions. Kept only so this
+# module stays standalone-constructible without importing the render layer.
 DEFAULT_VIEWPORT = 10
 
 
-class _ListState:
+class ListState:
     """Shared scrolling cursor over a non-empty choice list."""
 
     def __init__(self, choices: list[Choice], *, viewport: int = DEFAULT_VIEWPORT) -> None:
@@ -26,6 +27,16 @@ class _ListState:
         # construction — rather than at paint time.
         if not choices:
             raise ValueError("a prompt needs at least one choice")
+        # ``value`` is a primary key: CheckboxState's ``_checked`` is a set of
+        # values and ``selected`` filters by membership, so two rows sharing a
+        # value toggle as one and emit that value TWICE — into an agent's
+        # persisted ``tools:`` list, with a checkmark on a row nobody touched.
+        # Callers keep duplicates out today (unique registry keys, a set union
+        # over MCP servers, agent_tools' ``current - offered``), which is exactly
+        # why this belongs here instead: that care lives far from the type that
+        # depends on it, and the next choice source would inherit no guardrail.
+        if len({c.value for c in choices}) != len(choices):
+            raise ValueError("choice values must be unique")
         self.choices = choices
         self.cursor = 0
         self.viewport = max(1, viewport)
@@ -69,7 +80,7 @@ class _ListState:
         return len(self.choices) > self.viewport
 
 
-class SelectState(_ListState):
+class SelectState(ListState):
     """Single-choice cursor.
 
     ``default`` names the :attr:`Choice.value` to start on. An unrecognized
@@ -94,7 +105,7 @@ class SelectState(_ListState):
         return self.choices[self.cursor].value
 
 
-class CheckboxState(_ListState):
+class CheckboxState(ListState):
     """Multi-select cursor, pre-checked from :attr:`Choice.checked`."""
 
     def __init__(self, choices: list[Choice], *, viewport: int = DEFAULT_VIEWPORT) -> None:

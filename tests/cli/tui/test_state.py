@@ -54,6 +54,37 @@ class TestSelectState:
             SelectState([])
 
 
+class TestChoiceValuesAreUnique:
+    """``value`` is a primary key here, so a duplicate corrupts silently.
+
+    ``CheckboxState`` keys everything off ``Choice.value``: ``_checked`` is a set
+    of values, and ``selected`` filters by membership. Two rows sharing a value
+    therefore toggle as one and emit that value TWICE — straight into the agent's
+    persisted ``tools:`` list, with the checkmark appearing on a row the operator
+    never touched.
+
+    No caller produces duplicates today: ``_build_choices`` keeps them out with
+    unique registry keys, a set union over MCP servers, and the ``current -
+    offered`` subtraction at agent_tools.py. That is the problem — the invariant
+    lives 100 lines from the type that depends on it, and a fifth choice source
+    added later has no guardrail. Enforce it where it is relied upon.
+    """
+
+    def test_duplicate_values_are_rejected(self) -> None:
+        rows = [Choice("mcp/x", "from the server list"), Choice("mcp/x", "kept row")]
+        with pytest.raises(ValueError, match="unique"):
+            CheckboxState(rows)
+
+    def test_duplicate_values_are_rejected_for_select_too(self) -> None:
+        """``select`` returns a value; two rows sharing one make the answer ambiguous."""
+        with pytest.raises(ValueError, match="unique"):
+            SelectState([Choice("a", "One"), Choice("a", "Two")])
+
+    def test_distinct_values_with_identical_labels_are_fine(self) -> None:
+        """Labels are cosmetic — only the value is the key."""
+        assert CheckboxState([Choice("a", "same"), Choice("b", "same")]).selected == []
+
+
 class TestViewport:
     """A list taller than the terminal must scroll, not overflow it.
 
