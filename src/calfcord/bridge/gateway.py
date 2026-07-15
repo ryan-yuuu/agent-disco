@@ -224,7 +224,11 @@ class DiscordIngressGateway:
         # client is safe. Agent turns are recognized by bot-owned ``webhook_id``
         # (R-A3) via the persona sender's id set.
         fetcher = ChannelHistoryFetcher(self._client, persona_sender.owns_webhook)
-        history = DiscordHistoryProvider(fetcher, transcript_store)
+        history = DiscordHistoryProvider(
+            fetcher,
+            transcript_store,
+            max_json_bytes=self._bridge_settings.message_history.max_json_bytes,
+        )
         handler_sticky = (
             sticky_store if self._bridge_settings.sticky_replies.enabled else None
         )

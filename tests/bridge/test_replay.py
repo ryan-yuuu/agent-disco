@@ -42,6 +42,7 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 
 from calfcord.bridge.history import (
+    HISTORY_MAX_JSON_BYTES,
     REPLAY_TOOL_RETURN_MAX_CHARS,
     DiscordHistoryProvider,
     HistoryRecord,
@@ -345,6 +346,39 @@ class TestDiscordHistoryProvider:
         # Final answer text last.
         assert isinstance(message_history[3], ModelResponse)
         assert message_history[3].parts[0].content == "It's 18C."
+
+    async def test_history_is_bounded_by_max_json_bytes(self) -> None:
+        """The provider applies the serialized-size bound before handing the
+        history back — it is the last bridge-side point where the outgoing
+        payload is still assembled and typed.
+
+        The oversized opening turn cannot fit the budget, so it is dropped; the
+        agent reply it stranded at the head goes with it (assistant-first is a
+        provider 400), leaving the newest question.
+        """
+        records = [
+            _record(message_id=10, content="x" * 4000, author_display_name="ryan"),
+            _record(message_id=20, content="a reply", author_display_name="Scribe", is_agent=True),
+            _record(message_id=25, content="newest question", author_display_name="ryan"),
+        ]
+        provider = DiscordHistoryProvider(
+            _fake_fetcher(records), _fake_store({}), max_json_bytes=1000
+        )
+
+        message_history = await provider.message_history(_req(message_id=30))
+
+        assert len(ModelMessagesTypeAdapter.dump_json(message_history)) <= 1000
+        assert len(message_history) == 1
+        assert isinstance(message_history[0], ModelRequest)
+        assert message_history[0].parts[0].content == "newest question"
+
+    async def test_budget_defaults_to_the_module_constant(self) -> None:
+        """An unconfigured provider uses the shipped default, so a deployment
+        with no ``message_history`` settings block is still bounded."""
+        records = [_record(message_id=10, content="hi", author_display_name="ryan")]
+        provider = DiscordHistoryProvider(_fake_fetcher(records), _fake_store({}))
+
+        assert provider._max_json_bytes == HISTORY_MAX_JSON_BYTES
 
     async def test_fetch_is_anchored_on_the_request(self) -> None:
         """The provider fetches ``source_channel_id`` and anchors ``before=`` on

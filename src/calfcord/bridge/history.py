@@ -751,6 +751,34 @@ class ChannelHistoryFetcher:
         )
 
 
+def _drop_until_user_request(messages: Sequence[ModelMessage]) -> list[ModelMessage]:
+    """Drop from the head until the first message is a genuine user turn.
+
+    A history may only open with a :class:`ModelRequest` carrying a
+    :class:`UserPromptPart`. Two distinct heads are illegal and both are dropped:
+
+    * a leading :class:`ModelResponse` — calfkit's projection keeps a
+      self-authored leading response as a response, and Anthropic rejects a
+      history whose first message is ``assistant``;
+    * a leading :class:`ModelRequest` whose parts are all tool returns — a
+      ``tool_result`` with no matching ``tool_use``, which every provider 400s.
+
+    The single definition of "legal head" for this module, shared by
+    :func:`build_message_history` (which can only produce the first case, thanks
+    to its ``seen_request`` gate) and :func:`_bound_history_bytes` (whose cut can
+    land mid-replay-delta and produce the second). Stricter than either caller
+    needs alone; one rule beats two that must be kept in agreement.
+
+    Returns ``[]`` when no user turn survives. Non-mutating.
+    """
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, ModelRequest) and any(
+            isinstance(p, UserPromptPart) for p in msg.parts
+        ):
+            return list(messages[idx:])
+    return []
+
+
 def build_message_history(
     records: Sequence[HistoryRecord],
     *,
@@ -787,10 +815,13 @@ def build_message_history(
     ``_clean_message_history`` (``_agent_graph.py:1386``) does that before any
     provider mapper runs (our messages satisfy its merge conditions). It DOES
     drop empty/whitespace-only content (Anthropic skips zero-block user messages;
-    OpenAI wastes tokens) and DOES drop leading :class:`ModelResponse` entries
-    iteratively — calfkit's projection keeps a self-authored leading response as
-    a response, and Anthropic rejects a history whose first message is
-    ``assistant``.
+    OpenAI wastes tokens) and DOES enforce a legal head via
+    :func:`_drop_until_user_request`.
+
+    Says nothing about SIZE: the result is as big as the fetched window plus its
+    replay deltas. :func:`_bound_history_bytes` (applied by
+    :class:`DiscordHistoryProvider`, not here) is what bounds the payload — this
+    stays a pure semantic build, testable without serializing anything.
     """
     out: list[ModelMessage] = []
     seen_request = False
@@ -817,9 +848,7 @@ def build_message_history(
                 ModelRequest(parts=[UserPromptPart(content=r.content, name=r.author_display_name)])
             )
             seen_request = True
-    while out and isinstance(out[0], ModelResponse):
-        out.pop(0)
-    return out
+    return _drop_until_user_request(out)
 
 
 REPLAY_TOOL_RETURN_MAX_CHARS: Final[int] = 6000
@@ -830,9 +859,9 @@ Deliberately distinct from — and much larger than — the 2000-char Discord
 display budget: this bounds the *LLM context* a replayed turn re-injects, not a
 *display*. Reusing a display-sized cap would lobotomize the tool context the
 model reasons over on the next turn (the whole point of replay). Only oversized
-individual tool returns are trimmed; per R-A5 there is no global history ceiling,
-and this per-return cap is the one backstop kept (it bounds the realistic
-envelope blow-up — a giant tool output spliced back in)."""
+individual tool returns are trimmed. Composes with — and does not replace —
+:data:`HISTORY_MAX_JSON_BYTES`: this caps ONE return, that caps the whole
+history (N returns under this cap still sum past any envelope)."""
 
 _REPLAY_TRUNCATION_MARKER: Final[str] = "\n…(truncated)"
 """Visible marker appended to a tool return truncated to
@@ -889,6 +918,95 @@ def _stamp_response_names(messages: list[ModelMessage], name: str) -> list[Model
     return out
 
 
+HISTORY_MAX_JSON_BYTES: Final[int] = 800_000
+"""Default ceiling on the SERIALIZED (``ModelMessagesTypeAdapter.dump_json``)
+size of an outgoing ``message_history``, in bytes. Tunable per deployment via
+``message_history.max_json_bytes`` in bridge ``settings.json``.
+
+Sized against the envelope this history rides in: aiokafka's default
+``max_request_size`` is 1 MiB, and the envelope also carries the current prompt,
+``deps`` and headers — so the default leaves ~250 KB of headroom for everything
+that is not history. This bounds the history term ONLY; it is a floor under the
+common blow-up (a long channel + replayed tool returns), not a guarantee the
+envelope fits.
+
+Distinct from :data:`REPLAY_TOOL_RETURN_MAX_CHARS`, which caps ONE tool return.
+That per-return cap does not compose into a total — N returns at the cap grow
+without limit — which is why a global bound is needed as well."""
+
+_JSON_ARRAY_BRACKETS: Final[int] = 2
+"""Bytes of the enclosing ``[]`` in a serialized message list."""
+
+_JSON_SEPARATOR: Final[int] = 1
+"""Bytes of the ``,`` between two serialized messages (the adapter emits no
+whitespace, so a list of ``k`` messages costs exactly ``k - 1`` separators)."""
+
+
+def _message_json_size(message: ModelMessage) -> int:
+    """Serialized size of ``message`` as it appears INSIDE the array, in bytes.
+
+    Excludes the enclosing brackets so per-message sizes are additive: a list of
+    ``k`` messages serializes to ``_JSON_ARRAY_BRACKETS + sum(sizes) + (k - 1)``
+    bytes exactly. Sizing each message once keeps the bound linear — re-dumping
+    the whole list per dropped message would be quadratic over a payload this
+    size.
+    """
+    return len(ModelMessagesTypeAdapter.dump_json([message])) - _JSON_ARRAY_BRACKETS
+
+
+def _bound_history_bytes(
+    messages: list[ModelMessage], *, max_bytes: int = HISTORY_MAX_JSON_BYTES
+) -> list[ModelMessage]:
+    """Bound ``messages`` to ``max_bytes`` of serialized JSON, dropping oldest.
+
+    Keeps the largest suffix (newest turns — the ones worth spending budget on)
+    whose serialization fits ``max_bytes`` inclusive, then repairs the head via
+    :func:`_drop_until_user_request`. Repair only ever removes, so it cannot push
+    the result back over budget: one pass, no settle loop.
+
+    Repair also restores replay-delta atomicity for free. A delta holds no
+    user-prompt ``ModelRequest``, so a cut landing inside one is walked past
+    entirely rather than left as a half delta — no explicit turn model needed.
+
+    Deliberately does NOT re-grow after repair. Re-admitting the older message
+    that repair just orphaned past (typically the delta's ``tool_call``) would
+    win back a little context for a settle loop and a much subtler invariant.
+    This is a safety valve, not a packing optimizer; shedding slightly more than
+    strictly necessary at the boundary is the cheaper trade.
+
+    Returns ``[]`` if a single message exceeds ``max_bytes`` — dropping cannot
+    shrink it, and going out over budget is not an option.
+    """
+    total = _JSON_ARRAY_BRACKETS
+    start = len(messages)
+    for idx in range(len(messages) - 1, -1, -1):
+        # The separator is only owed once a message is already kept (k messages
+        # cost k - 1 separators), so the newest message adds none.
+        cost = _message_json_size(messages[idx]) + (
+            _JSON_SEPARATOR if start < len(messages) else 0
+        )
+        if total + cost > max_bytes:
+            break
+        total += cost
+        start = idx
+    if start == 0:
+        return list(messages)
+    bounded = _drop_until_user_request(messages[start:])
+    # Losing context silently would make a truncated-looking agent reply
+    # inexplicable; this is the only record that the turn was trimmed.
+    logger.warning(
+        "message_history trimmed to fit %d-byte budget: %d of %d messages sent "
+        "(%d dropped: %d over budget, %d repairing the head to a user turn)",
+        max_bytes,
+        len(bounded),
+        len(messages),
+        len(messages) - len(bounded),
+        start,
+        len(messages) - start - len(bounded),
+    )
+    return bounded
+
+
 class DiscordHistoryProvider:
     """Bridge-side ``MentionRequest`` → ``list[ModelMessage]`` history seam.
 
@@ -904,12 +1022,15 @@ class DiscordHistoryProvider:
         transcript_store: TranscriptStoreLike,
         *,
         limit: int = _DISCORD_HISTORY_MAX_LIMIT,
+        max_json_bytes: int = HISTORY_MAX_JSON_BYTES,
     ) -> None:
         self._fetcher = fetcher
         self._transcript_store = transcript_store
-        # Per R-A5 there is no global history ceiling; ``limit`` is just the
-        # Discord per-call REST cap (≤100). The fetched window is used as-is.
+        # ``limit`` is the Discord per-call REST cap (≤100), not a context
+        # bound: 100 records of replayed tool returns still blow an envelope,
+        # which is what ``max_json_bytes`` is for.
         self._limit = limit
+        self._max_json_bytes = max_json_bytes
 
     async def message_history(self, req: MentionRequest) -> list[ModelMessage]:
         records = await self._fetcher.fetch(
@@ -918,7 +1039,10 @@ class DiscordHistoryProvider:
             limit=self._limit,
         )
         hydration = await self._build_replay_hydration(records)
-        return build_message_history(records, hydration=hydration)
+        history = build_message_history(records, hydration=hydration)
+        # Bound LAST: replay hydration is what makes a history big, so the
+        # budget has to see the spliced result, not the pre-splice records.
+        return _bound_history_bytes(history, max_bytes=self._max_json_bytes)
 
     async def _build_replay_hydration(
         self, records: Sequence[HistoryRecord]

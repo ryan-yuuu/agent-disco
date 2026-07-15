@@ -7,7 +7,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
+
+from calfcord.bridge.history import HISTORY_MAX_JSON_BYTES
 
 _SETTINGS_ENV_VAR = "CALFCORD_SETTINGS"
 _HOME_ENV_VAR = "CALFCORD_HOME"
@@ -27,12 +29,24 @@ class StickyRepliesSettings(BaseModel):
     enabled: StrictBool = True
 
 
+class MessageHistorySettings(BaseModel):
+    """Settings for the outgoing ``message_history`` payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_json_bytes: StrictInt = Field(default=HISTORY_MAX_JSON_BYTES, gt=0)
+    """Ceiling on the serialized history; oldest turns are dropped to fit. Lower
+    it when the envelope's non-history terms are unusually large, raise it when
+    the broker's ``max_request_size`` has been raised to match."""
+
+
 class BridgeSettings(BaseModel):
     """Bridge-local runtime settings."""
 
     model_config = ConfigDict(extra="forbid")
 
     sticky_replies: StickyRepliesSettings = StickyRepliesSettings()
+    message_history: MessageHistorySettings = MessageHistorySettings()
 
 
 def resolve_settings_path(env: Mapping[str, str] | None = None) -> Path:

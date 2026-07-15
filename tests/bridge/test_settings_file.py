@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from calfcord.bridge.history import HISTORY_MAX_JSON_BYTES
 from calfcord.bridge.settings import SettingsConfigError, load_settings, resolve_settings_path
 
 
@@ -41,6 +42,48 @@ def test_load_settings_reads_sticky_replies_flag(tmp_path: Path) -> None:
     settings = load_settings(path)
 
     assert settings.sticky_replies.enabled is False
+
+
+def test_missing_settings_file_defaults_message_history_budget(tmp_path: Path) -> None:
+    settings = load_settings(tmp_path / "missing.json")
+
+    assert settings.message_history.max_json_bytes == HISTORY_MAX_JSON_BYTES
+
+
+def test_load_settings_reads_message_history_budget(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"message_history": {"max_json_bytes": 250_000}}), encoding="utf-8")
+
+    settings = load_settings(path)
+
+    assert settings.message_history.max_json_bytes == 250_000
+
+
+def test_load_settings_rejects_non_positive_message_history_budget(tmp_path: Path) -> None:
+    """A zero/negative budget would silently empty every history — reject it at
+    load rather than degrade every turn.
+
+    Matches the CONSTRAINT error, not the generic wrapper: an ``extra="forbid"``
+    rejection of an unknown ``message_history`` key would otherwise satisfy this
+    test without the field existing at all.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"message_history": {"max_json_bytes": 0}}), encoding="utf-8")
+
+    with pytest.raises(SettingsConfigError, match="greater than 0"):
+        load_settings(path)
+
+
+def test_load_settings_rejects_non_int_message_history_budget(tmp_path: Path) -> None:
+    """A stringy budget is a config typo, not a coercible value (mirrors the
+    ``StrictBool`` posture on ``sticky_replies.enabled``)."""
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps({"message_history": {"max_json_bytes": "800000"}}), encoding="utf-8"
+    )
+
+    with pytest.raises(SettingsConfigError, match="valid integer"):
+        load_settings(path)
 
 
 def test_load_settings_rejects_invalid_json(tmp_path: Path) -> None:

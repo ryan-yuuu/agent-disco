@@ -27,14 +27,22 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from calfkit._vendor.pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
 )
 
 from calfcord.bridge.history import (
     CLEAR_MARKER_TEXT,
+    HISTORY_MAX_JSON_BYTES,
     ChannelHistoryFetcher,
     HistoryRecord,
+    _bound_history_bytes,
     build_message_history,
     is_clear_marker,
 )
@@ -228,6 +236,118 @@ class TestBuildMessageHistory:
             assert type(a) is type(b)
             assert _text(a) == _text(b)
             assert _name(a) == _name(b)
+
+
+# ---------------------------------------------------------------------------
+# _bound_history_bytes — serialized-size budget + head repair
+# ---------------------------------------------------------------------------
+
+
+def _user(content: str, *, name: str = "ryan") -> ModelRequest:
+    return ModelRequest(parts=[UserPromptPart(content=content, name=name)])
+
+
+def _agent_text(content: str, *, name: str = "Scribe") -> ModelResponse:
+    return ModelResponse(parts=[TextPart(content=content)], name=name)
+
+
+def _tool_call(tool_call_id: str = "c1", *, name: str = "Scribe") -> ModelResponse:
+    """The first half of a replay delta: the agent's tool_use."""
+    return ModelResponse(
+        parts=[ToolCallPart(tool_name="grep", args={}, tool_call_id=tool_call_id)], name=name
+    )
+
+
+def _tool_return(tool_call_id: str = "c1", *, content: str = "result") -> ModelRequest:
+    """The second half of a replay delta: the tool_result. Orphaned (no matching
+    tool_use ahead of it) this is a provider 400 — see ``build_message_history``."""
+    return ModelRequest(
+        parts=[ToolReturnPart(tool_name="grep", content=content, tool_call_id=tool_call_id)]
+    )
+
+
+def _json_len(messages: list[ModelMessage]) -> int:
+    return len(ModelMessagesTypeAdapter.dump_json(messages))
+
+
+class TestBoundHistoryBytes:
+    """The serialized-size bound applied to a built history before it goes out.
+
+    Budgets in these tests are derived from :func:`_json_len` of the exact slice
+    that should survive, so they pin the boundary rather than a magic number.
+    """
+
+    def test_empty_input(self) -> None:
+        assert _bound_history_bytes([], max_bytes=HISTORY_MAX_JSON_BYTES) == []
+
+    def test_under_budget_is_unchanged(self) -> None:
+        msgs = [_user("how do I X?"), _agent_text("here's how")]
+        assert _bound_history_bytes(msgs, max_bytes=HISTORY_MAX_JSON_BYTES) == msgs
+
+    def test_exactly_at_budget_is_unchanged(self) -> None:
+        """The bound is inclusive: a history whose JSON is exactly the budget
+        fits and must not lose its oldest turn."""
+        msgs = [_user("how do I X?"), _agent_text("here's how")]
+        assert _bound_history_bytes(msgs, max_bytes=_json_len(msgs)) == msgs
+
+    def test_drops_oldest_first(self) -> None:
+        """Over budget sheds from the OLD end — the newest turns are the ones
+        worth keeping."""
+        msgs = [_user("oldest"), _user("middle"), _user("newest")]
+        out = _bound_history_bytes(msgs, max_bytes=_json_len(msgs[1:]))
+        assert out == msgs[1:]
+
+    def test_output_never_exceeds_budget(self) -> None:
+        msgs = [_user(f"turn {i}" * 20) for i in range(10)]
+        budget = _json_len(msgs) // 3
+        out = _bound_history_bytes(msgs, max_bytes=budget)
+        assert _json_len(out) <= budget
+        assert out  # a budget this size still admits several turns
+
+    def test_single_oversized_message_yields_empty(self) -> None:
+        """One turn bigger than the whole budget cannot be shrunk by dropping,
+        so the history empties rather than going out over budget."""
+        assert _bound_history_bytes([_user("x" * 5000)], max_bytes=200) == []
+
+    def test_head_repair_drops_orphaned_tool_return(self) -> None:
+        """A cut landing INSIDE a replay delta must not leave the delta's
+        tool-return ModelRequest at the head.
+
+        The surviving slice here starts at the tool_return whose matching
+        tool_call was just dropped — a ``tool_result`` with no ``tool_use``,
+        which is a provider 400. Repair walks past the whole delta remnant to
+        the next real user turn.
+        """
+        msgs = [
+            _user("q1"),
+            _tool_call(),
+            _tool_return(),
+            _agent_text("a1"),
+            _user("q2"),
+        ]
+        # A budget admitting [tool_return, a1, q2] but NOT the tool_call ahead of it.
+        out = _bound_history_bytes(msgs, max_bytes=_json_len(msgs[2:]))
+        assert out == [msgs[4]]
+
+    def test_head_repair_drops_leading_response(self) -> None:
+        """A cut landing on an agent turn drops it — Anthropic rejects a history
+        whose first message is ``assistant`` (the same rule
+        :func:`build_message_history` enforces)."""
+        msgs = [_user("q1"), _agent_text("a1"), _user("q2")]
+        out = _bound_history_bytes(msgs, max_bytes=_json_len(msgs[1:]))
+        assert out == [msgs[2]]
+
+    def test_head_repair_can_empty_the_history(self) -> None:
+        """If nothing user-authored survives the cut, the result is empty rather
+        than a head the provider would reject."""
+        msgs = [_user("q1"), _tool_call(), _tool_return()]
+        assert _bound_history_bytes(msgs, max_bytes=_json_len(msgs[2:])) == []
+
+    def test_does_not_mutate_input(self) -> None:
+        msgs = [_user("oldest"), _user("newest")]
+        before = list(msgs)
+        _bound_history_bytes(msgs, max_bytes=_json_len(msgs[1:]))
+        assert msgs == before
 
 
 # ---------------------------------------------------------------------------
