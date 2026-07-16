@@ -246,6 +246,86 @@ def test_run_write_failure_returns_1_without_banner(
     assert not (agents_dir / "scribe.md").exists()
 
 
+async def _workspace_up(_home: Path) -> bool:
+    return True
+
+
+async def _workspace_down(_home: Path) -> bool:
+    return False
+
+
+def test_create_for_start_returns_the_name_when_the_workspace_is_open(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ordinary path: hand the name back and let the caller start it.
+
+    No next-steps hint here — the agent comes online on the very next line, so
+    telling the operator how to bring it online would be noise.
+    """
+    name = agent_create.create_for_start(
+        _prompter(name="scribe"),
+        agents_dir=tmp_path / "agents",
+        env_path=tmp_path / ".env",
+        home=tmp_path / "home",
+        workspace_running_fn=_workspace_up,
+    )
+
+    assert name == "scribe"
+    assert "Bring scribe online" not in capsys.readouterr().out
+
+
+def test_create_for_start_gives_the_two_steps_in_the_order_they_are_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A closed workspace: say the steps, in the order they must be done.
+
+    The bare ``disco agent start`` that got here never typed a name, so
+    ``disco agent start <name>`` is the one command the operator has not met —
+    but it is USELESS before ``disco start``, so the order is the point. Printing
+    the pair here (rather than letting the roster refuse) is also what keeps them
+    ordered: the refusal names only ``disco start``, and any hint the create step
+    printed would land above it, listing step 2 before step 1.
+    """
+    name = agent_create.create_for_start(
+        _prompter(name="scribe"),
+        agents_dir=tmp_path / "agents",
+        env_path=tmp_path / ".env",
+        home=tmp_path / "home",
+        workspace_running_fn=_workspace_down,
+    )
+
+    assert name is None, "a start that cannot succeed must not be attempted"
+    out = capsys.readouterr().out
+    assert "Created agent 'scribe'." in out, "the agent IS on disk — say so"
+    assert out.index("disco start") < out.index("disco agent start scribe"), (
+        "the workspace must be opened before the agent can be clocked in"
+    )
+
+
+def test_create_for_start_says_nothing_about_starting_a_failed_create(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No agent landed on disk, so naming a command to start one would mislead."""
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(agent_create, "create_agent", _boom)
+
+    name = agent_create.create_for_start(
+        _prompter(name="scribe"),
+        agents_dir=tmp_path / "agents",
+        env_path=tmp_path / ".env",
+        home=tmp_path / "home",
+        workspace_running_fn=_workspace_down,
+    )
+
+    assert name is None
+    out = capsys.readouterr().out
+    assert "disco agent start" not in out
+    assert "error:" in out
+
+
 def test_create_agent_returns_name_and_provider(tmp_path: Path) -> None:
     """The extracted flow returns ``(name, provider)`` for the caller's guidance."""
     agents_dir = tmp_path / "agents"

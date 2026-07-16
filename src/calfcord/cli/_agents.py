@@ -45,6 +45,7 @@ from calfcord.agents.identifier import AGENT_ID_PATTERN
 # type. Importing the seam is cycle-free: ``_prompts`` holds only the Protocol and
 # a factory whose TUI import is lazy, so it never reaches back here.
 from calfcord.cli._prompts import Choice
+from calfcord.cli.tui import render
 
 if TYPE_CHECKING:
     from calfcord.cli._prompts import Prompter
@@ -74,6 +75,34 @@ _DANGEROUS_TOOLS = frozenset(
 # ("my_helper") rather than failing validation at write time.
 _STEM_INVALID = re.compile(r"[^a-z0-9_-]+")
 
+# The create row's value, and why this exact spelling is safe. It shares a
+# namespace with agent names (both are ``Choice.value``s in one select, and
+# ``ListState`` requires those to be unique), so it must be a string no agent
+# can ever be called — a collision does not merely mis-render, it RAISES, so the
+# picker never opens and no agent can be started at all.
+#
+# The leading separator is what buys that, and it is worth being exact about why,
+# because the obvious argument is wrong: ``AGENT_ID_PATTERN`` does NOT keep this
+# namespace clean. It governs the WRITE path (``slug_stem`` rewrites a typed name
+# toward it), while :func:`detect_agents` — which supplies every other row —
+# globs raw ``.md`` stems and validates nothing. An earlier version of this
+# constant was ``+create`` and reasoned that ``+`` was outside the pattern; a
+# hand-placed ``+create.md`` duly collided and crashed the picker. A stem is a
+# single path component, so it can never contain ``/`` — that holds no matter
+# what ``detect_agents`` filters, which is the property this needs.
+#
+# It is also not a valid agent id, so were it ever to leak through to
+# ``roster.agent_start`` it would fail that command's name-shape check loudly
+# rather than start something unexpected. That is a backstop, not the guarantee.
+CREATE_SENTINEL = "/create"
+
+# ``+`` reads as "new"; the ellipsis is the long-standing convention for a row
+# that OPENS something rather than acting immediately. Together they do the work
+# a colour would do elsewhere — deliberately, since :mod:`calfcord.cli.tui.theme`
+# is monochrome and every unselected row is already dim, leaving no styling
+# headroom to mark this row as different.
+_CREATE_LABEL = "+ Create a new agent…"
+
 
 @dataclass(frozen=True)
 class ToolGrantSelection:
@@ -87,26 +116,72 @@ class ToolGrantSelection:
     mcp: list[str]
 
 
-def pick_agent(prompter: Prompter, *, agents_dir: Path, message: str) -> str | None:
-    """Prompt for one of the DEFINED agents, or ``None`` after printing why not.
+def pick_agent(
+    prompter: Prompter,
+    *,
+    agents_dir: Path,
+    message: str,
+    create_fn: Callable[[], str | None],
+) -> str | None:
+    """Prompt for one of the DEFINED agents — or for a brand-new one.
 
-    The shared "which agent?" pick-list. An empty roster returns ``None`` rather
-    than opening a prompt with nothing in it: a choice-less list is unanswerable
-    — there is no key meaning "none of these" — so it would strand the operator
-    with only Ctrl-C, when the honest answer is that they have no agents yet, and
-    here is the command that makes one. Callers map ``None`` onto exit 1; the
-    message is already printed.
+    The "which agent?" pick-list. Returns the chosen agent's name; ``None`` means
+    "nothing to start", and whatever produced it has already said why, so callers
+    map it onto exit 1 without adding a message of their own.
+
+    The list always ends with a ``+ Create a new agent…`` row, because "none of
+    these" was the one answer it could not take: an operator whose roster held
+    nothing they wanted had to quit and run another command. Choosing it returns
+    whatever ``create_fn`` produces — a new agent's name, or ``None`` if the
+    create failed (in which case ``create_fn`` owns reporting it).
+
+    ``create_fn`` is injected rather than imported because
+    :mod:`calfcord.cli.agent_create` imports *this* module, so reaching the other
+    way would cycle; it also keeps this module's one job — asking the question —
+    separate from the flow that answers it. It is REQUIRED, not defaulted: the
+    only caller always creates, so a ``None`` default would be a branch no run
+    ever reaches, and it would let the next caller acquire a create-less picker
+    without ever deciding to.
+
+    Placement is deliberate. :class:`~calfcord.cli.tui.state.SelectState` opens on
+    row 0, so a create row at the top would make launching a wizard the
+    enter-through default of a command whose usual intent is to start an agent
+    that already exists. Last costs nothing in reach: ``ListState`` navigation
+    wraps, so one ``↑`` lands on it however long the roster is.
+
+    An empty roster opens the picker rather than refusing it, and the reasoning
+    here used to run the other way: a choice-less list is unanswerable — no key
+    means "none of these" — so it stranded the operator with only Ctrl-C, and
+    naming the command that makes an agent was the honest reply. Offering to
+    create inverts that: the list is no longer choice-less, it holds exactly one
+    honest answer, and offering it beats printing a command to go and type.
 
     This lists what is **defined** on disk, not what is **running**. That suits
     ``start``; it would be wrong for ``stop``/``restart``, whose real question is
     "which of the running agents?" — answerable only with a broker probe, and a
     defined-agent list there would invite picking one that is already stopped.
+
+    ``agent edit`` / ``agent tools`` keep their own near-identical pick-lists
+    rather than calling this, and that is deliberate: they return a ``Path``, they
+    have a name-given branch this has no equivalent of, and their empty-roster
+    dead end is honest — there is nothing to edit, and offering to create inside
+    "which agent do you want to edit?" answers a different question than the one
+    asked. The part that could actually drift between them, ``detect_agents``, is
+    already shared.
     """
     agents = detect_agents(agents_dir)
     if not agents:
-        print(f"no agents in {agents_dir} — create one with `disco agent create <name>`")
-        return None
-    return prompter.select(message, [Choice(a, a) for a in agents])
+        # The dead-end this replaced still carried one fact worth keeping: WHICH
+        # directory was searched is how an operator recognizes a wrong
+        # ``$CALFCORD_HOME``. As dim detail above the picker it survives without
+        # the dead end it used to arrive with.
+        render.note(f"no agents in {agents_dir}")
+
+    choices = [Choice(a, a) for a in agents]
+    choices.append(Choice(CREATE_SENTINEL, _CREATE_LABEL))
+
+    chosen = prompter.select(message, choices)
+    return create_fn() if chosen == CREATE_SENTINEL else chosen
 
 
 def detect_agents(agents_dir: Path) -> list[str]:

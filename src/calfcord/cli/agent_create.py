@@ -345,25 +345,10 @@ def run(
     # putting it inside would print two headers back to back there.
     render.header("disco agent create", subtitle="Add a teammate to your org.")
 
-    try:
-        created = create_agent(
-            prompter,
-            agents_dir=agents_dir,
-            env_path=env_path,
-            name_default=name,
-            prune_seed=False,
-            offer_prompt=True,
-            require_name=True,
-        )
-    except (ValueError, OSError) as e:
-        # The create path validates before writing, so this is either an invalid
-        # value the validator rejected or a filesystem failure during the atomic
-        # write — both leave no usable agent on disk. Report and stop without a
-        # success banner.
-        print(f"error: could not create agent {(name or '?')!r}: {e}")
+    created = _create_and_report(prompter, agents_dir=agents_dir, env_path=env_path, name_default=name)
+    if created is None:
         return 1
 
-    render.success(f"Created agent {created.name!r}.")
     return _finish_create(
         prompter,
         name=created.name,
@@ -376,6 +361,103 @@ def run(
         workspace_running_fn=workspace_running_fn,
         pc_binary_fn=pc_binary_fn,
     )
+
+
+def _create_and_report(
+    prompter: Prompter,
+    *,
+    agents_dir: Path,
+    env_path: Path,
+    name_default: str | None = None,
+) -> CreatedAgent | None:
+    """Run the standalone create policy, reporting the outcome; ``None`` if it failed.
+
+    The shared body of the two surfaces that create an agent outside ``init``:
+    ``disco agent create`` (:func:`run`) and the ``agent start`` picker's create
+    row (:func:`create_for_start`). Both want the same policy trio —
+    ``require_name`` (an enter-through must not silently target an existing
+    agent), ``prune_seed=False`` (adding an agent never deletes the operator's
+    starter; only ``init``'s first run may), and ``offer_prompt`` (straight into
+    the new agent's system prompt) — so it is stated once, here.
+
+    ``init`` deliberately does NOT route through this despite also creating: it
+    inverts all three of those, and draws its own phase headers around the flow.
+
+    Returns ``None`` on failure, having reported it as the single ``error:`` line
+    the CLI convention asks for. :func:`create_agent` validates before writing, so
+    both error types mean no usable agent landed on disk — callers must not go on
+    to start, or announce, one that isn't there.
+    """
+    try:
+        created = create_agent(
+            prompter,
+            agents_dir=agents_dir,
+            env_path=env_path,
+            name_default=name_default,
+            prune_seed=False,
+            offer_prompt=True,
+            require_name=True,
+        )
+    except (ValueError, OSError) as e:
+        # Named only when the caller supplied one. The wizard asks for the name
+        # itself, so a failure can precede having one — and `agent '?'` names
+        # nothing the operator could act on.
+        target = f" {name_default!r}" if name_default else ""
+        print(f"error: could not create agent{target}: {e}")
+        return None
+
+    render.success(f"Created agent {created.name!r}.")
+    return created
+
+
+def create_for_start(
+    prompter: Prompter,
+    *,
+    agents_dir: Path,
+    env_path: Path,
+    home: Path,
+    workspace_running_fn: Callable[[Path], Awaitable[bool]] | None = None,
+) -> str | None:
+    """Create an agent for the ``agent start`` picker's create row; return its name.
+
+    :func:`run` is deliberately NOT reused, though it is the obvious candidate: it
+    would print its own ``disco agent create`` header in the middle of a
+    ``start``, and end by asking "Start <name> now?" — a question the operator
+    answered by typing ``disco agent start``. What the two DO share is
+    :func:`_create_and_report`, so the create itself cannot drift between them.
+
+    ``None`` means "nothing to start", which the picker passes straight out and
+    the caller turns into exit 1. Two ways to get it, both already reported:
+
+    * **The create failed.** Returning a name would send the caller off to start
+      an agent that isn't there — which fails obscurely, since ``agent start``
+      never checks the file exists.
+    * **The workspace is closed.** The caller starts a created agent exactly as it
+      starts a named one, and that path needs an open workspace — so the start is
+      certain to be refused. Rather than spend it, say what to do, via the same
+      :func:`_print_manual_next_steps` ``disco agent create`` degrades to, so the
+      two surfaces give one answer.
+
+    That closed-workspace branch is also what keeps the guidance ORDERED, which is
+    its real point. ``disco agent start <name>`` is the one command a bare
+    ``disco agent start`` never had to type, so it is worth naming — but it is
+    useless before ``disco start``. Left to the roster, the refusal names only
+    ``disco start``, and any hint printed back at create time would sit ABOVE it,
+    telling the operator to run step 2 before step 1. Deciding here lets both
+    steps be printed together, in the order they must actually be run.
+
+    Nothing is said about starting when the workspace is already open: the agent
+    comes online on the very next line, so a hint would be noise.
+    """
+    created = _create_and_report(prompter, agents_dir=agents_dir, env_path=env_path)
+    if created is None:
+        return None
+
+    running = asyncio.run((workspace_running_fn or _default_workspace_running)(home))
+    if not running:
+        _print_manual_next_steps(created.name, running=False)
+        return None
+    return created.name
 
 
 def _finish_create(

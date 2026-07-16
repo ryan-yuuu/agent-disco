@@ -368,8 +368,10 @@ def _collect_set_updates(args: argparse.Namespace) -> dict[str, str]:
 _ROSTER_COMMANDS = frozenset({"start", "stop", "restart", "ps"})
 
 
-def _resolve_start_target(args: argparse.Namespace, *, agents_dir: Path) -> str | None:
-    """Return the agent ``agent start`` should start, picking one if none was named.
+def _resolve_start_target(
+    args: argparse.Namespace, *, agents_dir: Path, env_path: Path, home: Path
+) -> str | None:
+    """Return the agent ``agent start`` should start, picking or creating one if unnamed.
 
     A bare ``disco agent start`` used to be a parser error. That told the operator
     what they did wrong but not what they could do instead — while the CLI already
@@ -377,13 +379,34 @@ def _resolve_start_target(args: argparse.Namespace, *, agents_dir: Path) -> str 
     ``agent list`` reads. So it now offers them, the same way ``agent tools`` and
     ``agent edit`` always have.
 
-    ``None`` means "nothing to start" (an empty roster, already explained) — the
-    caller returns 1. ``--all`` and an explicit name never reach here; both are
-    already complete answers.
+    The picker also offers CREATING one — see
+    :func:`~calfcord.cli._agents.pick_agent` for why that row exists and why the
+    flow behind it is injected rather than imported.
+
+    Whatever the route, this returns a NAME and nothing else happens here — the
+    caller then starts it exactly as it would a named agent. So a created agent
+    goes through the same duplicate guard and workspace gate as any other, and a
+    closed workspace produces ``agent start``'s ordinary refusal rather than a
+    special case (the agent is already safely on disk by then).
+
+    ``None`` means "nothing to start" — reachable only from a create that failed,
+    which has already reported why, so the caller just returns 1. (Declining is
+    Ctrl-C, which is the resumable abort, not this.) ``--all`` and an explicit
+    name never reach here; both are already complete answers.
     """
     if args.name is not None:
         return args.name
-    return pick_agent(make_prompter(), agents_dir=agents_dir, message="Which agent do you want to start?")
+    # One prompter for both the picker and the wizard it may open: they are one
+    # continuous conversation with the operator, not two.
+    prompter = make_prompter()
+    return pick_agent(
+        prompter,
+        agents_dir=agents_dir,
+        message="Which agent do you want to start?",
+        create_fn=lambda: agent_create.create_for_start(
+            prompter, agents_dir=agents_dir, env_path=env_path, home=home
+        ),
+    )
 
 
 def _require_one_roster_target(
@@ -472,7 +495,9 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
     # every DEFINED agent — the ids come from the agents dir here so roster.py
     # stays off the disk read.
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
-    _, agents_dir = init.resolve_paths(home)
+    # ``env_path`` is kept (not discarded) for the picker's create row: the
+    # wizard's provider step reads and writes credentials through it.
+    env_path, agents_dir = init.resolve_paths(home)
     if args.all:
         return asyncio.run(roster.agent_start_all(home, agent_ids=detect_agents(agents_dir), server_urls=server_urls))
 
@@ -480,7 +505,7 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
     # before asyncio.run — the same ask-everything-first shape the rest of the CLI
     # keeps (see agent_create._finish_create): no longer forced now that the prompter
     # owns no event loop, but the flow reads better for it.
-    name = _resolve_start_target(args, agents_dir=agents_dir)
+    name = _resolve_start_target(args, agents_dir=agents_dir, env_path=env_path, home=home)
     if name is None:
         return 1
     return asyncio.run(roster.agent_start(home, name=name, server_urls=server_urls))

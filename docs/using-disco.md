@@ -105,6 +105,10 @@ covering the whole lifecycle.
 disco agent create               # or name it up front: disco agent create scribe
 ```
 
+A bare `disco agent start` offers the same wizard from the bottom of its picker, so you can make a
+teammate at the moment you notice none of the ones you have is the one you want. It then starts the
+agent it just created, on the same terms as any named one — so the workspace needs to be open.
+
 A brand-new agent runs as its own supervised process, so you bring it online directly — there's no
 workspace reload:
 

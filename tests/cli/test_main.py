@@ -27,6 +27,7 @@ from calfcord.cli import (
     tool_aliases,
 )
 from calfcord.cli import main as main_mod
+from calfcord.cli._agents import CREATE_SENTINEL
 from calfcord.cli.main import main
 from calfcord.supervisor import component, lifecycle, mcp_roster, roster
 
@@ -808,6 +809,11 @@ def test_main_agent_roster_requires_name_or_all(verb: str) -> None:
     assert exc.value.code == 2
 
 
+async def _workspace_up(_home: Path) -> bool:
+    """The supervisor probe `create_for_start` runs, answering 'workspace open'."""
+    return True
+
+
 class _PickingPrompter:
     """A prompter that answers the agent picker and records what it was shown."""
 
@@ -817,6 +823,12 @@ class _PickingPrompter:
 
     def select(self, message: str, choices: list, *, default: str | None = None) -> str:
         self.offered = choices
+        # The real widget can only return a row it painted. Without this, a test
+        # that scripts a row the picker never offered still passes — so deleting
+        # the create row would leave the create tests green, testing a row no
+        # operator could select.
+        offered = [c.value for c in choices]
+        assert self._choose in offered, f"{self._choose!r} was never offered: {offered}"
         return self._choose
 
     def text(self, message: str, *, default: str = "") -> str:
@@ -873,27 +885,36 @@ class TestBareAgentStartPicksInteractively:
         picker = _PickingPrompter("scribe")
         monkeypatch.setattr(main_mod, "make_prompter", lambda: picker)
         main(["agent", "start"])
-        assert [c.value for c in picker.offered] == ["archivist", "scribe"]
+        # Filters the create row rather than expecting an exact list: this test's
+        # subject is the ROSTER's completeness and order. That the list also ends
+        # with a create row is TestBareAgentStartCanCreate's subject, and pinning
+        # it here too would make one behaviour change break two unrelated tests.
+        agents = [c.value for c in picker.offered if c.value != CREATE_SENTINEL]
+        assert agents == ["archivist", "scribe"]
 
-    def test_an_empty_roster_says_so_instead_of_opening_an_empty_picker(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    def test_an_empty_roster_offers_to_create_rather_than_dead_ending(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """An empty list is an unanswerable prompt — say what to do instead.
+        """An empty roster is now answerable: the one honest answer is offered.
 
-        Asserts that nothing is *prompted* and nothing is *started*, not that no
-        prompter object is constructed: building one only stores two references,
-        so that would pin an implementation detail rather than a behaviour.
+        This used to assert the opposite — that no picker opened, and that the
+        operator was told to go and run ``disco agent create``. That was right
+        while a choice-less list was the only alternative; now that creating is
+        a row, the list has exactly one honest answer and offering it beats
+        naming a command to type.
         """
-        started = self._wire(monkeypatch, tmp_path, [])
-        picker = _PickingPrompter("unreachable")
+        self._wire(monkeypatch, tmp_path, [])
+        picker = _PickingPrompter(CREATE_SENTINEL)
         monkeypatch.setattr(main_mod, "make_prompter", lambda: picker)
+        monkeypatch.setattr(
+            agent_create,
+            "create_agent",
+            lambda *a, **k: agent_create.CreatedAgent(name="first", provider="anthropic"),
+        )
+        monkeypatch.setattr(agent_create, "_default_workspace_running", _workspace_up)
 
-        assert main(["agent", "start"]) == 1
-        assert picker.offered == [], "an empty roster must not open a picker"
-        assert started == []
-        out = capsys.readouterr().out
-        assert "no agents" in out
-        assert "disco agent create" in out, "say what to do next, not just what is missing"
+        assert main(["agent", "start"]) == 0
+        assert [c.value for c in picker.offered] == [CREATE_SENTINEL]
 
     def test_a_named_start_never_opens_the_picker(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -935,6 +956,135 @@ class TestBareAgentStartPicksInteractively:
             main(["agent", "start", "scribe", "--all"])
         assert exc.value.code == 2
         assert "mutually exclusive" in capsys.readouterr().err
+
+
+class TestBareAgentStartCanCreate:
+    """`disco agent start` offers creating when none of the roster is what you want.
+
+    The picker answers "which agent?" — but "none of these" was unanswerable, and
+    the operator's real next move (make one) meant quitting to another command.
+    The create row reuses ``agent_create.create_agent``, the flow ``agent create``
+    and ``init`` already share, so there is exactly one way an agent comes into
+    being.
+    """
+
+    def _wire(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agents: list[str]
+    ) -> tuple[list[str], dict]:
+        home = tmp_path / "home"
+        (home / "agents").mkdir(parents=True)
+        for name in agents:
+            (home / "agents" / f"{name}.md").write_text(f"---\nname: {name}\n---\nbody\n")
+        monkeypatch.setenv("CALFCORD_HOME", str(home))
+
+        started: list[str] = []
+        captured: dict = {}
+
+        async def _start(_home: Path, *, name: str, server_urls: str) -> int:
+            started.append(name)
+            return 0
+
+        def _create(prompter, **kwargs) -> agent_create.CreatedAgent:
+            captured.update(kwargs)
+            return agent_create.CreatedAgent(name="researcher", provider="anthropic")
+
+        monkeypatch.setattr(roster, "agent_start", _start)
+        monkeypatch.setattr(agent_create, "create_agent", _create)
+        # An OPEN workspace, so the create row hands the name on to be started.
+        # Left unstubbed this probes a real supervisor REST port and reports
+        # closed, which is its own case — TestCreatingWithAClosedWorkspace.
+        monkeypatch.setattr(agent_create, "_default_workspace_running", _workspace_up)
+        return started, captured
+
+    def test_choosing_create_starts_the_newly_created_agent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        started, _ = self._wire(monkeypatch, tmp_path, ["scribe"])
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: _PickingPrompter(CREATE_SENTINEL))
+
+        assert main(["agent", "start"]) == 0
+        assert started == ["researcher"], "the agent just created is the one that starts"
+
+    def test_the_wizard_is_asked_for_a_brand_new_agent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The three policies that make this a create, not an edit or a first-run.
+
+        ``require_name`` so an enter-through cannot silently target an existing
+        agent; ``prune_seed=False`` so adding an agent never deletes the starter
+        (only ``init``'s first-run may); ``offer_prompt`` to keep parity with
+        ``disco agent create``.
+        """
+        _, captured = self._wire(monkeypatch, tmp_path, ["scribe"])
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: _PickingPrompter(CREATE_SENTINEL))
+
+        main(["agent", "start"])
+
+        assert captured["require_name"] is True
+        assert captured["prune_seed"] is False
+        assert captured["offer_prompt"] is True
+
+    def test_the_wizard_writes_into_this_installs_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``env_path`` is threaded, not defaulted — the provider step needs it."""
+        _, captured = self._wire(monkeypatch, tmp_path, ["scribe"])
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: _PickingPrompter(CREATE_SENTINEL))
+
+        main(["agent", "start"])
+
+        expected_env, expected_agents = init.resolve_paths(tmp_path / "home")
+        assert captured["agents_dir"] == expected_agents
+        assert captured["env_path"] == expected_env
+
+    def test_a_closed_workspace_yields_ordered_steps_and_no_doomed_start(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The whole point of the ordering, end to end through the dispatcher.
+
+        `agent start` needs an open workspace, so starting a just-created agent
+        into a closed one is certain to be refused. The operator gets the two
+        commands that fix it, in the order they must run them — not step 2 above
+        step 1, which is what a hint printed at create time would produce.
+        """
+        started, _ = self._wire(monkeypatch, tmp_path, ["scribe"])
+
+        async def _down(_home: Path) -> bool:
+            return False
+
+        monkeypatch.setattr(agent_create, "_default_workspace_running", _down)
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: _PickingPrompter(CREATE_SENTINEL))
+
+        assert main(["agent", "start"]) == 1
+        assert started == [], "a start that cannot succeed must not be attempted"
+        out = capsys.readouterr().out
+        assert out.index("disco start") < out.index("disco agent start researcher")
+
+    @pytest.mark.parametrize("failure", [ValueError("bad model"), OSError("disk full")])
+    def test_a_failed_create_starts_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        failure: Exception,
+    ) -> None:
+        """A create that left no agent on disk must not be followed by a start.
+
+        ``create_agent`` validates before writing, so both failures mean nothing
+        usable landed. Starting a name that isn't there would spawn a child that
+        dies into a log file with the operator seeing only "exited immediately".
+        """
+        started, _ = self._wire(monkeypatch, tmp_path, ["scribe"])
+
+        def _boom(prompter, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(agent_create, "create_agent", _boom)
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: _PickingPrompter(CREATE_SENTINEL))
+
+        assert main(["agent", "start"]) == 1
+        assert started == []
+        assert "error:" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("verb", ["start", "stop", "restart"])
