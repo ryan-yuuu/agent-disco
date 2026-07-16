@@ -27,12 +27,22 @@ So: **`depends_on` and both readiness probes stay. The import graph gets fixed.*
 
 ## Consequences
 
-- The probes' standing CPU cost drops with the import graph rather than with
-  their cadence, so `_PROBE_PERIOD_SECONDS` (`supervisor/compose.py`) keeps a
-  responsive watchdog without re-creating the readiness-spiral incident that
-  same file documents. Cheapening the probe *dissolves* the tension between
-  watchdog responsiveness and CPU cost that forced the 3s period; it does not
-  merely trade one for the other.
+- **The probe cadence is deliberately unchanged.** Cheapening the probe pays out
+  twice over without touching it: each probe now *returns* ~1.25s sooner
+  (`_healthcheck bridge` 1.44s → 0.14s, `broker` 1.12s → 0.16s measured), so
+  Process Compose learns each component's verdict that much earlier — about 2.5s
+  of startup across broker + bridge — and the substrate's standing cost falls from
+  ~93% of a core continuously (two ~1.4s probes every 3s, the readiness-spiral
+  incident `compose.py` documents) to ~10%. Tightening `_PROBE_PERIOD_SECONDS`
+  3 → 1 would buy perhaps 1-2s more while tripling the duty cycle back toward 30%:
+  a documented-incident risk for very little. `_PROBE_TIMEOUT_SECONDS = 10` also
+  stays — despite its comment blaming the `uv run` cold start, it is really sized
+  for the broker probe's own 5s metadata timeout (`health/check.py`), which the
+  import fix does not shrink.
+- Cheapening the probe *dissolves* the tension between watchdog responsiveness and
+  CPU cost that forced the 3s period, rather than merely trading one for the other.
+  A future cadence change is now affordable on CPU grounds — but should be argued
+  on its own latency merits, not assumed from this ADR.
 - `cli/main.py`'s subcommand imports are now load-bearing for latency. A future
   top-level `from calfcord.cli import <module>` that reaches the agent stack
   silently re-imposes the ~1.4s tax on every probe and every command. This is

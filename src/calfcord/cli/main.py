@@ -727,7 +727,15 @@ def _run_lifecycle(command: str) -> int:
     # so a freshly-opened workspace can serve tool calls without a separate
     # `disco tools start`. Substrate failure short-circuits; the tools-host start is
     # advisory, so its outcome never fails an otherwise-open workspace.
-    return asyncio.run(open_workspace(home, server_urls=server_urls, launcher=launcher))
+    #
+    # Wrapped in the progress reporter: the waits inside run for tens of seconds
+    # (the Discord connect), and an unnarrated one reads as a hang (ADR-0023).
+    from calfcord.cli.tui.progress import ConsoleStartReporter
+
+    with ConsoleStartReporter() as reporter:
+        return asyncio.run(
+            open_workspace(home, server_urls=server_urls, launcher=launcher, reporter=reporter)
+        )
 
 
 def _run_component(name: str, verb: str) -> int:
