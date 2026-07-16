@@ -105,7 +105,7 @@ async def _launch_or_report(
 
 
 async def start_slot(
-    home: str | os.PathLike[str], slot: str, argv: Sequence[str], *, label: str
+    home: str | os.PathLike[str], slot: str, argv: Sequence[str], *, label: str, announce: bool = True
 ) -> int:
     """Spawn (or terminate + re-spawn) ``slot``; workspace/broker already gated.
 
@@ -132,6 +132,13 @@ async def start_slot(
     ``started``/``restarted`` (presence/registration is the callers' watchers'
     job, never claimed here). A busy slot is a benign duplicate action (``0``);
     a busy workspace is a real refusal (``1``).
+
+    ``announce`` governs that one success line and nothing else — every refusal,
+    warning, and error prints regardless. It exists for callers that report the same
+    fact in their own voice (``disco init``'s record board): the line is correct, but
+    a second narrator describing the same event is noise, not honesty. A caller that
+    silences it takes on saying *something* happened — the rc alone is not operator-
+    facing feedback.
     """
     try:
         with _workspace.slot_mutation(home, slot):
@@ -147,7 +154,8 @@ async def start_slot(
                     return 1
             if await _launch_or_report(home, slot, argv, label=label) != 0:
                 return 1
-            print(f"{label} {'restarted' if restarted else 'started'}")
+            if announce:
+                print(f"{label} {'restarted' if restarted else 'started'}")
             return 0
     except _workspace.SlotBusyError:
         # A concurrent start already holds the slot: a benign duplicate action,

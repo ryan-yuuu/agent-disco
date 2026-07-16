@@ -32,11 +32,17 @@ prevent.
 
 from __future__ import annotations
 
+import contextlib
+from typing import TYPE_CHECKING
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 from calfcord.cli.tui import theme
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _console: Console | None = None
 
@@ -109,6 +115,87 @@ def answer_text(label: str, value: str) -> Text:
     text.append(f"{label}  ", style=theme.MUTED)
     text.append(value, style=theme.ACCENT)
     return text
+
+
+def step(
+    label: str,
+    value: str,
+    *,
+    status: theme.Status = "ok",
+    width: int = 0,
+    console: Console | None = None,
+) -> None:
+    """Print one completed-step record: ``✓ label  value``.
+
+    Shares :func:`answer`'s hierarchy — quiet glyph and label, bright value — because
+    a step and an answer are the same shape of fact: the thing that happened matters,
+    the name of the slot it happened in does not. It is a separate helper for two
+    reasons. ``answer`` hard-codes a two-space gap, which is correct for a lone record
+    collapsing out of a prompt and ragged for a block of them printed together, so
+    ``width`` pads the label column and lets the values line up. And ``answer`` is only
+    ever ``✓``: a step can fail, and a flow whose contract is "no green light that
+    lies" cannot report failure with a tick.
+
+    ``width`` is the label column, and the caller owns it because only the caller knows
+    the whole block; ``0`` (the default) means "no padding", for a record printed alone.
+    A ``fail`` is styled :data:`theme.ERROR` — the theme reserves its one colour for
+    genuine failures, and a step that did not happen is one.
+    """
+    glyph = theme.STEP_GLYPHS[status]
+    text = Text()
+    text.append(f"{glyph} ", style=theme.ERROR if status == "fail" else theme.MUTED)
+    text.append_text(pair_text(label, value, width=width))
+    target(console).print(text, soft_wrap=True)
+
+
+def pair_text(label: str, value: str, *, width: int = 0) -> Text:
+    """Build a ``label  value`` row: quiet label, bright value. No glyph.
+
+    Each span carries its own style and the ``Text`` carries none — a base style is
+    inherited by every append and would drag the value dim, making the one thing the
+    row exists to show the quietest thing on it. See :func:`answer_text`.
+    """
+    text = Text()
+    text.append(f"{label.ljust(width)}  ", style=theme.MUTED)
+    text.append(value, style=theme.ACCENT)
+    return text
+
+
+@contextlib.contextmanager
+def working(label: str, *, console: Console | None = None) -> Iterator[None]:
+    """Paint a transient spinner while a slow step runs; render nothing off-TTY.
+
+    The arc :mod:`~calfcord.cli.tui.widgets` already performs — a transient Live torn
+    down and replaced by a durable one-line record — applied to waiting rather than to
+    a prompt. Reach for it only where a step is slow enough to look hung: a step that
+    resolves in a moment is better served by its record arriving.
+
+    Two constraints the implementation exists to honour:
+
+    * **The spinner is decoration; the record is the fact.** Live is inert off a
+      terminal (a piped run, CI, the tests), so anything painted here is *gone* there.
+      The caller must print its :func:`step` record OUTSIDE this block, or the step
+      vanishes from every captured log. That inertness is also what makes this safe:
+      no frames leak into a redirected stdout.
+    * **No hue.** Rich's default status spinner is green. In a palette whose one colour
+      is reserved for genuine failures, a waiting spinner rendering green would be the
+      single hued glyph in the CLI, so the style is pinned rather than inherited.
+    """
+    with target(console).status(
+        Text(label, style=theme.MUTED), spinner=theme.SPINNER, spinner_style=theme.MUTED
+    ):
+        yield
+
+
+def pair(label: str, value: str, *, width: int = 0, console: Console | None = None) -> None:
+    """Print a label/value row with no outcome glyph.
+
+    :func:`step` minus the mark, for rows that report no outcome — the "what next"
+    block a flow signs off with. Sharing the padded two-column shape is what lets that
+    block read as the same object as the record board above it, rather than as unrelated
+    prose that happens to follow.
+    """
+    target(console).print(pair_text(label, value, width=width), soft_wrap=True)
 
 
 def answer(label: str, value: str, *, console: Console | None = None) -> None:

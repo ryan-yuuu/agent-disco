@@ -525,6 +525,10 @@ async def _start_now(
             home,
             server_urls=server_urls,
             launcher=launcher,
+            # Start-now IS the next step the signpost would name, and it runs on the
+            # next line — so the signpost would only tell the operator to do what is
+            # already being done for them.
+            banner=False,
             start_fn=start_fn,
             tools_start_fn=tools_start_fn,
         )

@@ -7,6 +7,12 @@ prose. Both rules below exist to keep Rich from silently rewriting it.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import time
+
+from rich.console import Console
+
 from calfcord.cli.tui import render
 
 
@@ -140,3 +146,133 @@ class TestAnswerHierarchy:
 
     def test_the_label_stays_subordinate_to_the_value(self) -> None:
         assert self._style_of("Model provider").dim is True
+
+
+class TestStep:
+    """``step`` — the completed-step record for a multi-step flow.
+
+    The same two-column, glyph-led grammar ``answer`` uses and ``doctor``
+    independently converged on (``✓ <name padded>  <detail>``), but with a caller-set
+    label column so a *block* of consecutive records aligns. ``answer`` hard-codes a
+    two-space gap, which is right for a record printed alone after a prompt and ragged
+    for four printed together.
+    """
+
+    def test_renders_glyph_label_and_value(self) -> None:
+        assert _render(render.step, "workspace", "broker + bridge") == "✓ workspace  broker + bridge\n"
+
+    def test_pads_the_label_column_so_a_block_aligns(self) -> None:
+        # Built here rather than via ``_render``: that helper's ``width`` is the
+        # console's, and the label column is what's under test.
+        console = render.make_console(width=40, record=True)
+        render.step("tools", "up", width=9, console=console)
+        assert console.export_text() == "✓ tools      up\n"
+
+    def test_warn_and_fail_carry_their_own_glyph(self) -> None:
+        assert _render(render.step, "agent", "not seen", status="warn").startswith("⚠ agent")
+        assert _render(render.step, "tools", "not running", status="fail").startswith("✗ tools")
+
+    def test_value_is_not_dimmed_by_the_label(self) -> None:
+        """The value is the one thing the record exists to show.
+
+        ``answer_text``'s docstring pins the same invariant: a base style on the
+        ``Text`` is inherited by every appended span, so a dim base would render the
+        value bold *and* dimmed — the outcome becoming the quietest thing on the line.
+        """
+        console = render.make_console(width=40, record=True)
+        render.step("workspace", "broker + bridge", console=console)
+        export = console.export_text(styles=True)
+        assert "\x1b[1mbroker + bridge" in export  # bold, not "bold dim"
+
+    def test_does_not_interpret_square_brackets_as_markup(self) -> None:
+        assert "[bold]" in _render(render.step, "agent", "keep [bold] literal")
+
+
+class TestPair:
+    """``pair`` — a label/value row with no glyph.
+
+    ``step``'s hierarchy minus the outcome mark, for rows that aren't outcomes: the
+    "what next" block a flow signs off with. Sharing the padded two-column shape is
+    what lets that block read as the same object as the record board above it.
+    """
+
+    def test_renders_label_and_value_without_a_glyph(self) -> None:
+        assert _render(render.pair, "Learn more", "docs/using-disco.md") == "Learn more  docs/using-disco.md\n"
+
+    def test_pads_the_label_column(self) -> None:
+        console = render.make_console(width=60, record=True)
+        render.pair("Try it", "!scribe hello", width=14, console=console)
+        assert console.export_text() == "Try it          !scribe hello\n"
+
+    def test_value_is_not_dimmed_by_the_label(self) -> None:
+        console = render.make_console(width=60, record=True)
+        render.pair("Try it", "!scribe hello", console=console)
+        assert "\x1b[1m!scribe hello" in console.export_text(styles=True)
+
+    def test_does_not_interpret_square_brackets_as_markup(self) -> None:
+        assert "[bold]" in _render(render.pair, "x", "keep [bold] literal")
+
+
+class TestWorking:
+    """``working`` — a transient spinner for a step slow enough to look hung.
+
+    The same arc the widgets already perform: a transient Live that is torn down and
+    replaced by a durable one-line record. Progress is decoration; the record is the
+    fact. So this renders nothing off-TTY by design, and the caller's ``step`` record
+    prints either way.
+    """
+
+    def _paint(self, label: str = "waiting…") -> str:
+        # A real StringIO with force_terminal: record=True cannot capture Live output
+        # (see test_live_rendering.py, which pins the same constraint).
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, force_terminal=True, highlight=False)
+        with render.working(label, console=console):
+            time.sleep(0.15)
+        return buffer.getvalue()
+
+    def test_paints_a_spinner_and_the_label_on_a_terminal(self) -> None:
+        out = self._paint("waiting for scribe to come online…")
+        assert "waiting for scribe to come online…" in out
+        assert "⠋" in out  # the spinner actually animated
+
+    def test_the_spinner_carries_no_hue(self) -> None:
+        """Rich's default status spinner is GREEN — the theme is monochrome.
+
+        `theme` permits exactly one colour, ERROR, and only for genuine failures; a
+        waiting spinner is not one. Left at Rich's default this would have been the
+        single hued glyph in the whole CLI, which is why the style is pinned rather
+        than inherited.
+        """
+        out = self._paint()
+        assert not any(code in out for code in ("\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m"))
+
+    def test_renders_nothing_off_a_terminal(self) -> None:
+        """A piped or CI run must not collect spinner frames.
+
+        Live is inert off-TTY, which is what makes this safe — and is also why the
+        caller must print its record OUTSIDE the spinner, or the step would vanish
+        entirely from a captured log.
+        """
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, highlight=False)
+        with render.working("waiting…", console=console):
+            pass
+        assert buffer.getvalue() == ""
+
+    def test_the_body_still_runs_off_a_terminal(self) -> None:
+        """Guards the vacuous pass: silence must mean "not painted", not "not run"."""
+        ran = []
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, highlight=False)
+        with render.working("x", console=console):
+            ran.append(True)
+        assert ran == [True]
+
+    def test_the_spinner_is_torn_down_on_a_raise(self) -> None:
+        """A failure inside the step must not leave the terminal's cursor hidden."""
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, force_terminal=True, highlight=False)
+        with contextlib.suppress(RuntimeError), render.working("x", console=console):
+            raise RuntimeError("boom")
+        assert "\x1b[?25h" in buffer.getvalue()  # cursor restored

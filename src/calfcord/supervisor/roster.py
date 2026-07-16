@@ -244,6 +244,7 @@ async def agent_start(
     probe: Probe | None = None,
     live: list[str] | None = None,
     broker_probe: BrokerProbe | None = None,
+    announce: bool = True,
 ) -> int:
     """Bring agent ``name`` up: a teammate clocking into the live org (§3.5).
 
@@ -327,7 +328,9 @@ async def agent_start(
             print(f"agent {name} is already running in the organization")
             return 0
 
-    return await _slot_ops.start_slot(home, name, _agent_argv(launcher, name), label=_label(name))
+    return await _slot_ops.start_slot(
+        home, name, _agent_argv(launcher, name), label=_label(name), announce=announce
+    )
 
 
 async def agent_stop(

@@ -17,6 +17,8 @@ it gone too.
 
 from __future__ import annotations
 
+from typing import Literal, get_args
+
 from rich import box
 
 # --- styles -----------------------------------------------------------------
@@ -41,12 +43,35 @@ TITLE = "bold not dim"
 POINTER = "❯"  # noqa: RUF001
 CHECK_ON = "◉"
 CHECK_OFF = "○"
-TICK = "✓"
 BULLET = "·"
+
+# The step-record vocabulary. TICK alone can only describe a flow that worked, and
+# the flows that print records (`doctor`, `init`'s live finish) exist precisely to
+# report honest partial success — a tools host that didn't come up, an agent that
+# didn't register. WARN is "we could not confirm it", CROSS is "it is not so".
+TICK = "✓"
+WARN = "⚠"
+CROSS = "✗"
+
+# The status a step record reports, and its glyph. Lives here — not in the flows that
+# print one — because two boards each hard-coding "✓/⚠/✗" is two visual languages that
+# agree only by luck: `doctor` and `init`'s live finish would drift the first time
+# either gained a status. The map is the single source; the flows read it.
+Status = Literal["ok", "warn", "fail"]
+STEP_GLYPHS: dict[Status, str] = {"ok": TICK, "warn": WARN, "fail": CROSS}
+# A typo'd status renders nothing and raises at the call site, so pin the map to the
+# status domain at import (the idiom `doctor` established for exactly this map).
+assert set(STEP_GLYPHS) == set(get_args(Status)), "STEP_GLYPHS drifted from Status"
 
 # Rounded edges read as modern and match the house style of the tools this CLI
 # sits alongside.
 BOX = box.ROUNDED
+
+# The spinner for a step slow enough to look hung. Braille dots read as motion at any
+# font size and degrade to legible glyphs where the font lacks them. Its style must be
+# named explicitly wherever it is used: Rich's default status spinner is GREEN, which
+# would make it the one hued glyph in an otherwise monochrome CLI.
+SPINNER = "dots"
 
 # The hint rendered in a widget's bottom border. Ctrl-C — not Esc — is the cancel
 # key: readchar blocks after "\x1b" waiting to disambiguate an escape sequence, so
