@@ -17,11 +17,12 @@ of which `uv run` was 0.035s, the interpreter 0.010s, and
 (**1.83s**), which eagerly imported 11 subcommand modules including
 `agent_create` → `calfcord.agents` → `calfkit` → `calfkit.nodes.agent` →
 `calfkit.providers.pydantic_ai`. The probe was loading the entire agent
-framework — 24 modules of it — every 3
-seconds, forever — and so was every other `disco` command (`disco agent list`:
-1.93s). The fix is import hygiene, an invariant this codebase already states
-elsewhere (`cli/_supervisor.py`'s "import-light invariant"; calfkit's own
-`cli/dev.py` "Import hygiene (load-bearing)").
+framework — 24 modules of it — every 3 seconds, forever, and so was every other
+`disco` command (`disco agent list`: 1.93s). The fix is import hygiene, an
+invariant this codebase already states elsewhere (`cli/_supervisor.py`'s
+"import-light invariant"; calfkit's own `cli/dev.py` "Import hygiene
+(load-bearing)"). Measured after: `_healthcheck bridge` **1.42s → 0.14s**,
+`agent list` **1.93s → 0.14s** — every command now sits at the interpreter floor.
 
 So: **`depends_on` and both readiness probes stay. The import graph gets fixed.**
 
