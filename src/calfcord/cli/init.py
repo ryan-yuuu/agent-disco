@@ -977,7 +977,10 @@ async def _await_presence(
     try:
         return await presence_fn(server_urls, agent_id=name, timeout_s=_PRESENCE_TIMEOUT_S)
     except Exception as exc:
-        print(f"  (couldn't confirm {name} came online: {exc!r})")
+        # Dim, not red: the org came up: it is the DETECTOR that broke, and theme.ERROR
+        # is reserved for genuine failures. The ⚠ record and the honest fallback banner
+        # follow from the returned False; this line only says why we can't be sure.
+        render.note(f"  (couldn't confirm {name} came online: {exc!r})")
         return False
 
 

@@ -37,11 +37,12 @@ disco init
   key. If you pick **Codex**, it logs you into ChatGPT inline via a device code
   — it prints a URL + one-time code you open on any device, so it works the same
   on a local machine or over SSH — instead of pointing you at a separate command.
-- Your **first agent**: a name (default `assistant`), a description, a **model
-  picked from a live list fetched from the provider** (you select one, so you
-  can't enter a slug the provider would reject), and its **tools** — a checkbox
-  of every built-in with **all pre-selected**; deselect any you don't want, or
-  keep them all.
+- Your **first agent**: a name (default `assistant`), a description, and a
+  **model picked from a live list fetched from the provider** (you select one, so
+  you can't enter a slug the provider would reject). It starts with **every
+  built-in tool enabled** — `init` deliberately skips the tool picker so setup
+  stays short; narrow the list later with `disco agent tools <name>`, or pick per
+  agent up front when you add teammates with `disco agent create`.
 - Your **Discord bot token** (verified the instant you paste it — you'll see
   `✓ Connected as <bot>`). It then shows the invite link, **waits while you
   authorize the bot, and auto-detects your server** (confirming the bot can post)
