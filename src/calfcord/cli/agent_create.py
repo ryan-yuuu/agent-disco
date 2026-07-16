@@ -345,25 +345,10 @@ def run(
     # putting it inside would print two headers back to back there.
     render.header("disco agent create", subtitle="Add a teammate to your org.")
 
-    try:
-        created = create_agent(
-            prompter,
-            agents_dir=agents_dir,
-            env_path=env_path,
-            name_default=name,
-            prune_seed=False,
-            offer_prompt=True,
-            require_name=True,
-        )
-    except (ValueError, OSError) as e:
-        # The create path validates before writing, so this is either an invalid
-        # value the validator rejected or a filesystem failure during the atomic
-        # write — both leave no usable agent on disk. Report and stop without a
-        # success banner.
-        print(f"error: could not create agent {(name or '?')!r}: {e}")
+    created = _create_and_report(prompter, agents_dir=agents_dir, env_path=env_path, name_default=name)
+    if created is None:
         return 1
 
-    render.success(f"Created agent {created.name!r}.")
     return _finish_create(
         prompter,
         name=created.name,
@@ -376,6 +361,71 @@ def run(
         workspace_running_fn=workspace_running_fn,
         pc_binary_fn=pc_binary_fn,
     )
+
+
+def _create_and_report(
+    prompter: Prompter,
+    *,
+    agents_dir: Path,
+    env_path: Path,
+    name_default: str | None = None,
+) -> CreatedAgent | None:
+    """Run the standalone create policy, reporting the outcome; ``None`` if it failed.
+
+    The shared body of the two surfaces that create an agent outside ``init``:
+    ``disco agent create`` (:func:`run`) and the ``agent start`` picker's create
+    row (:func:`create_for_start`). Both want the same policy trio —
+    ``require_name`` (an enter-through must not silently target an existing
+    agent), ``prune_seed=False`` (adding an agent never deletes the operator's
+    starter; only ``init``'s first run may), and ``offer_prompt`` (straight into
+    the new agent's system prompt) — so it is stated once, here.
+
+    ``init`` deliberately does NOT route through this despite also creating: it
+    inverts all three of those, and draws its own phase headers around the flow.
+
+    Returns ``None`` on failure, having reported it as the single ``error:`` line
+    the CLI convention asks for. :func:`create_agent` validates before writing, so
+    both error types mean no usable agent landed on disk — callers must not go on
+    to start, or announce, one that isn't there.
+    """
+    try:
+        created = create_agent(
+            prompter,
+            agents_dir=agents_dir,
+            env_path=env_path,
+            name_default=name_default,
+            prune_seed=False,
+            offer_prompt=True,
+            require_name=True,
+        )
+    except (ValueError, OSError) as e:
+        # Named only when the caller supplied one. The wizard asks for the name
+        # itself, so a failure can precede having one — and `agent '?'` names
+        # nothing the operator could act on.
+        target = f" {name_default!r}" if name_default else ""
+        print(f"error: could not create agent{target}: {e}")
+        return None
+
+    render.success(f"Created agent {created.name!r}.")
+    return created
+
+
+def create_for_start(prompter: Prompter, *, agents_dir: Path, env_path: Path) -> str | None:
+    """Create an agent for the ``agent start`` picker's create row; return its name.
+
+    :func:`run` is deliberately NOT reused, though it is the obvious candidate: it
+    would print its own ``disco agent create`` header in the middle of a
+    ``start``, and end by asking "Start <name> now?" — a question the operator
+    answered by typing ``disco agent start``. What the two DO share is
+    :func:`_create_and_report`, so the create itself cannot drift between them.
+
+    ``None`` (nothing usable on disk, already reported) passes straight out
+    through the picker as "nothing to start". Returning a name would send the
+    caller off to start an agent that isn't there — which fails obscurely, since
+    ``agent start`` never checks the file exists.
+    """
+    created = _create_and_report(prompter, agents_dir=agents_dir, env_path=env_path)
+    return created.name if created is not None else None
 
 
 def _finish_create(
