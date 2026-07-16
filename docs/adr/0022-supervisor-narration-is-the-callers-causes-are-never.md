@@ -54,7 +54,9 @@ package. Both of its reads sit inside `if banner:` blocks, so this is unobservab
 
 A caller that silences narration takes on reporting the outcome — the return code is not
 operator-facing feedback. `disco init` discharges that with its record board (`✓/⚠/✗`) and
-its finish banner. Note the duty is only discharged where the epilogue is actually reached:
-a non-zero agent rc returns before it, so a dead tools host on that path is marked on the
-board but not re-explained. Accepted, because the operator's next move there is re-running
-`disco init`, which retries the host anyway.
+its finish banner. The duty is **per exit, not per flow**: init's agent-start failure returns
+before the epilogue, and for a while that path printed `✗ tools host  not running` and then
+nothing — a failure shown with no remedy, on a path `main` had covered. It now names the
+remedy and a next step itself. The general rule for anyone adding a caller: a flow that
+passes `announce=False` owes the report on **every** exit, and any early return is a place
+that debt silently goes unpaid.

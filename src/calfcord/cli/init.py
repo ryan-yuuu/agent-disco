@@ -102,6 +102,20 @@ def _label_width(name: str) -> int:
     return max(len(name), *(len(label) for label in _STEP_LABELS))
 
 
+def _print_actions(actions: list[tuple[str, str]]) -> None:
+    """Print "here is a thing to type" rows in the record board's column grammar.
+
+    Shared by the two exits that owe the operator a next step — the finish epilogue and
+    the agent-start failure — so neither can drift into a different shape for the same
+    job. The column is measured, not pinned: callers contribute different labels, and a
+    constant would either mis-align the long ones or pad the common case to fit a label
+    it never prints.
+    """
+    width = max(len(label) for label, _ in actions)
+    for label, value in actions:
+        render.pair(label, value, width=width)
+
+
 # How often the online-presence watcher re-reads the mesh, and the per-read bound
 # on the mesh view's open-time catch-up. Small so a brand-new org — whose
 # ``calf.agents`` topic is not created until the first agent registers — fails a
@@ -261,7 +275,7 @@ def run(
     just-written ``.env`` (same ``value or "localhost"`` default the runners use)
     rather than trusting this. The injected seams are the test surface —
     production defaults wire the real :mod:`discord_discovery`, :mod:`supervisor`,
-    and first-reply modules.
+    and presence-watcher modules.
     """
     verify_identity_fn = verify_identity_fn or discord_discovery.verify_bot_identity
     poll_joined_fn = poll_joined_fn or discord_discovery.poll_until_joined
@@ -356,7 +370,7 @@ def run(
     # Re-read the EFFECTIVE broker URL the broker phase just wrote, rather than
     # the pre-wizard ``server_urls`` (sampled by main.py BEFORE the wizard ran).
     # The operator can configure a different broker inside the wizard, so the
-    # live finish's lifecycle.start broker probe AND the first-reply watcher must
+    # live finish's lifecycle.start broker probe AND the presence watcher must
     # connect to what is now on disk — using the SAME ``value or "localhost"``
     # default the runners (main.py ``_run_lifecycle``) resolve from the env, so
     # all three agree on the broker the install actually talks to.
@@ -735,9 +749,10 @@ def _run_finish(
       ``disco logs`` / ``disco doctor`` (don't misattribute the cause) and stop
       (don't clock the agent into a workspace that isn't up);
     * agent start failed → stop before the presence watch;
-    * agent seen online → 🎉 (unless the ``postable`` preflight already proved the
-      bot can post nowhere, which downgrades to an honest "online but can't post");
-      timed out → the bounded "org is live — try it yourself / run ``disco doctor``".
+    * agent seen online → 🎉, but ONLY when nothing else is known broken: a
+      ``postable`` preflight that proved the bot can post nowhere, or a tools host
+      that didn't come up, each downgrade it to an honest partial verdict;
+    * timed out → the bounded "org is live — try it yourself / run ``disco doctor``".
     """
     pc_binary_fn = pc_binary_fn or _supervisor.default_pc_binary
 
@@ -922,7 +937,20 @@ async def _bring_online(
     else:
         render.step("tools host", "not running", status="fail", width=width)
 
-    return await agent_start_fn(home, name=name, server_urls=server_urls, announce=False), tools_ok
+    rc = await agent_start_fn(home, name=name, server_urls=server_urls, announce=False)
+    if rc != 0:
+        # ``agent_start`` has already printed the specific cause. This is the ONE exit
+        # that returns before the epilogue, so nothing downstream will name a next step
+        # (§12.6 — never strand the operator) or re-issue the tools-host remedy that
+        # ``announce=False`` above traded away on the promise the epilogue names it.
+        # Both debts fall due here, or nowhere.
+        render.line(f"{name} didn't come up — see the error above.")
+        actions = [("Diagnose", "disco doctor"), ("Then re-run", "disco init")]
+        if not tools_ok:
+            actions[:0] = [("Start the tools host", "disco tools start"), ("Why it failed", "disco logs tools")]
+        print()
+        _print_actions(actions)
+    return rc, tools_ok
 
 
 async def _await_presence(
@@ -958,10 +986,12 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
     "add a teammate" signpost (and where to learn more) shows on either. ``postable``
     is the Discord-step postability preflight verdict. A ``False`` (the bot can post in
     no channel) is a proven, fixable problem handled INDEPENDENTLY of detection: it
-    always surfaces the permission remedy — never the "try `!name hello`" errand that
-    can't get a reply — whether or not the agent was also seen online (§12.6, no green
-    light that lies). ``None`` (unknown) is not asserted as a failure, so a detected
-    agent still celebrates. ``tools_ok`` is the advisory tools-host outcome: ``False``
+    always surfaces the permission remedy, whether or not the agent was also seen
+    online (§12.6, no green light that lies). The hello is still offered under it, as
+    "Then try" — sequenced behind the fix rather than withheld: every problem here is
+    fixable in another window, and an operator who grants the permission wants the next
+    move already in front of them. ``None`` (unknown) is not asserted as a failure, so a
+    detected agent still celebrates. ``tools_ok`` is the advisory tools-host outcome: ``False``
     (the host didn't come up) qualifies the banner too, since the agent's tool calls
     will hang — the org isn't fully live for tool use — even though it may be online.
     """
@@ -980,7 +1010,14 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
         if detected:
             render.line(f"{name} is online, but it can't post in any Discord channel yet.")
         else:
-            render.line(f"{name} can't post in any Discord channel yet — and it isn't online in Discord either.")
+            # "hasn't been seen online", not "isn't online in Discord". Two corrections
+            # in one clause: ``detected=False`` means only "not seen inside the window"
+            # — the board two lines up hedges it (⚠, "started, but not seen online yet")
+            # and a verdict flatly asserting the negative contradicts it on the same
+            # screen. And presence is a calfkit mesh read (`get_agents`); Discord is the
+            # one system it never consults, so naming it would send an operator to check
+            # Discord for a broker problem.
+            render.line(f"{name} can't post in any Discord channel yet — and it hasn't been seen online yet either.")
     elif not tools_ok:
         # The agent came up but the advisory tools host didn't — its tool-using turns
         # will hang. Ranked above ``detected`` because a live-but-tool-less org is
@@ -1027,12 +1064,7 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
     actions.append(("Add a teammate", "disco agent create <name>"))
     actions.append(("Learn more", f"disco explain topology  {theme.BULLET}  docs/using-disco.md"))
     print()
-    # The column is measured, not pinned: the branches contribute different labels, and
-    # a constant would either mis-align the long ones or pad the common case to fit a
-    # label it never prints.
-    width = max(len(label) for label, _ in actions)
-    for label, value in actions:
-        render.pair(label, value, width=width)
+    _print_actions(actions)
     print()
     # `disco start` reopens only the substrate; the detached roster does not
     # auto-start, so the reboot note must name the agent re-start too. Dim: it is the
