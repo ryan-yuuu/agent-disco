@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import discord
+from aiokafka.errors import KafkaConnectionError
 from calfkit.client import Client, MeshViewConfig
 
 from calfcord._provisioning import PROVISIONING
@@ -111,6 +112,14 @@ _BRIDGE_INBOX_TOPIC = "discord.bridge.inbox"
 _MESH_STALE_AFTER_SECONDS = 90.0
 
 _UNSTICK_COMMAND_RE = re.compile(r"^\s*!unstick(?:\s|$)", re.IGNORECASE)
+# Mirrors ``mention_handler._ROSTER_UNAVAILABLE``'s shape: the two notices cover the
+# same class of transient infra blip, and a user hitting both should not have to work
+# out that they mean the same thing.
+_BROKER_UNREACHABLE = (
+    "I can't reach the message broker right now — it may be restarting. "
+    "Please try again in a moment."
+)
+
 _UNSTICK_NOTICE = "Sticky replies cleared for this thread."
 _NEW_THREAD_COMMAND_RE = re.compile(r"^\s*!new(?:\s|$)", re.IGNORECASE)
 _NEW_THREAD_IN_THREAD_NOTICE = "`!new` can only be used from a parent channel, not inside a thread."
@@ -531,11 +540,33 @@ class DiscordIngressGateway:
         (roster unavailable, no agent online, fault, drop). An *unexpected* crash
         (a bug) would otherwise leave the user with silence, so post a generic
         best-effort notice. ``CancelledError`` (shutdown) propagates untouched.
+
+        A broker-connectivity failure is split out because it is neither: the substrate
+        runs the broker under ``restart: always`` with a 15s backoff, so a mention can
+        legitimately land while it is bouncing. The bridge touches the broker lazily —
+        the first mention is what starts it (D-11, see :func:`main`) — so that mention
+        is the one that raises. calfkit's ``_ensure_started`` leaves the client startable
+        after a failed start, so the NEXT mention self-heals with no retry of our own
+        (a retry here would bypass its ``_start_lock``, which is what makes concurrent
+        first mentions safe). "Try again in a moment" is therefore the literal truth,
+        and the crash notice's "an operator should check the bridge logs" would send
+        someone hunting a bug that does not exist.
         """
         try:
             await self._handler.handle(req)
         except asyncio.CancelledError:
             raise
+        except KafkaConnectionError as exc:
+            # Not a crash: no traceback, and below ERROR so a self-healing blip does not
+            # read as a fault (or trip error alerting) in the operator's log.
+            logger.warning(
+                "broker unreachable handling message_id=%s (%s); it is likely restarting "
+                "— the next mention will retry",
+                req.message_id,
+                exc,
+            )
+            with contextlib.suppress(Exception):
+                await self._reply.post_notice(req, _BROKER_UNREACHABLE)
         except Exception:
             logger.exception(
                 "mention handler crashed for message_id=%s", req.message_id

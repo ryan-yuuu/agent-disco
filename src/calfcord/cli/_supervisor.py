@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from calfcord.supervisor._progress import NULL_REPORTER, TOOLS_STEP, StartReporter
+
 if TYPE_CHECKING:
     import os
     from collections.abc import Awaitable, Callable
@@ -44,8 +46,12 @@ def supervisor_unavailable_reason(pc_binary_fn: Callable[[], str]) -> str | None
 def default_pc_binary() -> str:
     """Resolve the process-compose binary via the supervisor's own resolver.
 
-    Imported lazily so importing this module never pulls the supervisor package (the
-    import-light invariant); the dev-mode path degrades before this is ever called.
+    Imported lazily so importing this module never pulls :mod:`~calfcord.supervisor.
+    lifecycle` (the import-light invariant); the dev-mode path degrades before this is
+    ever called. The module-scope :mod:`~calfcord.supervisor._progress` import does not
+    breach it: the supervisor package's ``__init__`` is a docstring and ``_progress``
+    imports only ``typing``, so the invariant's substance — stay off the heavy modules —
+    is intact.
     """
     from calfcord.supervisor.lifecycle import resolve_pc_binary
 
@@ -123,6 +129,7 @@ async def open_workspace(
     banner: bool = True,
     start_fn: Callable[..., Awaitable[int]] | None = None,
     tools_start_fn: Callable[..., Awaitable[int]] | None = None,
+    reporter: StartReporter = NULL_REPORTER,
 ) -> int:
     """Open the workspace: the substrate (broker + bridge), then the tools host.
 
@@ -144,13 +151,25 @@ async def open_workspace(
     next-step signpost only (errors always print). ``disco start`` keeps it on;
     ``agent create``'s start-now passes ``False``, because it goes on to start the
     agent the signpost would have told the operator to start themselves.
+
+    ``reporter`` narrates the cold open's waits (ADR-0023): ``start_fn`` reports its
+    own substrate steps, and the tools-host step — the one this function owns — is
+    reported here. A failed tools host is deliberately left UNMARKED even though the
+    workspace stays open: rendering it done would promise tool calls that will hang.
+    It is orthogonal to ``banner``: ``banner`` decides who says the *outcome*, while
+    the reporter surfaces *progress* toward it — waits that printed nothing either way
+    (ADR-0022 draws the first line; this draws no new prose of its own).
     """
     if start_fn is None:
         from calfcord.supervisor import lifecycle
 
         start_fn = lifecycle.start
-    rc = await start_fn(home, server_urls=server_urls, launcher=launcher, banner=banner)
+    rc = await start_fn(
+        home, server_urls=server_urls, launcher=launcher, banner=banner, reporter=reporter
+    )
     if rc != 0:
         return rc
-    await start_tools_host(home, launcher=launcher, tools_start_fn=tools_start_fn)
+    reporter.step(TOOLS_STEP)
+    if await start_tools_host(home, launcher=launcher, tools_start_fn=tools_start_fn) == 0:
+        reporter.done(TOOLS_STEP)
     return rc

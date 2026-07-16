@@ -147,7 +147,7 @@ async def test_open_workspace_opens_substrate_then_tools_host() -> None:
     host, returning the substrate code on success."""
     order: list[str] = []
 
-    async def _sub(home, *, server_urls, launcher, banner=True) -> int:
+    async def _sub(home, *, server_urls, launcher, reporter, banner=True) -> int:
         order.append("substrate")
         return 0
 
@@ -162,10 +162,76 @@ async def test_open_workspace_opens_substrate_then_tools_host() -> None:
     assert order == ["substrate", "tools"]
 
 
+class _RecordingReporter:
+    """Records the progress seam's step/done transitions."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def step(self, name: str) -> None:
+        self.events.append(("step", name))
+
+    def done(self, name: str) -> None:
+        self.events.append(("done", name))
+
+
+async def test_open_workspace_narrates_the_tools_host_step() -> None:
+    """The tools host is the third thing a cold open waits on, so it is narrated too.
+
+    ``start_fn`` narrates its own substrate steps; this covers the step
+    ``open_workspace`` itself owns.
+    """
+    reporter = _RecordingReporter()
+
+    async def _sub(home, *, server_urls, launcher, reporter, banner=True) -> int:
+        return 0
+
+    async def _tools(home, *, name, launcher, announce=True) -> int:
+        return 0
+
+    rc = await _supervisor.open_workspace(
+        "/h",
+        server_urls="b:9092",
+        launcher="/l",
+        start_fn=_sub,
+        tools_start_fn=_tools,
+        reporter=reporter,
+    )
+
+    assert rc == 0
+    assert reporter.events == [("step", "tools"), ("done", "tools")]
+
+
+async def test_open_workspace_leaves_a_failed_tools_host_unmarked() -> None:
+    """The tools host is advisory — a failure keeps the workspace open (rc stays 0),
+    but it must not be rendered as a completed step. Marking it done would tell the
+    operator tool calls will work when they will hang."""
+    reporter = _RecordingReporter()
+
+    async def _sub(home, *, server_urls, launcher, reporter, banner=True) -> int:
+        return 0
+
+    async def _tools(home, *, name, launcher, announce=True) -> int:
+        return 1
+
+    rc = await _supervisor.open_workspace(
+        "/h",
+        server_urls="b:9092",
+        launcher="/l",
+        start_fn=_sub,
+        tools_start_fn=_tools,
+        reporter=reporter,
+    )
+
+    assert rc == 0  # advisory: the substrate opened
+    assert ("step", "tools") in reporter.events
+    assert ("done", "tools") not in reporter.events
+
+
 async def test_open_workspace_short_circuits_on_substrate_failure() -> None:
     """A substrate failure returns its code before the tools host is ever spawned."""
 
-    async def _sub(home, *, server_urls, launcher, banner=True) -> int:
+    async def _sub(home, *, server_urls, launcher, reporter, banner=True) -> int:
         return 1
 
     async def _boom_tools(home, *, name, launcher) -> int:
@@ -181,7 +247,7 @@ async def test_open_workspace_tools_failure_does_not_change_substrate_code() -> 
     """The tools-host start is advisory: a failure leaves the successful substrate code
     intact (the workspace is open)."""
 
-    async def _sub(home, *, server_urls, launcher, banner=True) -> int:
+    async def _sub(home, *, server_urls, launcher, reporter, banner=True) -> int:
         return 0
 
     async def _tools(home, *, name, launcher, announce=True) -> int:
@@ -198,7 +264,7 @@ async def test_open_workspace_defaults_start_fn_to_lifecycle_start(monkeypatch: 
     (lazily); the tools host resolves ``component.component_start`` via start_tools_host."""
     from calfcord.supervisor import component, lifecycle
 
-    async def _ls(home, *, server_urls, launcher, banner=True) -> int:
+    async def _ls(home, *, server_urls, launcher, reporter, banner=True) -> int:
         return 0
 
     async def _cs(home, *, name, launcher=None, **_) -> int:

@@ -26,12 +26,14 @@ recording/failing fake so a mention only has to REACH ``handler.handle``. The
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
+from aiokafka.errors import KafkaConnectionError
 from pydantic import SecretStr
 
 from calfcord.bridge.gateway import DiscordIngressGateway
@@ -644,6 +646,58 @@ class TestRunHandlerErrorHandling:
         assert "Something went wrong" in text
         # The notice must not leak internal detail.
         assert "RuntimeError" not in text
+
+    async def test_broker_bounce_posts_a_transient_notice_not_a_crash_notice(self) -> None:
+        """A mention landing during a broker restart is transient, not a bug.
+
+        The substrate runs the broker under ``restart: always`` with a 15s backoff, so a
+        mention CAN land while it is down — and calfkit's ``_ensure_started`` leaves the
+        client startable on failure, so the very next mention self-heals. The honest
+        notice is "try again in a moment", not "something went wrong … an operator should
+        check the bridge logs", which sends someone hunting a bug that isn't there.
+        """
+        gateway = _gateway()
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+
+        class _BrokerDown:
+            async def handle(self, req: MentionRequest) -> None:
+                raise KafkaConnectionError("Unable to bootstrap from [('localhost', 9092)]")
+
+        gateway._handler = _BrokerDown()  # type: ignore[assignment]
+        req = _req()
+        await gateway._run_handler(req)
+
+        gateway._reply.post_notice.assert_awaited_once()
+        posted_req, text = gateway._reply.post_notice.await_args.args
+        assert posted_req is req
+        assert "Something went wrong" not in text
+        assert "moment" in text
+        assert "bootstrap" not in text  # no internal detail leaks to the channel
+
+    async def test_broker_bounce_is_logged_without_a_traceback(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A transient blip must not be logged as a crash.
+
+        ``logger.exception`` at ERROR with a full traceback is how a *bug* is recorded;
+        emitting that for a broker restart is noise that trains operators to ignore the
+        channel and can trip error alerting on a self-healing condition.
+        """
+        gateway = _gateway()
+        gateway._reply.post_notice = AsyncMock()  # type: ignore[method-assign]
+
+        class _BrokerDown:
+            async def handle(self, req: MentionRequest) -> None:
+                raise KafkaConnectionError("Unable to bootstrap from [('localhost', 9092)]")
+
+        gateway._handler = _BrokerDown()  # type: ignore[assignment]
+        with caplog.at_level(logging.DEBUG):
+            await gateway._run_handler(_req())
+
+        records = [r for r in caplog.records if "broker" in r.getMessage().lower()]
+        assert records, "the blip must still be recorded for operators"
+        assert all(r.levelno < logging.ERROR for r in records)
+        assert all(r.exc_info is None for r in records)  # no traceback: not a crash
 
     async def test_cancelled_error_propagates_without_notice(self) -> None:
         # Shutdown cancellation must propagate so drain sees the task as cancelled;

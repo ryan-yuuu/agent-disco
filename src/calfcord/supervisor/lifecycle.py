@@ -43,6 +43,7 @@ from pathlib import Path
 
 from calfcord.health.check import BrokerProbe, default_broker_probe
 from calfcord.supervisor import _workspace, procspawn
+from calfcord.supervisor._progress import BRIDGE_STEP, NULL_REPORTER, SUPERVISOR_STEP, StartReporter
 from calfcord.supervisor._workspace import (
     iter_process_dicts,
     resolve_client,
@@ -76,11 +77,18 @@ _PORT_RANGE_START = 8100
 _PORT_RANGE_END = 8899
 _PORT_RANGE_WIDTH = _PORT_RANGE_END - _PORT_RANGE_START + 1
 
-# Readiness gate cadence (§13.2/§13.3): poll the bridge every few seconds until it
-# is ready or the budget is spent. A modest default budget covers a cold broker
-# provision + Discord connect without hanging the CLI forever.
+# Readiness gate cadence (§13.2/§13.3): poll the bridge until it is ready or the
+# budget is spent. A modest default budget covers a cold broker provision +
+# Discord connect without hanging the CLI forever.
+#
+# The interval is pure dead time — the workspace stays shut for up to one interval
+# AFTER the bridge is already serving — and each poll is a loopback REST read costing
+# ~1ms, so there is nothing to amortise: 0.25s across the 90s budget is 360 trivially
+# cheap reads (ADR-0023). It was 2.0s, which spent up to 2s of every start doing
+# nothing. Contrast the exec readiness probes in ``compose.py``, whose period IS
+# cost-bound (each spawns a process): this poll is not, so it can be fine-grained.
 _DEFAULT_READY_TIMEOUT_SECONDS = 90
-_READINESS_POLL_INTERVAL_SECONDS = 2.0
+_READINESS_POLL_INTERVAL_SECONDS = 0.25
 
 # Bounded wait for the REST server itself to answer after a detached ``up`` (the
 # socket binds a beat after the process forks). Separate from the readiness gate:
@@ -593,6 +601,7 @@ async def start(
     sleep: Sleep | None = None,
     broker_probe: BrokerProbe | None = None,
     banner: bool = True,
+    reporter: StartReporter = NULL_REPORTER,
 ) -> int:
     """Open the workspace: render, launch detached, prime, gate on readiness.
 
@@ -628,6 +637,23 @@ async def start(
     start the agent themselves, so for them the signpost tells the operator to run a
     command the very next line executes for them, and they narrate their own progress
     in their own voice besides.
+
+    ``reporter`` narrates the two waits that block a cold open — the REST server
+    answering and the bridge reaching Ready — so the CLI can render live progress
+    instead of leaving the operator staring at a silent terminal (§12.6's honesty rule
+    applied to the *wait*, not just the verdict). It defaults to the silent
+    :data:`~calfcord.supervisor._progress.NULL_REPORTER`, and a wait that fails is
+    deliberately never marked done, so the reporter can name what actually hung.
+
+    It is **orthogonal to** ``banner``, and deliberately not the ``narrate`` callback
+    ADR-0022 rejected. That callback would have re-routed prose this function already
+    prints — for which a bool is the simpler, more legible answer, and ADR-0022 is
+    right. The reporter re-routes nothing: these two waits print *nothing* on any
+    branch, at any ``banner`` setting, and a bool cannot express "the bridge wait is
+    in flight" to a spinner. ADR-0022's line still holds either way — signposts and
+    outcomes are the caller's, causes are never — and the reporter emits stable ids
+    rather than prose precisely so every word stays the caller's (ADR-0023).
+
 
     ``client`` / ``spawn`` / ``spawn_blocking`` / ``clock`` / ``sleep`` /
     ``broker_probe`` are injected for testing; in production they default to a
@@ -748,6 +774,7 @@ async def start(
             ]
         )
 
+        reporter.step(SUPERVISOR_STEP)
         if not await _await_supervisor_up(client, clock=clock, sleep=sleep):
             print(
                 "error: process-compose REST server did not come up "
@@ -755,6 +782,7 @@ async def start(
                 f"check {log_path}"
             )
             return 1
+        reporter.done(SUPERVISOR_STEP)
 
         # Priming reconcile for upstream #494 (§13.1): exactly one no-op
         # project-update with the byte-identical YAML, so the buggy first update
@@ -777,6 +805,7 @@ async def start(
             )
             return 1
 
+        reporter.step(BRIDGE_STEP)
         if not await _await_bridge_ready(
             client, timeout_s=ready_timeout_s, clock=clock, sleep=sleep
         ):
@@ -811,6 +840,7 @@ async def start(
                     f"intents are off. See {bridge_log} or run: disco doctor"
                 )
             return 1
+        reporter.done(BRIDGE_STEP)
 
     if banner:
         if agents_defined:

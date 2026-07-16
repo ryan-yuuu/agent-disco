@@ -43,6 +43,24 @@ class _FakeClock:
         self.t += seconds
 
 
+class _RecordingReporter:
+    """Records what ``start`` narrates through the progress seam.
+
+    The real reporter renders a live spinner; ``start`` only needs to announce
+    which wait it has entered and when that wait resolved, so the seam is two
+    calls and the CLI owns every word the operator sees.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def step(self, name: str) -> None:
+        self.events.append(("step", name))
+
+    def done(self, name: str) -> None:
+        self.events.append(("done", name))
+
+
 class _RecordingSpawn:
     """Records every argv it is asked to launch (the process spawner seam)."""
 
@@ -426,6 +444,24 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
     assert "port" in out
 
 
+async def test_bridge_ready_gate_notices_readiness_within_a_quarter_second() -> None:
+    """A bridge that flips to Ready between two polls is picked up on the next one.
+
+    The gate's poll interval is pure dead time: the workspace stays shut for up to
+    one interval AFTER the bridge is already serving, and the poll it is waiting on
+    is a loopback REST read costing ~1ms. The old 2s interval spent up to 2s of the
+    user's startup doing nothing; this pins the granularity as a behaviour rather
+    than trusting the constant to stay small (ADR-0023).
+    """
+    clock = _FakeClock()
+    client = _StubClient(bridge_states=[{"is_ready": "Starting"}, {"is_ready": "Ready", "pid": 100}])
+
+    ready = await lifecycle._await_bridge_ready(client, timeout_s=90, clock=clock, sleep=clock.sleep)
+
+    assert ready is True
+    assert clock() <= 0.25
+
+
 # --- bridge restart: the shared mechanism + the `disco bridge restart` verb --
 
 
@@ -732,6 +768,79 @@ async def test_start_manifest_is_substrate_only(tmp_path, capsys, fake_pc_bin) -
     project = _yaml.safe_load((tmp_path / "state" / "process-compose.yaml").read_text())
     assert set(project["processes"]) == {"broker", "bridge"}
 
+
+
+async def test_start_narrates_each_substrate_wait_to_the_reporter(tmp_path, capsys, fake_pc_bin) -> None:
+    """`start` announces the waits it enters, so a cold open is never a silent hang.
+
+    The two waits are the only places `start` blocks on someone else: the REST
+    server answering, and the bridge reaching Ready (the Discord connect — by far
+    the long pole). Each is announced on entry and marked on resolution. `start`
+    emits stable ids, never prose: the CLI owns the wording and the rendering, so
+    this module stays free of a console (ADR-0023).
+    """
+    _define_agent(tmp_path)
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    reporter = _RecordingReporter()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Ready"}],
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+        reporter=reporter,
+    )
+
+    assert code == 0
+    assert reporter.events == [
+        ("step", "supervisor"),
+        ("done", "supervisor"),
+        ("step", "bridge"),
+        ("done", "bridge"),
+    ]
+
+
+async def test_start_leaves_a_failed_wait_unmarked_for_the_reporter(tmp_path, capsys, fake_pc_bin) -> None:
+    """A wait that never resolves is announced but never marked done.
+
+    That asymmetry is what lets the reporter name the exact target that hung
+    ("still pending: bridge") instead of a generic timeout — the honest failure
+    story the silent gate could not tell.
+    """
+    _define_agent(tmp_path)
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    reporter = _RecordingReporter()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Starting"}] * 500,
+    )
+
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        ready_timeout_s=4,
+        broker_probe=_reachable_broker,
+        reporter=reporter,
+    )
+
+    assert code == 1
+    assert ("step", "bridge") in reporter.events
+    assert ("done", "bridge") not in reporter.events
 
 
 async def test_start_happy_path(tmp_path, capsys, fake_pc_bin) -> None:

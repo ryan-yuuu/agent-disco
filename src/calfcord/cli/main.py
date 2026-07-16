@@ -8,6 +8,19 @@ register additional subparsers; the shim only needs to know the top-level verb
 (``init`` / ``doctor`` / ``agent`` / ``tools``) to dispatch them here.
 The ``run`` / ``auth`` verbs are translated to console scripts in the shim itself,
 not here.
+
+**Import hygiene is load-bearing here** (ADR-0023). This module is the console
+script every ``disco`` invocation runs, including ``disco _healthcheck
+<component>`` — which Process Compose re-executes as a readiness probe every few
+seconds for the life of the workspace. Importing the subcommand modules at module
+scope pulled ``agent_create`` -> ``calfcord.agents`` -> ``calfkit`` ->
+``calfkit.nodes.agent`` -> ``calfkit.providers.pydantic_ai``, so a probe that only
+reads one JSON file paid ~1.4s to load the whole agent framework, and so did every
+other command. They are therefore imported INSIDE the dispatch arm that needs them:
+the cost lands only on the invocation that actually uses it. ``tests/cli/
+test_import_hygiene.py`` pins this — a new module-scope
+``from calfcord.cli import <module>`` reaching the agent stack would silently
+restore the tax with no symptom but a slow CLI.
 """
 
 from __future__ import annotations
@@ -19,27 +32,13 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from calfcord.cli import (
-    agent_create,
-    agent_edit,
-    agent_inspect,
-    agent_lifecycle,
-    agent_tools,
-    deploy,
-    doctor,
-    explain,
-    init,
-    logs,
-    mcp_admin,
-)
 from calfcord.cli._agents import detect_agents, pick_agent
 from calfcord.cli._fields import FIELDS
 from calfcord.cli._mcp import configured_mcp_servers_or_none
 from calfcord.cli._prompts import make_prompter
 from calfcord.cli._supervisor import open_workspace
 from calfcord.health.check import default_broker_probe, healthcheck
-from calfcord.mcp.config import resolve_config_path
-from calfcord.supervisor import component, lifecycle, mcp_roster, roster
+from calfcord.supervisor import component, lifecycle, mcp_roster
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -399,13 +398,23 @@ def _resolve_start_target(
     # One prompter for both the picker and the wizard it may open: they are one
     # continuous conversation with the operator, not two.
     prompter = make_prompter()
+
+    def _create() -> str | None:
+        # Imported HERE, not at function scope: ``agent_create`` reaches the agent
+        # stack (~1.2s), and this callback fires only if the operator picks the create
+        # row. At function scope the cost would land on every bare `agent start`,
+        # stalling the picker before it can even be drawn (ADR-0023).
+        from calfcord.cli import agent_create
+
+        return agent_create.create_for_start(
+            prompter, agents_dir=agents_dir, env_path=env_path, home=home
+        )
+
     return pick_agent(
         prompter,
         agents_dir=agents_dir,
         message="Which agent do you want to start?",
-        create_fn=lambda: agent_create.create_for_start(
-            prompter, agents_dir=agents_dir, env_path=env_path, home=home
-        ),
+        create_fn=_create,
     )
 
 
@@ -473,6 +482,10 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if home is None:
         return 1
 
+    # Deferred: roster reaches ``calfkit.client``, whose package barrel pulls
+    # ``calfkit.nodes.agent`` and the model providers. Only the roster verbs need it.
+    from calfcord.supervisor import roster
+
     if command == "ps":
         # ``ps`` is the read-only running view; it consults the broker-wide probe.
         server_urls = os.getenv("CALF_HOST_URL") or "localhost"
@@ -495,6 +508,8 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
     # every DEFINED agent — the ids come from the agents dir here so roster.py
     # stays off the disk read.
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
+    from calfcord.cli import init
+
     # ``env_path`` is kept (not discarded) for the picker's create row: the
     # wizard's provider step reads and writes credentials through it.
     env_path, agents_dir = init.resolve_paths(home)
@@ -519,6 +534,9 @@ def _run_agent(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     # parser too so the exactly-one-of name|--all rule can `parser.error` cleanly.
     if args.agent_command in _ROSTER_COMMANDS:
         return _run_agent_roster(parser, args)
+
+    # The file verbs are the agent-stack callers; only they pay its import.
+    from calfcord.cli import agent_create, agent_edit, agent_inspect, agent_lifecycle, agent_tools, init
 
     home = _resolve_home()
     env_path, agents_dir = init.resolve_paths(home)
@@ -598,6 +616,11 @@ def _run_mcp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     # resolved mcp.json (dev runs edit ./mcp.json) and only *optionally* touch
     # the supervisor (add's start step, list's state column) when a home exists.
     if command in ("add", "list", "remove"):
+        # ``mcp.config`` reaches ``calfkit.mcp``, and calfkit's package barrel pulls
+        # ``calfkit.nodes.agent`` with it — so this import is not the cheap one it looks.
+        from calfcord.cli import mcp_admin
+        from calfcord.mcp.config import resolve_config_path
+
         config_path = resolve_config_path()
         home = _resolve_home()
         if command == "add":
@@ -704,7 +727,15 @@ def _run_lifecycle(command: str) -> int:
     # so a freshly-opened workspace can serve tool calls without a separate
     # `disco tools start`. Substrate failure short-circuits; the tools-host start is
     # advisory, so its outcome never fails an otherwise-open workspace.
-    return asyncio.run(open_workspace(home, server_urls=server_urls, launcher=launcher))
+    #
+    # Wrapped in the progress reporter: the waits inside run for tens of seconds
+    # (the Discord connect), and an unnarrated one reads as a hang (ADR-0023).
+    from calfcord.cli.tui.progress import ConsoleStartReporter
+
+    with ConsoleStartReporter() as reporter:
+        return asyncio.run(
+            open_workspace(home, server_urls=server_urls, launcher=launcher, reporter=reporter)
+        )
 
 
 def _run_component(name: str, verb: str) -> int:
@@ -780,6 +811,8 @@ def _run_logs(component: str | None, *, follow: bool) -> int:
     home = _require_home("logs", detail="the supervisor has a stable home and logs dir.")
     if home is None:
         return 1
+    from calfcord.cli import init, logs
+
     _, agents_dir = init.resolve_paths(home)
     return logs.tail(home, agents_dir=agents_dir, component=component, follow=follow)
 
@@ -799,6 +832,8 @@ def _run_deploy(target: str, *, output: str | None) -> int:
     home = _require_home("deploy", detail="the manifest can reference a stable home and shim.")
     if home is None:
         return 1
+    from calfcord.cli import deploy, init
+
     env_path, agents_dir = init.resolve_paths(home)
     return deploy.run(
         target,
@@ -819,7 +854,7 @@ def _run_tool_alias(args: argparse.Namespace) -> int:
     from ``ALL_TOOLS`` so the validator can check the source and its
     aliasability without the CLI hard-coding the tool list.
     """
-    from calfcord.cli import tool_aliases
+    from calfcord.cli import init, tool_aliases
 
     env_path, _ = init.resolve_paths(_resolve_home())
     cmd = args.tools_alias_command
@@ -866,6 +901,7 @@ def _apply_alias_restart() -> None:
     # letting them fail separately would print two confusing "not running"
     # hints for what is really a single no-op. Probing once lets us print one
     # clean line instead. (Don't "simplify" this away.)
+    from calfcord.supervisor import roster
     from calfcord.supervisor._workspace import resolve_client, workspace_is_up
 
     async def _up() -> bool:
@@ -893,6 +929,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         # orchestrate the install-scoped supervisor (it degrades to manual
         # next-steps when ``home`` is None / a dev run). ``server_urls`` mirrors
         # the same ``CALF_HOST_URL`` default the runners and ``start`` use.
+        from calfcord.cli import init
+
         home = _resolve_home()
         env_path, agents_dir = init.resolve_paths(home)
         return init.run(
@@ -908,6 +946,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         # resolved install ``home`` (None in dev mode) activates doctor's runtime
         # daemon-health section when the workspace is open; it stays correctly
         # skipped on a dev run with no install heartbeats to read.
+        from calfcord.cli import doctor, init
+
         env_path, agents_dir = init.resolve_paths(_resolve_home())
         return doctor.run(env_path=env_path, agents_dir=agents_dir, offline=args.offline, home=_resolve_home())
 
@@ -932,6 +972,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return _run_mcp(parser, args)
 
     if args.command == "explain":
+        from calfcord.cli import explain
+
         return explain.run(args.explain_command)
 
     if args.command == "logs":
