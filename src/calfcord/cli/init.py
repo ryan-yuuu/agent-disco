@@ -913,9 +913,10 @@ async def _bring_online(
         )
         == 0
     )
-    # A dead tools host is recorded where it happened, not saved for the banner: the
-    # remedy `start_tools_host` just printed is the actionable part, and a board that
-    # showed only ticks would contradict it three lines later.
+    # A dead tools host is recorded where it happened rather than only in the banner —
+    # a board of unbroken ticks above a degraded verdict reads as a contradiction. The
+    # remedy is the epilogue's (the ``announce=False`` above is what makes it so); this
+    # row's whole job is to mark WHERE it broke.
     if tools_ok:
         render.step("tools host", "all builtin tools", width=width)
     else:
@@ -969,34 +970,25 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
     # direct caller (the tests, a future flow) gets the same spacing.
     print()
     hello = f"!{name} hello  (in Discord)"
-    # Each branch states the verdict, then contributes its remedy to the SAME action
-    # block the sign-off uses, rather than trailing indented prose. One grammar for
-    # "here is a thing to type" means the reader learns to scan the right column once.
     actions: list[tuple[str, str]] = []
+
+    # The VERDICT is one line and therefore has to choose, worst first: a bot that can
+    # post nowhere outranks a dead tools host, which outranks an unconfirmed agent.
     if postable is False:
         # The preflight PROVED the bot can post in no channel — a known, fixable problem
-        # independent of detection. Lead with the remedy rather than the generic "try
-        # `!name hello`" (it can't get a reply) or a bare `disco doctor` (it won't
-        # diagnose Discord permissions) (§12.6). Whether or not it also came online.
+        # independent of detection (§12.6), so it leads whether or not it came online.
         if detected:
             render.line(f"{name} is online, but it can't post in any Discord channel yet.")
         else:
             render.line(f"{name} can't post in any Discord channel yet — and it isn't online in Discord either.")
-        actions.append(("Fix it", "grant it View Channel + Send Messages + Manage Webhooks"))
-        actions.append(("Then try", hello))
-        if not detected:
-            actions.append(("If it stays quiet", "disco doctor"))
     elif not tools_ok:
         # The agent came up but the advisory tools host didn't — its tool-using turns
-        # will hang. Degrade honestly rather than the unqualified 🎉 (no green light that
-        # lies). Handled before ``detected`` because a live-but-tool-less org is exactly
-        # the trap the banner must not paper over.
+        # will hang. Ranked above ``detected`` because a live-but-tool-less org is
+        # exactly the trap the banner must not paper over.
         if detected:
             render.line(f"{name} is online — but the tools host isn't up, so its tool calls will hang.")
         else:
             render.line("Your organization is live — but the tools host isn't up, so tool calls will hang.")
-        actions.append(("Fix it", "disco tools start"))
-        actions.append(("Why it failed", "disco logs tools"))
     elif detected:
         # Emphasised via render.line rather than render.success: this line keeps its
         # 🎉 and must not also carry success()'s ✓ — two markers on the payoff line
@@ -1004,15 +996,31 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
         # place; it is the onboarding win moment, not decoration, and dropping it to
         # suit the monochrome palette would be a product change wearing a style hat.
         render.line("🎉 your organization is live!", style=theme.ACCENT)
-        actions.append(("Try it", hello))
     else:
         # Bounded fallback (§12.6): never promise more than we detected. The record
         # above already said what wasn't seen, so this adds the reading rather than
-        # repeating it: the org IS live, and a slow registration is the likely cause,
-        # which is why the hello is still worth trying — this is the one degraded
-        # branch where it can actually succeed.
+        # repeating it: the org IS live, and a slow registration is the likely cause.
         render.line(f"Your organization is live — {name} may still be registering.")
-        actions.append(("Try it", hello))
+
+    # The REMEDIES do NOT choose. Each problem has an independent cause — Discord
+    # permissions from §4.5, the tools host and registration from bring-up — so any
+    # combination can be true at once and every one of them is separately actionable.
+    # Ranking them the way the verdict must would silently drop the losers: passing
+    # ``announce=False`` to `start_tools_host` traded away the unconditional remedy it
+    # used to print, on the promise that this block always names it. Ranked, that
+    # promise held only when no other problem outranked the tools host — leaving an
+    # operator with a dead host and a mute bot told to fix permissions, then hang on
+    # their first tool call with nothing naming `disco tools start`.
+    if postable is False:
+        actions.append(("Grant it", "View Channel + Send Messages + Manage Webhooks"))
+    if not tools_ok:
+        actions.append(("Start the tools host", "disco tools start"))
+        actions.append(("Why it failed", "disco logs tools"))
+    # The hello always earns its row: it is the point of the whole wizard. "Then try"
+    # when something above must be fixed first — a mute bot can't answer it, and a
+    # tool-using turn will hang — so the label sequences it rather than promising it.
+    actions.append(("Then try" if actions else "Try it", hello))
+    if not detected:
         actions.append(("If it stays quiet", "disco doctor"))
 
     # The next step nobody teaches: a one-agent org is step one, not the finish line.

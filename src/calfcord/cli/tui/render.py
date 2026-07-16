@@ -111,16 +111,11 @@ def answer_text(label: str, value: str) -> Text:
     return text
 
 
-# The step glyphs, by status. Mirrors the board `doctor` prints, so the two flows
-# that report step outcomes speak one vocabulary rather than each hard-coding its own.
-_STEP_GLYPHS: dict[str, str] = {"ok": theme.TICK, "warn": theme.WARN, "fail": theme.CROSS}
-
-
 def step(
     label: str,
     value: str,
     *,
-    status: str = "ok",
+    status: theme.Status = "ok",
     width: int = 0,
     console: Console | None = None,
 ) -> None:
@@ -140,7 +135,7 @@ def step(
     A ``fail`` is styled :data:`theme.ERROR` — the theme reserves its one colour for
     genuine failures, and a step that did not happen is one.
     """
-    glyph = _STEP_GLYPHS[status]
+    glyph = theme.STEP_GLYPHS[status]
     text = Text()
     text.append(f"{glyph} ", style=theme.ERROR if status == "fail" else theme.MUTED)
     text.append_text(pair_text(label, value, width=width))

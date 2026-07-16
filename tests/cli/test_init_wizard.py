@@ -1370,6 +1370,26 @@ def test_epilogue_celebrates_when_postability_undetermined(capsys: pytest.Captur
     assert "can't post in any Discord channel" not in out
 
 
+def test_epilogue_gives_every_remedy_when_problems_coincide(capsys: pytest.CaptureFixture[str]) -> None:
+    """A bot that can't post and a dead tools host are two facts, not two branches.
+
+    They have independent causes — one from the Discord phase, one from bring-up — so
+    an ``elif`` between them silently drops whichever loses. It used to be survivable:
+    ``start_tools_host`` printed the tools remedy unconditionally, covering the gap
+    from outside. Passing ``announce=False`` removed that net on the promise that the
+    epilogue names the remedy — a promise the epilogue only kept on branches where no
+    other problem outranked it. The operator would be told to fix permissions, try
+    ``!scribe hello``, and then hang forever on the first tool-using turn with nothing
+    naming ``disco tools start``.
+    """
+    init._print_finish_epilogue("scribe", detected=True, postable=False, tools_ok=False)
+    out = capsys.readouterr().out
+    assert "View Channel + Send Messages + Manage Webhooks" in out  # the Discord remedy
+    assert "disco tools start" in out  # AND the tools-host remedy
+    assert "disco logs tools" in out
+    assert "🎉" not in out
+
+
 def test_epilogue_surfaces_post_permission_fix_even_when_offline(capsys: pytest.CaptureFixture[str]) -> None:
     """When the preflight PROVED the bot can post nowhere (``postable is False``), the
     permission remedy must be shown even if the agent also wasn't seen online — the

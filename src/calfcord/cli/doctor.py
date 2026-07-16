@@ -23,11 +23,12 @@ import os
 import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING
 
 from calfkit_mesh import TansuBinaryNotFound, resolve_broker_bin
 
 from calfcord.cli._envfile import read_env
+from calfcord.cli.tui import theme
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,11 +46,12 @@ _DISCORD_ME_URL = "https://discord.com/api/v10/users/@me"
 _TCP_TIMEOUT = 2.0
 _HTTP_TIMEOUT = 5.0
 
-Status = Literal["ok", "warn", "fail"]
-_SYMBOLS: dict[Status, str] = {"ok": "✓", "warn": "⚠", "fail": "✗"}
-# A typo'd status would silently miscount the exit code, so pin the render map to the
-# status domain at import (mirrors the THINKING_EFFORTS drift assert in _fields.py).
-assert set(_SYMBOLS) == set(get_args(Status)), "_SYMBOLS drifted from Status"
+# The status domain and its glyphs are the TUI's shared step vocabulary, not doctor's
+# own: `init`'s live finish prints the same board, and two local copies would agree
+# only until either gained a status. The drift assert that used to live here moved with
+# them (`theme.STEP_GLYPHS`), so a typo'd status is still caught at import.
+Status = theme.Status
+_SYMBOLS = theme.STEP_GLYPHS
 
 
 @dataclass(frozen=True)
