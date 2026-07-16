@@ -28,6 +28,14 @@ Two reader depths, matching who needs secrets:
 * :func:`load_mcp_servers` — full parse + expansion into ready
   :class:`~calfkit.mcp.mcp_toolbox.MCPToolboxNode` defs; only the runner (and
   the wizard's optional start step) call this.
+
+That split is an **import boundary too**, not just a secrets one (ADR-0023).
+calfkit's package barrel pulls ``calfkit.nodes.agent`` and the model providers
+(~0.6s), so importing it at module scope charged that to every name-only reader —
+including the ``disco _healthcheck`` readiness probe, which reaches this module
+through the CLI entry point and which Process Compose re-runs every few seconds
+forever. The calfkit names are therefore imported inside the deep-read functions
+that construct nodes; the shallow readers stay pure-stdlib.
 """
 
 from __future__ import annotations
@@ -37,12 +45,13 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
-
-from calfkit.mcp.mcp_toolbox import MCPToolboxNode
-from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParameters
+from typing import TYPE_CHECKING, Any
 
 from calfcord.mcp.selector import is_valid_server_name
+
+if TYPE_CHECKING:
+    from calfkit.mcp.mcp_toolbox import MCPToolboxNode
+    from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParameters
 
 CONFIG_ENV_VAR = "CALFCORD_MCP_CONFIG"
 """Environment override for the ``mcp.json`` path."""
@@ -159,6 +168,8 @@ def load_mcp_servers(path: Path) -> dict[str, MCPToolboxNode]:
     problem, including a missing file — the runner wants "you asked to host
     servers but there's no config" loud, unlike enumeration.
     """
+    from calfkit.mcp.mcp_toolbox import MCPToolboxNode
+
     if not path.exists():
         raise McpConfigError(
             f"MCP config not found at {path} — create it (or run 'disco mcp add') first"
@@ -181,6 +192,8 @@ def load_one_server(path: Path, name: str) -> MCPToolboxNode:
     registry (pointing at ``disco mcp add``), or an unknown name (listing
     what IS configured).
     """
+    from calfkit.mcp.mcp_toolbox import MCPToolboxNode
+
     if not path.exists():
         raise McpConfigError(
             f"MCP config not found at {path} — create it (or run 'disco mcp add') first"
@@ -302,6 +315,8 @@ def _build_params(
     name: str, entry: dict[str, Any]
 ) -> StdioServerParameters | StreamableHttpParameters:
     """Expand ``$VAR`` references and build the calfkit transport params."""
+    from calfkit.mcp.mcp_transport import StdioServerParameters, StreamableHttpParameters
+
     env = os.environ
 
     def expand(value: str) -> str:

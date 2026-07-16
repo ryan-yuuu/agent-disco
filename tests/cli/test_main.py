@@ -24,6 +24,7 @@ from calfcord.cli import (
     explain,
     init,
     logs,
+    mcp_admin,
     tool_aliases,
 )
 from calfcord.cli import main as main_mod
@@ -2071,7 +2072,7 @@ def test_main_mcp_add_dispatches_with_flags(monkeypatch: pytest.MonkeyPatch, tmp
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(main_mod.mcp_admin, "run_add", _add)
+    monkeypatch.setattr(mcp_admin, "run_add", _add)
     assert (
         main(
             [
@@ -2109,7 +2110,7 @@ def test_main_mcp_add_works_without_home_dev_run(monkeypatch: pytest.MonkeyPatch
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(main_mod.mcp_admin, "run_add", _add)
+    monkeypatch.setattr(mcp_admin, "run_add", _add)
     assert main(["mcp", "add", "github", "--command", "srv"]) == 0
     assert captured["home"] is None
     assert captured["config_path"] == Path("mcp.json")
@@ -2124,7 +2125,7 @@ def test_main_mcp_list_dispatches(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(main_mod.mcp_admin, "run_list", _list)
+    monkeypatch.setattr(mcp_admin, "run_list", _list)
     assert main(["mcp", "list"]) == 0
     assert captured["home"] == home
 
@@ -2137,7 +2138,7 @@ def test_main_mcp_remove_dispatches(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(main_mod.mcp_admin, "run_remove", _remove)
+    monkeypatch.setattr(mcp_admin, "run_remove", _remove)
     assert main(["mcp", "remove", "github", "--force"]) == 0
     assert captured["server"] == "github"
     assert captured["force"] is True
