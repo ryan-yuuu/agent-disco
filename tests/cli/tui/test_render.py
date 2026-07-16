@@ -7,6 +7,12 @@ prose. Both rules below exist to keep Rich from silently rewriting it.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import time
+
+from rich.console import Console
+
 from calfcord.cli.tui import render
 
 
@@ -205,3 +211,68 @@ class TestPair:
 
     def test_does_not_interpret_square_brackets_as_markup(self) -> None:
         assert "[bold]" in _render(render.pair, "x", "keep [bold] literal")
+
+
+class TestWorking:
+    """``working`` — a transient spinner for a step slow enough to look hung.
+
+    The same arc the widgets already perform: a transient Live that is torn down and
+    replaced by a durable one-line record. Progress is decoration; the record is the
+    fact. So this renders nothing off-TTY by design, and the caller's ``step`` record
+    prints either way.
+    """
+
+    def _paint(self, label: str = "waiting…") -> str:
+        # A real StringIO with force_terminal: record=True cannot capture Live output
+        # (see test_live_rendering.py, which pins the same constraint).
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, force_terminal=True, highlight=False)
+        with render.working(label, console=console):
+            time.sleep(0.15)
+        return buffer.getvalue()
+
+    def test_paints_a_spinner_and_the_label_on_a_terminal(self) -> None:
+        out = self._paint("waiting for scribe to come online…")
+        assert "waiting for scribe to come online…" in out
+        assert "⠋" in out  # the spinner actually animated
+
+    def test_the_spinner_carries_no_hue(self) -> None:
+        """Rich's default status spinner is GREEN — the theme is monochrome.
+
+        `theme` permits exactly one colour, ERROR, and only for genuine failures; a
+        waiting spinner is not one. Left at Rich's default this would have been the
+        single hued glyph in the whole CLI, which is why the style is pinned rather
+        than inherited.
+        """
+        out = self._paint()
+        assert not any(code in out for code in ("\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m"))
+
+    def test_renders_nothing_off_a_terminal(self) -> None:
+        """A piped or CI run must not collect spinner frames.
+
+        Live is inert off-TTY, which is what makes this safe — and is also why the
+        caller must print its record OUTSIDE the spinner, or the step would vanish
+        entirely from a captured log.
+        """
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, highlight=False)
+        with render.working("waiting…", console=console):
+            pass
+        assert buffer.getvalue() == ""
+
+    def test_the_body_still_runs_off_a_terminal(self) -> None:
+        """Guards the vacuous pass: silence must mean "not painted", not "not run"."""
+        ran = []
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, highlight=False)
+        with render.working("x", console=console):
+            ran.append(True)
+        assert ran == [True]
+
+    def test_the_spinner_is_torn_down_on_a_raise(self) -> None:
+        """A failure inside the step must not leave the terminal's cursor hidden."""
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=60, force_terminal=True, highlight=False)
+        with contextlib.suppress(RuntimeError), render.working("x", console=console):
+            raise RuntimeError("boom")
+        assert "\x1b[?25h" in buffer.getvalue()  # cursor restored

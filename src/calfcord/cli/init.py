@@ -850,11 +850,13 @@ async def _finish_live(
     if rc != 0:
         return rc, tools_ok, False
 
-    # The one wait long enough to need saying out loud: the agent's registration can
-    # take a moment, and the window before we give up is a whole minute. Every other
-    # step resolves in seconds, so its record IS its feedback.
-    render.note(f"  waiting for {name} to come online…")
-    detected = await _await_presence(presence_fn, name=name, server_urls=server_urls)
+    # The one wait long enough to look hung: registration usually lands in a moment,
+    # but the window before we give up is a whole minute. Every other step resolves in
+    # seconds, so its record arriving IS its feedback. The spinner is decoration and
+    # paints only on a terminal — the record below is printed OUTSIDE it, so a piped
+    # run still gets the outcome (§ :func:`render.working`).
+    with render.working(f"waiting for {name} to come online…"):
+        detected = await _await_presence(presence_fn, name=name, server_urls=server_urls)
     # ``warn``, never ``fail``: a timeout means "not seen inside the window", and the
     # agent may be registering as we print. Saying more than we observed — in either
     # direction — is the thing this phase exists not to do.

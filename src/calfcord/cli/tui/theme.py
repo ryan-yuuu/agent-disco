@@ -67,6 +67,12 @@ assert set(STEP_GLYPHS) == set(get_args(Status)), "STEP_GLYPHS drifted from Stat
 # sits alongside.
 BOX = box.ROUNDED
 
+# The spinner for a step slow enough to look hung. Braille dots read as motion at any
+# font size and degrade to legible glyphs where the font lacks them. Its style must be
+# named explicitly wherever it is used: Rich's default status spinner is GREEN, which
+# would make it the one hued glyph in an otherwise monochrome CLI.
+SPINNER = "dots"
+
 # The hint rendered in a widget's bottom border. Ctrl-C — not Esc — is the cancel
 # key: readchar blocks after "\x1b" waiting to disambiguate an escape sequence, so
 # a lone Esc press cannot be observed at all (design §4.1). Ctrl-C is also what the

@@ -32,11 +32,17 @@ prevent.
 
 from __future__ import annotations
 
+import contextlib
+from typing import TYPE_CHECKING
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 from calfcord.cli.tui import theme
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _console: Console | None = None
 
@@ -153,6 +159,32 @@ def pair_text(label: str, value: str, *, width: int = 0) -> Text:
     text.append(f"{label.ljust(width)}  ", style=theme.MUTED)
     text.append(value, style=theme.ACCENT)
     return text
+
+
+@contextlib.contextmanager
+def working(label: str, *, console: Console | None = None) -> Iterator[None]:
+    """Paint a transient spinner while a slow step runs; render nothing off-TTY.
+
+    The arc :mod:`~calfcord.cli.tui.widgets` already performs — a transient Live torn
+    down and replaced by a durable one-line record — applied to waiting rather than to
+    a prompt. Reach for it only where a step is slow enough to look hung: a step that
+    resolves in a moment is better served by its record arriving.
+
+    Two constraints the implementation exists to honour:
+
+    * **The spinner is decoration; the record is the fact.** Live is inert off a
+      terminal (a piped run, CI, the tests), so anything painted here is *gone* there.
+      The caller must print its :func:`step` record OUTSIDE this block, or the step
+      vanishes from every captured log. That inertness is also what makes this safe:
+      no frames leak into a redirected stdout.
+    * **No hue.** Rich's default status spinner is green. In a palette whose one colour
+      is reserved for genuine failures, a waiting spinner rendering green would be the
+      single hued glyph in the CLI, so the style is pinned rather than inherited.
+    """
+    with target(console).status(
+        Text(label, style=theme.MUTED), spinner=theme.SPINNER, spinner_style=theme.MUTED
+    ):
+        yield
 
 
 def pair(label: str, value: str, *, width: int = 0, console: Console | None = None) -> None:
