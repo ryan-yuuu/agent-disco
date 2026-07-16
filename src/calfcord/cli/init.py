@@ -105,11 +105,12 @@ def _label_width(name: str) -> int:
 def _print_actions(actions: list[tuple[str, str]]) -> None:
     """Print "here is a thing to type" rows in the record board's column grammar.
 
-    Shared by the two exits that owe the operator a next step — the finish epilogue and
-    the agent-start failure — so neither can drift into a different shape for the same
-    job. The column is measured, not pinned: callers contribute different labels, and a
-    constant would either mis-align the long ones or pad the common case to fit a label
-    it never prints.
+    Shared by the exits that render their next steps as rows — the finish epilogue and
+    the agent-start failure — so the two can't drift into different shapes for one job.
+    (The dev-run and substrate-failure degrades name their steps as prose; they predate
+    this grammar and read fine, so they are left alone rather than churned.) The column
+    is measured, not pinned: callers contribute different labels, and a constant would
+    either mis-align the long ones or pad the common case to fit a label it never prints.
     """
     width = max(len(label) for label, _ in actions)
     for label, value in actions:
@@ -939,11 +940,12 @@ async def _bring_online(
 
     rc = await agent_start_fn(home, name=name, server_urls=server_urls, announce=False)
     if rc != 0:
-        # ``agent_start`` has already printed the specific cause. This is the ONE exit
-        # that returns before the epilogue, so nothing downstream will name a next step
-        # (§12.6 — never strand the operator) or re-issue the tools-host remedy that
-        # ``announce=False`` above traded away on the promise the epilogue names it.
-        # Both debts fall due here, or nowhere.
+        # ``agent_start`` has already printed the specific cause. Of the exits that skip
+        # the epilogue this is the only one carrying the ``announce=False`` tools debt —
+        # the dev-run and missing-binary degrades never start anything, and a substrate
+        # failure returns before the tools host is spawned. So the remedy that
+        # ``announce=False`` above traded away on the promise the epilogue names it falls
+        # due here or nowhere, as does the next step (§12.6 — never strand the operator).
         render.line(f"{name} didn't come up — see the error above.")
         actions = [("Diagnose", "disco doctor"), ("Then re-run", "disco init")]
         if not tools_ok:

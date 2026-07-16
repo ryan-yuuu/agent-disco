@@ -57,7 +57,7 @@ file-write, code-execution, and web reach — see
 exposing it.
 
 **`init` ends live.** After config it opens your workspace, brings your agent
-online, and watches Discord until it sees the first reply — so the session
+online, and waits until the agent registers on the mesh — so the session
 finishes with a working agent, not a "now run these commands" wall. Saying
 `!assistant hello` afterward is a confirmation, not the moment of truth.
 
