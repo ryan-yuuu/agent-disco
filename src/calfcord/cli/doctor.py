@@ -21,8 +21,11 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from calfkit_mesh import TansuBinaryNotFound, resolve_broker_bin
@@ -32,7 +35,6 @@ from calfcord.cli.tui import theme
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     import httpx
 
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
 _DISCORD_ME_URL = "https://discord.com/api/v10/users/@me"
 _TCP_TIMEOUT = 2.0
 _HTTP_TIMEOUT = 5.0
+_UV_TIMEOUT = 5.0
 
 # The status domain and its glyphs are the TUI's shared step vocabulary, not doctor's
 # own: `init`'s live finish prints the same board, and two local copies would agree
@@ -166,6 +169,53 @@ def _check_broker_binary() -> Result:
     return Result("broker binary", "ok", path)
 
 
+def _uv_managed_python_root(home: Path) -> Path | None:
+    """Where the install's own uv keeps its managed interpreters, or ``None`` if it can't say."""
+    uv = home / "bin" / "uv"
+    if not os.access(uv, os.X_OK):
+        return None
+    try:
+        done = subprocess.run(
+            [str(uv), "python", "dir"],
+            capture_output=True,
+            text=True,
+            timeout=_UV_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    return Path(done.stdout.strip())
+
+
+def _check_interpreter(home: Path) -> Result:
+    """Whether this install runs on an interpreter it owns (ADR 0023).
+
+    Doctor executes *inside* the pinned venv, so ``sys.base_prefix`` is the live
+    truth about which interpreter the bridge and agents actually run on — not a
+    claim recorded at install time. An install whose venv borrows a conda or
+    system Python keeps working right up until that Python is removed or
+    upgraded, which is what makes it worth surfacing.
+
+    ``warn``, never ``fail``: a borrowed interpreter is a latent risk, not a
+    broken install, and doctor's exit code is reserved for what blocks startup
+    (same reasoning as the broker-binary check).
+    """
+    version = ".".join(str(part) for part in sys.version_info[:3])
+    base = Path(sys.base_prefix)
+    managed_root = _uv_managed_python_root(home)
+    if managed_root is None:
+        return Result("python", "warn", f"{version} — no usable uv in {home / 'bin'}; re-run the installer")
+    if managed_root in base.parents:
+        return Result("python", "ok", f"{version} (uv-managed)")
+    return Result(
+        "python",
+        "warn",
+        f"{version} borrowed from {base} — re-run the installer to rebuild on an interpreter this install owns",
+    )
+
+
 def _check_token(*, offline: bool, client_factory: Callable[[], httpx.Client] | None) -> Result:
     token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     if not token:
@@ -214,7 +264,7 @@ def _check_agents(agents_dir: Path) -> Result:
 
 # --------------------------------------------------------------------- runtime checks
 #
-# The six checks above are STATIC — they answer "will the processes boot?" from
+# The checks above are STATIC — they answer "will the processes boot?" from
 # config alone, with no running daemon. When the workspace IS open (the substrate
 # started detached via ``disco start``) doctor adds a RUNTIME section that proves
 # the daemon is actually alive — the "green light that lies" the design (§12.1)
@@ -308,10 +358,12 @@ def run(
 
     The six STATIC checks (config / broker / broker binary / token / app id /
     agents) always run.
-    When ``home`` is supplied (a native install) doctor additionally runs the
-    RUNTIME section — daemon liveness plus a pointer to the native mesh roster view
-    — but only if the daemon is actually up (a fresh bridge heartbeat exists); a
-    closed workspace prints a next-step hint and adds no findings. doctor is
+    When ``home`` is supplied (a native install) doctor additionally checks that
+    the install runs on an interpreter it owns — a promise only the native install
+    makes, since a container deliberately runs its base image's Python — and runs
+    the RUNTIME section: daemon liveness plus a pointer to the native mesh roster
+    view, but only if the daemon is actually up (a fresh bridge heartbeat exists);
+    a closed workspace prints a next-step hint and adds no findings. doctor is
     **read-only** apart from one benign, idempotent side effect: the broker-binary
     check calls ``resolve_broker_bin()``, which materializes the calfkit-mesh
     binary into ``~/.calfkit/bin`` on first run (a deliberate cache-warm). The
@@ -319,8 +371,13 @@ def run(
     beat file, and default in production to the heartbeat reader and the system
     clock.
     """
-    results = [
-        _check_config(env_path),
+    results = [_check_config(env_path)]
+    if home is not None:
+        # Interpreter ownership is a promise of the NATIVE install only: a
+        # container deliberately runs its base image's Python, so checking there
+        # would warn about a documented, intentional choice (ADR 0023).
+        results.append(_check_interpreter(home))
+    results += [
         _check_broker(),
         _check_broker_binary(),
         _check_token(offline=offline, client_factory=client_factory),

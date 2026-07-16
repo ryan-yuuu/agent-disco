@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 #
-# Agent Disco installer — native, no-prerequisites, reproducible one-line install.
+# Agent Disco installer — native, reproducible one-line install.
 #
 #   curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/install.sh | bash
 #
-# What it does, making NO assumptions about the box (no git, no system Python):
-#   1. bootstraps `uv` (a static binary) privately under ~/.agent-disco
+# Needs only bash and curl-or-wget. Notably NOT git, and NOT Python — the box's
+# Python is never used even when it has one.
+#
+# What it does:
+#   1. bootstraps the pinned `uv` (a static binary) privately under ~/.agent-disco
 #   2. pins + downloads the source for a single commit of `main` (tarball, no git)
-#   3. builds an isolated, locked venv with `uv sync --locked --no-dev`
+#   3. builds an isolated, locked venv with `uv sync --locked --no-dev`, on the
+#      pinned CPython uv downloads for it
 #   4. installs a `disco` command that thinly wraps `uv run` in that venv
+#
+# The install OWNS its toolchain: uv, the interpreter, the supervisor and the
+# broker all come from it, never from the box, so one commit resolves to one
+# environment everywhere and nothing breaks when the operator's Python moves.
+# The interpreter it downloads is the one thing that lives outside the home, in
+# uv's shared cache (~/.local/share/uv/python) — see docs/adr/0023.
 #
 # Each version is built in its own `versions/<sha>` dir (Python venvs are not
 # relocatable, so they must be built in their final home); a `current` symlink
@@ -21,6 +31,8 @@
 #   CALFCORD_REF    branch or commit SHA  (default: main)
 #   CALFCORD_REPO   owner/repo            (default: ryan-yuuu/agent-disco)
 #   GITHUB_TOKEN    optional, for API rate limits / private mirrors
+#   CALFCORD_UV_VERSION      pinned uv     (see UV_VERSION below)
+#   CALFCORD_PYTHON_VERSION  pinned CPython (see PYTHON_VERSION below)
 #   CALFCORD_VERBOSE  set to restore the step-by-step progress narration
 #                     (default: quiet — only the final ACTIVATE hint prints)
 #
@@ -44,6 +56,20 @@ CURRENT_LINK="$CALFCORD_HOME/current"
 # BIN_DIR/process-compose. Pin matches the Phase-0 gate (docs §13.2): the REST
 # update semantics and the disabled-slot start path are version-specific.
 PROCESS_COMPOSE_VERSION="${CALFCORD_PROCESS_COMPOSE_VERSION:-v1.110.0}"
+
+# The toolchain this install owns: a pinned uv, and the exact CPython it builds
+# every venv on. THESE TWO MOVE TOGETHER. uv resolves managed interpreters from a
+# registry baked into each release, so a CPython pin only resolves on a uv new
+# enough to know it (0.9.22 tops out at 3.12.12; 3.12.13 needs a later uv) —
+# raising PYTHON_VERSION alone fails the install.
+#
+# The CPython pin lives here rather than in `.python-version` because that file
+# drives contributors' `uv run` on a uv we do not own — pinning a patch there
+# breaks the dev loop of anyone whose uv predates it. It stays the dev default;
+# the installer owns both pins, so the shipped artifact is exact regardless of
+# the box. See docs/adr/0023.
+UV_VERSION="${CALFCORD_UV_VERSION:-0.11.29}"
+PYTHON_VERSION="${CALFCORD_PYTHON_VERSION:-3.12.13}"
 VERSION_FILE="$CALFCORD_HOME/version"
 
 API_BASE="https://api.github.com/repos/$REPO"
@@ -75,10 +101,6 @@ die()  { printf '%sdisco error%s %s\n' "$C_E" "$C_0" "$*" >&2; exit 1; }
 trap 'die "install failed: $BASH_COMMAND"' ERR
 
 have() { command -v "$1" >/dev/null 2>&1; }
-
-# True if this uv supports the flags the disco shim relies on (notably
-# `uv run --env-file`, a relatively recent addition).
-uv_supported() { "$1" run --help 2>/dev/null | grep -q -- '--env-file'; }
 
 # fetch URL [accept] -> response body on stdout. Single home for the
 # curl/wget + optional-auth matrix. For curl, --location-trusted keeps the
@@ -125,29 +147,42 @@ extract_source() {
   fetch "$DL_BASE/archive/$sha.tar.gz" | tar -xz -C "$dest" --strip-components=1
 }
 
-# Bootstrap uv privately, or reuse an existing one.
+# Bootstrap the pinned uv privately (idempotent).
+#
+# A uv already on the box is deliberately NOT adopted, however capable it looks.
+# uv is a *runtime* dependency — every `disco` invocation execs it — so borrowing
+# one leaves each invocation at the mercy of the caller's PATH and leaves the
+# interpreter pin hostage to a uv version we do not control. See docs/adr/0023.
 ensure_uv() {
+  # Reuse only the PINNED uv. `disco self update` re-runs this installer against
+  # an existing home, so an unconditional reuse would land a bumped
+  # PYTHON_VERSION while silently keeping the old uv — and since an interpreter
+  # pin only resolves on a uv whose registry knows it, bumping both (the
+  # prescribed way to ship a CPython security patch) would leave every existing
+  # install unable to update, failing far from the cause. `|| true` inside the
+  # substitution: the ERR trap runs in that subshell and would print a
+  # fatal-looking line for a uv that cannot answer.
   if [ -x "$BIN_DIR/uv" ]; then
-    UV="$BIN_DIR/uv"
-  elif have uv && uv_supported "$(command -v uv)"; then
-    UV="$(command -v uv)"
-    log "using existing uv at $UV"
-  else
-    if have uv; then
-      warn "system uv lacks 'uv run --env-file'; installing a private uv under $BIN_DIR"
-    else
-      log "installing uv (no system Python or git required)..."
-    fi
-    mkdir -p "$BIN_DIR"
-    if have curl; then
-      curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$BIN_DIR" sh
-    elif have wget; then
-      wget -qO- https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$BIN_DIR" sh
-    else
-      die "need curl or wget to install uv"
-    fi
-    UV="$BIN_DIR/uv"
+    case "$("$BIN_DIR/uv" --version 2>/dev/null || true)" in
+      "uv $UV_VERSION" | "uv $UV_VERSION "*)
+        UV="$BIN_DIR/uv"
+        log "using private uv $UV_VERSION at $UV"
+        return 0
+        ;;
+    esac
+    log "private uv is not $UV_VERSION — re-bootstrapping"
   fi
+  log "installing uv $UV_VERSION (no system Python or git required)..."
+  mkdir -p "$BIN_DIR"
+  local url="https://astral.sh/uv/$UV_VERSION/install.sh"
+  if have curl; then
+    curl -LsSf "$url" | env UV_UNMANAGED_INSTALL="$BIN_DIR" sh
+  elif have wget; then
+    wget -qO- "$url" | env UV_UNMANAGED_INSTALL="$BIN_DIR" sh
+  else
+    die "need curl or wget to install uv"
+  fi
+  UV="$BIN_DIR/uv"
   [ -x "$UV" ] || die "uv unavailable after bootstrap"
 }
 
@@ -236,12 +271,78 @@ warm_broker_cache() {
   fi
 }
 
+# Build the locked env for an unpacked source tree, on an interpreter we own.
+#
+# These assignments are command-scoped, so they REPLACE anything the operator
+# exported. That is why UV_PYTHON_PREFERENCE is repeated here despite the source
+# declaring it in `[tool.uv]`: the two reach different places. The declaration
+# reaches the dev loop, CI and a user-level ~/.config/uv/uv.toml, which we cannot
+# touch from here; this reaches an exported UV_PYTHON_PREFERENCE, which outranks
+# project config, and a sibling uv.toml in the source, which would void
+# `[tool.uv]` outright. Neither is a substitute for `interpreter_is_owned`, which
+# checks what we actually got. See docs/adr/0023.
+#
+# UV_PROJECT_ENVIRONMENT keeps the venv inside versions/<sha>, which the atomic
+# flip and rollback both assume.
+build_env() {
+  local dest="$1"
+  ( cd "$dest" && \
+    UV_PYTHON="$PYTHON_VERSION" \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT="$dest/.venv" \
+    "$UV" sync --locked --no-dev )
+}
+
+# Echo the interpreter a built venv is bound to (its pyvenv.cfg `home`), or
+# nothing when there is no venv. PARSED, never sourced — same rule as meta().
+venv_interpreter_home() {
+  local cfg="$1/.venv/pyvenv.cfg" line
+  [ -f "$cfg" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in "home = "*) printf '%s' "${line#home = }"; return 0 ;; esac
+  done < "$cfg"
+  return 0
+}
+
+# True when DEST's venv runs on an interpreter this install owns: one of uv's
+# managed CPythons. Reading pyvenv.cfg beats launching the interpreter — it still
+# answers when the venv is broken, which is exactly when we need an answer.
+#
+# Keep it a predicate: install_version both branches on this and dies on it, so
+# the die stays at the call site. See docs/adr/0023.
+interpreter_is_owned() {
+  local dest="$1" vhome managed
+  vhome="$(venv_interpreter_home "$dest")"
+  [ -n "$vhome" ] || return 1
+  # `|| true` INSIDE the substitution: the ERR trap runs in that subshell and
+  # would print "install failed" to our stderr even though `|| return 1` outside
+  # carries on — a fatal-looking line on a survivable path. The emptiness check
+  # below is the real guard.
+  managed="$("$UV" python dir 2>/dev/null || true)"
+  [ -n "$managed" ] || return 1
+  # `uv python dir` echoes UV_PYTHON_INSTALL_DIR verbatim, so an operator who
+  # exported it with a trailing slash would otherwise have a good build rejected
+  # (the match below would test against `<dir>//*`) and the install would die on
+  # it. Strip any number of trailing slashes; `/` itself is never a sane value.
+  while [ "$managed" != "/" ] && [ "${managed%/}" != "$managed" ]; do
+    managed="${managed%/}"
+  done
+  case "$vhome" in
+    "$managed"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Build versions/<sha> in place (idempotent). Sets INSTALLED_DEST.
 install_version() {
-  local sha="$1"
+  local sha="$1" vhome
   local dest="$VERSIONS_DIR/$sha"
   INSTALLED_DEST="$dest"
-  if [ -f "$dest/.calfcord-ok" ]; then
+  # `.calfcord-ok` alone does not certify a build. Versions built before the
+  # interpreter was pinned carry the marker yet are bound to whatever Python the
+  # box offered, and the marker would short-circuit their repair forever — so
+  # gate reuse on provenance and let those installs self-heal on the next run.
+  if [ -f "$dest/.calfcord-ok" ] && interpreter_is_owned "$dest"; then
     log "version ${sha:0:12} already built — reusing"
     return 0
   fi
@@ -250,7 +351,17 @@ install_version() {
   extract_source "$sha" "$dest"
   [ -f "$dest/pyproject.toml" ] || die "extracted source looks wrong (no pyproject.toml)"
   log "building isolated environment (uv sync --locked --no-dev) ..."
-  ( cd "$dest" && "$UV" sync --locked --no-dev )
+  build_env "$dest"
+  # Mark good only once the build is provably on an owned interpreter. The die
+  # names the two things that actually cause this — an exported UV_PYTHON_* beats
+  # the source's `[tool.uv]`, and an active env whose Python equals PYTHON_VERSION
+  # satisfies the pin — so the operator gets a next step, not just a verdict.
+  if ! interpreter_is_owned "$dest"; then
+    vhome="$(venv_interpreter_home "$dest")"
+    die "built env runs on ${vhome:-no interpreter}, which this install does not own.
+  Deactivate any conda env / virtualenv and unset UV_PYTHON_PREFERENCE, then re-run.
+  Agent Disco must build on the CPython $PYTHON_VERSION it pins (docs/adr/0023)."
+  fi
   : > "$dest/.calfcord-ok"
 }
 
@@ -419,11 +530,12 @@ case "${1:-}" in
   "") usage >&2; exit 2 ;;
 esac
 
+# The install owns its uv; a uv on PATH is never adopted. Borrowing one made
+# every `disco` invocation depend on the caller's PATH — which the generated
+# systemd unit does not set, so `disco start` died with "uv not found" on a box
+# whose interactive `disco` worked fine. See docs/adr/0023.
 UV="$H/bin/uv"
-if [ ! -x "$UV" ]; then
-  UV="$(command -v uv || true)"
-fi
-{ [ -n "$UV" ] && [ -x "$UV" ]; } || { echo "disco: uv not found; re-run the installer" >&2; exit 1; }
+[ -x "$UV" ] || { echo "disco: uv not found at $UV; re-run the installer" >&2; exit 1; }
 [ -e "$H/current" ] || { echo "disco: no active install at $H/current; re-run the installer" >&2; exit 1; }
 
 # `disco broker` runs the calfcord-broker console script in the pinned venv,

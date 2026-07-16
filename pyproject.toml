@@ -32,6 +32,20 @@ calfkit-auth = "calfcord.providers.codex.cli:main"
 calfcord-cli = "calfcord.cli.main:main"
 calfcord-broker = "calfcord.broker.runner:main"
 
+[tool.uv]
+# Agent Disco runs on an interpreter it owns — never the box's. An active conda
+# env or virtualenv otherwise rebinds the venv to that interpreter (its stdlib
+# and base_prefix land outside the install), so removing or upgrading conda
+# breaks the bridge and every agent, silently and days later. Declared here, so
+# one statement governs the install, a contributor's `uv run`, and CI.
+#
+# `automatic` is already uv's default: it is restated to DEFEND it, because a
+# user-level ~/.config/uv/uv.toml setting `never` would otherwise fail an install
+# on exactly the Python-less box the installer promises to serve, and project
+# config outranks user config. See docs/adr/0023.
+python-preference = "only-managed"
+python-downloads = "automatic"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
