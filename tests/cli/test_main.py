@@ -809,6 +809,11 @@ def test_main_agent_roster_requires_name_or_all(verb: str) -> None:
     assert exc.value.code == 2
 
 
+async def _workspace_up(_home: Path) -> bool:
+    """The supervisor probe `create_for_start` runs, answering 'workspace open'."""
+    return True
+
+
 class _PickingPrompter:
     """A prompter that answers the agent picker and records what it was shown."""
 
@@ -906,6 +911,7 @@ class TestBareAgentStartPicksInteractively:
             "create_agent",
             lambda *a, **k: agent_create.CreatedAgent(name="first", provider="anthropic"),
         )
+        monkeypatch.setattr(agent_create, "_default_workspace_running", _workspace_up)
 
         assert main(["agent", "start"]) == 0
         assert [c.value for c in picker.offered] == [CREATE_SENTINEL]
@@ -984,6 +990,10 @@ class TestBareAgentStartCanCreate:
 
         monkeypatch.setattr(roster, "agent_start", _start)
         monkeypatch.setattr(agent_create, "create_agent", _create)
+        # An OPEN workspace, so the create row hands the name on to be started.
+        # Left unstubbed this probes a real supervisor REST port and reports
+        # closed, which is its own case — TestCreatingWithAClosedWorkspace.
+        monkeypatch.setattr(agent_create, "_default_workspace_running", _workspace_up)
         return started, captured
 
     def test_choosing_create_starts_the_newly_created_agent(
@@ -1026,6 +1036,29 @@ class TestBareAgentStartCanCreate:
         expected_env, expected_agents = init.resolve_paths(tmp_path / "home")
         assert captured["agents_dir"] == expected_agents
         assert captured["env_path"] == expected_env
+
+    def test_a_closed_workspace_yields_ordered_steps_and_no_doomed_start(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The whole point of the ordering, end to end through the dispatcher.
+
+        `agent start` needs an open workspace, so starting a just-created agent
+        into a closed one is certain to be refused. The operator gets the two
+        commands that fix it, in the order they must run them — not step 2 above
+        step 1, which is what a hint printed at create time would produce.
+        """
+        started, _ = self._wire(monkeypatch, tmp_path, ["scribe"])
+
+        async def _down(_home: Path) -> bool:
+            return False
+
+        monkeypatch.setattr(agent_create, "_default_workspace_running", _down)
+        monkeypatch.setattr(main_mod, "make_prompter", lambda: _PickingPrompter(CREATE_SENTINEL))
+
+        assert main(["agent", "start"]) == 1
+        assert started == [], "a start that cannot succeed must not be attempted"
+        out = capsys.readouterr().out
+        assert out.index("disco start") < out.index("disco agent start researcher")
 
     @pytest.mark.parametrize("failure", [ValueError("bad model"), OSError("disk full")])
     def test_a_failed_create_starts_nothing(

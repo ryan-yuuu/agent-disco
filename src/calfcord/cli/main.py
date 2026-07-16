@@ -368,7 +368,9 @@ def _collect_set_updates(args: argparse.Namespace) -> dict[str, str]:
 _ROSTER_COMMANDS = frozenset({"start", "stop", "restart", "ps"})
 
 
-def _resolve_start_target(args: argparse.Namespace, *, agents_dir: Path, env_path: Path) -> str | None:
+def _resolve_start_target(
+    args: argparse.Namespace, *, agents_dir: Path, env_path: Path, home: Path
+) -> str | None:
     """Return the agent ``agent start`` should start, picking or creating one if unnamed.
 
     A bare ``disco agent start`` used to be a parser error. That told the operator
@@ -402,7 +404,7 @@ def _resolve_start_target(args: argparse.Namespace, *, agents_dir: Path, env_pat
         agents_dir=agents_dir,
         message="Which agent do you want to start?",
         create_fn=lambda: agent_create.create_for_start(
-            prompter, agents_dir=agents_dir, env_path=env_path
+            prompter, agents_dir=agents_dir, env_path=env_path, home=home
         ),
     )
 
@@ -503,7 +505,7 @@ def _run_agent_roster(parser: argparse.ArgumentParser, args: argparse.Namespace)
     # before asyncio.run — the same ask-everything-first shape the rest of the CLI
     # keeps (see agent_create._finish_create): no longer forced now that the prompter
     # owns no event loop, but the flow reads better for it.
-    name = _resolve_start_target(args, agents_dir=agents_dir, env_path=env_path)
+    name = _resolve_start_target(args, agents_dir=agents_dir, env_path=env_path, home=home)
     if name is None:
         return 1
     return asyncio.run(roster.agent_start(home, name=name, server_urls=server_urls))
