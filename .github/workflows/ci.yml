@@ -153,7 +153,7 @@ jobs:
         # No ``push``; this job exists to catch Dockerfile breakage early.
         # ``type=gha`` cache keeps subsequent runs cheap. ``load`` so the run
         # step below has a real image to execute.
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
