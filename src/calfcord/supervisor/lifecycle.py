@@ -76,11 +76,18 @@ _PORT_RANGE_START = 8100
 _PORT_RANGE_END = 8899
 _PORT_RANGE_WIDTH = _PORT_RANGE_END - _PORT_RANGE_START + 1
 
-# Readiness gate cadence (§13.2/§13.3): poll the bridge every few seconds until it
-# is ready or the budget is spent. A modest default budget covers a cold broker
-# provision + Discord connect without hanging the CLI forever.
+# Readiness gate cadence (§13.2/§13.3): poll the bridge until it is ready or the
+# budget is spent. A modest default budget covers a cold broker provision +
+# Discord connect without hanging the CLI forever.
+#
+# The interval is pure dead time — the workspace stays shut for up to one interval
+# AFTER the bridge is already serving — and each poll is a loopback REST read costing
+# ~1ms, so there is nothing to amortise: 0.25s across the 90s budget is 360 trivially
+# cheap reads (ADR-0023). It was 2.0s, which spent up to 2s of every start doing
+# nothing. Contrast the exec readiness probes in ``compose.py``, whose period IS
+# cost-bound (each spawns a process): this poll is not, so it can be fine-grained.
 _DEFAULT_READY_TIMEOUT_SECONDS = 90
-_READINESS_POLL_INTERVAL_SECONDS = 2.0
+_READINESS_POLL_INTERVAL_SECONDS = 0.25
 
 # Bounded wait for the REST server itself to answer after a detached ``up`` (the
 # socket binds a beat after the process forks). Separate from the readiness gate:

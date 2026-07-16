@@ -426,6 +426,24 @@ async def test_start_idempotency_rejects_a_different_home_on_a_colliding_port(
     assert "port" in out
 
 
+async def test_bridge_ready_gate_notices_readiness_within_a_quarter_second() -> None:
+    """A bridge that flips to Ready between two polls is picked up on the next one.
+
+    The gate's poll interval is pure dead time: the workspace stays shut for up to
+    one interval AFTER the bridge is already serving, and the poll it is waiting on
+    is a loopback REST read costing ~1ms. The old 2s interval spent up to 2s of the
+    user's startup doing nothing; this pins the granularity as a behaviour rather
+    than trusting the constant to stay small (ADR-0023).
+    """
+    clock = _FakeClock()
+    client = _StubClient(bridge_states=[{"is_ready": "Starting"}, {"is_ready": "Ready", "pid": 100}])
+
+    ready = await lifecycle._await_bridge_ready(client, timeout_s=90, clock=clock, sleep=clock.sleep)
+
+    assert ready is True
+    assert clock() <= 0.25
+
+
 # --- bridge restart: the shared mechanism + the `disco bridge restart` verb --
 
 
