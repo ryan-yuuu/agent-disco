@@ -83,12 +83,15 @@ async def start_tools_host(
     is the test seam, defaulting to the same
     :func:`~calfcord.supervisor.component.component_start` that ``disco tools start`` runs.
 
-    ``announce`` silences the operator-facing narration — the slot's "tools started"
-    line AND the advisory warnings below — for a caller that reports the same outcome
+    ``announce`` silences the **narration** — the slot's "tools started" line and the
+    advisory outcome/remedy warnings below — for a caller that reports the same facts
     itself. ``disco init`` passes ``False``: it marks a dead host on its own record
     board and names the remedy in its finish banner, so leaving these on says the same
-    thing three times. The RETURN CODE is unaffected, and a caller that silences these
-    takes on reporting the failure — the code alone is not operator-facing feedback.
+    thing three times. It does **not** silence the *cause*: a raise's repr always
+    prints, because the guard degrades the exception to a return code and no caller can
+    report what it never sees. Signposts and outcomes are the caller's to own; causes
+    never are — the same split :func:`lifecycle.start`'s ``banner`` draws. The RETURN
+    CODE is unaffected either way.
     """
     if tools_start_fn is None:
         from calfcord.supervisor import component
@@ -100,8 +103,11 @@ async def start_tools_host(
         # Advisory: degrade ANY spawn fault, never crash the caller. ``except Exception``
         # (not bare) lets ``CancelledError`` / ``KeyboardInterrupt`` (both ``BaseException``)
         # propagate — only a real fault is degraded to a warning + non-zero code.
-        if announce:
-            print(f"  the tools host couldn't be started ({exc!r}).")
+        # NOT gated on ``announce``: this is the cause, not narration. The guard below
+        # degrades the raise to a return code, so the caller never sees ``exc`` — this
+        # print is the only place its repr reaches the operator. A silenced caller can
+        # say "not running"; only here can anything say why.
+        print(f"  the tools host couldn't be started ({exc!r}).")
         rc = 1
     if rc != 0 and announce:
         print("  the tools host isn't up — agents can chat, but tool calls will hang until it is up.")

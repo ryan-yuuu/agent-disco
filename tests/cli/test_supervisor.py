@@ -113,6 +113,30 @@ async def test_start_tools_host_degrades_a_raise_instead_of_propagating(capsys: 
     assert "permission denied" in out  # the cause is surfaced, not silently dropped
 
 
+async def test_start_tools_host_names_the_cause_even_when_not_announcing(capsys) -> None:
+    """``announce=False`` silences narration — never a CAUSE.
+
+    A caller passing ``announce=False`` is claiming it reports the same *outcome*
+    itself, and ``disco init`` does: a ``✗ tools host  not running`` record and a
+    banner naming the remedy. What it cannot report is WHY, because it never sees the
+    exception — the advisory guard degrades it to a return code here. So this line is
+    the only place the repr of a ``PermissionError``/``ENOSPC`` ever reaches the
+    operator; gating it on ``announce`` would turn a real fault into a bare "not
+    running" and send them to `disco logs tools`, which holds nothing for a host that
+    never spawned. Same split ``lifecycle.start``'s ``banner`` draws: signposts are the
+    caller's, causes are never.
+    """
+
+    async def _boom(home, *, name, launcher, announce=True) -> int:
+        raise OSError("permission denied: state/run/tools.lock")
+
+    rc = await _supervisor.start_tools_host("/home", launcher="/l", announce=False, tools_start_fn=_boom)
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert "permission denied" in out  # the cause survives the silence
+    assert "disco tools start" not in out  # the remedy is the caller's to give
+
+
 # --------------------------------------------------------------------------- #
 # open_workspace — the one "open the workspace" (substrate + tools host)
 # --------------------------------------------------------------------------- #
