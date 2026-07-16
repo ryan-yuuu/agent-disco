@@ -115,12 +115,16 @@ class _FakeOverrides:
 
 
 class _FakeA2A:
-    def __init__(self) -> None:
+    def __init__(self, *, url: str | None = "https://discord.com/channels/42/9001") -> None:
         self.projected: list[Any] = []
         self.faults: list[Any] = []
+        # The audit thread's jump link; ``None`` models a swallowed projection
+        # failure (no thread was anchored), which the marker must surface.
+        self.url = url
 
-    async def project(self, projection: Any) -> None:
+    async def project(self, projection: Any) -> str | None:
         self.projected.append(projection)
+        return self.url
 
     async def project_fault(self, call: Any) -> None:
         self.faults.append(call)
@@ -133,10 +137,15 @@ class _FakeProgress:
         # Track the owning agent passed to each on_step call so handoff-tracking
         # tests can assert that tool steps after a handoff carry the new agent.
         self.owning_agents: list[str] = []
+        # Bridge-authored annotations (text, persona_name) — not run steps.
+        self.notes: list[tuple[str, str]] = []
 
     async def on_step(self, step: Any, req: MentionRequest, *, owning_agent: str) -> None:
         self.steps.append(step)
         self.owning_agents.append(owning_agent)
+
+    async def on_note(self, text: str, req: MentionRequest, *, correlation_id: str, persona_name: str) -> None:
+        self.notes.append((text, persona_name))
 
     async def finish(self, correlation_id: str) -> None:
         self.finished.append(correlation_id)
@@ -193,14 +202,21 @@ def _consult(tcid: str, peer: str, message: str, caller: str = "scribe") -> Tool
     )
 
 
-def _consult_reply(tcid: str, peer: str, text: str) -> ToolResultEvent:
+def _consult_reply(tcid: str, peer: str, text: str, caller: str = "scribe") -> ToolResultEvent:
+    """A consult's reply as calfkit actually emits it.
+
+    NOT ``emitter=<peer>, name=<peer>``: the result is minted on the CALLER's fold
+    hop (``nodes/_steps.py`` ``folded``) with ``name`` echoed from the call's
+    marker, so the peer appears on neither field — which is exactly why the
+    dispatcher pairs on ``tool_call_id`` and takes the peer from the request.
+    """
     return ToolResultEvent(
         correlation_id="c1",
         depth=1,
         frame_id="f",
-        emitter=peer,
+        emitter=caller,
         tool_call_id=tcid,
-        name=peer,
+        name="message_agent",
         parts=[TextPart(text=text)],
         outcome="success",
     )
@@ -378,6 +394,80 @@ class TestStreamDrain:
         assert len(fakes["a2a"].projected) == 2  # request + reply
         assert fakes["progress"].steps == []
 
+    async def test_consulted_peer_steps_do_not_leak_into_the_human_thread(self) -> None:
+        # calfkit flushes EVERY hop's steps to the ROOT caller (base.py's
+        # ``_flush_steps`` → ``stack.root.callback_topic``), so a consulted peer's
+        # own preamble and tool calls arrive on this run's stream stamped with the
+        # PEER as emitter. That work is the A2A audit channel's business, not live
+        # progress for the human — rendering it would spill a private exchange into
+        # the mention's thread (and, for the peer's tool steps, under the CALLER's
+        # persona, since ``owning_agent`` only transfers on handoff).
+        steps = (
+            _agent_msg("let me ask conan", emitter="scribe"),
+            _consult("t1", "conan", "latency budget?"),
+            _agent_msg("checking the ingest path…", emitter="conan"),  # the peer's preamble
+            _tool_call("t2", "grep_codebase", emitter="conan"),  # the peer's own tool call
+            _consult_reply("t1", "conan", "about 200ms"),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        # Only the caller's own step is live progress; the consult itself is audited.
+        assert [s.emitter for s in fakes["progress"].steps] == ["scribe"]
+        assert len(fakes["a2a"].projected) == 2  # request + reply
+
+    async def test_consult_leaves_a_cross_link_marker_in_the_human_thread(self) -> None:
+        # The exchange is private (it projects to the audit channel), but the
+        # consult itself must not be invisible from the conversation that caused
+        # it: the trace gets ONE marker per consult, under the CALLER's persona,
+        # linking into the audit thread. The reply adds no second marker — it
+        # lands in the same thread the marker already points at.
+        steps = (_consult("t1", "conan", "latency budget?"), _consult_reply("t1", "conan", "200ms"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["progress"].notes == [
+            ("💬 consulted `conan` — [view exchange](https://discord.com/channels/42/9001)", "scribe")
+        ]
+
+    async def test_consult_marker_surfaces_the_audit_gap_when_projection_failed(self) -> None:
+        # The projection is best-effort and swallows Discord failures, so a broken
+        # audit channel used to be invisible to everyone but a log reader. With no
+        # thread to link, the marker states the gap in the human's own thread.
+        steps = (_consult("t1", "conan", "latency budget?"),)
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        fakes["a2a"].url = None  # the projection failed; no thread was anchored
+        await handler.handle(_req())
+        assert fakes["progress"].notes == [("💬 consulted `conan` — ⚠️ couldn't write the audit log", "scribe")]
+
+    async def test_peer_s_internal_handoff_does_not_hijack_the_owner(self) -> None:
+        # A consulted peer may itself hand off (`handoff` defaults on), and that
+        # handoff flushes to the ROOT caller like every other hop. It must not
+        # advance `owning_agent`: control of the HUMAN's turn never left scribe.
+        # Letting a peer's handoff transfer ownership silently blackholes every
+        # later step the owner emits — the whole trace stops mid-turn.
+        steps = (
+            _consult("t1", "conan", "q"),
+            _handoff("dot", "yours", emitter="conan"),  # conan's PRIVATE handoff
+            _consult_reply("t1", "conan", "a"),
+            _agent_msg("here's the answer", emitter="scribe"),  # the owner, still in control
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert [s.emitter for s in fakes["progress"].steps] == ["scribe"]
+
+    async def test_nested_consult_does_not_leak_a_marker_into_the_human_thread(self) -> None:
+        # A consulted peer consulting ITS own peer (B→C inside A→B) is audited —
+        # the dispatcher classifies it from any hop — but it is the peer's private
+        # business. Only the owner's own consults earn a marker in the human's
+        # thread; otherwise the cross-link becomes the very leak it replaced.
+        steps = (
+            _consult("t1", "conan", "q"),  # scribe → conan: the owner's consult
+            _consult("t2", "dot", "z", caller="conan"),  # conan → dot: PRIVATE
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert len(fakes["a2a"].projected) == 2  # both audited
+        assert [persona for _text, persona in fakes["progress"].notes] == ["scribe"]
+
     async def test_plain_agent_message_goes_to_progress(self) -> None:
         handler, _client, fakes = _make(
             handle=_FakeHandle(steps=(_agent_msg("thinking…"),), result=_result("done", "scribe"))
@@ -403,9 +493,12 @@ class TestStreamDrain:
         # not scribe's). The handoff step itself still carries the pre-transfer
         # owner (scribe announced it).
         steps = (
-            _tool_call("t1", "terminal"),  # scribe's tool call
+            _tool_call("t1", "terminal", emitter="scribe"),  # scribe's tool call
             _handoff("dot", "you handle this"),  # scribe hands off to dot
-            _tool_call("t2", "read_file"),  # dot's tool call
+            # Post-handoff steps are emitted by DOT's node, so they carry dot as
+            # emitter (calfkit stamps ``emitter=self.node_id`` per hop) — a handoff
+            # transfers control, so these stay live progress under the new owner.
+            _tool_call("t2", "read_file", emitter="dot"),  # dot's tool call
             _agent_msg("done", emitter="dot"),  # dot's reply
         )
         handler, _client, fakes = _make(

@@ -44,8 +44,9 @@ class StepEvent:
     ``agent_message`` or a ``tool_result``."""
     tool_call_id: str | None = None
     name: str | None = None
-    """``tool_call``: the tool name. ``tool_result``: the result emitter's name
-    (the peer, on an A2A reply)."""
+    """``tool_call``: the tool name. ``tool_result``: the tool name echoed from the
+    call's marker — so an A2A reply reads ``"message_agent"``, never the peer's
+    name (the peer is only on the request's ``args``)."""
     args: dict[str, Any] | None = None
     """``tool_call`` arguments (normalized to a dict)."""
     outcome: Outcome = "success"

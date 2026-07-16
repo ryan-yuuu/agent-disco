@@ -292,6 +292,27 @@ class TestRenderStepMessage:
         assert any("agent_thinking" in r.getMessage() for r in caplog.records)
 
 
+class TestRenderConsultMarker:
+    """The consult cross-link: the ONE line a ``message_agent`` consult leaves in
+    the human's thread. The exchange itself is private (it projects to the A2A
+    audit channel), so the trace gets a marker plus a jump link — without it a
+    consult is invisible from the conversation that caused it."""
+
+    def test_marker_links_to_the_a2a_thread(self) -> None:
+        block = steps_render.render_consult_marker("scribe", "https://discord.com/channels/1/2")
+        assert block == "💬 consulted `scribe` — [view exchange](https://discord.com/channels/1/2)"
+
+    def test_marker_without_a_thread_says_the_audit_log_is_unavailable(self) -> None:
+        # No thread means the A2A projection failed (best-effort, so it was
+        # swallowed). The consult still HAPPENED, so the trace must say so rather
+        # than render a link to nowhere — silently dropping the marker would hide
+        # the audit gap from the one person watching.
+        block = steps_render.render_consult_marker("scribe", None)
+        assert "scribe" in block
+        assert "⚠️" in block
+        assert "](" not in block  # no masked link when there is nowhere to jump
+
+
 class TestFenceSafe:
     """``_fence_safe`` neutralizes runs of 3+ backticks (which would close a
     Discord code fence early regardless of the opening fence length) while

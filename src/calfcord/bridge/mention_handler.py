@@ -27,9 +27,10 @@ from calfkit.models.error_report import ErrorReport, FaultTypes
 
 from calfcord.agents.identifier import MENTION_PREFIX
 from calfcord.agents.thinking import build_model_settings_union
-from calfcord.bridge.a2a_dispatch import A2ACall, A2ADispatcher, A2AProjection
+from calfcord.bridge.a2a_dispatch import A2ACall, A2ADispatcher, A2AProjection, A2ARequest
 from calfcord.bridge.persona_resolve import persona_for
 from calfcord.bridge.step_events import StepEvent, normalize_run_event
+from calfcord.bridge.steps_render import render_consult_marker
 from calfcord.bridge.wire import WireMessage
 from calfcord.discord.persona import Persona
 
@@ -245,12 +246,17 @@ class OverrideProvider(Protocol):
 
 
 class A2AProjectorLike(Protocol):
-    async def project(self, projection: A2AProjection) -> None: ...
+    """``project`` returns the audit thread's jump URL as a receipt for the render
+    it just performed, or ``None`` when that render failed (best-effort) and there
+    is therefore nothing to link to."""
+
+    async def project(self, projection: A2AProjection) -> str | None: ...
     async def project_fault(self, call: A2ACall) -> None: ...
 
 
 class ProgressRenderer(Protocol):
     async def on_step(self, step: StepEvent, req: MentionRequest, *, owning_agent: str) -> None: ...
+    async def on_note(self, text: str, req: MentionRequest, *, correlation_id: str, persona_name: str) -> None: ...
     async def finish(self, correlation_id: str) -> None: ...
 
 
@@ -348,15 +354,54 @@ class MentionHandler:
                     step = normalize_run_event(event)
                     if step is None:
                         continue  # terminal — handled by result() below
+                    # THE invariant, applied uniformly below: only the agent in
+                    # control of the human's turn may touch the human's thread or
+                    # transfer that control. Any other emitter is inside a consulted
+                    # peer's private sub-tree, reaching us only because calfkit
+                    # flushes EVERY hop to the ROOT caller (base.py ``_flush_steps``
+                    # → ``stack.root.callback_topic``). ``A2ARequest.caller`` IS the
+                    # step's emitter, so this one predicate covers both branches.
+                    is_owner = step.emitter == owning_agent
                     projection = dispatcher.classify(step)
                     if projection is not None:
-                        await self._a2a.project(projection)
-                    else:
+                        # Audit EVERY consult, nested peer-to-peer ones included —
+                        # the audit channel is the system of record for the whole
+                        # run tree. The url is this render's receipt: None means it
+                        # failed (swallowed), so there is no thread to link.
+                        url = await self._a2a.project(projection)
+                        if isinstance(projection, A2ARequest) and is_owner:
+                            # Cross-link the consult from the human's thread into the
+                            # audit thread now holding it. ONE marker per consult: the
+                            # reply lands in that same thread. Only the OWNER's
+                            # consults earn one — a peer's nested consult is its own
+                            # private business, and marking it here would re-create
+                            # the very leak this marker replaced.
+                            await self._progress.on_note(
+                                render_consult_marker(projection.peer, url),
+                                req,
+                                correlation_id=projection.correlation_id,
+                                persona_name=projection.caller,
+                            )
+                    elif is_owner:
                         await self._progress.on_step(step, req, owning_agent=owning_agent)
-                    # After a handoff the receiving agent owns all subsequent
-                    # steps. Update AFTER rendering so the handoff announcement
-                    # itself stays under the handing-off agent's persona.
-                    if step.kind == "handoff" and step.target:
+                    else:
+                        # A consulted peer's own step (its preamble, its tool calls).
+                        # That is private A2A work — the audit channel's business —
+                        # and rendering it would spill the exchange into the human's
+                        # thread.
+                        logger.debug(
+                            "bridge: not live progress — step from consulted peer emitter=%s owner=%s kind=%s",
+                            step.emitter,
+                            owning_agent,
+                            step.kind,
+                        )
+                    # A handoff TRANSFERS control, so the new owner's steps keep
+                    # rendering. Update AFTER rendering, so the announcement itself
+                    # stays under the handing-off agent's persona — and only for the
+                    # OWNER's own handoff: a consulted peer handing off inside its
+                    # private sub-tree never had the human's turn to give away, and
+                    # letting it seize ownership blackholes every later owner step.
+                    if step.kind == "handoff" and step.target and is_owner:
                         owning_agent = step.target.removeprefix("/")
                 except Exception:
                     # A render/normalize/classify bug (or a future calfkit event

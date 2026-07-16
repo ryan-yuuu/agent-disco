@@ -23,6 +23,7 @@ failed Discord render is logged and swallowed — it never faults the human turn
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable
 from typing import assert_never
 
 from calfcord.bridge.a2a_dispatch import (
@@ -46,6 +47,16 @@ _EMPTY_PLACEHOLDER = "(empty response)"
 _SYSTEM_PERSONA = Persona(name="a2a")
 """Persona for *meta* notes (rejections, handoffs, faults) that are not a peer's
 own words — rendered as a system annotation, not attributed to an agent (D-2)."""
+
+_AUDIT_GAP_REMEDY = (
+    "Agent-to-agent exchanges are NOT being recorded. A 403 (error code 50013) here usually means "
+    "the bot lacks Manage Channels and so cannot create the audit channel: re-run the invite from "
+    "`disco init` to re-authorize, or create the channel by hand and grant it View Channel + "
+    "Manage Webhooks + Create Public Threads + Send Messages in Threads. See docs/a2a-threads.md."
+)
+"""Named in the first failure's log line. The projection is best-effort by design, so without an
+actionable line a broken audit channel is indistinguishable from an idle one — the failure mode
+this text exists to end."""
 
 # Thread-name shaping (re-homed from the old private_chat tool).
 _THREAD_NAME_MAX_TOTAL = 100
@@ -83,42 +94,91 @@ class A2AProjector:
         self._personas = personas
         self._threads: dict[str, int] = {}
         self._channel_id: int | None = None
+        self._degraded = False
 
-    async def project(self, projection: A2AProjection) -> None:
-        """Render one projection (best-effort — a Discord failure is swallowed)."""
+    async def project(self, projection: A2AProjection) -> str | None:
+        """Render one projection; return the audit thread's jump URL, or ``None``.
+
+        The URL is this render's **receipt** — returned only when the post actually
+        reached Discord — so the bridge can cross-link the exchange it just wrote.
+        ``None`` means the render failed and was swallowed (best-effort: a Discord
+        failure must never fault the human turn), leaving nothing to link to.
+
+        Deriving the link from the thread map instead would answer a subtly
+        different question — "does a thread exist for this turn?" — which diverges
+        the moment a turn's SECOND consult fails: the first consult's thread is
+        still mapped, so the caller would confidently link a thread that never
+        received this exchange. A receipt cannot drift from what was written.
+        """
+        thread_id = await self._guarded(self._dispatch(projection), type(projection).__name__)
+        if thread_id is None:
+            return None
+        return f"https://discord.com/channels/{self._resolver.guild_id}/{thread_id}"
+
+    async def _guarded(self, render: Awaitable[int], kind: str) -> int | None:
+        """Run one best-effort render: swallow a Discord failure (it must never
+        fault the human turn — this runs inside the mention handler's stream-drain
+        loop), note the audit gap, and report the thread it reached or ``None``.
+
+        Both render entry points funnel through here so the gap latch arms *and
+        re-arms* identically on either — an asymmetry would silently lose the loud
+        line for the next real outage.
+        """
         try:
-            await self._dispatch(projection)
+            thread_id = await render
         except Exception:
-            # Best-effort audit: a failed render must never fault the human turn
-            # (this runs inside the mention handler's stream-drain loop).
-            logger.warning(
-                "A2A projection failed (audit gap); continuing kind=%s",
-                type(projection).__name__,
-                exc_info=True,
-            )
+            self._note_gap(kind)
+            return None
+        self._degraded = False  # this outage is over; a LATER one earns its own loud line
+        return thread_id
+
+    def _note_gap(self, kind: str) -> None:
+        """Log an audit gap: loudly the first time, quietly while it persists.
+
+        The projection is best-effort, so a broken audit channel produces no
+        user-visible error and no fault — only this line. It is therefore an ERROR
+        naming the remedy, not a bare WARN. Repeats drop to DEBUG because the
+        failure is almost always systemic (a missing permission fails identically
+        on every consult), and re-logging a traceback per projection buries the
+        one line that matters under its own noise.
+        """
+        if self._degraded:
+            # exc_info stays on: the latch is a bare bool, so a DIFFERENT failure
+            # arriving during an outage lands here too — without the traceback it
+            # would vanish with no diagnostic at any level.
+            logger.debug("A2A projection still failing (audit gap); continuing kind=%s", kind, exc_info=True)
+            return
+        self._degraded = True
+        logger.error(
+            "A2A projection failed (audit gap); continuing kind=%s. %s",
+            kind,
+            _AUDIT_GAP_REMEDY,
+            exc_info=True,
+        )
 
     async def project_fault(self, call: A2ACall) -> None:
         """Note a consult that never got a reply because the peer faulted (D-2)."""
-        try:
-            await self._emit(
+        await self._guarded(
+            self._emit(
                 call.correlation_id,
                 _SYSTEM_PERSONA,
                 f"⚠️ {call.peer} did not reply — the consult faulted before a response.",
                 thread_name=_build_thread_name(call.caller, call.peer, call.message),
-            )
-        except Exception:
-            logger.warning("A2A fault note failed (audit gap); continuing", exc_info=True)
+            ),
+            "A2AFault",
+        )
 
-    async def _dispatch(self, projection: A2AProjection) -> None:
+    async def _dispatch(self, projection: A2AProjection) -> int:
+        """Render one projection and return the thread it landed in."""
         if isinstance(projection, A2ARequest):
-            await self._emit(
+            return await self._emit(
                 projection.correlation_id,
                 persona_for(projection.caller),
                 projection.message,
                 thread_name=_build_thread_name(projection.caller, projection.peer, projection.message),
             )
         elif isinstance(projection, A2AReply):
-            await self._emit(
+            return await self._emit(
                 projection.correlation_id,
                 persona_for(projection.peer),
                 projection.text,
@@ -127,7 +187,7 @@ class A2AProjector:
         elif isinstance(projection, A2AReject):
             # A rejected consult (peer offline / cycle / self) is a system note,
             # not a peer post — the peer never spoke (D-2).
-            await self._emit(
+            return await self._emit(
                 projection.correlation_id,
                 _SYSTEM_PERSONA,
                 f"⚠️ consult to {projection.peer} was rejected: {projection.text}",
@@ -136,7 +196,7 @@ class A2AProjector:
         elif isinstance(projection, A2AFailed):
             # A consult that reached the peer but faulted — a system note distinct
             # from a refused dispatch (A2AReject); the peer engaged but errored.
-            await self._emit(
+            return await self._emit(
                 projection.correlation_id,
                 _SYSTEM_PERSONA,
                 f"💥 consult to {projection.peer} failed: {projection.text}",
@@ -154,8 +214,9 @@ class A2AProjector:
             self._channel_id = await self._resolver.resolve_unified_channel()
         return self._channel_id
 
-    async def _emit(self, correlation_id: str, persona: Persona, content: str, *, thread_name: str) -> None:
-        """Post ``content`` under ``persona`` into ``correlation_id``'s thread.
+    async def _emit(self, correlation_id: str, persona: Persona, content: str, *, thread_name: str) -> int:
+        """Post ``content`` under ``persona`` into ``correlation_id``'s thread, and
+        return that thread's id.
 
         Creates the thread lazily on the first projection for the turn — the first
         content chunk becomes the thread's anchor/starter message — then posts any
@@ -174,3 +235,4 @@ class A2AProjector:
             rest = chunks
         for chunk in rest:
             await self._personas.send(persona, channel_id=channel_id, content=chunk, thread_id=thread_id)
+        return thread_id

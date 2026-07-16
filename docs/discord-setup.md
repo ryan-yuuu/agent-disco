@@ -48,10 +48,13 @@ browser tab appears, copy the link the wizard printed and open it yourself.
 
 The link grants the channel permissions Agent Disco needs to operate: View
 Channel, Send Messages, Embed Links, Read Message History, Manage Webhooks,
-Create Public Threads, and Send Messages in Threads. (The two privileged
-*intents* from step 2 are a separate Bot-tab toggle the link can't set.) Invite
-it **only to servers you trust** — agents can run code on the host (see
-[`security.md`](./security.md)).
+Create Public Threads, and Send Messages in Threads. It also grants **Manage
+Channels**, which the bridge uses once — to create the agent-to-agent audit
+channel the first time two agents talk (see
+[`a2a-threads.md`](./a2a-threads.md)); Discord has no narrower "create one
+channel" permission. (The two privileged *intents* from step 2 are a separate
+Bot-tab toggle the link can't set.) Invite it **only to servers you trust** —
+agents can run code on the host (see [`security.md`](./security.md)).
 
 ## 4. The wizard takes it from here
 
@@ -89,6 +92,7 @@ ID**, and set the key in `~/.agent-disco/config/.env`:
 | Bridge exits with `PrivilegedIntentsRequired` | Enable the **Message Content** intent (step 2). |
 | Bot is online but never replies | Confirm Message Content intent (step 2); check it can **View Channel** + **Send Messages** in that channel. |
 | Agent can't post / `Forbidden` on a webhook | Bot needs **Manage Webhooks** in that channel. |
+| Agents consult each other but the A2A audit channel is empty | The bot needs **Manage Channels** to create it on first use. Installs invited before that bit was added to the link 403 here (`error code: 50013`); re-run the invite from `disco init` to re-authorize, or create the channel (`private-a2a-chats`) by hand. See [`a2a-threads.md`](./a2a-threads.md). |
 | `/task` does nothing | The invite grants **Create Public Threads** server-wide, but a channel-level permission override can still deny it in a specific channel — check that channel's permission overrides. |
 | "typing…" indicator never shows | The bot **user** needs **Send Messages** (and **Send Messages in Threads** for `/task` threads) in that channel — this is separate from Manage Webhooks, and a channel override can deny it. Typing is cosmetic, so it fails silently; the first denial is logged at WARNING. |
 | Slash commands don't appear | Set `DISCORD_GUILD_ID` for instant sync (global takes ~1 h). |

@@ -270,12 +270,60 @@ class TestAggregation:
         assert len(sender.sends) == 1 and sender.edits == []
 
 
+class TestNotes:
+    """``on_note`` appends a BRIDGE-authored annotation (a consult cross-link, an
+    audit-gap warning) to the same aggregate as the run's steps. It is not a run
+    step — it carries no ``StepEvent`` — so the correlation and persona are passed
+    explicitly."""
+
+    async def test_note_posts_into_the_trace(self, sender: _FakeSender) -> None:
+        renderer = _renderer(sender)
+        await renderer.on_note(
+            "💬 consulted `conan`", _req(), correlation_id=_CORRELATION_ID, persona_name="aksel"
+        )
+        await _until(lambda: len(sender.sends) == 1)
+        assert sender.sends[0]["body"] == "💬 consulted `conan`"
+        assert sender.sends[0]["persona"].name == "aksel"
+
+    async def test_note_shares_the_segment_with_same_persona_steps(self, sender: _FakeSender) -> None:
+        # A consult marker must flow inline with the caller's own trace, not open a
+        # new message — the caller is speaking continuously either side of it.
+        renderer = _renderer(sender)
+        await renderer.on_step(_step("tool_call", name="read_file"), _req(), owning_agent="aksel")
+        await _until(lambda: len(sender.sends) == 1)
+        await renderer.on_note(
+            "💬 consulted `conan`", _req(), correlation_id=_CORRELATION_ID, persona_name="aksel"
+        )
+        await _until(lambda: len(sender.edits) == 1)
+        assert sender.edits[0]["body"] == "🔧 `read_file` called\n💬 consulted `conan`"
+        assert len(sender.sends) == 1  # same message, edited in place
+
+    async def test_empty_note_renders_nothing(self, sender: _FakeSender) -> None:
+        renderer = _renderer(sender)
+        await renderer.on_note("", _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await renderer.finish(_CORRELATION_ID)
+        assert sender.sends == []
+
+
 class TestPersonaSegmentation:
     """One message per contiguous persona run; a persona change starts a new one."""
 
     async def test_tool_steps_post_under_owning_agent_persona(self, sender: _FakeSender) -> None:
-        """A tool_result's emitter is the tool node (e.g. 'todo'), but the trace
-        must appear under the calling agent's persona (#96)."""
+        """A tool step's trace must appear under the calling agent's persona, not
+        the tool's (#96).
+
+        The emitter is pinned to a tool name here to hold that guarantee at the
+        renderer no matter what the wire carries. Under calfkit 0.12.9 it cannot
+        actually happen: EVERY ``ToolResultStep`` is minted by the hop ledger
+        (``nodes/_steps.py`` ``folded``/``fold_failed``), whose only call sites are
+        the fold path (``nodes/base.py:1389-1442``) — which runs on the node
+        *receiving* the reply, i.e. the CALLER — and the flush stamps
+        ``emitter=self.node_id`` there. A tool node folds no replies and declares no
+        facts, so its ledger is empty and ``flush`` returns before publishing. #96
+        predates calfkit's caller-side step-emission redesign, when the tool node
+        published its own result step. Keep the pin: it costs nothing and the
+        renderer's contract shouldn't depend on that history.
+        """
         renderer = _renderer(sender)
         await renderer.on_step(_step("tool_result", name="todo", emitter="todo"), _req(), owning_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
