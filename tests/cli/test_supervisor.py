@@ -57,7 +57,7 @@ async def test_start_tools_host_spawns_the_tools_slot() -> None:
     injected start fn, and returns its code on success."""
     calls: list[tuple] = []
 
-    async def _tools(home, *, name, launcher) -> int:
+    async def _tools(home, *, name, launcher, announce=True) -> int:
         calls.append((home, name, launcher))
         return 0
 
@@ -87,7 +87,7 @@ async def test_start_tools_host_warns_and_returns_nonzero_on_failure(capsys: pyt
     """A non-zero return is advisory: warn (pointing at ``disco tools start``) and return
     the code, never raise — the caller keeps going."""
 
-    async def _tools(home, *, name, launcher) -> int:
+    async def _tools(home, *, name, launcher, announce=True) -> int:
         return 1
 
     rc = await _supervisor.start_tools_host("/home", launcher="/l", tools_start_fn=_tools)
@@ -103,7 +103,7 @@ async def test_start_tools_host_degrades_a_raise_instead_of_propagating(capsys: 
     guarantee this helper exists to provide. The cause is named (not swallowed), mirroring
     ``init._await_presence``."""
 
-    async def _boom(home, *, name, launcher) -> int:
+    async def _boom(home, *, name, launcher, announce=True) -> int:
         raise OSError("permission denied: state/run/tools.lock")
 
     rc = await _supervisor.start_tools_host("/home", launcher="/l", tools_start_fn=_boom)
@@ -123,11 +123,11 @@ async def test_open_workspace_opens_substrate_then_tools_host() -> None:
     host, returning the substrate code on success."""
     order: list[str] = []
 
-    async def _sub(home, *, server_urls, launcher) -> int:
+    async def _sub(home, *, server_urls, launcher, banner=True) -> int:
         order.append("substrate")
         return 0
 
-    async def _tools(home, *, name, launcher) -> int:
+    async def _tools(home, *, name, launcher, announce=True) -> int:
         order.append("tools")
         return 0
 
@@ -141,7 +141,7 @@ async def test_open_workspace_opens_substrate_then_tools_host() -> None:
 async def test_open_workspace_short_circuits_on_substrate_failure() -> None:
     """A substrate failure returns its code before the tools host is ever spawned."""
 
-    async def _sub(home, *, server_urls, launcher) -> int:
+    async def _sub(home, *, server_urls, launcher, banner=True) -> int:
         return 1
 
     async def _boom_tools(home, *, name, launcher) -> int:
@@ -157,10 +157,10 @@ async def test_open_workspace_tools_failure_does_not_change_substrate_code() -> 
     """The tools-host start is advisory: a failure leaves the successful substrate code
     intact (the workspace is open)."""
 
-    async def _sub(home, *, server_urls, launcher) -> int:
+    async def _sub(home, *, server_urls, launcher, banner=True) -> int:
         return 0
 
-    async def _tools(home, *, name, launcher) -> int:
+    async def _tools(home, *, name, launcher, announce=True) -> int:
         return 1
 
     rc = await _supervisor.open_workspace(
@@ -174,7 +174,7 @@ async def test_open_workspace_defaults_start_fn_to_lifecycle_start(monkeypatch: 
     (lazily); the tools host resolves ``component.component_start`` via start_tools_host."""
     from calfcord.supervisor import component, lifecycle
 
-    async def _ls(home, *, server_urls, launcher) -> int:
+    async def _ls(home, *, server_urls, launcher, banner=True) -> int:
         return 0
 
     async def _cs(home, *, name, launcher=None, **_) -> int:

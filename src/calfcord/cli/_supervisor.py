@@ -56,6 +56,7 @@ async def start_tools_host(
     home: str | os.PathLike[str],
     *,
     launcher: str,
+    announce: bool = True,
     tools_start_fn: Callable[..., Awaitable[int]] | None = None,
 ) -> int:
     """Bring the singleton tools host (all builtin tools) online; **warn-and-continue**.
@@ -81,20 +82,28 @@ async def start_tools_host(
     (the same advisory-degrade idiom as :func:`init._await_presence`). ``tools_start_fn``
     is the test seam, defaulting to the same
     :func:`~calfcord.supervisor.component.component_start` that ``disco tools start`` runs.
+
+    ``announce`` silences the operator-facing narration — the slot's "tools started"
+    line AND the advisory warnings below — for a caller that reports the same outcome
+    itself. ``disco init`` passes ``False``: it marks a dead host on its own record
+    board and names the remedy in its finish banner, so leaving these on says the same
+    thing three times. The RETURN CODE is unaffected, and a caller that silences these
+    takes on reporting the failure — the code alone is not operator-facing feedback.
     """
     if tools_start_fn is None:
         from calfcord.supervisor import component
 
         tools_start_fn = component.component_start
     try:
-        rc = await tools_start_fn(home, name=_TOOLS_SLOT, launcher=launcher)
+        rc = await tools_start_fn(home, name=_TOOLS_SLOT, launcher=launcher, announce=announce)
     except Exception as exc:
         # Advisory: degrade ANY spawn fault, never crash the caller. ``except Exception``
         # (not bare) lets ``CancelledError`` / ``KeyboardInterrupt`` (both ``BaseException``)
         # propagate — only a real fault is degraded to a warning + non-zero code.
-        print(f"  the tools host couldn't be started ({exc!r}).")
+        if announce:
+            print(f"  the tools host couldn't be started ({exc!r}).")
         rc = 1
-    if rc != 0:
+    if rc != 0 and announce:
         print("  the tools host isn't up — agents can chat, but tool calls will hang until it is up.")
         print("  Bring it up with `disco tools start` (see `disco logs tools` for why it failed).")
     return rc
@@ -105,6 +114,7 @@ async def open_workspace(
     *,
     server_urls: str,
     launcher: str,
+    banner: bool = True,
     start_fn: Callable[..., Awaitable[int]] | None = None,
     tools_start_fn: Callable[..., Awaitable[int]] | None = None,
 ) -> int:
@@ -123,12 +133,17 @@ async def open_workspace(
     outcome never changes the returned substrate code — a workspace whose substrate
     opened is open. ``start_fn`` defaults (lazily) to :func:`lifecycle.start`;
     ``start_fn``/``tools_start_fn`` are the test seams.
+
+    ``banner`` is forwarded to :func:`lifecycle.start` and governs its closing
+    next-step signpost only (errors always print). ``disco start`` keeps it on;
+    ``agent create``'s start-now passes ``False``, because it goes on to start the
+    agent the signpost would have told the operator to start themselves.
     """
     if start_fn is None:
         from calfcord.supervisor import lifecycle
 
         start_fn = lifecycle.start
-    rc = await start_fn(home, server_urls=server_urls, launcher=launcher)
+    rc = await start_fn(home, server_urls=server_urls, launcher=launcher, banner=banner)
     if rc != 0:
         return rc
     await start_tools_host(home, launcher=launcher, tools_start_fn=tools_start_fn)

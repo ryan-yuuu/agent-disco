@@ -955,6 +955,68 @@ async def test_start_signpost_honours_agents_dir_env_override(
     assert "agent create" not in out
 
 
+async def test_start_banner_false_suppresses_the_next_step_signpost(tmp_path, capsys, fake_pc_bin) -> None:
+    """``banner=False`` drops the terminal "what next" signpost — and nothing else.
+
+    The signpost is written for the operator who ran ``disco start`` and now has a
+    decision to make. A caller that goes on to make that decision itself — the init
+    wizard, ``agent create``'s start-now — would otherwise print "No agents running
+    yet -> disco agent start <name>" immediately before starting the agent, telling
+    the operator to run a command that the very next line executes for them.
+    """
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Ready"}],
+    )
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+        banner=False,
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "disco agent start" not in out
+    assert "workspace open" not in out
+
+
+async def test_start_banner_false_still_prints_errors(tmp_path, capsys, fake_pc_bin) -> None:
+    """``banner`` governs the signpost ONLY — never the diagnostics.
+
+    Every caller wants the errors verbatim: they are composed where their context
+    lives (the bridge log path, the diagnosis, the teardown outcome) and init's finish
+    explicitly relies on ``start`` having "already printed the specific cause". A
+    ``banner`` that crept into meaning "quiet" would strand the wizard on a silent
+    failure, so pin the split.
+    """
+    home = _home(tmp_path)
+    clock = _FakeClock()
+    client = _StubClient(
+        project_state_results=[RuntimeError("not up yet"), {"running": True}],
+        bridge_states=[{"status": "Running", "is_ready": "Not Ready"}],
+    )
+    code = await lifecycle.start(
+        home,
+        server_urls="localhost:9092",
+        launcher="/h/shims/disco",
+        client=client,
+        spawn=_RecordingSpawn(),
+        clock=clock,
+        sleep=clock.sleep,
+        broker_probe=_reachable_broker,
+        banner=False,
+    )
+    assert code != 0
+    assert "did not become ready" in capsys.readouterr().out
+
+
 async def test_start_log_dir_is_created(tmp_path, fake_pc_bin) -> None:
     home = _home(tmp_path)
     clock = _FakeClock()

@@ -17,7 +17,6 @@ provider SDK / network / key.
 
 from __future__ import annotations
 
-import asyncio
 import os
 from collections import deque
 from collections.abc import Callable
@@ -283,7 +282,7 @@ def _run(
         start_fn=finish.start,
         tools_start_fn=finish.tools_start,
         agent_start_fn=finish.agent_start,
-        first_reply_fn=finish.first_reply,
+        presence_fn=finish.first_reply,
         pc_binary_fn=finish.pc_binary,
     )
 
@@ -299,15 +298,13 @@ def _prompter(
     extra_selects: list[str] | None = None,
     extra_texts: list[str] | None = None,
     extra_secrets: list[str] | None = None,
-    cls: type[FakePrompter] = FakePrompter,
 ) -> FakePrompter:
     """Build a prompter scripting one full native happy-path pass.
 
     Consumed prompts (provider sub-flow stubbed out):
       text(name), text(description), secret(discord token),
       [select(guild) ONLY when ``guild_select`` is set],
-      select(broker) [+ text(broker_url) on the ``url`` branch],
-      pause(say-hello-now).
+      select(broker) [+ text(broker_url) on the ``url`` branch].
     The single-guild happy path auto-advances the guild pick (the default
     ``_DiscordStub`` reports exactly one guild), so no guild ``select`` fires and
     the script omits it; pass ``guild_select`` (with a >1-guild stub) to script the
@@ -315,9 +312,8 @@ def _prompter(
     is derived from the bot token (via the injected ``verify_identity_fn``), so a
     bare name+description is all the text() this scripts. There is no channel prompt
     either: channel selection was removed — the bot listens to every channel, so the
-    wizard only reports postability after the guild is bound. ``cls`` swaps in a
-    :class:`FakePrompter` subclass (same script) so a test can vary only the prompt
-    *mechanics* — e.g. the nested-``asyncio.run`` reproduction.
+    wizard only reports postability after the guild is bound. Phase 4 scripts nothing
+    at all: the live finish is non-interactive.
     """
     texts = [name, description]
     if broker == "url":
@@ -327,7 +323,7 @@ def _prompter(
     selects += extra_selects or []
     secrets = [discord_token]
     secrets += extra_secrets or []
-    return cls(
+    return FakePrompter(
         selects=selects,
         texts=texts,
         secrets=secrets,
@@ -1181,68 +1177,116 @@ def test_live_finish_watcher_failure_degrades_to_live_org_fallback(
     assert "couldn't confirm scribe came online" in out
 
 
-def test_live_finish_prompts_hello_in_flow(tmp_path: Path) -> None:
-    """The ``!agent hello`` nudge happens INSIDE init (fixes the §12.6 step3/4
-    contradiction) as a press-Enter pause — not a Y/n confirm, since there is no
-    choice to make — then we watch the outbox."""
+def test_live_finish_suppresses_the_workspace_next_step_signpost(tmp_path: Path) -> None:
+    """init opens the workspace with ``banner=False``.
+
+    ``lifecycle.start``'s closing signpost is written for someone who just ran ``disco
+    start`` and now chooses what to do next. Inside the wizard it landed as "No agents
+    running yet -> disco agent start <name>" one line before init started the agent
+    itself — telling the operator to run a command the wizard was already running for
+    them. init narrates its own bring-up, so it wants the work, not the signpost.
+    """
+    finish = _FinishStub(reply=True)
+    _run(_prompter(), tmp_path, home=tmp_path, finish=finish)
+    assert finish.start_calls[0]["banner"] is False
+
+
+def test_live_finish_silences_the_supervisor_slot_narration(tmp_path: Path) -> None:
+    """init starts the tools host and the agent with ``announce=False``.
+
+    ``start_slot`` prints its own factual outcome line — "tools started", "agent scribe
+    started" — for the operator who ran ``disco tools start`` directly. The wizard
+    reports the same two facts as records in its own voice (``✓ tools host …``,
+    ``✓ scribe  online``), so leaving the slot line on interleaves two narrators
+    describing one event, and the record board it interleaves into stops reading as a
+    board. The work is wanted; the second narration isn't.
+    """
+    finish = _FinishStub(reply=True)
+    _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    assert finish.tools_calls[0]["announce"] is False
+    assert finish.agent_calls[0]["announce"] is False
+
+
+def test_live_finish_reports_bring_up_as_an_aligned_record_board(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The finish reports each step as a record, in one column-aligned block.
+
+    The labels are all known before the first step runs, so the column width is too —
+    which is what lets the records print progressively (as each step lands) and still
+    line up, rather than being buffered to the end to be measured.
+    """
+    finish = _FinishStub(reply=True)
+    _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    out = capsys.readouterr().out
+    # width = max(len("workspace"), len("tools host"), len("scribe")) == 10
+    assert "✓ workspace   broker + bridge" in out
+    assert "✓ tools host  all builtin tools" in out
+    assert "✓ scribe      online" in out
+
+
+def test_live_finish_record_board_marks_a_failed_tools_host(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A tools host that didn't come up is a ``✗`` record, not just a banner footnote.
+
+    The board reports what happened where it happened. Previously a dead tools host was
+    visible only in the closing banner, so the bring-up read as uniformly fine and the
+    contradiction surfaced paragraphs later.
+    """
+    finish = _FinishStub(reply=True, tools_rc=1)
+    _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    out = capsys.readouterr().out
+    assert "✗ tools host  not running" in out
+    assert "✓ tools host" not in out
+
+
+def test_live_finish_record_board_marks_an_unconfirmed_agent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A presence timeout is ``⚠``, not ``✗``: the agent may well be fine.
+
+    ``_await_presence`` returning False means "not seen within the window" — the org is
+    live and the process started. Marking that as a failure would be the mirror of the
+    green light that lies, so the record says only what was observed.
+    """
+    finish = _FinishStub(reply=False)
+    _run(_prompter(name="scribe"), tmp_path, home=tmp_path, finish=finish)
+    out = capsys.readouterr().out
+    assert "⚠ scribe" in out
+    assert "✗ scribe" not in out
+
+
+def test_live_finish_is_non_interactive(tmp_path: Path) -> None:
+    """The finish never prompts. Presence detection is a level-triggered mesh read
+    that the hello does not feed (it polls ``get_agents()``, not the agent's reply),
+    so gating it behind a press-Enter pause only bought a window in which the operator
+    was told to message an agent whose registration was not yet confirmed — and the
+    bridge answers such a mention with "No agent matching `!scribe` is online right
+    now." The finish now confirms presence itself and defers the hello to the epilogue
+    as a suggestion, so nothing in phase 4 reads from the terminal."""
     finish = _FinishStub(reply=True)
     p = _prompter(name="scribe")
     assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
-    assert len(p.pauses) == 1  # the in-flow "say hello" pause fired
-    assert len(finish.reply_calls) == 1
+    assert not p.pauses  # no press-Enter gate
+    assert len(finish.reply_calls) == 1  # presence was still confirmed
 
 
-class _LoopAssertingPrompter(FakePrompter):
-    """A :class:`FakePrompter` whose ``pause`` asserts it runs with NO event loop.
-
-    The reported crash was ``disco init`` prompting the ``!agent hello`` nudge from
-    inside a running event loop: InquirerPy's old ``confirm`` drove its own
-    ``asyncio.run()`` and raised ``RuntimeError: asyncio.run() cannot be called from
-    a running event loop``, aborting init right after the broker started. The nudge
-    is now :meth:`Prompter.pause` (a blocking ``input()``), which must likewise run
-    outside any loop of ours — between the two ``asyncio.run`` phases, never awaited
-    inside one. This asserts exactly that invariant, primitive-agnostically.
-    """
-
-    def pause(self, message: str) -> None:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass  # good: no running loop, as required
-        else:
-            raise AssertionError("pause() ran inside a running event loop")
-        super().pause(message)
-
-
-def test_live_finish_prompt_runs_outside_event_loop(tmp_path: Path) -> None:
-    """Regression (the reported crash): the in-flow ``!agent hello`` nudge must run
-    with NO event loop running. It sits BETWEEN two independent ``asyncio.run``
-    phases (bring-online, then presence-watch), so a blocking ``input()`` can neither
-    stall nor crash a loop of ours. A prompter asserting the no-loop invariant must
-    complete the finish cleanly and still reach the presence watch."""
-    finish = _FinishStub(reply=True)
-    p = _prompter(name="scribe", cls=_LoopAssertingPrompter)
-    assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
-    assert len(finish.reply_calls) == 1  # the flow reached the presence watch
-    assert p.pauses  # the pause was actually invoked (guards against a vacuous pass)
-
-
-def test_user_is_prompted_before_the_presence_watcher_starts(tmp_path: Path) -> None:
-    """The human is prompted to send ``!agent hello`` FIRST, then the presence
-    watcher runs — the two no longer overlap.
-
-    This ordering is safe because ``_wait_for_agent_online`` reads the *current* mesh
-    (a compacted-topic ktable via ``get_agents()``) backed by a bounded poll, not a
-    ``latest``-offset tail: it detects the agent whenever registration lands — before
-    or after the watcher opens — with no lost-registration race (``agent_start`` only
-    spawns the process; registration completes asynchronously). The shared ``events``
-    log records the order: ``prompted`` must precede ``watcher_started``."""
+def test_live_finish_confirms_presence_before_suggesting_the_hello(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ordering the whole fix exists for: the agent is seen online BEFORE the
+    operator is told to message it. Previously init nudged first and checked second,
+    so a hello sent in that window got "No agent matching …is online right now" from
+    the bridge while init went on to celebrate. The ``!scribe hello`` suggestion must
+    therefore appear only in the epilogue, after the presence read resolved."""
     events: list[str] = []
     finish = _FinishStub(reply=True, events=events)
     p = _prompter(name="scribe")
-    p._events = events  # share the ordering log with the finish stub
+    p._events = events
     assert _run(p, tmp_path, home=tmp_path, finish=finish) == 0
-    assert events == ["prompted", "watcher_started"]
+    assert events == ["watcher_started"]  # nothing prompted before it
+    assert "!scribe hello" in capsys.readouterr().out
 
 
 def test_epilogue_degrades_banner_when_tools_host_is_down(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1261,6 +1305,34 @@ def test_epilogue_celebrates_when_tools_host_up_and_detected(capsys: pytest.Capt
     """The 🎉 banner is unchanged on the all-good path (``tools_ok`` defaults True)."""
     init._print_finish_epilogue("scribe", detected=True, postable=None, tools_ok=True)
     assert "🎉" in capsys.readouterr().out
+
+
+def test_epilogue_next_steps_are_an_aligned_pair_block(capsys: pytest.CaptureFixture[str]) -> None:
+    """The sign-off is a label/value block sharing the record board's column grammar.
+
+    The wizard's last screen was four different shapes — a sentence, a heading with an
+    indented command under it, an inline "Learn more:", a parenthesised paragraph — so
+    the reader re-parses each one. As pairs they scan: labels left, the thing to type
+    right, in the same two columns the bring-up records above them use.
+    """
+    init._print_finish_epilogue("scribe", detected=True, postable=None, tools_ok=True)
+    out = capsys.readouterr().out
+    assert "Try it          !scribe hello" in out
+    assert "Add a teammate  disco agent create <name>" in out
+    assert "Learn more      disco explain topology" in out
+
+
+def test_epilogue_celebrate_suggests_the_hello_to_try(capsys: pytest.CaptureFixture[str]) -> None:
+    """The celebrate branch must name ``!scribe hello`` as the thing to try.
+
+    Every other branch already ends with an action (the permission remedy, `disco
+    tools start`, the "try it yourself" fallback); the 🎉 branch was the only one that
+    stopped at the good news, because the nudge used to live in a pause ahead of the
+    presence check. With the pause gone the epilogue is the single owner of "what to
+    do next", so the payoff branch has to carry it too — otherwise removing the pause
+    would silently drop the instruction on the one path most operators take."""
+    init._print_finish_epilogue("scribe", detected=True, postable=None, tools_ok=True)
+    assert "!scribe hello" in capsys.readouterr().out
 
 
 def test_epilogue_degrades_when_tools_host_down_and_not_detected(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1308,7 +1380,7 @@ def test_epilogue_surfaces_post_permission_fix_even_when_offline(capsys: pytest.
     must not celebrate."""
     init._print_finish_epilogue("scribe", detected=False, postable=False)
     out = capsys.readouterr().out
-    assert "Grant it View Channel + Send Messages + Manage Webhooks" in out
+    assert "View Channel + Send Messages + Manage Webhooks" in out
     assert "🎉" not in out
 
 
@@ -1770,7 +1842,7 @@ async def test_bring_online_start_failure_does_not_claim_the_workspace_is_down(
     ``start`` has already printed the specific cause; init points at it, not a
     guessed teardown, and never proceeds to agent start."""
 
-    async def _start_fn(home, *, server_urls, launcher):
+    async def _start_fn(home, *, server_urls, launcher, banner=True):
         print("error: the bridge didn't come back ready — check `disco logs bridge`.")
         return 1
 

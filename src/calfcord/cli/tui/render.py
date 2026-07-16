@@ -111,6 +111,66 @@ def answer_text(label: str, value: str) -> Text:
     return text
 
 
+# The step glyphs, by status. Mirrors the board `doctor` prints, so the two flows
+# that report step outcomes speak one vocabulary rather than each hard-coding its own.
+_STEP_GLYPHS: dict[str, str] = {"ok": theme.TICK, "warn": theme.WARN, "fail": theme.CROSS}
+
+
+def step(
+    label: str,
+    value: str,
+    *,
+    status: str = "ok",
+    width: int = 0,
+    console: Console | None = None,
+) -> None:
+    """Print one completed-step record: ``✓ label  value``.
+
+    Shares :func:`answer`'s hierarchy — quiet glyph and label, bright value — because
+    a step and an answer are the same shape of fact: the thing that happened matters,
+    the name of the slot it happened in does not. It is a separate helper for two
+    reasons. ``answer`` hard-codes a two-space gap, which is correct for a lone record
+    collapsing out of a prompt and ragged for a block of them printed together, so
+    ``width`` pads the label column and lets the values line up. And ``answer`` is only
+    ever ``✓``: a step can fail, and a flow whose contract is "no green light that
+    lies" cannot report failure with a tick.
+
+    ``width`` is the label column, and the caller owns it because only the caller knows
+    the whole block; ``0`` (the default) means "no padding", for a record printed alone.
+    A ``fail`` is styled :data:`theme.ERROR` — the theme reserves its one colour for
+    genuine failures, and a step that did not happen is one.
+    """
+    glyph = _STEP_GLYPHS[status]
+    text = Text()
+    text.append(f"{glyph} ", style=theme.ERROR if status == "fail" else theme.MUTED)
+    text.append_text(pair_text(label, value, width=width))
+    target(console).print(text, soft_wrap=True)
+
+
+def pair_text(label: str, value: str, *, width: int = 0) -> Text:
+    """Build a ``label  value`` row: quiet label, bright value. No glyph.
+
+    Each span carries its own style and the ``Text`` carries none — a base style is
+    inherited by every append and would drag the value dim, making the one thing the
+    row exists to show the quietest thing on it. See :func:`answer_text`.
+    """
+    text = Text()
+    text.append(f"{label.ljust(width)}  ", style=theme.MUTED)
+    text.append(value, style=theme.ACCENT)
+    return text
+
+
+def pair(label: str, value: str, *, width: int = 0, console: Console | None = None) -> None:
+    """Print a label/value row with no outcome glyph.
+
+    :func:`step` minus the mark, for rows that report no outcome — the "what next"
+    block a flow signs off with. Sharing the padded two-column shape is what lets that
+    block read as the same object as the record board above it, rather than as unrelated
+    prose that happens to follow.
+    """
+    target(console).print(pair_text(label, value, width=width), soft_wrap=True)
+
+
 def answer(label: str, value: str, *, console: Console | None = None) -> None:
     """Print the one-line record a widget collapses to once answered.
 

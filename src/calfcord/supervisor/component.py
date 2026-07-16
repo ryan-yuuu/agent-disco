@@ -67,6 +67,7 @@ async def component_start(
     launcher: str | None = None,
     client: ProcessComposeClient | None = None,
     broker_probe: BrokerProbe | None = None,
+    announce: bool = True,
 ) -> int:
     """Bring the singleton component ``name`` up (spawn its detached process).
 
@@ -109,7 +110,9 @@ async def component_start(
         print(_BROKER_UNREACHABLE_HINT)
         return 1
 
-    return await _slot_ops.start_slot(home, name, _component_argv(launcher, name), label=name)
+    return await _slot_ops.start_slot(
+        home, name, _component_argv(launcher, name), label=name, announce=announce
+    )
 
 
 async def component_stop(

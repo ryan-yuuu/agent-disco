@@ -140,3 +140,68 @@ class TestAnswerHierarchy:
 
     def test_the_label_stays_subordinate_to_the_value(self) -> None:
         assert self._style_of("Model provider").dim is True
+
+
+class TestStep:
+    """``step`` — the completed-step record for a multi-step flow.
+
+    The same two-column, glyph-led grammar ``answer`` uses and ``doctor``
+    independently converged on (``✓ <name padded>  <detail>``), but with a caller-set
+    label column so a *block* of consecutive records aligns. ``answer`` hard-codes a
+    two-space gap, which is right for a record printed alone after a prompt and ragged
+    for four printed together.
+    """
+
+    def test_renders_glyph_label_and_value(self) -> None:
+        assert _render(render.step, "workspace", "broker + bridge") == "✓ workspace  broker + bridge\n"
+
+    def test_pads_the_label_column_so_a_block_aligns(self) -> None:
+        # Built here rather than via ``_render``: that helper's ``width`` is the
+        # console's, and the label column is what's under test.
+        console = render.make_console(width=40, record=True)
+        render.step("tools", "up", width=9, console=console)
+        assert console.export_text() == "✓ tools      up\n"
+
+    def test_warn_and_fail_carry_their_own_glyph(self) -> None:
+        assert _render(render.step, "agent", "not seen", status="warn").startswith("⚠ agent")
+        assert _render(render.step, "tools", "not running", status="fail").startswith("✗ tools")
+
+    def test_value_is_not_dimmed_by_the_label(self) -> None:
+        """The value is the one thing the record exists to show.
+
+        ``answer_text``'s docstring pins the same invariant: a base style on the
+        ``Text`` is inherited by every appended span, so a dim base would render the
+        value bold *and* dimmed — the outcome becoming the quietest thing on the line.
+        """
+        console = render.make_console(width=40, record=True)
+        render.step("workspace", "broker + bridge", console=console)
+        export = console.export_text(styles=True)
+        assert "\x1b[1mbroker + bridge" in export  # bold, not "bold dim"
+
+    def test_does_not_interpret_square_brackets_as_markup(self) -> None:
+        assert "[bold]" in _render(render.step, "agent", "keep [bold] literal")
+
+
+class TestPair:
+    """``pair`` — a label/value row with no glyph.
+
+    ``step``'s hierarchy minus the outcome mark, for rows that aren't outcomes: the
+    "what next" block a flow signs off with. Sharing the padded two-column shape is
+    what lets that block read as the same object as the record board above it.
+    """
+
+    def test_renders_label_and_value_without_a_glyph(self) -> None:
+        assert _render(render.pair, "Learn more", "docs/using-disco.md") == "Learn more  docs/using-disco.md\n"
+
+    def test_pads_the_label_column(self) -> None:
+        console = render.make_console(width=60, record=True)
+        render.pair("Try it", "!scribe hello", width=14, console=console)
+        assert console.export_text() == "Try it          !scribe hello\n"
+
+    def test_value_is_not_dimmed_by_the_label(self) -> None:
+        console = render.make_console(width=60, record=True)
+        render.pair("Try it", "!scribe hello", console=console)
+        assert "\x1b[1m!scribe hello" in console.export_text(styles=True)
+
+    def test_does_not_interpret_square_brackets_as_markup(self) -> None:
+        assert "[bold]" in _render(render.pair, "x", "keep [bold] literal")

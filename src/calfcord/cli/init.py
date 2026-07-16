@@ -23,11 +23,12 @@ reusable:
   preflight) in place of the old "paste a numeric ID" prompts (§4.5).
 * **Live finish** — :func:`_run_finish` composes
   :func:`calfcord.supervisor.lifecycle.start` (substrate, health-gated) →
-  :func:`calfcord.supervisor.roster.agent_start` (the agent clocks in) → an
-  in-flow ``!<agent> hello`` prompt → online-presence detection on the mesh
-  (:func:`_wait_for_agent_online`, §4.6 / §12.6). On a dev run (no install) or a
-  missing supervisor binary it DEGRADES to honest manual next-steps rather than
-  orchestrating something it cannot.
+  :func:`calfcord.supervisor.roster.agent_start` (the agent clocks in) →
+  online-presence detection on the mesh (:func:`_wait_for_agent_online`, §4.6 /
+  §12.6), and reports. It is **non-interactive**: it proves the org is live rather
+  than asking the operator to prove it, and only then suggests the first
+  ``!<agent> hello``. On a dev run (no install) or a missing supervisor binary it
+  DEGRADES to honest manual next-steps rather than orchestrating something it cannot.
 * **Resumability** — :mod:`calfcord.cli.setup_state` records *which steps are
   done* so a crash / Ctrl-C / the unavoidable browser detour resumes ("Welcome
   back …") instead of restarting. The checkpoint is **advisory** (§12.7): every
@@ -88,7 +89,18 @@ _LOCAL_BROKER_URL = "localhost:9092"
 # How long the live finish waits for the agent to come online before downgrading
 # to the honest "try it yourself" hint. Bounded so init never hangs on an agent
 # that never registers — the §12.6 fallback is the safety net, not a failure.
-_FIRST_REPLY_TIMEOUT_S = 60.0
+_PRESENCE_TIMEOUT_S = 60.0
+
+# The live finish's non-agent step labels. The agent's own label is its name, so the
+# board's column width is known before the first step runs — which is what lets each
+# record print the moment its step lands and still align with the rest.
+_STEP_LABELS = ("workspace", "tools host")
+
+
+def _label_width(name: str) -> int:
+    """The record board's label column: the longest of the fixed labels and the agent's."""
+    return max(len(name), *(len(label) for label in _STEP_LABELS))
+
 
 # How often the online-presence watcher re-reads the mesh, and the per-read bound
 # on the mesh view's open-time catch-up. Small so a brand-new org — whose
@@ -124,9 +136,13 @@ async def _wait_for_agent_online(
     the mesh completes asynchronously afterward (it may land after this opens), so the
     safety here is two-part: the read catches a registration that already landed, and
     the bounded poll (up to ``timeout_s``) catches one still in flight. Either way
-    there is no lost-registration race — which is why the caller can run this AFTER the
-    human prompt rather than concurrently with it. (Don't drop the poll for a single
-    snapshot: a slow-booting agent would then be missed.)
+    there is no lost-registration race, so the caller can open this whenever it likes.
+    (Don't drop the poll for a single snapshot: a slow-booting agent would then be
+    missed.)
+
+    Because this measures registration and not a reply, the operator's ``!<agent>
+    hello`` contributes nothing to it — which is why the finish confirms presence
+    itself instead of asking for a hello first and inferring liveness from the answer.
     """
     from calfkit import MeshViewConfig
     from calfkit.client import Client
@@ -223,7 +239,7 @@ def run(
     start_fn: Callable[..., Awaitable[int]] | None = None,
     tools_start_fn: Callable[..., Awaitable[int]] | None = None,
     agent_start_fn: Callable[..., Awaitable[int]] | None = None,
-    first_reply_fn: Callable[..., Awaitable[bool]] | None = None,
+    presence_fn: Callable[..., Awaitable[bool]] | None = None,
     pc_binary_fn: Callable[[], str] | None = None,
     now: Callable[[], datetime] | None = None,
     open_url_fn: Callable[[str], None] | None = None,
@@ -362,7 +378,6 @@ def run(
 
     # --- Phase 4: live finish (or honest degrade) --------------------------
     return _run_finish(
-        prompter,
         name=name,
         home=home,
         env_path=env_path,
@@ -371,7 +386,7 @@ def run(
         start_fn=start_fn,
         tools_start_fn=tools_start_fn,
         agent_start_fn=agent_start_fn,
-        first_reply_fn=first_reply_fn,
+        presence_fn=presence_fn,
         pc_binary_fn=pc_binary_fn,
     )
 
@@ -680,7 +695,6 @@ def _run_broker(prompter: Prompter, *, env_path: Path) -> None:
 
 
 def _run_finish(
-    prompter: Prompter,
     *,
     name: str,
     home: Path | None,
@@ -690,10 +704,10 @@ def _run_finish(
     start_fn: Callable[..., Awaitable[int]] | None,
     tools_start_fn: Callable[..., Awaitable[int]] | None,
     agent_start_fn: Callable[..., Awaitable[int]] | None,
-    first_reply_fn: Callable[..., Awaitable[bool]] | None,
+    presence_fn: Callable[..., Awaitable[bool]] | None,
     pc_binary_fn: Callable[[], str] | None,
 ) -> int:
-    """The ends-live finish (§4.6 / §12.6): start substrate → agent → prompt hello → confirm presence.
+    """The ends-live finish (§4.6 / §12.6): start substrate → agent → confirm presence.
 
     Only possible on a **native install** (the supervisor is install-scoped — its
     lock, derived REST port, generated YAML, logs, and shim launcher all live
@@ -701,10 +715,21 @@ def _run_finish(
     process-compose binary is missing, this DEGRADES to honest manual next-steps
     instead of orchestrating something it cannot (no green light that lies).
 
-    On the native happy path it runs three correctly-layered phases:
-    :func:`_bring_online` (async) → an in-flow ``!<name> hello`` press-Enter pause
-    (synchronous, no event loop running) → :func:`_await_presence` (async), mapping
-    each failure to its specific hint:
+    **Non-interactive by design.** The finish takes no prompter and reads nothing from
+    the terminal: it brings the org up, confirms the agent registered, and reports.
+    It used to pause on ``Say !<name> hello … press Enter`` BEFORE confirming presence
+    — a leftover from when detection meant consuming the agent's actual reply, where
+    the hello was the thing being measured. Detection is presence now
+    (:func:`_wait_for_agent_online` polls the mesh; the hello feeds it nothing), so
+    the pause only bought a window in which the operator was told to message an agent
+    whose registration was unconfirmed — and the bridge answers a mention of an
+    unregistered agent with "No agent matching ``!<name>`` is online right now" while
+    init went on to celebrate. §12.6 prescribes exactly this shape for the case where
+    reply-detection is downgraded: *confirm registration + prompt to verify*, in that
+    order. The hello is now a suggestion in :func:`_print_finish_epilogue`, which
+    already owned that instruction on every degraded branch.
+
+    Failures map to their specific hint:
 
     * substrate not ready → tear-down already happened in ``start``; point at
       ``disco logs`` / ``disco doctor`` (don't misattribute the cause) and stop
@@ -713,17 +738,6 @@ def _run_finish(
     * agent seen online → 🎉 (unless the ``postable`` preflight already proved the
       bot can post nowhere, which downgrades to an honest "online but can't post");
       timed out → the bounded "org is live — try it yourself / run ``disco doctor``".
-
-    The pause is a blocking, synchronous terminal read (:meth:`Prompter.pause` →
-    ``input()``) — so it must never run inside a loop of ours, which it would block.
-    Keeping it BETWEEN two independent ``asyncio.run`` calls (rather than awaited
-    inside one) satisfies that by construction. It historically also sidestepped a
-    crash where an InquirerPy ``confirm`` here drove its own ``asyncio.run()`` from
-    inside our loop; the Rich/readchar prompter owns no event loop, so only the
-    first reason still binds. Running the presence watch AFTER the pause (rather than
-    concurrently) is safe for the reason :func:`_wait_for_agent_online` documents: it
-    is a level-triggered mesh read backed by a bounded poll, so it detects the agent
-    whenever registration lands — before or after the watch opens.
     """
     pc_binary_fn = pc_binary_fn or _supervisor.default_pc_binary
 
@@ -754,7 +768,7 @@ def _run_finish(
     # watcher (:func:`_wait_for_agent_online`) is a local module function whose own
     # calfkit imports are deferred to its body, so referencing it here adds nothing
     # to init's import graph.
-    if start_fn is None or tools_start_fn is None or agent_start_fn is None or first_reply_fn is None:
+    if start_fn is None or tools_start_fn is None or agent_start_fn is None or presence_fn is None:
         from calfcord.supervisor import component, lifecycle, roster
 
         start_fn = start_fn or lifecycle.start
@@ -763,38 +777,76 @@ def _run_finish(
         # other slot, via the same ``component_start`` ``disco tools start`` uses.
         tools_start_fn = tools_start_fn or component.component_start
         agent_start_fn = agent_start_fn or roster.agent_start
-        first_reply_fn = first_reply_fn or _wait_for_agent_online
+        presence_fn = presence_fn or _wait_for_agent_online
 
-    # Phase 1 — bring the org live (async). The substrate, tools host, and agent are
-    # DETACHED external processes, so this loop can close afterward without touching them.
-    # ``tools_ok`` rides out separately (NOT the control-flow rc, which stays the agent's)
-    # so the finish banner can be honest when the advisory tools host didn't come up.
-    rc, tools_ok = asyncio.run(
-        _bring_online(
+    # One loop for the whole live finish. The substrate, tools host, and agent are
+    # DETACHED external processes, so this loop can close afterward without touching
+    # them. ``tools_ok`` rides out separately (NOT the control-flow rc, which stays the
+    # agent's) so the finish banner can be honest when the advisory tools host didn't
+    # come up.
+    rc, tools_ok, detected = asyncio.run(
+        _finish_live(
             name=name,
             home=home,
             server_urls=server_urls,
             start_fn=start_fn,
             tools_start_fn=tools_start_fn,
             agent_start_fn=agent_start_fn,
+            presence_fn=presence_fn,
         )
     )
     if rc != 0:
         return rc
-
-    # Phase 2 — the human nudge (§12.6: prompt the !mention INSIDE init). A
-    # press-Enter pause, not a Y/n confirm: there is no choice to record, only an
-    # acknowledgment that the operator has sent the hello. Runs synchronously with NO
-    # event loop of ours running (between the two ``asyncio.run`` phases), so the
-    # blocking read can neither stall nor crash a loop.
-    prompter.pause(f"\nSay  !{name} hello  in Discord, then press Enter to continue…")
-    print(f"Waiting for {name} to come online…")
-
-    # Phase 3 — confirm presence (async, level-triggered read). The org is already
-    # live; detection is advisory, so a failure degrades to the honest fallback.
-    detected = asyncio.run(_await_presence(first_reply_fn, name=name, server_urls=server_urls))
     _print_finish_epilogue(name, detected=detected, postable=postable, tools_ok=tools_ok)
     return 0
+
+
+async def _finish_live(
+    *,
+    name: str,
+    home: Path,
+    server_urls: str,
+    start_fn: Callable[..., Awaitable[int]],
+    tools_start_fn: Callable[..., Awaitable[int]],
+    agent_start_fn: Callable[..., Awaitable[int]],
+    presence_fn: Callable[..., Awaitable[bool]],
+) -> tuple[int, bool, bool]:
+    """Bring the org live, then confirm the agent registered: ``(rc, tools_ok, detected)``.
+
+    The two phases are one coroutine because nothing sits between them any more. They
+    used to be two separate ``asyncio.run`` calls with the ``!<name> hello`` pause
+    wedged in the middle — a layout that existed only to keep a blocking ``input()``
+    out of a running loop. That pause is gone (the finish is non-interactive), so the
+    split has nothing left to separate.
+
+    ``detected`` is ``False`` on a non-zero ``rc``: the caller returns before the
+    epilogue, so no banner ever reads it, and confirming presence for an org that
+    failed to come up would be a contradiction rather than a datum.
+    """
+    rc, tools_ok = await _bring_online(
+        name=name,
+        home=home,
+        server_urls=server_urls,
+        start_fn=start_fn,
+        tools_start_fn=tools_start_fn,
+        agent_start_fn=agent_start_fn,
+    )
+    if rc != 0:
+        return rc, tools_ok, False
+
+    # The one wait long enough to need saying out loud: the agent's registration can
+    # take a moment, and the window before we give up is a whole minute. Every other
+    # step resolves in seconds, so its record IS its feedback.
+    render.note(f"  waiting for {name} to come online…")
+    detected = await _await_presence(presence_fn, name=name, server_urls=server_urls)
+    # ``warn``, never ``fail``: a timeout means "not seen inside the window", and the
+    # agent may be registering as we print. Saying more than we observed — in either
+    # direction — is the thing this phase exists not to do.
+    if detected:
+        render.step(name, "online", width=_label_width(name))
+    else:
+        render.step(name, "started, but not seen online yet", status="warn", width=_label_width(name))
+    return rc, tools_ok, detected
 
 
 async def _bring_online(
@@ -822,7 +874,7 @@ async def _bring_online(
     separate ``tools_ok`` flag so the finish banner can be honest (not a green light
     that lies) when the host didn't come up — the org isn't fully live for tool use.
     """
-    print("Opening your workspace (broker + bridge)…")
+    width = _label_width(name)
     # Mirror main.py's _run_lifecycle wiring (DRY): the shim launcher every
     # supervised process execs under, and the broker URL. The project is
     # substrate-only — the roster (this agent included) spawns off Process
@@ -831,7 +883,12 @@ async def _bring_online(
     # reaching a live org, and a broken mcp.json surfaces later through the
     # strict readers (`disco start`, `disco mcp start`).
     launcher = str(home / "shims" / "disco")
-    rc = await start_fn(home, server_urls=server_urls, launcher=launcher)
+    # ``banner=False``: ``start``'s closing signpost ("No agents running yet -> disco
+    # agent start <name>") addresses an operator who has just been handed the prompt
+    # back and must choose what to do next. The wizard is not that operator — it starts
+    # the agent itself a few lines below, so the signpost would name a command init is
+    # already running, in a voice that isn't the wizard's. Errors still print.
+    rc = await start_fn(home, server_urls=server_urls, launcher=launcher, banner=False)
     if rc != 0:
         # start() has already printed the specific cause (§12.6 — never
         # misattribute). Several failures land here: a cold-start broker failure
@@ -844,20 +901,31 @@ async def _bring_online(
             "(or run `disco logs` / `disco doctor`), then re-run `disco init`."
         )
         return rc, True  # tools_ok is moot — the caller returns on the non-zero rc
+    render.step("workspace", "broker + bridge", width=width)
 
     # Infra, not a teammate: bring the singleton tools host up next so a first-turn
     # tool call has a live host to dispatch to. Advisory (warn-and-continue) — its code
     # never blocks the agent, but its outcome rides out as ``tools_ok`` so the finish
     # banner can degrade honestly when the host didn't come up.
-    print("Bringing the tools host online (all builtin tools)…")
-    tools_ok = await _supervisor.start_tools_host(home, launcher=launcher, tools_start_fn=tools_start_fn) == 0
+    tools_ok = (
+        await _supervisor.start_tools_host(
+            home, launcher=launcher, announce=False, tools_start_fn=tools_start_fn
+        )
+        == 0
+    )
+    # A dead tools host is recorded where it happened, not saved for the banner: the
+    # remedy `start_tools_host` just printed is the actionable part, and a board that
+    # showed only ticks would contradict it three lines later.
+    if tools_ok:
+        render.step("tools host", "all builtin tools", width=width)
+    else:
+        render.step("tools host", "not running", status="fail", width=width)
 
-    print(f"Bringing {name} online…")
-    return await agent_start_fn(home, name=name, server_urls=server_urls), tools_ok
+    return await agent_start_fn(home, name=name, server_urls=server_urls, announce=False), tools_ok
 
 
 async def _await_presence(
-    first_reply_fn: Callable[..., Awaitable[bool]],
+    presence_fn: Callable[..., Awaitable[bool]],
     *,
     name: str,
     server_urls: str,
@@ -876,7 +944,7 @@ async def _await_presence(
     propagate: the failure is in detection, not in the (already-live) org.
     """
     try:
-        return await first_reply_fn(server_urls, agent_id=name, timeout_s=_FIRST_REPLY_TIMEOUT_S)
+        return await presence_fn(server_urls, agent_id=name, timeout_s=_PRESENCE_TIMEOUT_S)
     except Exception as exc:
         print(f"  (couldn't confirm {name} came online: {exc!r})")
         return False
@@ -896,53 +964,75 @@ def _print_finish_epilogue(name: str, *, detected: bool, postable: bool | None, 
     (the host didn't come up) qualifies the banner too, since the agent's tool calls
     will hang — the org isn't fully live for tool use — even though it may be online.
     """
+    # The verdict is a separate thought from the bring-up records above it, and reads
+    # as one more record without the gap. Owned here rather than at the call site so a
+    # direct caller (the tests, a future flow) gets the same spacing.
+    print()
+    hello = f"!{name} hello  (in Discord)"
+    # Each branch states the verdict, then contributes its remedy to the SAME action
+    # block the sign-off uses, rather than trailing indented prose. One grammar for
+    # "here is a thing to type" means the reader learns to scan the right column once.
+    actions: list[tuple[str, str]] = []
     if postable is False:
         # The preflight PROVED the bot can post in no channel — a known, fixable problem
         # independent of detection. Lead with the remedy rather than the generic "try
         # `!name hello`" (it can't get a reply) or a bare `disco doctor` (it won't
         # diagnose Discord permissions) (§12.6). Whether or not it also came online.
         if detected:
-            print(f"{name} is online, but it can't post in any Discord channel yet.")
+            render.line(f"{name} is online, but it can't post in any Discord channel yet.")
         else:
-            print(f"{name} can't post in any Discord channel yet — and it isn't online in Discord either.")
-        print(f"  Grant it View Channel + Send Messages + Manage Webhooks, then say `!{name} hello`.")
+            render.line(f"{name} can't post in any Discord channel yet — and it isn't online in Discord either.")
+        actions.append(("Fix it", "grant it View Channel + Send Messages + Manage Webhooks"))
+        actions.append(("Then try", hello))
         if not detected:
-            print("  If it stays quiet after that, run `disco doctor`.")
+            actions.append(("If it stays quiet", "disco doctor"))
     elif not tools_ok:
         # The agent came up but the advisory tools host didn't — its tool-using turns
         # will hang. Degrade honestly rather than the unqualified 🎉 (no green light that
-        # lies); the remedy was printed during bring-up, but the FINAL word must not
-        # overstate readiness. Handled before ``detected`` because a live-but-tool-less
-        # org is exactly the trap the banner must not paper over.
+        # lies). Handled before ``detected`` because a live-but-tool-less org is exactly
+        # the trap the banner must not paper over.
         if detected:
-            print(f"{name} is online — but the tools host isn't up, so its tool calls will hang.")
+            render.line(f"{name} is online — but the tools host isn't up, so its tool calls will hang.")
         else:
-            print("  your organization is live — but the tools host isn't up, so tool calls will hang.")
-        print("  Bring it up with `disco tools start` (see `disco logs tools`), then retry a tool.")
+            render.line("Your organization is live — but the tools host isn't up, so tool calls will hang.")
+        actions.append(("Fix it", "disco tools start"))
+        actions.append(("Why it failed", "disco logs tools"))
     elif detected:
         # Emphasised via render.line rather than render.success: this line keeps its
         # 🎉 and must not also carry success()'s ✓ — two markers on the payoff line
         # of the whole wizard reads as clutter. The emoji is deliberately left in
         # place; it is the onboarding win moment, not decoration, and dropping it to
         # suit the monochrome palette would be a product change wearing a style hat.
-        render.line(f"🎉 {name} is online — your organization is live!", style=theme.ACCENT)
+        render.line("🎉 your organization is live!", style=theme.ACCENT)
+        actions.append(("Try it", hello))
     else:
-        # Bounded fallback (§12.6): never promise more than we detected.
-        print(
-            f"  your organization is live — try `!{name} hello` in Discord. If nothing replies, run `disco doctor`."
-        )
+        # Bounded fallback (§12.6): never promise more than we detected. The record
+        # above already said what wasn't seen, so this adds the reading rather than
+        # repeating it: the org IS live, and a slow registration is the likely cause,
+        # which is why the hello is still worth trying — this is the one degraded
+        # branch where it can actually succeed.
+        render.line(f"Your organization is live — {name} may still be registering.")
+        actions.append(("Try it", hello))
+        actions.append(("If it stays quiet", "disco doctor"))
+
     # The next step nobody teaches: a one-agent org is step one, not the finish line.
+    actions.append(("Add a teammate", "disco agent create <name>"))
+    actions.append(("Learn more", f"disco explain topology  {theme.BULLET}  docs/using-disco.md"))
     print()
-    print("Add a teammate any time:")
-    print("    disco agent create <name>")
-    print("Learn more:  disco explain topology  ·  docs/using-disco.md")
+    # The column is measured, not pinned: the branches contribute different labels, and
+    # a constant would either mis-align the long ones or pad the common case to fit a
+    # label it never prints.
+    width = max(len(label) for label, _ in actions)
+    for label, value in actions:
+        render.pair(label, value, width=width)
     print()
     # `disco start` reopens only the substrate; the detached roster does not
-    # auto-start, so the reboot note must name the agent re-start too.
-    print(
-        f"({_REBOOT_NOTE} `disco start` reopens it, then `disco agent start --all` "
-        "brings the agents back; `disco status` shows who's online.)"
-    )
+    # auto-start, so the reboot note must name the agent re-start too. Dim: it is the
+    # one thing here the operator does not act on now, and the parentheses it used to
+    # wear were doing that job in punctuation for want of a style.
+    render.note(_REBOOT_NOTE)
+    render.note("`disco start` reopens it, then `disco agent start --all` brings the agents back;")
+    render.note("`disco status` shows who's online.")
 
 
 def _print_manual_finish(name: str) -> None:

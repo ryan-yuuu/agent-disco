@@ -41,8 +41,15 @@ TITLE = "bold not dim"
 POINTER = "❯"  # noqa: RUF001
 CHECK_ON = "◉"
 CHECK_OFF = "○"
-TICK = "✓"
 BULLET = "·"
+
+# The step-record vocabulary. TICK alone can only describe a flow that worked, and
+# the flows that print records (`doctor`, `init`'s live finish) exist precisely to
+# report honest partial success — a tools host that didn't come up, an agent that
+# didn't register. WARN is "we could not confirm it", CROSS is "it is not so".
+TICK = "✓"
+WARN = "⚠"
+CROSS = "✗"
 
 # Rounded edges read as modern and match the house style of the tools this CLI
 # sits alongside.

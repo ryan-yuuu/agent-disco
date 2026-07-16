@@ -592,6 +592,7 @@ async def start(
     clock: Clock | None = None,
     sleep: Sleep | None = None,
     broker_probe: BrokerProbe | None = None,
+    banner: bool = True,
 ) -> int:
     """Open the workspace: render, launch detached, prime, gate on readiness.
 
@@ -612,6 +613,22 @@ async def start(
     whether the rendered manifest declares a local ``broker`` slot, so the two
     decisions cannot diverge.
 
+    ``banner`` governs the **terminal next-step signpost ONLY** — the closing
+    "workspace open … -> disco agent start <name>" line (and its already-open and
+    empty-org variants). Errors and warnings print regardless, on every branch: they
+    are composed where their context lives, every caller wants them verbatim, and
+    ``init``'s finish explicitly relies on ``start`` having already printed the
+    specific cause. This is emphatically **not** a ``quiet`` flag; widening it to one
+    would strand the wizard on a silent failure.
+
+    Pass ``banner=False`` when the caller is about to *take* the next step the
+    signpost would name. ``disco start`` leaves it on — the operator is being handed
+    back the prompt with a decision to make, and §12.6 requires that banner to always
+    name what's next. But ``disco init`` and ``agent create``'s start-now go on to
+    start the agent themselves, so for them the signpost tells the operator to run a
+    command the very next line executes for them, and they narrate their own progress
+    in their own voice besides.
+
     ``client`` / ``spawn`` / ``spawn_blocking`` / ``clock`` / ``sleep`` /
     ``broker_probe`` are injected for testing; in production they default to a
     per-home REST client, a detached subprocess spawner (``up`` must outlive the
@@ -626,8 +643,10 @@ async def start(
     sleep = sleep or asyncio.sleep
     # Read the defined roster once so the success banners can tell an empty org
     # from a defined one — an org with zero agents is steered to `agent create`,
-    # not the pointless `agent start`.
-    agents_defined = _agents_defined(home)
+    # not the pointless `agent start`. The banners are its ONLY consumer, and the
+    # read lazily imports the heavy agents package, so a caller that suppressed the
+    # signpost pays neither the import nor the filesystem scan.
+    agents_defined = _agents_defined(home) if banner else False
 
     with contextlib.ExitStack() as stack:
         # A contended lock (another start/stop, or a roster verb holding it SHARED
@@ -667,13 +686,14 @@ async def start(
             if reason is not None:
                 print(f"error: {reason}")
                 return 1
-            if agents_defined:
-                print("workspace already open — bridge restarted. Next: disco agent start <name>")
-            else:
-                print(
-                    "workspace already open — bridge restarted. "
-                    "No agents defined yet -> disco agent create <name>"
-                )
+            if banner:
+                if agents_defined:
+                    print("workspace already open — bridge restarted. Next: disco agent start <name>")
+                else:
+                    print(
+                        "workspace already open — bridge restarted. "
+                        "No agents defined yet -> disco agent create <name>"
+                    )
             return 0
 
         # One predicate governs both the pre-launch probe and the manifest's broker
@@ -792,16 +812,17 @@ async def start(
                 )
             return 1
 
-    if agents_defined:
-        print(
-            "workspace open (broker + bridge). No agents running yet "
-            "-> disco agent start <name>"
-        )
-    else:
-        print(
-            "workspace open (broker + bridge). "
-            "No agents defined yet -> disco agent create <name>"
-        )
+    if banner:
+        if agents_defined:
+            print(
+                "workspace open (broker + bridge). No agents running yet "
+                "-> disco agent start <name>"
+            )
+        else:
+            print(
+                "workspace open (broker + bridge). "
+                "No agents defined yet -> disco agent create <name>"
+            )
     return 0
 
 

@@ -697,6 +697,20 @@ def test_run_start_now_yes_workspace_not_running_opens_and_starts(
     assert "scribe is online — say !scribe hello in Discord" in out
 
 
+def test_run_start_now_suppresses_the_workspace_next_step_signpost(tmp_path: Path) -> None:
+    """Start-now opens the workspace with ``banner=False``.
+
+    The same contradiction the init wizard had: ``lifecycle.start``'s closing signpost
+    says "No agents running yet -> disco agent start <name>", and start-now's very next
+    act is to start the agent. The signpost is for the operator who is being handed the
+    prompt back with a decision to make — not for a flow that has already made it.
+    """
+    finish = _FinishRecorder(running=False, present=True)
+    prompter = FakePrompter(texts=["scribe", "d"], confirms=[False, True])
+    assert _run_live(prompter, tmp_path, finish, name="scribe") == 0
+    assert finish.start_kwargs[0]["banner"] is False
+
+
 def test_run_start_now_running_does_not_restart_tools_host(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
