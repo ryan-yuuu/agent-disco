@@ -52,6 +52,24 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
+          # The uv CLI version — NOT the action's (``@v6``) and not Python's
+          # (``python-version`` above). Pinned for two reasons.
+          #
+          # Availability: left unset, setup-uv finds no version in pyproject.toml
+          # and falls back to asking api.github.com for uv's latest release. That
+          # makes every run depend on an API call to learn something we can just
+          # state — and when that endpoint served 5xx to runners for an hour, it
+          # took every job here down before a single test ran, while the two jobs
+          # that never call setup-uv stayed green. An explicit version returns from
+          # the action's ``resolveVersion`` before any API call, and the download
+          # goes to github.com/<owner>/<repo>/releases/download/..., not the API.
+          #
+          # Reproducibility: unpinned, CI silently adopts every new uv release, so
+          # a uv regression lands as a red build on a branch that changed nothing.
+          #
+          # Keep it EXACT. A range (``0.11.x``) resolves through the action's
+          # ``getAvailableVersions`` — the same API call, reintroduced.
+          version: "0.11.29"
           # Cache the uv-managed venv + downloads keyed on uv.lock so
           # repeat runs don't redownload every dependency.
           enable-cache: true
@@ -93,6 +111,10 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
+          # Same uv build as the lint job — see the rationale on that step. One
+          # uv resolves uv.lock for every interpreter in the matrix; the Python
+          # version is what varies here, and it must be the ONLY thing that does.
+          version: "0.11.29"
           enable-cache: true
       - name: Install dependencies
         run: uv sync --frozen
