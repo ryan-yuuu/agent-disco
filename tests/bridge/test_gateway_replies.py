@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 from pydantic import SecretStr
 
@@ -125,6 +126,19 @@ async def _settle(gateway: DiscordIngressGateway) -> None:
     tasks = list(gateway._inflight)
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _deliver(gateway: DiscordIngressGateway, msg: Any) -> _RecordingHandler:
+    """Drive one message through intake and settle; return the recording handler.
+
+    Whether a message routes is then just ``handler.calls`` — so the same helper
+    serves both the "must dispatch" and "must drop" assertions.
+    """
+    handler = _RecordingHandler()
+    gateway._handler = handler  # type: ignore[assignment]
+    await gateway._on_message(msg)
+    await _settle(gateway)
+    return handler
 
 
 def _req() -> MentionRequest:
@@ -458,17 +472,10 @@ class TestNewThreadCommand:
 class TestOnMessageFilters:
     """Messages that must never spawn a handler task."""
 
-    async def _dropped(self, gateway: DiscordIngressGateway, msg: Any) -> _RecordingHandler:
-        handler = _RecordingHandler()
-        gateway._handler = handler  # type: ignore[assignment]
-        await gateway._on_message(msg)
-        await _settle(gateway)
-        return handler
-
     async def test_ambient_message_without_mention_is_ignored(self, fake_message) -> None:
         gateway = _gateway()
         _ready(gateway)
-        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID, content="just chatting"))
+        handler = await _deliver(gateway, fake_message(guild_id=_GUILD_ID, content="just chatting"))
         assert handler.calls == []
 
     async def test_own_non_webhook_message_is_ignored(self, fake_message) -> None:
@@ -477,7 +484,7 @@ class TestOnMessageFilters:
         gateway = _gateway()
         _ready(gateway)
         msg = fake_message(author_id=_BOT_USER_ID, webhook_id=None, guild_id=_GUILD_ID, content="!scribe hi")
-        handler = await self._dropped(gateway, msg)
+        handler = await _deliver(gateway, msg)
         assert handler.calls == []
 
     async def test_webhook_post_with_bot_id_passes_through(self, fake_message) -> None:
@@ -496,13 +503,13 @@ class TestOnMessageFilters:
     async def test_dm_is_ignored(self, fake_message) -> None:
         gateway = _gateway()
         _ready(gateway)
-        handler = await self._dropped(gateway, fake_message(guild_id=None, content="!scribe hi"))
+        handler = await _deliver(gateway, fake_message(guild_id=None, content="!scribe hi"))
         assert handler.calls == []
 
     async def test_wrong_guild_is_ignored(self, fake_message) -> None:
         gateway = _gateway()
         _ready(gateway)
-        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID + 1, content="!scribe hi"))
+        handler = await _deliver(gateway, fake_message(guild_id=_GUILD_ID + 1, content="!scribe hi"))
         assert handler.calls == []
 
     async def test_pre_ready_message_is_ignored(self, fake_message) -> None:
@@ -510,8 +517,93 @@ class TestOnMessageFilters:
         gateway = _gateway()
         gateway._message_normalizer = None
         gateway._bot_user_id = None
-        handler = await self._dropped(gateway, fake_message(guild_id=_GUILD_ID, content="!scribe hi"))
+        handler = await _deliver(gateway, fake_message(guild_id=_GUILD_ID, content="!scribe hi"))
         assert handler.calls == []
+
+
+class TestSystemMessageFilter:
+    """Discord-constructed messages must never trigger a routing decision.
+
+    Discord authors these as the *human* who caused them, so they are
+    indistinguishable from real input downstream. The load-bearing case is
+    ``thread_created``: opening a thread from the channel's "new thread" button
+    posts one into the PARENT channel whose ``content`` is the thread's TITLE
+    (discord.py renders it as "X started a thread: **<content>**"). Left
+    unfiltered, that title routes in the parent — so the parent's sticky agent
+    answers a thread the user opened for someone else.
+    """
+
+    async def test_thread_created_title_does_not_route_to_parent_sticky_owner(self, fake_message) -> None:
+        # The reported bug: !sol was mentioned in a new thread's seed message, but
+        # the parent channel's sticky owner (terra) also answered — because the
+        # thread's title arrived in the parent as a thread_created system message.
+        store = _StickyStore(owner="terra")
+        gateway = _gateway(sticky_store=store)
+        _ready(gateway)
+
+        msg = fake_message(
+            channel_id=200,
+            guild_id=_GUILD_ID,
+            content="fix the disco TUI",  # the thread TITLE, echoed into the parent
+            message_type=discord.MessageType.thread_created,
+        )
+        handler = await _deliver(gateway, msg)
+
+        assert handler.calls == []
+        assert store.gets == [], "a system message must not even reach a sticky lookup"
+
+    async def test_thread_created_title_with_mention_does_not_route(self, fake_message) -> None:
+        # A title like "!scribe fix the TUI" would otherwise dispatch a SECOND
+        # time in the parent, so the guard cannot live in the sticky branch alone.
+        gateway = _gateway()
+        _ready(gateway)
+
+        msg = fake_message(
+            guild_id=_GUILD_ID,
+            content="!scribe fix the TUI",
+            message_type=discord.MessageType.thread_created,
+        )
+        handler = await _deliver(gateway, msg)
+
+        assert handler.calls == []
+
+    @pytest.mark.parametrize(
+        "message_type",
+        [
+            discord.MessageType.pins_add,
+            discord.MessageType.new_member,
+            discord.MessageType.channel_name_change,
+            # The four below are the ones ``is_system()`` reports as NON-system,
+            # so an ``is_system()`` guard would let them through; pin them so the
+            # allowlist rationale stays honest.
+            discord.MessageType.thread_starter_message,
+            discord.MessageType.poll_result,
+            discord.MessageType.chat_input_command,
+            discord.MessageType.context_menu_command,
+        ],
+    )
+    async def test_system_message_types_never_route(self, fake_message, message_type) -> None:
+        store = _StickyStore(owner="terra")
+        gateway = _gateway(sticky_store=store)
+        _ready(gateway)
+
+        msg = fake_message(guild_id=_GUILD_ID, content="!scribe hi", message_type=message_type)
+        handler = await _deliver(gateway, msg)
+
+        assert handler.calls == []
+        assert store.gets == [], "the drop must happen before the sticky lookup"
+
+    async def test_user_reply_still_routes(self, fake_message) -> None:
+        # A reply (type 19) carries real user content and MUST keep working —
+        # the allowlist is not "default only".
+        gateway = _gateway()
+        _ready(gateway)
+
+        msg = fake_message(guild_id=_GUILD_ID, content="!scribe hi", message_type=discord.MessageType.reply)
+        handler = await _deliver(gateway, msg)
+
+        assert len(handler.calls) == 1
+        assert handler.calls[0].mention_ids == ("scribe",)
 
 
 class TestOnMessageDedup:

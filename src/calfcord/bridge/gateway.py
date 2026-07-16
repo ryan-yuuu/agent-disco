@@ -76,6 +76,30 @@ _HEALTH_COMPONENT = "bridge"
 
 _SEEN_MESSAGE_IDS_CAPACITY = 1024
 
+# The only Discord message types that carry human intent and may therefore drive
+# routing. Everything else is constructed by Discord (or by an interaction), yet
+# is stamped with the *human* as its author and can carry non-empty text — so by
+# the time one reaches the routing decision it is indistinguishable from real
+# input. Discord pushes these over the same MESSAGE_CREATE gateway event, so
+# ingress is where they have to be caught.
+#
+# ``thread_created`` (18) is why this exists: opening a thread via a channel's
+# "new thread" button posts one into the PARENT channel whose ``content`` is the
+# thread's TITLE (discord.py renders it "X started a thread: **<content>**").
+# Unfiltered, that title routes in the parent — so the parent's sticky agent
+# answers a thread the user opened for a different agent, and a title carrying a
+# ``!mention`` dispatches that agent a second time outside the thread.
+#
+# An allowlist, not ``Message.is_system()``: that helper reports
+# ``thread_starter_message``, ``poll_result``, ``chat_input_command`` and
+# ``context_menu_command`` as NON-system, which would let them through here.
+_ROUTABLE_MESSAGE_TYPES = frozenset(
+    {
+        discord.MessageType.default,
+        discord.MessageType.reply,
+    }
+)
+
 # Durable, fixed inbox topic for the bridge's caller surface. A stable name
 # (vs an auto-generated per-restart one) avoids leaking orphan topics on a
 # no-auto-delete broker (Tansu); only one bridge runs, so there is no contention.
@@ -355,6 +379,11 @@ class DiscordIngressGateway:
             return
         if self._message_normalizer is None:
             return  # pre-ready; defensive
+        if message.type not in _ROUTABLE_MESSAGE_TYPES:
+            logger.debug(
+                "ignoring non-routable message id=%s type=%s", message.id, message.type
+            )
+            return
         # Skip the bot's own non-webhook posts (e.g. /clear markers, notices).
         # Webhook posts (the bot acting as an agent persona) flow through so the
         # author-stamping / peer-visibility paths see them.
