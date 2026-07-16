@@ -15,7 +15,13 @@ curl -fsSL https://raw.githubusercontent.com/ryan-yuuu/agent-disco/main/scripts/
 
 You don't need Python, Docker, or git installed first — the installer handles
 everything, including a native **Tansu** broker and a process supervisor (more
-on both below).
+on both below). It needs only `bash` and `curl` (or `wget`).
+
+And if you *do* have Python, it still isn't used. Agent Disco runs on an
+interpreter it downloads and pins for itself, so your system, conda, or
+`pyenv` Python is never touched — and upgrading or removing it can't break your
+agents. Same commit, same interpreter, on every machine. `disco doctor` reports
+which one you're on.
 
 It finishes on one of two lines. `READY` means `disco` already works in this
 terminal. `ACTIVATE` means it couldn't reach your current shell — open a new
@@ -274,6 +280,11 @@ Edit the `# Agent Disco` block if it still points at `~/.calfcord/env` — in
 
 ```bash
 disco stop
+
+# Optional, and only while ~/.agent-disco is still here — see the note below.
+~/.agent-disco/bin/uv python list --only-installed
+# ~/.agent-disco/bin/uv python uninstall <version>   # only if nothing else wants it
+
 rm -rf ~/.agent-disco ~/.calfkit/bin
 for d in ~/.local/bin /usr/local/bin; do
   case "$(readlink "$d/disco" 2>/dev/null)" in */.agent-disco/shims/disco) rm -f "$d/disco" ;; esac
@@ -283,6 +294,15 @@ done
 The loop removes the `disco` symlink the installer may have put on your `PATH`,
 but only while it still points into `~/.agent-disco` — another tool's `disco` is
 never touched.
+
+The CPython that Agent Disco pinned for itself is left behind, in uv's shared
+interpreter cache (`~/.local/share/uv/python`). That cache belongs to uv and is
+shared with any other uv project, so clearing it is not part of uninstalling
+Agent Disco — leave it unless you are sure nothing else wants it.
+
+Both optional commands come before the `rm -rf` for a reason: if you took this
+page at its word and never installed Python, Agent Disco's own uv is the only one
+on the machine, and the `rm -rf` deletes it.
 
 Then remove the `# Agent Disco` block the installer added to `~/.profile`,
 `~/.bashrc`, and `~/.zshenv` (or `$ZDOTDIR/.zshenv`).

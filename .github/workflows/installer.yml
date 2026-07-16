@@ -10,6 +10,10 @@
 
 name: installer
 
+# The install's toolchain contract is not all shell: `[tool.uv]` declares the
+# interpreter requirement, and uv.lock / .python-version feed the build — so a
+# change to any of them can break an install (docs/adr/0023) and must run these
+# jobs. (Actions does not support YAML anchors, hence the duplicated list.)
 on:
   push:
     branches: [main]
@@ -17,11 +21,17 @@ on:
       - 'scripts/install.sh'
       - 'scripts/tests/**'
       - '.github/workflows/installer.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
   pull_request:
     paths:
       - 'scripts/install.sh'
       - 'scripts/tests/**'
       - '.github/workflows/installer.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
 
 permissions:
   contents: read
@@ -60,3 +70,29 @@ jobs:
           else
             bash scripts/tests/test_installer.sh
           fi
+
+  # The one job that tests the headline promise — "You don't need Python
+  # installed first" (docs/installation.md). Everything else stubs `uv` and is
+  # network-free, and both GitHub runner images ship Python, so this claim was
+  # asserted nowhere. A container without python3 is the only honest host for it.
+  #
+  # It is also the guard for the uv/CPython pin coupling: a PYTHON_VERSION the
+  # pinned uv does not know fails here rather than in an operator's terminal.
+  hermetic:
+    name: install on a Python-less box
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # The container wraps only the INSTALL, not the whole job. Putting the job
+      # in `container:` instead makes actions/checkout run there too, where it
+      # finds no git and silently degrades to a REST-API download — a step this
+      # test does not care about and cannot control. Checking out on the runner
+      # keeps the container exactly as bare as the claim under test: the
+      # installer's real prerequisites (bash + curl), no Python, and no git —
+      # which also keeps "no git required" honest.
+      - name: Build on a box with no Python
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w debian:bookworm-slim sh -c '
+            apt-get update -qq &&
+            apt-get install -y -qq --no-install-recommends bash curl ca-certificates tar &&
+            bash scripts/tests/test_hermetic_install.sh'

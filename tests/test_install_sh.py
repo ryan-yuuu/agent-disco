@@ -1,9 +1,12 @@
-"""Behavioural tests for the native installer's seeding + shim env wiring.
+"""Behavioural tests for the native installer's toolchain, seeding + shim env wiring.
 
-``scripts/install.sh`` is the no-prerequisites ``curl | bash`` installer. Two
-pieces of its logic are easy to get subtly wrong and impossible to unit-test
-from Python directly, so we drive the *actual shell* here:
+``scripts/install.sh`` is the ``curl | bash`` installer (bash and curl-or-wget
+are its only prerequisites). Pieces of its logic are easy to get subtly wrong and
+impossible to unit-test from Python directly, so we drive the *actual shell* here:
 
+* the toolchain contract — the install must own its ``uv`` and build every venv
+  on an interpreter it owns, at a pinned patch, and must refuse to certify a
+  build that escaped. See docs/adr/0023.
 * ``seed_agents`` — must give the native install a stable agents home and
   drop in the starter agent on first install, **without** clobbering an
   operator who removed the starter or added their own agents.
@@ -14,16 +17,22 @@ from Python directly, so we drive the *actual shell* here:
 
 The installer guards ``main "$@"`` so the file can be *sourced* (rather than
 executed, which would hit the network), letting these tests call individual
-functions in a throwaway ``CALFCORD_HOME``. The shim env behaviour is observed
-end-to-end via a fake ``uv`` that simply prints the three env vars it inherits.
+functions in a throwaway ``CALFCORD_HOME``. Env-var contracts are observed
+end-to-end via fake ``uv`` binaries that print what they inherited.
+
+These suites are deliberately network-free, so they cannot prove the install
+works on a box with no Python at all — ``scripts/tests/test_hermetic_install.sh``
+does that, against a real uv in a container without python3.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -38,6 +47,30 @@ _UNSET = "__UNSET__"
 _FAKE_UV = """#!/usr/bin/env bash
 printf 'CALFKIT_AGENTS_DIR=%s\\n' "${CALFKIT_AGENTS_DIR-__UNSET__}"
 printf 'CALFCORD_WORKSPACE_DIR=%s\\n' "${CALFCORD_WORKSPACE_DIR-__UNSET__}"
+"""
+
+# A *capable* system uv: it advertises `uv run --env-file`, which was exactly the
+# probe the installer used to justify adopting whatever uv happened to be on
+# PATH. Its presence is what the ensure_uv tests assert is now ignored.
+_FAKE_SYSTEM_UV = """#!/usr/bin/env bash
+if [ "${1:-}" = "run" ]; then
+  echo "  --env-file <FILE>  Load environment variables from a .env file"
+fi
+exit 0
+"""
+
+# Stands in for astral's install.sh delivery: records the URL it was asked for,
+# then emits the shell the installer pipes into `sh`, which drops a uv into
+# UV_UNMANAGED_INSTALL just as the real script does.
+_FAKE_CURL = """#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in https://*) printf '%s\\n' "$arg" >> "$CURL_URL_LOG" ;; esac
+done
+cat <<'EOS'
+mkdir -p "$UV_UNMANAGED_INSTALL"
+printf '#!/usr/bin/env bash\\nexit 0\\n' > "$UV_UNMANAGED_INSTALL/uv"
+chmod +x "$UV_UNMANAGED_INSTALL/uv"
+EOS
 """
 
 
@@ -94,6 +127,418 @@ def _run_shim(home: Path, *, cwd: Path, env_file: str = "", extra_env: dict[str,
         key, _, value = line.partition("=")
         parsed[key] = value
     return parsed
+
+
+# A stand-in for ``uv`` that reports the build-environment contract it inherited
+# from ``build_env`` (plus the argv it was handed).
+_FAKE_ENV_REPORTING_UV = """#!/usr/bin/env bash
+printf 'UV_PYTHON=%s\\n' "${UV_PYTHON-__UNSET__}"
+printf 'UV_PYTHON_PREFERENCE=%s\\n' "${UV_PYTHON_PREFERENCE-__UNSET__}"
+printf 'UV_PROJECT_ENVIRONMENT=%s\\n' "${UV_PROJECT_ENVIRONMENT-__UNSET__}"
+printf 'CWD=%s\\n' "$PWD"
+printf 'ARGV=%s\\n' "$*"
+"""
+
+
+def _write_tool(path: Path, body: str) -> Path:
+    path.write_text(body)
+    path.chmod(0o755)
+    return path
+
+
+def _parse_kv(stdout: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in stdout.splitlines():
+        key, _, value = line.partition("=")
+        parsed[key] = value
+    return parsed
+
+
+# ------------------------------------------- toolchain declaration (pyproject) ---
+#
+# Tripwires, not behaviour tests: they assert the manifest says what it means to
+# say. That is worth two tests because nothing else can cover what this
+# declaration uniquely reaches — a CONTRIBUTOR's ``uv run`` and a user-level
+# ``~/.config/uv/uv.toml``. The install itself no longer depends on it
+# (``build_env`` also forces the preference, and ``interpreter_is_owned`` checks
+# the result), so deleting these settings would break the dev loop silently while
+# every other test stayed green. See docs/adr/0023.
+
+
+def _tool_uv_config() -> dict:
+    with (INSTALL_SH.parents[1] / "pyproject.toml").open("rb") as fh:
+        return tomllib.load(fh)["tool"]["uv"]
+
+
+def test_pyproject_requires_a_uv_managed_interpreter() -> None:
+    """An ambient conda env must never bind a build to its interpreter (ADR 0023).
+
+    ``CONDA_PREFIX`` in the shell silently rebound the venv to ~/miniconda3,
+    leaving an install whose interpreter disappears with conda. Declaring the
+    requirement closes the class, where scrubbing named variables would only
+    blocklist the ones known today.
+    """
+    assert _tool_uv_config()["python-preference"] == "only-managed"
+
+
+def test_pyproject_keeps_interpreter_downloads_automatic() -> None:
+    """A user-level uv.toml must not break a Python-less install.
+
+    ``python-downloads = "never"`` in ~/.config/uv/uv.toml would otherwise fail
+    the install on exactly the box the installer promises to serve. Project
+    config outranks user config, so declaring it here wins.
+    """
+    assert _tool_uv_config()["python-downloads"] == "automatic"
+
+
+# ------------------------------------------------------------------ build_env ---
+
+
+def _run_build_env(tmp: Path, home: Path, *, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    dest = tmp / "dest"
+    dest.mkdir()
+    uv = _write_tool(tmp / "fake-uv", _FAKE_ENV_REPORTING_UV)
+    result = _source_and_run(f'UV="{uv}"; build_env "{dest}"', home=home, extra_env=extra_env)
+    assert result.returncode == 0, result.stderr
+    return _parse_kv(result.stdout)
+
+
+def test_build_env_overrides_a_hostile_interpreter_preference(tmp_path: Path) -> None:
+    """The build wins against an exported ``UV_PYTHON_PREFERENCE`` (ADR 0023).
+
+    Layered deliberately, because each layer covers what the others structurally
+    cannot. The source's ``[tool.uv]`` declaration reaches the dev loop, CI and a
+    user-level ``~/.config/uv/uv.toml`` — but an env var outranks project config,
+    and a sibling ``uv.toml`` in the source would void ``[tool.uv]`` outright. A
+    command-scoped assignment replaces the inherited export, so the operator gets
+    a correct install instead of a failed one after a full sync.
+    """
+    env = _run_build_env(tmp_path, tmp_path / "home", extra_env={"UV_PYTHON_PREFERENCE": "only-system"})
+    assert env["UV_PYTHON_PREFERENCE"] == "only-managed"
+
+
+def test_build_env_keeps_the_venv_inside_the_version_dir(tmp_path: Path) -> None:
+    """An ambient UV_PROJECT_ENVIRONMENT must not relocate the venv (ADR 0023).
+
+    The atomic version flip and rollback both assume the env lives at
+    versions/<sha>/.venv; a relocated venv would still get a ``.calfcord-ok``.
+    """
+    env = _run_build_env(tmp_path, tmp_path / "home", extra_env={"UV_PROJECT_ENVIRONMENT": "/tmp/elsewhere"})
+    assert env["UV_PROJECT_ENVIRONMENT"] == f"{tmp_path / 'dest'}/.venv"
+
+
+def test_build_env_syncs_the_locked_production_deps(tmp_path: Path) -> None:
+    """The build stays locked and dev-free."""
+    env = _run_build_env(tmp_path, tmp_path / "home")
+    assert env["ARGV"] == "sync --locked --no-dev"
+
+
+def test_build_env_builds_the_version_dir_not_the_launch_directory(tmp_path: Path) -> None:
+    """The sync must run in versions/<sha>, whatever the operator's cwd is.
+
+    ``curl | bash`` runs wherever the operator happens to be standing, and uv
+    resolves a project from the working directory. If that directory is itself a
+    uv project, ``sync --locked`` would resolve THAT project's lock into this
+    install's venv — a silent, wrong-dependency install rather than a failure.
+    """
+    env = _run_build_env(tmp_path, tmp_path / "home")
+    assert env["CWD"] == str(tmp_path / "dest")
+
+
+def test_build_env_pins_an_exact_interpreter_patch(tmp_path: Path) -> None:
+    """The installed interpreter is an exact, declared input (ADR 0023).
+
+    A floating series let one commit resolve 3.12.12 on one box and 3.12.13 on
+    another — the only unpinned input in a build where uv.lock pins every
+    package exactly. The pin lives in the installer rather than in
+    ``.python-version`` because that file drives the contributor's ``uv run`` on
+    a uv we do not own, so pinning a patch there breaks the dev loop of anyone
+    whose uv predates it; the installer owns the pinned uv that has to know it.
+    """
+    env = _run_build_env(tmp_path, tmp_path / "home")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", env["UV_PYTHON"]), f"expected an exact patch pin, got {env['UV_PYTHON']!r}"
+
+
+# ------------------------------------------------------ interpreter_is_owned ---
+
+
+# A ``uv`` that only answers ``uv python dir`` — the managed-interpreter root the
+# provenance check compares a venv's ``home`` against.
+_FAKE_PYTHON_DIR_UV = """#!/usr/bin/env bash
+if [ "${1:-}" = "python" ] && [ "${2:-}" = "dir" ]; then
+  printf '%s\\n' "$FAKE_UV_PYTHON_DIR"
+  exit 0
+fi
+exit 0
+"""
+
+
+def _write_pyvenv_cfg(dest: Path, *, home_dir: str) -> None:
+    """Write the ``pyvenv.cfg`` recording which interpreter a venv is bound to."""
+    (dest / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (dest / ".venv" / "pyvenv.cfg").write_text(f"home = {home_dir}\nimplementation = CPython\nversion_info = 3.12.13\n")
+
+
+def _managed_bin(tmp: Path) -> str:
+    return str(tmp / "uvpythons" / "cpython-3.12.13-macos-aarch64-none" / "bin")
+
+
+def _run_owned_check(
+    tmp: Path, home: Path, *, venv_home: str | None, managed_dir: str | None = None
+) -> subprocess.CompletedProcess:
+    dest = tmp / "dest"
+    dest.mkdir(exist_ok=True)
+    if venv_home is not None:
+        _write_pyvenv_cfg(dest, home_dir=venv_home)
+    (tmp / "uvpythons").mkdir(exist_ok=True)
+    uv = _write_tool(tmp / "fake-uv-pythondir", _FAKE_PYTHON_DIR_UV)
+    return _source_and_run(
+        f'UV="{uv}"; interpreter_is_owned "{dest}"',
+        home=home,
+        extra_env={"FAKE_UV_PYTHON_DIR": managed_dir or str(tmp / "uvpythons")},
+    )
+
+
+def test_interpreter_is_owned_accepts_a_managed_venv(tmp_path: Path) -> None:
+    """A venv on uv's managed CPython is what the install promises."""
+    result = _run_owned_check(tmp_path, tmp_path / "home", venv_home=_managed_bin(tmp_path))
+    assert result.returncode == 0, result.stderr
+
+
+def test_interpreter_is_owned_rejects_a_borrowed_venv(tmp_path: Path) -> None:
+    """A venv bound to a conda/system interpreter is not owned (ADR 0023).
+
+    This is the defect itself: the venv held only site-packages, while
+    ``base_prefix`` and the stdlib resolved into ~/miniconda3 — so removing conda
+    would break the bridge and every agent, silently and days later.
+    """
+    result = _run_owned_check(tmp_path, tmp_path / "home", venv_home="/Users/someone/miniconda3/bin")
+    assert result.returncode != 0
+
+
+def test_interpreter_is_owned_rejects_a_missing_venv(tmp_path: Path) -> None:
+    """A dir with no venv is not a usable build."""
+    result = _run_owned_check(tmp_path, tmp_path / "home", venv_home=None)
+    assert result.returncode != 0
+
+
+def test_interpreter_is_owned_is_quiet_when_uv_cannot_answer(tmp_path: Path) -> None:
+    """A uv that cannot answer must not look fatal (ADR 0023).
+
+    The ERR trap fires *inside* the command substitution and calls ``die``, whose
+    output lands on the installer's stderr even though ``|| return 1`` carries on
+    — so an operator with (say) a malformed ~/.config/uv/uv.toml would see
+    "disco error install failed" on a path that is not fatal, while the install
+    quietly went on to delete and rebuild a perfectly good version.
+    """
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    _write_pyvenv_cfg(dest, home_dir="/somewhere/bin")
+    uv = _write_tool(tmp_path / "broken-uv", "#!/usr/bin/env bash\nexit 2\n")
+    result = _source_and_run(
+        f'UV="{uv}"; interpreter_is_owned "{dest}" || echo NOT_OWNED',
+        home=tmp_path / "home",
+    )
+    assert "NOT_OWNED" in result.stdout
+    assert "install failed" not in result.stderr
+
+
+def test_interpreter_is_owned_tolerates_a_trailing_slash_from_uv(tmp_path: Path) -> None:
+    """``uv python dir`` echoes ``UV_PYTHON_INSTALL_DIR`` verbatim — slash and all.
+
+    An operator who exports ``UV_PYTHON_INSTALL_DIR=/opt/pythons/`` would
+    otherwise have a perfectly good build rejected (the prefix match would test
+    against ``/opt/pythons//*``) and the install would die on it.
+    """
+    result = _run_owned_check(
+        tmp_path,
+        tmp_path / "home",
+        venv_home=_managed_bin(tmp_path),
+        managed_dir=f"{tmp_path / 'uvpythons'}/",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+# ------------------------------------------- install_version provenance gate ---
+
+
+def _run_install_version(
+    tmp: Path, home: Path, *, marked: bool, existing_venv: str | None, built_venv: str
+) -> subprocess.CompletedProcess:
+    """Drive ``install_version`` with its network + build collaborators stubbed."""
+    sha = "a" * 40
+    vdir = home / "versions" / sha
+    vdir.mkdir(parents=True)
+    (vdir / "pyproject.toml").write_text("[project]\n")
+    if existing_venv is not None:
+        _write_pyvenv_cfg(vdir, home_dir=existing_venv)
+    if marked:
+        (vdir / ".calfcord-ok").write_text("")
+    (tmp / "uvpythons").mkdir(exist_ok=True)
+    uv = _write_tool(tmp / "fake-uv-pythondir", _FAKE_PYTHON_DIR_UV)
+    snippet = "\n".join(
+        [
+            f'UV="{uv}"',
+            'extract_source() { mkdir -p "$2"; printf "[project]\\n" > "$2/pyproject.toml"; echo EXTRACTED >&2; }',
+            'build_env() { mkdir -p "$1/.venv"; '
+            f'printf "home = {built_venv}\\n" > "$1/.venv/pyvenv.cfg"; echo BUILT >&2; }}',
+            f'install_version "{sha}"',
+        ]
+    )
+    return _source_and_run(snippet, home=home, extra_env={"FAKE_UV_PYTHON_DIR": str(tmp / "uvpythons")})
+
+
+def test_install_version_reuses_a_marked_build_on_an_owned_interpreter(tmp_path: Path) -> None:
+    """The fast path survives: a good build is not rebuilt on re-run."""
+    home = tmp_path / "home"
+    result = _run_install_version(
+        tmp_path, home, marked=True, existing_venv=_managed_bin(tmp_path), built_venv=_managed_bin(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    assert "BUILT" not in result.stderr
+
+
+def test_install_version_rebuilds_a_marked_build_bound_to_a_borrowed_interpreter(tmp_path: Path) -> None:
+    """``.calfcord-ok`` alone must not certify a build (ADR 0023).
+
+    Installs already built against conda would otherwise never be repaired: the
+    marker short-circuits the rebuild, so an operator re-running the installer
+    keeps the broken interpreter forever. Gating reuse on provenance is what lets
+    them self-heal.
+    """
+    home = tmp_path / "home"
+    result = _run_install_version(
+        tmp_path, home, marked=True, existing_venv="/Users/someone/miniconda3/bin", built_venv=_managed_bin(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    assert "BUILT" in result.stderr
+
+
+def test_install_version_refuses_to_mark_a_build_on_a_borrowed_interpreter(tmp_path: Path) -> None:
+    """A build that escapes the pin must fail loudly, leaving no marker.
+
+    Without this the installer would report success and hand the operator a
+    version whose interpreter it does not control.
+    """
+    home = tmp_path / "home"
+    result = _run_install_version(
+        tmp_path, home, marked=False, existing_venv=None, built_venv="/Users/someone/miniconda3/bin"
+    )
+    assert result.returncode != 0
+    assert "miniconda3" in result.stderr
+    assert not (home / "versions" / ("a" * 40) / ".calfcord-ok").exists()
+
+
+# ----------------------------------------------------------------- ensure_uv ---
+
+
+def _stub_toolchain_path(tmp: Path) -> tuple[Path, Path]:
+    """Put a capable system ``uv`` and a recording ``curl`` ahead of the real PATH.
+
+    Returns the stub bin dir and the file the fake curl logs requested URLs to.
+    """
+    stub = tmp / "stubbin"
+    stub.mkdir()
+    for name, body in (("uv", _FAKE_SYSTEM_UV), ("curl", _FAKE_CURL)):
+        (stub / name).write_text(body)
+        (stub / name).chmod(0o755)
+    url_log = tmp / "curl-urls.log"
+    url_log.write_text("")
+    return stub, url_log
+
+
+def _run_ensure_uv(tmp: Path, home: Path) -> tuple[subprocess.CompletedProcess, Path]:
+    stub, url_log = _stub_toolchain_path(tmp)
+    result = _source_and_run(
+        'ensure_uv; echo "RESOLVED_UV=$UV"',
+        home=home,
+        extra_env={"PATH": f"{stub}:{os.environ['PATH']}", "CURL_URL_LOG": str(url_log)},
+    )
+    return result, url_log
+
+
+def test_ensure_uv_ignores_a_capable_system_uv(tmp_path: Path) -> None:
+    """The install owns its uv; a system uv is never adopted (ADR 0023).
+
+    Reusing the box's uv left the interpreter pin hostage to its version and the
+    shim dependent on PATH (breaking the generated systemd unit).
+    """
+    home = tmp_path / "home"
+    result, _ = _run_ensure_uv(tmp_path, home)
+    assert result.returncode == 0, result.stderr
+    assert f"RESOLVED_UV={home}/bin/uv" in result.stdout
+
+
+def test_ensure_uv_downloads_the_pinned_version(tmp_path: Path) -> None:
+    """uv is pinned, and co-versioned with ``PYTHON_VERSION`` (ADR 0023).
+
+    An unpinned uv makes two installs of one commit resolve different
+    interpreters, since uv's downloadable-CPython registry is version-specific.
+    """
+    home = tmp_path / "home"
+    result, url_log = _run_ensure_uv(tmp_path, home)
+    assert result.returncode == 0, result.stderr
+    assert "https://astral.sh/uv/0.11.29/install.sh" in url_log.read_text()
+
+
+def _write_private_uv(home: Path, version: str) -> None:
+    """Put a private uv in the install home that reports ``version``."""
+    (home / "bin").mkdir(parents=True, exist_ok=True)
+    _write_tool(home / "bin" / "uv", f'#!/usr/bin/env bash\necho "uv {version} (abc1234 2026-07-15 aarch64)"\n')
+
+
+def test_ensure_uv_reuses_the_private_uv_at_the_pinned_version(tmp_path: Path) -> None:
+    """Re-runs (including ``disco self update``) must not re-download the pinned uv."""
+    home = tmp_path / "home"
+    _write_private_uv(home, "0.11.29")
+    result, url_log = _run_ensure_uv(tmp_path, home)
+    assert result.returncode == 0, result.stderr
+    assert f"RESOLVED_UV={home}/bin/uv" in result.stdout
+    assert url_log.read_text() == ""
+
+
+def test_ensure_uv_replaces_a_private_uv_at_the_wrong_version(tmp_path: Path) -> None:
+    """A bumped ``UV_VERSION`` must actually reach an existing install (ADR 0023).
+
+    ``disco self update`` re-runs this installer against the existing
+    CALFCORD_HOME. Reusing whatever uv is already in bin/ would land the bumped
+    PYTHON_VERSION while silently discarding the bumped UV_VERSION — and since an
+    interpreter pin only resolves on a uv whose registry knows it, every existing
+    install would become permanently unable to update, failing with an error
+    pointing nowhere near the cause. Fresh installs would stay green.
+    """
+    home = tmp_path / "home"
+    _write_private_uv(home, "0.9.22")
+    result, url_log = _run_ensure_uv(tmp_path, home)
+    assert result.returncode == 0, result.stderr
+    assert "https://astral.sh/uv/0.11.29/install.sh" in url_log.read_text()
+
+
+# ------------------------------------------------------- shim uv resolution ---
+
+
+def test_shim_never_falls_back_to_an_ambient_uv(tmp_path: Path) -> None:
+    """The shim runs the install's own uv, or nothing at all (ADR 0023).
+
+    Falling back to ``command -v uv`` made every ``disco`` invocation depend on
+    the caller's PATH: the generated systemd unit sets no PATH, so ``disco start``
+    died with "uv not found" on a box whose interactive ``disco`` worked fine.
+    Failing loudly beats silently running a uv the install does not control.
+    """
+    home = tmp_path / "home"
+    _install_shims(home)
+    (home / "current").mkdir(parents=True, exist_ok=True)
+    stub, _ = _stub_toolchain_path(tmp_path)  # a perfectly usable `uv` on PATH
+    assert not (home / "bin" / "uv").exists()
+    result = subprocess.run(
+        [str(home / "shims" / "disco"), "calfkit-agent"],
+        env={**os.environ, "CALFCORD_HOME": str(home), "PATH": f"{stub}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "uv not found" in result.stderr
 
 
 # --------------------------------------------------------------- seed_agents ---

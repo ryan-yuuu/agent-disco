@@ -151,10 +151,21 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - name: Build calfcord image
         # No ``push``; this job exists to catch Dockerfile breakage early.
-        # ``type=gha`` cache keeps subsequent runs cheap.
+        # ``type=gha`` cache keeps subsequent runs cheap. ``load`` so the run
+        # step below has a real image to execute.
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
+          load: true
+          tags: calfcord:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # A green build can still ship an unrunnable image: uv resolves the
+      # interpreter at BUILD time and binds .venv/bin/python to it by absolute
+      # path, so a resolution landing outside /app leaves the runtime stage
+      # (which copies only /app) with a dangling symlink — silently, because the
+      # build itself succeeds. Executing an entry point is the only thing that
+      # catches it. See docs/adr/0023.
+      - name: The image must actually run
+        run: docker run --rm calfcord:ci calfkit-agent --help

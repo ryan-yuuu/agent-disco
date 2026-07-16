@@ -27,6 +27,20 @@ WORKDIR /app
 # the runtime ENV, because uv reads it at sync time.
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# In a container the base image IS the pinned interpreter, so override the
+# source's `[tool.uv] python-preference = "only-managed"` (an env var outranks
+# project config). That setting exists for the NATIVE install, which must not
+# borrow the box's Python; here the opposite is true and the override is what
+# keeps `python:3.14-slim` meaningful.
+#
+# It is load-bearing, not belt-and-braces: under only-managed, uv would reject
+# this image's Python, download a managed CPython to /root/.local/share/uv, and
+# bind /app/.venv/bin/python to it — but the runtime stage copies only /app, so
+# the interpreter would be left behind and the image would ship a dangling
+# symlink. `only-system`, not `system`: `system` falls back to a managed
+# download, which is exactly the failure. See docs/adr/0022.
+ENV UV_PYTHON_PREFERENCE=only-system
+
 # Step 1: install dependencies WITHOUT the project source.
 # Copying ``pyproject.toml`` + ``uv.lock`` + ``README.md`` (hatchling
 # reads the README for package metadata) first means the dep-install

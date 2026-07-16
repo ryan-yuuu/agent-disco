@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +14,80 @@ from calfcord.health.heartbeat import Heartbeat
 
 # A recognizable bot token that must NEVER appear in doctor's output.
 TOKEN = "SENTINEL_TOKEN_do_not_leak_42"
+
+
+# --------------------------------------------------------------- _check_interpreter
+
+
+def _install_fake_uv(home: Path, python_dir: str) -> None:
+    """Put a ``uv`` in the home that answers ``uv python dir`` with ``python_dir``."""
+    (home / "bin").mkdir(parents=True, exist_ok=True)
+    uv = home / "bin" / "uv"
+    uv.write_text(f'#!/usr/bin/env bash\nif [ "$1 $2" = "python dir" ]; then printf "%s\\n" "{python_dir}"; fi\n')
+    uv.chmod(0o755)
+
+
+def test_check_interpreter_reports_an_owned_interpreter(tmp_path: Path) -> None:
+    """An install on uv's managed CPython is what ADR 0023 promises."""
+    home = tmp_path / "home"
+    # The running interpreter's base_prefix sits under this root, so it reads as managed.
+    _install_fake_uv(home, str(Path(sys.base_prefix).parent))
+    result = doctor._check_interpreter(home)
+    assert result.status == "ok"
+
+
+def test_check_interpreter_flags_a_borrowed_interpreter(tmp_path: Path) -> None:
+    """A venv bound to a conda/system Python must be visible, not silent (ADR 0023).
+
+    The install kept working while its interpreter lived in ~/miniconda3 — and
+    would have broken the day conda was removed. It went unnoticed for over a day
+    because nothing ever looked. ``warn``, not ``fail``: nothing is broken yet, so
+    it must not flip doctor's scriptable exit code.
+    """
+    home = tmp_path / "home"
+    _install_fake_uv(home, str(tmp_path / "somewhere-else"))
+    result = doctor._check_interpreter(home)
+    assert result.status == "warn"
+    assert sys.base_prefix in result.detail
+
+
+def test_check_interpreter_warns_when_uv_cannot_be_asked(tmp_path: Path) -> None:
+    """No uv in the home is a warning, never a crash."""
+    result = doctor._check_interpreter(tmp_path / "home")
+    assert result.status == "warn"
+
+
+def test_check_interpreter_warns_when_uv_errors(tmp_path: Path) -> None:
+    """A uv that runs but cannot answer degrades to a warning, not a traceback.
+
+    Reachable with a malformed ~/.config/uv/uv.toml, which makes uv error on
+    nearly every subcommand. doctor's job is to report, so a broken uv must not
+    take the whole preflight down.
+
+    It prints a plausible path *and* exits non-zero, so the exit status is the
+    only thing that can reject it: a stub that merely printed nothing would be
+    caught by the empty-stdout guard and leave the returncode check unproven.
+    """
+    home = tmp_path / "home"
+    _install_fake_uv(home, str(Path(sys.base_prefix).parent))
+    uv = home / "bin" / "uv"
+    uv.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "{Path(sys.base_prefix).parent}"\nexit 2\n')
+    uv.chmod(0o755)
+    result = doctor._check_interpreter(home)
+    assert result.status == "warn"
+    # Not the "ok" it would report if the failed call's stdout were trusted.
+    assert "uv-managed" not in result.detail
+
+
+def test_check_interpreter_warns_when_uv_is_not_executable_at_all(tmp_path: Path) -> None:
+    """A uv that cannot even be spawned is still just a warning (OSError path)."""
+    home = tmp_path / "home"
+    (home / "bin").mkdir(parents=True)
+    uv = home / "bin" / "uv"
+    uv.write_text("#!/nonexistent/interpreter\n")
+    uv.chmod(0o755)
+    result = doctor._check_interpreter(home)
+    assert result.status == "warn"
 
 
 # --------------------------------------------------------------------- _parse_broker
@@ -347,7 +422,11 @@ def _reader(beats: dict[str, Heartbeat]):
 def _runtime_setup(monkeypatch, tmp_path):
     """A healthy STATIC layout plus an install ``home`` for the runtime section."""
     env_path, agents_dir = _setup(monkeypatch, tmp_path)
-    home = tmp_path  # any path: the heartbeat reader is stubbed, so it is never read
+    home = tmp_path  # the heartbeat reader is stubbed, so the beat file is never read
+    # ...but a native install always owns a uv (ADR 0023), and doctor asks it where
+    # the managed interpreters live. Report a root that contains this interpreter's
+    # base_prefix, so the home reads as the healthy install these tests describe.
+    _install_fake_uv(home, str(Path(sys.base_prefix).parent))
     return env_path, agents_dir, home
 
 
