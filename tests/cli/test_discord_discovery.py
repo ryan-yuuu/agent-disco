@@ -27,6 +27,7 @@ VIEW_CHANNEL = 1 << 10  # 1024
 ADMINISTRATOR = 1 << 3  # 8
 EMBED_LINKS = 1 << 14  # 16384
 READ_MESSAGE_HISTORY = 1 << 16  # 65536
+MANAGE_CHANNELS = 1 << 4  # 16 — lazily creating the A2A audit channel (bridge/egress.py)
 MANAGE_THREADS = 1 << 34  # 17179869184 — deliberately NOT in the invite (nothing uses it)
 CREATE_PUBLIC_THREADS = 1 << 35  # 34359738368 — /task + A2A thread creation
 SEND_MESSAGES_IN_THREADS = 1 << 38  # 274877906944 — posting into those threads
@@ -191,12 +192,13 @@ def test_invite_permissions_is_the_exact_expected_mask():
         | SEND_MESSAGES
         | EMBED_LINKS
         | READ_MESSAGE_HISTORY
+        | MANAGE_CHANNELS
         | MANAGE_WEBHOOKS
         | CREATE_PUBLIC_THREADS
         | SEND_MESSAGES_IN_THREADS
     )
     assert expected == dd.INVITE_PERMISSIONS
-    assert dd.INVITE_PERMISSIONS == 309774601216
+    assert dd.INVITE_PERMISSIONS == 309774601232
 
 
 def test_invite_permissions_grants_thread_creation_bits():
@@ -205,6 +207,17 @@ def test_invite_permissions_grants_thread_creation_bits():
     # break for anyone who followed the invite link (see bridge/egress.py, docs/a2a-threads.md).
     assert dd.INVITE_PERMISSIONS & CREATE_PUBLIC_THREADS
     assert dd.INVITE_PERMISSIONS & SEND_MESSAGES_IN_THREADS
+
+
+def test_invite_permissions_grants_channel_creation_for_the_a2a_audit_channel():
+    # The A2A audit channel is lazily created on the first consult
+    # (bridge/egress.py ``_create`` → ``guild.create_text_channel``), which Discord
+    # gates behind Manage Channels. The invite grants every bit needed to USE that
+    # channel (webhooks + the two thread bits) but historically none to CREATE it,
+    # so every fresh install's first agent-to-agent consult 403'd (error 50013) and
+    # the whole audit log silently never appeared — the projection is best-effort,
+    # so it swallowed the failure and only a WARN in the bridge log recorded it.
+    assert dd.INVITE_PERMISSIONS & MANAGE_CHANNELS
 
 
 def test_invite_permissions_excludes_unused_manage_threads():

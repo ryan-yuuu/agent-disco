@@ -4,7 +4,9 @@ The bridge's :class:`~calfcord.bridge.mention_handler.MentionHandler` drains a
 run's ``stream()`` and, for every non-A2A
 :class:`~calfcord.bridge.step_events.StepEvent`, calls
 :meth:`ProgressRenderer.on_step`; a ``finally`` always calls
-:meth:`ProgressRenderer.finish`.
+:meth:`ProgressRenderer.finish`. :meth:`ProgressRenderer.on_note` folds in the
+bridge's OWN annotations (today: the consult cross-link) — same aggregate, no
+``StepEvent``, since they are commentary on the turn rather than steps of it.
 
 Steps are aggregated into ONE growing, persistent **Components-V2** message per
 persona *segment*: the first renderable step posts the message, later steps are
@@ -240,14 +242,7 @@ class ProgressRenderer:
         # handoff stamps its own identity.
         persona_name = owning_agent if step.kind in ("tool_call", "tool_result") else step.emitter
         persona = persona_for(persona_name)
-        entry = self._entries.get(step.correlation_id)
-        if entry is None:
-            entry = _Entry(
-                channel_id=req.channel_id,
-                thread_id=(req.source_channel_id if req.source_channel_id != req.channel_id else None),
-            )
-            entry.writer = asyncio.create_task(self._write_loop(entry))
-            self._entries[step.correlation_id] = entry
+        entry = self._entry_for(step.correlation_id, req)
         # Typing disabled for now — re-enable by uncommenting (the notifier is
         # still wired through the gateway, just dormant):
         # if self._typing is not None:
@@ -255,6 +250,37 @@ class ProgressRenderer:
         for block in blocks:
             self._append(entry, persona, block)
         entry.wake.set()
+
+    async def on_note(self, text: str, req: MentionRequest, *, correlation_id: str, persona_name: str) -> None:
+        """Fold one BRIDGE-authored annotation into the correlation's aggregate.
+
+        Unlike :meth:`on_step` this is not a run step — it is the bridge's own
+        commentary on the turn (today: the consult cross-link), so it carries no
+        ``StepEvent`` and the correlation and persona are passed explicitly. It
+        shares the step aggregate deliberately: a note is part of the same
+        narrative, so under an unchanged persona it flows inline rather than opening
+        a second message. Empty text touches nothing.
+        """
+        if not text:
+            return
+        entry = self._entry_for(correlation_id, req)
+        self._append(entry, persona_for(persona_name), text)
+        entry.wake.set()
+
+    def _entry_for(self, correlation_id: str, req: MentionRequest) -> _Entry:
+        """The correlation's trace entry, created (with its writer task) on first
+        use. Routing is fixed at creation: the webhook hosts on the parent
+        ``channel_id`` and posts into ``thread_id`` when the wire came from a
+        thread."""
+        entry = self._entries.get(correlation_id)
+        if entry is None:
+            entry = _Entry(
+                channel_id=req.channel_id,
+                thread_id=(req.source_channel_id if req.source_channel_id != req.channel_id else None),
+            )
+            entry.writer = asyncio.create_task(self._write_loop(entry))
+            self._entries[correlation_id] = entry
+        return entry
 
     async def finish(self, correlation_id: str) -> None:
         """Flush pending content and retire the correlation's writer.

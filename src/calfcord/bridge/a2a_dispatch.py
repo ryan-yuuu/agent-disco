@@ -3,16 +3,19 @@ stream (D-1/D-2).
 
 A native ``message_agent`` consult is a ``tool_call`` step (name
 ``"message_agent"``); its reply is a ``tool_result`` whose ``tool_call_id``
-matches. The reply CANNOT be classified by its own fields — on the happy path
-its ``emitter``/``name`` is the *peer*, and a rejected consult's is the
-*caller* — so the dispatcher records each consult's ``tool_call_id`` and routes
-the matching result to A2A. This is reliable because the whole run shares one
-``correlation_id`` (single partition → request-before-reply order) and the
-handle stream is lossless and ordered.
+matches. The dispatcher records each consult's ``tool_call_id`` and routes the
+matching result to A2A rather than reading the result's own fields, because the
+peer is not on them: calfkit mints a tool result on the CALLER's fold hop
+(``nodes/_steps.py`` ``folded``, echoing ``name`` from the call's marker; the
+flush stamps ``emitter=self.node_id``), so an A2A reply reads
+``emitter=<caller>``, ``name="message_agent"`` on success AND on rejection.
+Pairing is reliable because the whole run shares one ``correlation_id``
+(single partition → request-before-reply order) and the handle stream is
+lossless and ordered.
 
-Peer identity for the projected thread always comes from the *request*'s
-``args["name"]`` (the one source stable across success and rejection), recorded
-in :class:`A2ACall`.
+Peer identity for the projected thread therefore always comes from the
+*request*'s ``args["name"]`` — the only place it appears — recorded in
+:class:`A2ACall`.
 """
 
 from __future__ import annotations

@@ -113,6 +113,28 @@ message per human turn that produced A2A activity, each anchoring a thread:
 Click a thread to see the exchange in order: the caller's consult
 (caller persona), the peer's reply (peer persona), and any system notes.
 
+### Finding it from the conversation
+
+You never have to hunt for the right thread. A consult leaves exactly **one**
+line in the caller's own step trace, under the caller's persona, linking
+straight into the audit thread:
+
+```
+💬 consulted `scribe` — view exchange
+```
+
+That marker is the *only* thing a consult contributes to the human's thread.
+The peer's own work — its preamble, its tool calls — is **private** and never
+renders there: those steps reach the bridge only because calfkit flushes every
+hop to the root caller (`emitter=<peer>`, `depth>1`), and the drain drops any
+step whose emitter is not the agent currently in control of the turn. A handoff
+is different: it *transfers* control, so the new owner's steps keep rendering
+inline under its own persona.
+
+When the projection failed there is no thread to link, so the marker reads
+`⚠️ couldn't write the audit log` instead — the consult still happened, and
+saying nothing would hide the gap from the one person watching.
+
 ### Reject and fault rendering
 
 Not every A2A event is a peer speaking, so two cases render as system
@@ -157,13 +179,29 @@ bridge needs:
 | Send Messages in Threads | All request / reply / note projections post into threads. |
 
 On the **guild** (server-wide), `Manage Channels` is required for lazy
-creation of the unified channel or category if they don't exist yet.
+creation of the unified channel or category if they don't exist yet. The
+invite link `disco init` prints grants it, so a fresh install needs no manual
+step. An install invited **before** that bit joined the link 403s here
+(`error code: 50013`) on its very first consult — re-run the invite to
+re-authorize, or create the channel by hand and grant the four channel
+permissions above.
+
+`Manage Channels` is only ever exercised on a **discovery miss**, so once the
+channel exists it is dead weight. It is also the broadest permission the bot
+holds (it covers editing and deleting *any* channel in the guild), so if you
+prefer a tighter standing grant you can revoke it after the first consult —
+everything above still works, and A2A only breaks again if the channel is
+deleted or `CALFKIT_A2A_CHANNEL_NAME` changes.
 
 The projection is **best-effort**: if a post fails (missing permission,
-rate-limit, transient 5xx) the bridge logs a WARN and continues — a
-Discord failure never faults the human turn. So a missing thread
-permission shows up as an audit gap in the bridge log, not an error to the
-user.
+rate-limit, transient 5xx) the bridge logs and continues — a Discord failure
+never faults the human turn. But it is not silent. The first failure logs at
+**ERROR** with the remedy named inline; while the outage persists, repeats drop
+to DEBUG so one broken channel cannot bury the log under identical tracebacks
+(a recovery re-arms the loud line). And because the consult marker in the
+caller's own thread renders `⚠️ couldn't write the audit log` whenever there is
+no thread to link, an audit gap is visible to the person talking to the agents
+— not just to whoever reads the log.
 
 ## Lifecycle
 
@@ -182,7 +220,7 @@ context in its conversation history.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| A2A activity happens but nothing appears in the audit channel | Bot lacks `Create Public Threads` / `Send Messages in Threads` / `Manage Webhooks` on the channel | Grant the permissions; the render is best-effort, so the log names the failing post |
+| A2A activity happens but nothing appears in the audit channel | Bot lacks `Manage Channels` (to create it), or `Create Public Threads` / `Send Messages in Threads` / `Manage Webhooks` (to use it) | The consult marker reads `⚠️ couldn't write the audit log`, and the first failure logs at ERROR naming the fix. `403 error code: 50013` on `create_text_channel` means `Manage Channels` — re-run the invite from `disco init`, which now grants it |
 | `⚠️ consult to X was rejected` in a thread | The peer is offline, or the consult is a self/cycle call | Bring the peer online; check the calling agent's `a2a` peer list |
 | `⚠️ X did not reply — the consult faulted` | The peer errored mid-consult | Check the peer agent's runner logs for the correlation id |
 | Unified channel keeps getting recreated | `CALFKIT_A2A_CHANNEL_NAME` differs between bridge restarts, or the channel keeps getting deleted | Pin the env var; check for moderation rules |

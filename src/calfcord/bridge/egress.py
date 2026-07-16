@@ -90,6 +90,12 @@ class A2AChannelResolver:
         self._unified_channel_id: int | None = None
         self._category: discord.CategoryChannel | None = None
 
+    @property
+    def guild_id(self) -> int:
+        """The guild hosting the unified channel — read by the projector to build
+        Discord jump links (``/channels/<guild>/<thread>``) into A2A threads."""
+        return self._guild_id
+
     async def resolve_unified_channel(self) -> int:
         """Return the Discord channel ID of the unified A2A audit channel.
 

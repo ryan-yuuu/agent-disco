@@ -281,6 +281,21 @@ def _chunk_text(text: str, limit: int) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def render_consult_marker(peer: str, thread_url: str | None) -> str:
+    """The one line a ``message_agent`` consult leaves in the human's thread.
+
+    The exchange itself is private — it projects to the A2A audit channel — so the
+    live trace carries only that the consult happened, plus a jump link into the
+    thread holding it. ``thread_url`` is ``None`` when the projection failed (it is
+    best-effort, so the failure was swallowed); the marker then states the audit gap
+    instead of linking nowhere, because a consult that silently renders nothing is
+    exactly the invisibility this marker exists to fix.
+    """
+    if thread_url is None:
+        return f"💬 consulted `{peer}` — ⚠️ couldn't write the audit log"
+    return f"💬 consulted `{peer}` — [view exchange]({thread_url})"
+
+
 def render_step_message(step: StepEvent) -> list[str]:
     """Render ONE :class:`StepEvent` into Components-V2 message bodies.
 

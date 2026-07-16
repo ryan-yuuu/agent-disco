@@ -106,9 +106,18 @@ services:
       CALF_HOST_URL: tansu:9092
       # The A2A audit channel: agent-to-agent exchanges rendered into a
       # private Discord channel. Bridge-hosted since the calfkit-012
-      # migration (it moved off the tools service). Set
-      # CALFKIT_A2A_CHANNEL_CATEGORY too to file the channel under a category.
-      CALFKIT_A2A_CHANNEL_NAME: private-a2a
+      # migration (it moved off the tools service). Left UNSET so compose
+      # inherits the bridge's own default (`private-a2a-chats`) — pinning a
+      # different literal here silently gave compose deployments a different
+      # channel than `disco start` ones. Uncomment to override, and set
+      # CALFKIT_A2A_CHANNEL_CATEGORY to file the channel under a category.
+      #
+      # MIGRATION: this used to pin `private-a2a`. A compose deployment that
+      # ran with that value will now resolve `private-a2a-chats` instead and
+      # create it on the next consult; the old channel is left untouched with
+      # its history intact. To keep using it, uncomment the line below and set
+      # it back to `private-a2a`.
+      # CALFKIT_A2A_CHANNEL_NAME: private-a2a-chats
     volumes:
       # Bridge-local SQLite store (DISCORD_TRANSCRIPT_DB_PATH, default
       # state/transcripts.sqlite3): step transcripts + tool-call replay, plus
