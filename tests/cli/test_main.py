@@ -8,9 +8,11 @@ honours the native (``$CALFCORD_HOME``) vs dev layouts and the
 
 from __future__ import annotations
 
+import argparse
 import errno
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -283,6 +285,45 @@ def test_main_traps_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch, capsys: 
     monkeypatch.setattr(main_mod, "_dispatch", _interrupt)
     assert main(["init"]) == 130
     assert "aborted." in capsys.readouterr().out
+
+
+def test_start_picker_create_row_is_wired_to_the_wizard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bare ``agent start`` hands the picker a create row that reaches the wizard.
+
+    Nothing else covers this wiring: every ``pick_agent`` test supplies its own
+    ``create_fn``, so they prove the picker, not the callback the CLI actually passes
+    it. And the callback imports ``agent_create`` lazily — the agent stack is ~1.2s and
+    the row may never be chosen (ADR-0023) — so there is no module-scope reference for
+    a linter to check either. A mistake here would surface only when a real operator
+    picked "create a new agent".
+    """
+    from calfcord.cli import agent_create
+
+    seen: dict[str, object] = {}
+
+    def _create_for_start(prompter: object, *, agents_dir: Path, env_path: Path, home: Path) -> str:
+        seen.update(agents_dir=agents_dir, env_path=env_path, home=home)
+        return "scribe"
+
+    def _pick(prompter: object, *, agents_dir: Path, message: str, create_fn: Any) -> object:
+        return create_fn()  # the operator chose the create row
+
+    monkeypatch.setattr(agent_create, "create_for_start", _create_for_start)
+    monkeypatch.setattr(main_mod, "pick_agent", _pick)
+    monkeypatch.setattr(main_mod, "make_prompter", lambda: object())
+
+    agents_dir, env_path, home = tmp_path / "agents", tmp_path / ".env", tmp_path
+    resolved = main_mod._resolve_start_target(
+        argparse.Namespace(name=None, all=False),
+        agents_dir=agents_dir,
+        env_path=env_path,
+        home=home,
+    )
+
+    assert resolved == "scribe"
+    assert seen == {"agents_dir": agents_dir, "env_path": env_path, "home": home}
 
 
 def test_main_maps_oserror_to_clean_exit_when_stdin_not_a_tty(
