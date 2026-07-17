@@ -54,11 +54,16 @@ bridge  client.agent(<name>).start(...)  ──►  agent runtime
    │    pairs each message_agent ToolCallEvent with its ToolResultEvent
    │    by tool_call_id; recognizes HandoffEvents
    │
-   └─ A2AProjector.project(...)
-        resolve/create the unified audit channel (lazy, cached)
-        anchor ONE thread per human turn (keyed by correlation_id)
-        post request (caller persona), reply (peer persona),
-        and any reject/handoff/fault notes (system "a2a" persona)
+   ├─ A2AProjector.project(...)
+   │    resolve/create the unified audit channel (lazy, cached)
+   │    anchor ONE thread per human turn (keyed by correlation_id)
+   │    post request (caller persona), reply (peer persona),
+   │    and any reject/handoff/fault notes (system "a2a" persona)
+   │
+   └─ A2AProjector.project_step(...)      # steps of a CONSULTED agent
+        every step whose emitter is not the turn's owner
+        folded into that agent's aggregated trace in the same thread
+        (ADR-0017 rendering, ADR-0026 routing)
 ```
 
 The dispatcher is **stateful**: there is no `message_agent` step *kind* —
@@ -67,8 +72,14 @@ reply is a `ToolResultEvent` whose emitter is the *peer*. The dispatcher
 records each `message_agent` `tool_call_id` and routes the matching result
 to A2A (reliable because a run's steps share one `correlation_id` → single
 partition → request-before-reply order, and the handle stream is
-lossless and ordered). Everything else on the stream is live progress,
-not A2A.
+lossless and ordered).
+
+Everything else on the stream is split by **one** predicate — is this step's
+emitter the agent currently in control of the human's turn? If yes it is live
+progress for the human's thread; if no it belongs to a consulted agent's
+sub-tree and is A2A. The same `is_acting` test has always drawn that line; since
+[ADR-0026](./adr/0026-the-a2a-thread-records-the-consulted-sub-tree.md) the
+second branch is *rendered* rather than dropped.
 
 Nested consults reach the bridge too: steps from the whole run tree
 publish to the root caller's inbox, so a B→C consult inside an A→B consult
@@ -80,8 +91,10 @@ is observable (it carries the same `correlation_id`, `emitter=C`,
 - **One thread per human turn.** The projector keys threads by
   `correlation_id` (one per top-level mention), created lazily on the
   first A2A projection for that turn — that first post is the thread's
-  starter message. Every later request / reply / reject / handoff / fault
-  for the same turn posts into that thread.
+  starter message. Every later request / reply / reject / fault **and every
+  consulted agent's step** for the same turn posts into that thread. Only a
+  *projection* ever creates the thread: a step arriving with none (the request's
+  render failed) is dropped rather than anchoring a thread it cannot name.
 - **Thread name** is shaped `caller→peer: <first ~40 chars>` (Discord caps
   thread names at 100 chars; the `→` is `U+2192`).
 - **Personas are a pure function** of the agent name —
@@ -103,33 +116,73 @@ message per human turn that produced A2A activity, each anchoring a thread:
 ─────────────────────────────────────────
 [Conan]   please summarize the design doc for...
           ↪ Thread: "conan→scribe: please summarize the design doc..."
-                    (2 messages)
+                    (3 messages)
 
 [Scribe]  what's the latency budget on the ingest path?
           ↪ Thread: "scribe→librarian: what's the latency budget..."
-                    (2 messages)
+                    (3 messages)
 ```
 
-Click a thread to see the exchange in order: the caller's consult
-(caller persona), the peer's reply (peer persona), and any system notes.
+Click a thread to see the whole consulted sub-tree in order: the caller's consult
+(caller persona), **the consulted agent's own working trace** (its persona), its
+reply (same persona), and any system notes. The working trace reads in the same
+row grammar as the human's thread — one row per tool, resolving in place, dim at
+rest and bright only where something needs you:
+
+```
+┌ terra
+│ -# ● read_file src/main.py · 120ms
+│ -# ● grep MessageSize · 118ms
+│ ❌ fan_out — MessageSizeTooLargeError('The message is 1150729 bytes')
+│ ⚠️ run failed after 4 tools · 1m 30s — details below
+└
+```
+
+That last row is the seal ([ADR-0025](./adr/0025-seal-the-step-trace-from-the-streams-terminal.md)):
+a consulted agent's trace closes with the run's outcome, so a thread says where
+the work stopped rather than trailing off. Before this, that whole message was a
+shrug. A nested consult — the peer
+consulting a peer — lands in the same thread, each agent under its own identity
+(see [ADR-0026](./adr/0026-the-a2a-thread-records-the-consulted-sub-tree.md)).
+
+The working trace is rendered by the same aggregated, throttled step renderer the
+human's thread uses ([ADR-0017](./adr/0017-aggregated-step-messages-throttled-edits.md)):
+one growing message per **unbroken run of steps under one persona**, edited in
+place — not one message per tool call. A new message starts when the persona
+changes (a webhook edit cannot change username/avatar) or when the 4000-char cap
+rolls over. So a thread holds roughly as many messages as the exchange has
+*speaking turns*, not as many as it has steps — and an agent that works, waits on
+a nested consult, then works again has two trace messages, not one.
 
 ### Finding it from the conversation
 
 You never have to hunt for the right thread. A consult leaves exactly **one**
-line in the caller's own step trace, under the caller's persona, linking
-straight into the audit thread:
+row in the caller's own step trace, under the caller's persona, linking straight
+into the audit thread. The row *resolves* as the consult does — it opens in the
+present tense and is rewritten in place, so it never claims an answer that has
+not arrived:
 
 ```
-💬 consulted `scribe` — view exchange
+◐ consulting scribe · view exchange          ← in flight
+-# ● consulted scribe · view exchange        ← answered; dim, out of the way
+❌ scribe didn't answer · view exchange      ← faulted; the one bright row
+-# ~~⊘ scribe~~ — cycle detected · view exchange   ← the caller refused to send
 ```
 
-That marker is the *only* thing a consult contributes to the human's thread.
-The peer's own work — its preamble, its tool calls — is **private** and never
-renders there: those steps reach the bridge only because calfkit flushes every
-hop to the root caller (`emitter=<peer>`, `depth>1`), and the drain drops any
-step whose emitter is not the agent currently in control of the turn. A handoff
-is different: it *transfers* control, so the new owner's steps keep rendering
-inline under its own persona.
+That row is the *only* thing a consult contributes to the human's thread, and it
+never carries what was said — only that it happened and where to read it.
+The consulted agent's own work — its preamble, its tool calls — never renders
+there: those steps reach the bridge only because calfkit flushes every hop to
+the root caller (`emitter=<peer>`, `depth>1`), and the drain routes any step
+whose emitter is not the agent currently in control of the turn into the A2A
+thread instead ([ADR-0026](./adr/0026-the-a2a-thread-records-the-consulted-sub-tree.md)).
+So it is not hidden — it is *elsewhere*, which is the point: the human's
+conversation stays about the human's question, and the working detail is one
+click away. The one exception is when the consult's own projection failed: with
+no thread to render into, the trace is dropped (at DEBUG) rather than invented
+somewhere — the marker reads `⚠️ couldn't write the audit log`, and that gap
+covers the working trace too. A handoff is different: it *transfers* control, so
+the new owner's steps keep rendering inline under its own persona.
 
 When the projection failed there is no thread to link, so the marker reads
 `⚠️ couldn't write the audit log` instead — the consult still happened, and
@@ -147,8 +200,8 @@ Not every A2A event is a peer speaking, so two cases render as system
 
 (Handoffs are no longer rendered here — see the note at the top of this doc.)
 
-The happy-path consult renders the request under the caller's persona and
-the reply under the peer's persona.
+The happy-path consult renders the request under the caller's persona, the
+consulted agent's working trace and its reply under that agent's persona.
 
 ## Operator setup
 
@@ -198,7 +251,17 @@ rate-limit, transient 5xx) the bridge logs and continues — a Discord failure
 never faults the human turn. But it is not silent. The first failure logs at
 **ERROR** with the remedy named inline; while the outage persists, repeats drop
 to DEBUG so one broken channel cannot bury the log under identical tracebacks
-(a recovery re-arms the loud line). And because the consult marker in the
+(a recovery re-arms the loud line).
+
+That loud line covers the **projections** (requests, replies, system notes). A
+consulted agent's *step trace* is written by the step renderer instead, whose
+failures are best-effort in its own way: an unposted trace message stays dirty
+and is retried on the next step or the final flush, and a failed edit heals on
+the next append — logged at WARNING/DEBUG, never arming the ERROR above. So a
+permission problem surfaces via the projections; a trace that merely lags is
+usually the rate-limit row in the runbook below, not an outage.
+
+And because the consult marker in the
 caller's own thread renders `⚠️ couldn't write the audit log` whenever there is
 no thread to link, an audit gap is visible to the person talking to the agents
 — not just to whoever reads the log.
@@ -225,6 +288,8 @@ context in its conversation history.
 | `⚠️ X did not reply — the consult faulted` | The peer errored mid-consult | Check the peer agent's runner logs for the correlation id |
 | Unified channel keeps getting recreated | `CALFKIT_A2A_CHANNEL_NAME` differs between bridge restarts, or the channel keeps getting deleted | Pin the env var; check for moderation rules |
 | Audit-render WARNs in the bridge log | Discord rate-limit or transient 5xx | Usually self-healing; investigate if persistent |
+| A consulted agent's working trace lags behind its reply, or updates in visible jumps | **Known limit.** Every thread in the audit channel shares **one webhook** (one per channel), but the step throttle is per-*turn* (`_MIN_EDIT_INTERVAL_SECONDS = 1.0`, sized against Discord's ~5 req/2s per-webhook bucket). Several turns consulting at once exceed that budget | Self-healing: discord.py backs off, and every progress write is best-effort — an unposted segment retries on the next wake, a failed edit heals on the next append. Nothing is lost, only delayed. If it is chronic, raise `min_edit_interval` for the A2A renderer (a constructor argument, not config) |
+| A consulted agent's step appears *above* the consult it announced | **Known limit, cosmetic.** The step aggregate is flushed by a throttled writer task while requests/replies are posted inline, so two writers race for order in one thread ([ADR-0026](./adr/0026-the-a2a-thread-records-the-consulted-sub-tree.md)) | None needed. Every message is still attributed to the right agent; only the interleaving is uncertain |
 
 ## What's not in v1
 

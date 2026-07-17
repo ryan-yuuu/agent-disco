@@ -679,7 +679,15 @@ def main() -> None:
                         transcript_store=transcript_store,
                         roster=MeshRoster(calfkit_client),
                         overrides=overrides,
-                        a2a=A2AProjector(resolver, persona_sender),
+                        # TWO renderer instances, not one shared: each is keyed by
+                        # correlation_id and both surfaces see the same id for a
+                        # turn, so one instance would collide the human's trace
+                        # with the consulted agents' (ADR-0026).
+                        a2a=A2AProjector(
+                            resolver,
+                            persona_sender,
+                            StepTraceRenderer(persona_sender, typing_notifier),
+                        ),
                         trace=StepTraceRenderer(persona_sender, typing_notifier),
                         reply=ReplyPoster(persona_sender, transcript_store),
                         memory_deps=MemoryPromptDeps(),

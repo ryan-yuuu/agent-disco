@@ -567,10 +567,11 @@ directory is calfkit's.
 A2A activity is projected to a unified Discord audit channel (default
 `private-a2a-chats`, overridable via `CALFKIT_A2A_CHANNEL_NAME`), now
 **hosted by the bridge**. The bridge watches each mention run's event
-stream and renders the consult request, the peer's reply, and any handoff
-into a per-turn thread. Kafka is the system of record; Discord is the
-human-readable audit. See [`a2a-threads.md`](a2a-threads.md) for the full
-projection design.
+stream and renders the consult request, the consulted agent's own working
+trace, and its reply into a per-turn thread. (Handoffs are *not* projected
+there — a handoff transfers the turn, so it renders inline in the main step
+stream.) Kafka is the system of record; Discord is the human-readable audit.
+See [`a2a-threads.md`](a2a-threads.md) for the full projection design.
 
 ## 9. Managing agents from the CLI
 

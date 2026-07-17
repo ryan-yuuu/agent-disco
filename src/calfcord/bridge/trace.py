@@ -99,7 +99,6 @@ from calfcord.bridge.trace_rows import (
 from calfcord.discord.messages import SentMessage
 
 if TYPE_CHECKING:
-    from calfcord.bridge.mention_handler import MentionRequest
     from calfcord.bridge.step_events import StepEvent
     from calfcord.discord.persona import DiscordPersonaSender, Persona
     from calfcord.discord.typing import TypingNotifier
@@ -129,6 +128,23 @@ _RESULT_STATE: Final[dict[str, RowState]] = {"success": "ok", "failed": "failed"
 """``StepEvent.outcome`` → the row state it resolves to. ``denied`` stays
 distinct from ``failed`` all the way to the glyph: a denial is routine (a winning
 handoff stubs its siblings) and must not spend the red a real failure needs."""
+
+
+@dataclass(frozen=True, slots=True)
+class Destination:
+    """Where a trace renders: the persona webhook hosts on ``channel_id`` and
+    posts into ``thread_id`` when the trace belongs in a thread (``None`` for a
+    top-level channel).
+
+    The renderer takes this rather than the inbound request it used to derive it
+    from, because a trace's destination is not always the human's conversation: a
+    consulted agent's trace renders into the A2A thread (ADR-0026). Callers own
+    the derivation — this module only needs the answer, which also keeps
+    ``mention_handler`` out of this module's imports.
+    """
+
+    channel_id: int
+    thread_id: int | None = None
 
 
 def _is_pending(row: TraceRow) -> TypeGuard[ToolRow | ConsultRow]:
@@ -332,11 +348,18 @@ async def _best_effort_trace[T](coro: Awaitable[T], *, channel_id: int) -> T | _
 class StepTraceRenderer:
     """Aggregates run steps into throttled, edited-in-place v2 trace messages.
 
-    Satisfies the ``StepTraceRenderer`` protocol the
+    Satisfies the ``StepTraceRendererLike`` protocol the
     :class:`~calfcord.bridge.mention_handler.MentionHandler` injects. Construct
-    once per bridge process from the REST-only persona sender and (optionally) a
-    typing notifier (currently dormant). ``min_edit_interval`` exists for tests;
-    production uses the default.
+    one per RENDERING SURFACE from the REST-only persona sender and (optionally) a
+    typing notifier (currently dormant): the bridge has two — the human's thread,
+    and the A2A audit thread each consulted agent's trace renders into
+    (ADR-0026). They MUST be separate instances because ``_entries`` is keyed by
+    ``correlation_id`` and both surfaces see the same one for a given turn.
+
+    ``min_edit_interval`` exists for tests, and as the one lever if a surface
+    proves too chatty for its webhook's bucket (the A2A channel funnels every
+    thread through ONE webhook — see the runbook in ``docs/a2a-threads.md``);
+    neither production instance passes it, so both take the default.
     """
 
     def __init__(
@@ -360,7 +383,7 @@ class StepTraceRenderer:
         # handler calls it in a ``finally``), so there is no eviction pressure.
         self._entries: dict[str, _Entry] = {}
 
-    async def on_step(self, step: StepEvent, req: MentionRequest, *, acting_agent: str) -> None:
+    async def on_step(self, step: StepEvent, dest: Destination, *, acting_agent: str) -> None:
         """Fold one step into the correlation's trace — no Discord I/O here.
 
         A ``tool_call`` opens a PENDING row; its ``tool_result`` resolves that
@@ -384,7 +407,7 @@ class StepTraceRenderer:
 
         match step.kind:
             case "tool_call":
-                entry = self._entry_for(step.correlation_id, req)
+                entry = self._entry_for(step.correlation_id, dest)
                 subject, detail = _summarise_args(step.args or {})
                 key = step.tool_call_id
                 row = ToolRow(key=key or "", name=_plain(step.name or "?"), subject=subject, detail=detail)
@@ -401,10 +424,10 @@ class StepTraceRenderer:
                     entry.started[key] = self._now()
                 entry.tool_count += 1
             case "tool_result":
-                entry = self._entry_for(step.correlation_id, req)
+                entry = self._entry_for(step.correlation_id, dest)
                 self._resolve_tool(entry, persona, step)
             case "handoff":
-                entry = self._entry_for(step.correlation_id, req)
+                entry = self._entry_for(step.correlation_id, dest)
                 self._append(
                     entry,
                     persona,
@@ -417,7 +440,7 @@ class StepTraceRenderer:
                 text = step.text.strip()
                 if not text:
                     return  # renders nothing → touches nothing
-                entry = self._entry_for(step.correlation_id, req)
+                entry = self._entry_for(step.correlation_id, dest)
                 for chunk in _chunk_text(text, _V2_CHUNK):
                     self._append(entry, persona, ProseRow(text=chunk))
             case _:
@@ -486,7 +509,7 @@ class StepTraceRenderer:
         key: str,
         peer: str,
         thread_url: str | None,
-        req: MentionRequest,
+        dest: Destination,
         *,
         correlation_id: str,
         persona_name: str,
@@ -506,7 +529,7 @@ class StepTraceRenderer:
         Per ADR-0020 the exchange itself is private: this shows only THAT the
         consult happened and where to read it.
         """
-        entry = self._entry_for(correlation_id, req)
+        entry = self._entry_for(correlation_id, dest)
         self._append_keyed(
             entry,
             persona_for(persona_name),
@@ -541,16 +564,15 @@ class StepTraceRenderer:
         entry.locate.pop(key, None)  # see _resolve_tool: a resolved row reserves nothing
         entry.wake.set()
 
-    def _entry_for(self, correlation_id: str, req: MentionRequest) -> _Entry:
+    def _entry_for(self, correlation_id: str, dest: Destination) -> _Entry:
         """The correlation's trace entry, created (with its writer task) on first
-        use. Routing is fixed at creation: the webhook hosts on the parent
-        ``channel_id`` and posts into ``thread_id`` when the wire came from a
-        thread."""
+        use. Routing is fixed at creation, from the destination the caller
+        derived."""
         entry = self._entries.get(correlation_id)
         if entry is None:
             entry = _Entry(
-                channel_id=req.channel_id,
-                thread_id=(req.source_channel_id if req.source_channel_id != req.channel_id else None),
+                channel_id=dest.channel_id,
+                thread_id=dest.thread_id,
                 opened_at=self._now(),
             )
             entry.writer = asyncio.create_task(self._write_loop(entry))

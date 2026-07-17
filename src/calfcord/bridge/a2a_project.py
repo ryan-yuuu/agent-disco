@@ -36,6 +36,8 @@ from calfcord.bridge.a2a_dispatch import (
 )
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.bridge.persona_resolve import persona_for
+from calfcord.bridge.step_events import StepEvent
+from calfcord.bridge.trace import Destination, StepTraceRenderer
 from calfcord.discord.chunking import chunk_split
 from calfcord.discord.persona import DiscordPersonaSender, Persona
 
@@ -44,7 +46,7 @@ logger = logging.getLogger(__name__)
 _EMPTY_PLACEHOLDER = "(empty response)"
 """Discord rejects an empty webhook message; substitute this for empty content."""
 
-_SYSTEM_PERSONA = Persona(name="a2a")
+_SYSTEM_PERSONA = persona_for("a2a")
 """Persona for *meta* notes (rejections, handoffs, faults) that are not a peer's
 own words — rendered as a system annotation, not attributed to an agent (D-2)."""
 
@@ -89,10 +91,20 @@ class A2AProjector:
     state, mirroring one thread per human turn's A2A activity.
     """
 
-    def __init__(self, resolver: A2AChannelResolver, personas: DiscordPersonaSender) -> None:
+    def __init__(
+        self,
+        resolver: A2AChannelResolver,
+        personas: DiscordPersonaSender,
+        steps: StepTraceRenderer,
+    ) -> None:
         self._resolver = resolver
         self._personas = personas
         self._threads: dict[str, int] = {}
+        # The audit channel's OWN step renderer — a DIFFERENT instance from the
+        # one rendering the human's thread (ADR-0026). Two surfaces, two entry
+        # maps: both are keyed by correlation_id and both see the same one for a
+        # turn, so sharing an instance would collide them onto one trace.
+        self._steps = steps
         self._channel_id: int | None = None
         self._degraded = False
 
@@ -167,6 +179,70 @@ class A2AProjector:
             ),
             "A2AFault",
         )
+
+    async def project_step(self, step: StepEvent) -> None:
+        """Fold one CONSULTED agent's step into its trace in that turn's thread
+        (ADR-0026). The drain hands us every step whose emitter is not the turn's
+        acting agent; the acting agent's own steps go to the human's thread.
+
+        ``acting_agent=step.emitter`` renders every step under the agent that
+        actually emitted it — in an audit view a tool call belongs to the agent
+        that made it, and a nested consult's peer is its own participant. It goes
+        through the SAME renderer the human's thread uses, so 23 tool calls are
+        one edited-in-place message rather than 23 (ADR-0017), rendered in the
+        same row grammar (ADR-0024).
+
+        A step never CREATES the thread: a thread is named ``caller→peer`` from
+        the consult, which a step cannot supply, and a step cannot precede its own
+        consult. So no thread means the request's render failed (best-effort) —
+        drop, matching the audit gap already logged there.
+        """
+        thread_id = self._threads.get(step.correlation_id)
+        if thread_id is None:
+            logger.debug(
+                "A2A: no thread for correlation=%s; dropping consulted agent's step emitter=%s kind=%s",
+                step.correlation_id,
+                step.emitter,
+                step.kind,
+            )
+            return
+        channel_id = self._channel_id
+        if channel_id is None:  # pragma: no cover - a thread implies a channel
+            return
+        await self._steps.on_step(
+            step,
+            Destination(channel_id=channel_id, thread_id=thread_id),
+            acting_agent=step.emitter,
+        )
+
+    async def seal(self, correlation_id: str, *, faulted: bool) -> None:
+        """Close the consulted agents' trace with the run's outcome (ADR-0025).
+
+        Driven by the same stream terminal that seals the human's thread. Without
+        it ``finish`` below would seal every consulted trace defensively as
+        ``interrupted`` — wrong for a clean run, and it would bury the case this
+        whole surface exists for: an agent that made 23 tool calls and then
+        faulted must read "run failed after 23 tools", not simply stop.
+        """
+        await self._steps.seal(correlation_id, faulted=faulted)
+
+    async def finish(self, correlation_id: str) -> None:
+        """Retire the turn's projector state.
+
+        MUST run after the terminal reply: a faulted run synthesises its
+        dangling-consult notes during delivery, and ``_emit`` needs the turn's
+        thread still mapped — evicting first would create a SECOND thread and
+        orphan each note in it.
+
+        The eviction is unconditional (a ``finally``) because ``_threads`` was
+        previously never evicted at all. That was tolerable at ~100 bytes per
+        turn; it is not now the projector owns a renderer, because an unretired
+        entry strands a live asyncio writer task per turn.
+        """
+        try:
+            await self._steps.finish(correlation_id)
+        finally:
+            self._threads.pop(correlation_id, None)
 
     async def _dispatch(self, projection: A2AProjection) -> int:
         """Render one projection and return the thread it landed in."""
