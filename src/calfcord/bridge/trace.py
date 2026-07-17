@@ -74,7 +74,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeGuard
 
 import aiohttp
 import discord
@@ -131,10 +131,15 @@ distinct from ``failed`` all the way to the glyph: a denial is routine (a winnin
 handoff stubs its siblings) and must not spend the red a real failure needs."""
 
 
-def _is_pending(row: TraceRow) -> bool:
+def _is_pending(row: TraceRow) -> TypeGuard[ToolRow | ConsultRow]:
     """Whether ``row`` still has a growth reservation booked against it.
 
     Only the keyed rows resolve; prose, handoffs, and the seal are born final.
+
+    A ``TypeGuard`` rather than a plain ``bool`` because callers rely on the
+    narrowing it performs: ``_seal_entry`` does ``replace(row, state=...)``, which
+    is only valid on the two variants that HAVE a state. The guard is what makes
+    that safety checkable instead of merely true.
     """
     return isinstance(row, ToolRow | ConsultRow) and row.state == "pending"
 

@@ -393,13 +393,14 @@ def _render_seal(row: SealRow) -> str:
 def render_row(row: TraceRow) -> str:
     """Render ONE row into ONE line. Pure, total, exhaustive.
 
-    ``assert_never`` is the house exhaustiveness idiom (see ``a2a_project.py``),
-    but be honest about what it buys HERE: this project runs no type checker, so
-    it is a runtime guard, not a build-time one. A sixth variant added without a
-    branch raises ``AssertionError`` inside ``_flush``; the writer loop logs it
-    and — because ``_flush`` renders before clearing ``dirty`` — the segment stays
-    dirty and re-raises on every wake, so the trace stops rendering entirely.
-    Loud in the logs, invisible in Discord. Add the branch.
+    ``assert_never`` is the exhaustiveness guard: a sixth variant added without a
+    branch here is a **mypy error** (the ``types`` CI job covers this module), not
+    a silently unrendered row. That job exists largely for this line — until it
+    did, the claim was decoration, and the runtime failure it hides is severe: the
+    ``AssertionError`` lands inside ``_flush``, the writer loop logs it, and
+    because ``_flush`` renders before clearing ``dirty`` the segment re-raises on
+    every wake. The trace stops rendering entirely — loud in the logs, invisible
+    in Discord.
     """
     if isinstance(row, ProseRow):
         return row.text
