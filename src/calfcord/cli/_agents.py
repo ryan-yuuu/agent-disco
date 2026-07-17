@@ -254,6 +254,9 @@ def agent_body(name: str) -> str:
         f"You are {human}, a helpful AI teammate in this Discord workspace. Answer\n"
         "questions and help with tasks clearly and concisely. If you don't know something,\n"
         "say so rather than guessing.\n"
+        "\n"
+        "You talk to people through Discord, so you can use Discord-flavored markdown in\n"
+        "your replies. Tables do not render.\n"
     )
 
 
