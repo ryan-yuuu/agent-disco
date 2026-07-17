@@ -51,7 +51,8 @@ terminal.
 **Failure semantics.** Every Discord call is best-effort
 (:func:`_best_effort_trace`): a failed send/edit must never crash the run or
 affect the terminal reply. A failed *post* leaves the segment dirty so the next
-wake (or the final flush) retries it — unposted content is never dropped. A
+wake retries it — and the final flush, which has no next wake, retries once
+inline. A
 failed *edit* is dropped without a retry (avoiding a hot loop on e.g. a deleted
 message); every edit re-renders the segment's full current body, so the next
 append heals the gap — EXCEPT on the final flush, which has no next append and
@@ -95,6 +96,7 @@ from calfcord.bridge.trace_rows import (
     _summarise_args,
     render_row,
 )
+from calfcord.discord.messages import SentMessage
 
 if TYPE_CHECKING:
     from calfcord.bridge.mention_handler import MentionRequest
@@ -300,8 +302,8 @@ async def _best_effort_trace[T](coro: Awaitable[T], *, channel_id: int) -> T | _
     discord.py does NOT wrap in a ``DiscordException`` — it comes straight from
     the transport. Left uncaught it escapes to the writer loop, which logs it and
     moves on, but by then ``_flush`` has cleared ``dirty``: the segment is clean,
-    never retried, and its content is silently gone. Returning ``None`` instead
-    routes a transport blip into the same "post failed, retry next wake" path as
+    never retried, and its content is silently gone. Returning :data:`_FAILED`
+    instead routes a transport blip into the same "post failed, retry" path as
     every other transient failure.
     """
     try:
@@ -705,24 +707,44 @@ class StepTraceRenderer:
             view = _build_segment_view(segment.body(), accent_for(segment.persona.name))
             segment.dirty = False
             if segment.message_id is None:
-                sent = await _best_effort_trace(
-                    self._persona_sender.send_components(
-                        persona=segment.persona,
-                        channel_id=entry.channel_id,
-                        view=view,
-                        thread_id=entry.thread_id,
-                    ),
-                    channel_id=entry.channel_id,
-                )
-                if not isinstance(sent, _Failed):
-                    segment.message_id = sent.id
-                else:
+                sent = await self._post(entry, segment, view)
+                if isinstance(sent, _Failed):
                     # Unposted content must not be lost: retry on the next wake
                     # (or the final flush). Bounded — one attempt per wake.
                     segment.dirty = True
                     blocked = True  # nothing behind this may post ahead of it
+                else:
+                    segment.message_id = sent.id
             else:
                 await self._edit(entry, segment, view)
+
+    async def _post(self, entry: _Entry, segment: _Segment, view: discord.ui.LayoutView) -> SentMessage | _Failed:
+        """Post one segment, retrying ONCE on a final flush.
+
+        The mirror of :meth:`_edit`, and for the mirror-image reason. A failed
+        post normally retries on the next wake — but it sets ``dirty`` WITHOUT
+        setting ``wake`` (that is what stops a hot loop), so on the final flush
+        the writer exits and **there is no next wake**. One transient 500 would
+        then drop the whole segment, seal included, leaving a trace that reads
+        "still running" forever.
+
+        Reachable whenever the seal's segment is unposted at ``finish``: a cap
+        rollover the seal opens, or a run that ends before the first flush.
+        """
+
+        def _attempt() -> Awaitable[SentMessage]:
+            return self._persona_sender.send_components(
+                persona=segment.persona,
+                channel_id=entry.channel_id,
+                view=view,
+                thread_id=entry.thread_id,
+            )
+
+        sent = await _best_effort_trace(_attempt(), channel_id=entry.channel_id)
+        if not isinstance(sent, _Failed) or not entry.finished.is_set():
+            return sent
+        logger.debug("trace: retrying the final post channel_id=%d", entry.channel_id)
+        return await _best_effort_trace(_attempt(), channel_id=entry.channel_id)
 
     async def _edit(self, entry: _Entry, segment: _Segment, view: discord.ui.LayoutView) -> None:
         """Edit one segment in place, retrying ONCE on a final flush.
@@ -748,7 +770,7 @@ class StepTraceRenderer:
                 thread_id=entry.thread_id,
             )
 
-        if await _best_effort_trace(_attempt(), channel_id=entry.channel_id) is not _FAILED:
+        if not isinstance(await _best_effort_trace(_attempt(), channel_id=entry.channel_id), _Failed):
             return
         if entry.finished.is_set():
             logger.debug("trace: retrying the final edit channel_id=%d", entry.channel_id)

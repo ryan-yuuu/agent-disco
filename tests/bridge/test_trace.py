@@ -1052,6 +1052,19 @@ class TestFailureSemantics:
         assert len(bodies) == 2, f"expected both segments to land, got {bodies}"
         assert "FIRST" in bodies[0] and "SECOND" in bodies[1], f"the trace reads backwards: {bodies}"
 
+    async def test_a_post_failing_on_the_final_flush_is_retried(self, sender: _FakeSender) -> None:
+        # The mirror of the seal's edit: "a failed post retries on the next wake"
+        # is true mid-run and FALSE on the final flush — a failed post sets
+        # `dirty` but deliberately not `wake`, so the writer exits and there is
+        # no next wake. Reachable whenever the seal's segment is still unposted
+        # at finish: cap rollover, or a run that ends before the first flush.
+        sender.send_failures.append(_http_exc(discord.HTTPException, 500))
+        r = _renderer(sender, interval=60.0)  # park the writer so nothing flushes early
+        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await _end(r)
+        assert sender.ok_sends(), "the whole trace was lost to one transient post failure"
+        assert "-# 1 tool · 0ms" in sender.ok_sends()[-1]["body"]
+
     async def test_the_seal_s_own_edit_is_retried_when_it_fails(self, sender: _FakeSender) -> None:
         # "A failed edit heals on the next append" holds for every edit EXCEPT
         # the last — and the seal is always the last, so there is no next append.
