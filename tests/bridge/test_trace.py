@@ -478,22 +478,33 @@ class TestRowLifecycle:
         assert sender.ok_sends()[0]["body"].startswith(r"-# ● read\_file")
 
     async def test_a_result_resolves_a_row_in_an_earlier_posted_segment(self, sender: _FakeSender) -> None:
-        # The call row lives in an ALREADY-POSTED message while a later segment
-        # is being appended to. _flush iterates every segment, each with its own
-        # message_id, so the older one simply goes dirty and is edited. Each
-        # _until forces a real flush, which is what makes this the cross-message
-        # case rather than one coalesced post.
+        # The call row lives in an ALREADY-POSTED message while a later segment is
+        # being appended to. _flush iterates every segment, each with its own
+        # message_id, so the older one simply goes dirty and is edited.
+        #
+        # The split is via CAP ROLLOVER, not a persona change — that is the only
+        # way a call and its result land in different messages (the design doc's
+        # edge-case table): a handoff stubs every pending sibling as denied BEFORE
+        # transferring, so a pending call can never survive a persona change to be
+        # resolved later. Filling segment 1 so the SECOND call cannot fit — its
+        # reserve pushes past the cap — is what forces the rollover.
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _dest(), acting_agent="aksel")
-        await _until(lambda: len(sender.ok_sends()) == 1)
-        await r.on_step(_step("handoff", target="billing"), _dest(), acting_agent="aksel")
-        await r.on_step(_step("agent_message", emitter="billing", text="on it"), _dest(), acting_agent="billing")
-        await _until(lambda: len(sender.ok_sends()) == 2)  # the persona change opened message 2
-        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
+        # Leave room for exactly one pending row's reserve, not two.
+        filler = "y" * (trace_mod._V2_TEXT_LIMIT - 200)
+        await r.on_step(_step("agent_message", text=filler), _dest(), acting_agent="aksel")
+        await r.on_step(_call("t1", "probe", {}), _dest(), acting_agent="aksel")
+        await _until(lambda: len(sender.ok_sends()) == 1)  # message 1: filler + ◐ probe
+        await r.on_step(_call("t2", "probe2", {}), _dest(), acting_agent="aksel")
+        await _until(lambda: len(sender.ok_sends()) == 2)  # rollover: message 2 opened
+        assert "probe2" not in sender.ok_sends()[0]["body"]  # t2 is NOT in message 1
+
+        # t1's result resolves a row inside message 1, which is already posted.
+        await r.on_step(_result("t1", "probe"), _dest(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
-        edits = [e["body"] for e in sender.ok_edits() if "read" in e["body"]]
-        assert edits, "the earlier, already-posted segment was never re-edited"
-        assert edits[-1].startswith(r"-# ● read\_file a.py · ")
+        m1_edits = [e["body"] for e in sender.ok_edits() if "probe " in e["body"] or e["body"].endswith("probe")]
+        assert m1_edits, "the earlier, already-posted segment was never re-edited"
+        assert "-# ● probe · " in m1_edits[-1]
+        assert "◐ probe" not in m1_edits[-1]  # resolved, not still pending
 
     async def test_elapsed_is_measured_between_call_and_result(self, sender: _FakeSender) -> None:
         clock = _FakeClock()
