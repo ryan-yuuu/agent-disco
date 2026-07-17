@@ -1,9 +1,7 @@
 <h1 align="center">🕺💃 Agent Disco</h1>
 
 <h3 align="center">
-Your agent team for anything. 
-
-Message them from anywhere using Discord.
+Your decentralized AI agent team with Discord as the interface.
 </h3>
 
 <br>
