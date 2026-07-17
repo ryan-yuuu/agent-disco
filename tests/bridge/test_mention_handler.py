@@ -140,7 +140,10 @@ class _FakeTrace:
         # Consult rows opened (key, peer, url, persona_name) and resolved
         # (key, state) — bridge annotations on the turn, not run steps.
         self.consults: list[tuple[str, str, str | None, str]] = []
-        self.consult_results: list[tuple[str, str]] = []
+        # (key, state, note) — `note` is recorded because ADR-0020's privacy rule
+        # lives in WHAT the handler passes here. Dropping it made the rule
+        # unobservable: a mutation leaking the peer's reply passed every test.
+        self.consult_results: list[tuple[str, str, str]] = []
         # (correlation_id, faulted) per seal — driven by the stream's terminal.
         self.seals: list[tuple[str, bool]] = []
 
@@ -161,7 +164,7 @@ class _FakeTrace:
         self.consults.append((key, peer, thread_url, persona_name))
 
     async def on_consult_result(self, key: str, *, state: str, note: str, correlation_id: str) -> None:
-        self.consult_results.append((key, state))
+        self.consult_results.append((key, state, note))
 
     async def seal(self, correlation_id: str, *, faulted: bool) -> None:
         self.seals.append((correlation_id, faulted))
@@ -218,6 +221,27 @@ def _consult(tcid: str, peer: str, message: str, caller: str = "scribe") -> Tool
         tool_call_id=tcid,
         name="message_agent",
         args={"name": peer, "message": message},
+    )
+
+
+def _consult_outcome(tcid: str, text: str, outcome: str, caller: str = "scribe") -> ToolResultEvent:
+    """A consult that was REJECTED (the caller refused to dispatch — offline,
+    self, a cycle) or FAULTED (the peer engaged, then blew up).
+
+    These are the branches this redesign exists for: today's marker is written at
+    request time in the past tense, so both of these leave an optimistic
+    "consulted" line in the human's thread while the warning goes only to the
+    audit thread.
+    """
+    return ToolResultEvent(
+        correlation_id="c1",
+        depth=1,
+        frame_id="f",
+        emitter=caller,
+        tool_call_id=tcid,
+        name="message_agent",
+        parts=[TextPart(text=text)],
+        outcome=outcome,  # type: ignore[arg-type]
     )
 
 
@@ -445,7 +469,7 @@ class TestStreamDrain:
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         await handler.handle(_req())
         assert fakes["trace"].consults == [("t1", "conan", "https://discord.com/channels/42/9001", "scribe")]
-        assert fakes["trace"].consult_results == [("t1", "ok")]
+        assert fakes["trace"].consult_results == [("t1", "ok", "")]
 
     async def test_consult_marker_surfaces_the_audit_gap_when_projection_failed(self) -> None:
         # The projection is best-effort and swallows Discord failures, so a broken
@@ -883,3 +907,39 @@ class TestTerminalSeals:
         handler, _client, fakes = _make(trace=_RaisingSeal())
         await handler.handle(_req(mentions=("scribe",)))
         assert len(fakes["reply"].replies) == 1
+
+
+class TestConsultOutcomesReachTheTrace:
+    """The redesign's stated reason for existing: a consult's OUTCOME must reach
+    the human's thread, not just its request.
+
+    Round-1 review: neither `A2AReject` nor `A2AFailed` appeared anywhere in this
+    file, so the two branches carrying that fix were untested at the seam.
+    """
+
+    async def test_a_rejected_consult_resolves_the_row_with_its_reason(self) -> None:
+        # The caller refused to dispatch (peer offline / self / a cycle). The
+        # reason is the DISPATCHER's own note about why the call never left — not
+        # part of any exchange — so ADR-0020 permits surfacing it.
+        steps = (_consult("t1", "conan", "q"), _consult_outcome("t1", "conan is offline", "denied"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["trace"].consult_results == [("t1", "denied", "conan is offline")]
+
+    async def test_a_faulted_consult_resolves_the_row_without_the_peer_s_words(self) -> None:
+        # The peer engaged and then faulted. Its text is exchange content, so the
+        # row must resolve WITHOUT it — the audit thread is where that lives.
+        steps = (_consult("t1", "conan", "q"), _consult_outcome("t1", "conan exploded: SECRET", "failed"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["trace"].consult_results == [("t1", "failed", "")]
+
+    async def test_a_successful_consult_never_forwards_the_peer_s_reply(self) -> None:
+        # THE privacy invariant (ADR-0020), asserted at the point that enforces
+        # it. It previously held only by accident — the `ok` render happens to
+        # ignore `note` — so a mutation forwarding the reply passed every test.
+        steps = (_consult("t1", "conan", "q"), _consult_reply("t1", "conan", "the SECRET is 42"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["trace"].consult_results == [("t1", "ok", "")]
+        assert all("SECRET" not in note for _k, _s, note in fakes["trace"].consult_results)

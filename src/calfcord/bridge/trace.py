@@ -685,8 +685,18 @@ class StepTraceRenderer:
         re-marks the segment dirty and is carried by the next flush. Iterates a
         copy — ``on_step`` may append a NEW segment while an older one is being
         sent (it is picked up on the next wake, which that append also set).
+
+        **A later segment is never posted before an earlier one lands.** Discord
+        orders by post time and this trace deletes nothing, so posting out of
+        order inverts the turn permanently — the reader sees the handoff before
+        the work that caused it. An unposted earlier segment therefore holds back
+        the ones behind it; it stays dirty and retries on the next wake. Only
+        POSTS are held: an edit cannot reorder anything.
         """
+        blocked = False
         for segment in list(entry.segments):
+            if blocked and segment.message_id is None:
+                continue  # still dirty → retried once the earlier segment lands
             if not segment.dirty:
                 continue
             # Render BEFORE clearing dirty: if the render raises, the writer
@@ -710,6 +720,7 @@ class StepTraceRenderer:
                     # Unposted content must not be lost: retry on the next wake
                     # (or the final flush). Bounded — one attempt per wake.
                     segment.dirty = True
+                    blocked = True  # nothing behind this may post ahead of it
             else:
                 await self._edit(entry, segment, view)
 

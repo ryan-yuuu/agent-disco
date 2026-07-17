@@ -143,6 +143,10 @@ class _BlockingSender(_FakeSender):
     This one parks inside the call until released, making "content appended
     while a flush is in flight" a deterministic scenario rather than a timing
     accident.
+
+    BOTH calls block. The edit matters more than the send: in a real turn the
+    message is posted long before the terminal arrives, so the seal almost always
+    races an in-flight EDIT, not a send.
     """
 
     def __init__(self) -> None:
@@ -150,10 +154,17 @@ class _BlockingSender(_FakeSender):
         self.in_flight = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def send_components(self, **kwargs: Any) -> SentMessage:
+    async def _park(self) -> None:
         self.in_flight.set()
         await self.release.wait()
+
+    async def send_components(self, **kwargs: Any) -> SentMessage:
+        await self._park()
         return await super().send_components(**kwargs)
+
+    async def edit_components(self, **kwargs: Any) -> None:
+        await self._park()
+        await super().edit_components(**kwargs)
 
 
 def _view_body(view: discord.ui.LayoutView) -> str:
@@ -534,6 +545,29 @@ class TestNothingIsLostMidFlush:
         body = _last_body(sender)
         assert "-# 1 tool · 0ms" in body, "the seal was dropped by the writer's exit"
         assert "◐" not in body, "a resolved row was left frozen as pending"
+
+    async def test_the_seal_survives_landing_during_an_in_flight_edit(self) -> None:
+        # The likelier shape of the same race: by the time the terminal arrives
+        # the message is long since posted, so the seal collides with an EDIT.
+        sender = _BlockingSender()
+        r = _renderer(sender)
+        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await sender.in_flight.wait()
+        sender.release.set()
+        await _until(lambda: len(sender.ok_sends()) == 1)  # posted
+
+        sender.release.clear()
+        sender.in_flight.clear()
+        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await sender.in_flight.wait()  # the writer is now INSIDE the edit
+
+        await r.seal(_CORRELATION_ID, faulted=False)
+        finishing = asyncio.create_task(r.finish(_CORRELATION_ID))
+        await asyncio.sleep(0)
+        sender.release.set()
+        await finishing
+
+        assert "-# 1 tool · 0ms" in _last_body(sender), "the seal was dropped mid-edit"
 
 
 class TestRemoteControlledFieldsAreHygienised:
@@ -993,6 +1027,30 @@ class TestFailureSemantics:
     """Best-effort: no Discord failure ever escapes on_step/finish; a failed
     post is retried (content must not be lost); a failed edit is dropped
     (the next flush re-renders the full body anyway)."""
+
+    async def test_a_retried_segment_never_lands_below_a_later_one(self, sender: _FakeSender) -> None:
+        # Nothing is ever deleted, so an out-of-order post is PERMANENT. If
+        # segment 1's post keeps failing while segment 2 opens (a handoff) and
+        # posts, segment 1's eventual retry lands underneath it and the turn
+        # reads backwards forever. Hold a later segment back rather than invert
+        # the trace; the earlier one retries on the next wake.
+        # Two failures, both landing DURING the run — one is not enough, since a
+        # single flush already retries the earlier segment before the later one.
+        sender.send_failures.append(_http_exc(discord.HTTPException, 503))
+        sender.send_failures.append(_http_exc(discord.HTTPException, 503))
+        r = _renderer(sender)
+        await r.on_step(_step("agent_message", emitter="aksel", text="FIRST: aksel"), _req(), acting_agent="aksel")
+        await _settle()  # failure 1
+        await r.on_step(_step("handoff", target="billing"), _req(), acting_agent="aksel")
+        await r.on_step(
+            _step("agent_message", emitter="billing", text="SECOND: billing"), _req(), acting_agent="billing"
+        )
+        await _settle()  # failure 2 — and billing's segment must NOT post ahead of aksel's
+        assert sender.ok_sends() == [], "a later segment posted while an earlier one was still unposted"
+        await _end(r)
+        bodies = [c["body"] for c in sender.ok_sends()]
+        assert len(bodies) == 2, f"expected both segments to land, got {bodies}"
+        assert "FIRST" in bodies[0] and "SECOND" in bodies[1], f"the trace reads backwards: {bodies}"
 
     async def test_the_seal_s_own_edit_is_retried_when_it_fails(self, sender: _FakeSender) -> None:
         # "A failed edit heals on the next append" holds for every edit EXCEPT
