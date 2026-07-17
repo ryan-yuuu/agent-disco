@@ -67,7 +67,26 @@ than left to inspection — this constant and :func:`render_row` must move
 together."""
 
 
-def _plain(text: str, limit: int = _DETAIL_MAX) -> str:
+class Plain(str):
+    """Text that has already been through :func:`_plain`.
+
+    A marker, not a validator — it exists so :func:`_plain` can be IDEMPOTENT.
+    Without it the contract is "call ``_plain`` exactly once", which is the
+    hardest kind to keep: zero lets a newline break out of the per-line ``-# ``
+    prefix, twice double-escapes visibly, and the two calls sit in different
+    modules. Three fields missed it. With it, the contract is "at least once" —
+    trivially satisfiable, so each row can coerce its own fields regardless of
+    what the caller did.
+
+    Note this is a *runtime* marker. As a ``NewType`` it would be erased and buy
+    nothing, since the project runs no type checker — a mechanism that looks like
+    enforcement without being it is worse than an honest docstring.
+    """
+
+    __slots__ = ()
+
+
+def _plain(text: str, limit: int = _DETAIL_MAX) -> Plain:
     """Flatten, escape, and bound arbitrary text for use inside one row.
 
     A row is a single line; tool output is not. A newline that survived into a
@@ -79,15 +98,21 @@ def _plain(text: str, limit: int = _DETAIL_MAX) -> str:
     Truncation happens *after* escaping so the returned length is genuinely
     bounded; cutting mid-escape would strand a lone backslash that then escapes
     the ellipsis, so an odd trailing run is trimmed back.
+
+    Idempotent: already-:class:`Plain` text is returned untouched, so applying it
+    twice is safe. That is what lets the rows coerce their own fields without
+    double-escaping whatever the caller already hygienised.
     """
+    if isinstance(text, Plain):
+        return text
     flat = " ".join(text.split())
     escaped = _MD_ESCAPE.sub(r"\\\1", flat)
     if len(escaped) <= limit:
-        return escaped
+        return Plain(escaped)
     cut = escaped[: limit - 1]
     if (len(cut) - len(cut.rstrip("\\"))) % 2:
         cut = cut[:-1]
-    return cut.rstrip() + "…"
+    return Plain(cut.rstrip() + "…")
 
 
 # --- argument summarisation -------------------------------------------------
@@ -115,7 +140,7 @@ _SCALARS: Final[tuple[type, ...]] = (str, int, float, bool)
 so a deep argument can never bloat the line."""
 
 
-def _summarise_args(args: Mapping[str, Any]) -> tuple[str, str]:
+def _summarise_args(args: Mapping[str, Any]) -> tuple[Plain, Plain]:
     """Split a tool call's arguments into ``(subject, detail)``.
 
     opencode's rule, ported: promote ONE argument to prose, bracket the scalar
@@ -127,9 +152,9 @@ def _summarise_args(args: Mapping[str, Any]) -> tuple[str, str]:
         (key for key in _SUBJECT_KEYS if isinstance(args.get(key), _SCALARS)),
         None,
     )
-    subject = _plain(str(args[subject_key])) if subject_key is not None else ""
+    subject = _plain(str(args[subject_key])) if subject_key is not None else Plain("")
     pairs = [f"{key}={value}" for key, value in args.items() if key != subject_key and isinstance(value, _SCALARS)]
-    detail = _plain(f"[{', '.join(pairs)}]") if pairs else ""
+    detail = _plain(f"[{', '.join(pairs)}]") if pairs else Plain("")
     return subject, detail
 
 
@@ -150,13 +175,33 @@ def _duration(ms: int) -> str:
 
 RowState = Literal["pending", "ok", "failed", "denied", "interrupted"]
 """A keyed row's lifecycle. ``pending`` is the live edge; the rest are terminal.
-``interrupted`` is what the seal rewrites a still-``pending`` row to when the run
-faults — the bridge is alive and knows, so it never leaves a frozen ``◐``."""
+
+``interrupted`` is what the seal rewrites a still-``pending`` row to whenever it
+lands with rows in flight — a fault OR an unknown outcome alike. Note this is a
+different axis from :data:`SealOutcome`: ``RowState.interrupted`` co-occurs with
+``SealOutcome.faulted``, and neither implies the other. Either way the bridge is
+alive and knows, so it never leaves a frozen ``◐``."""
+
+
+def _hygienise(row: object, *fields: str) -> None:
+    """Coerce each named field through :func:`_plain`, in place.
+
+    Called from ``__post_init__``, which ``dataclasses.replace`` re-runs — safe
+    only because ``_plain`` is idempotent. ``object.__setattr__`` is how a frozen
+    dataclass initialises itself.
+    """
+    for field_name in fields:
+        object.__setattr__(row, field_name, _plain(getattr(row, field_name)))
 
 
 @dataclass(frozen=True, slots=True)
 class ProseRow:
-    """The agent's own narration. Unkeyed — never mutates."""
+    """The agent's own narration. Unkeyed — never mutates.
+
+    Deliberately NOT hygienised: this is the agent's own markdown, rendered
+    bright with no ``-# `` prefix, so escaping it would corrupt the answer. It is
+    bounded by :func:`_chunk_text` instead.
+    """
 
     text: str
 
@@ -179,6 +224,9 @@ class ToolRow:
     """Why it ended that way — the error, or the denial's reason."""
     elapsed_ms: int | None = None
 
+    def __post_init__(self) -> None:
+        _hygienise(self, "name", "subject", "detail", "note")
+
 
 @dataclass(frozen=True, slots=True)
 class ConsultRow:
@@ -192,8 +240,20 @@ class ConsultRow:
     key: str
     peer: str
     thread_url: str | None = None
+    """The projection's receipt. NOT hygienised — a bridge-built URL, which
+    escaping would corrupt."""
     state: RowState = "pending"
-    note: str = ""
+    denial_reason: str = ""
+    """Why the caller REFUSED to dispatch (offline, self, a cycle) — the
+    dispatcher's own note, not part of the exchange, so ADR-0020 permits it.
+
+    Rendered by the ``denied`` branch ONLY. The ``failed`` branch drops it on
+    purpose: there the text is the PEER's own fault prose, which must never reach
+    the human's thread. Named for the one thing it may carry so that omission
+    cannot look like an inconsistency worth "fixing"."""
+
+    def __post_init__(self) -> None:
+        _hygienise(self, "peer", "denial_reason")
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +263,9 @@ class HandoffRow:
 
     target: str
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        _hygienise(self, "target", "reason")
 
 
 SealOutcome = Literal["ok", "faulted", "interrupted"]
@@ -302,7 +365,7 @@ def _render_consult(row: ConsultRow) -> str:
         case "failed":
             return f"{_FAILED} {row.peer} didn't answer · {link}"
         case "denied":
-            return f"{_struck(row.peer, row.note)} · {link}"
+            return f"{_struck(row.peer, row.denial_reason)} · {link}"
         case "interrupted":
             return f"{_struck(row.peer, 'never replied')} · {link}"
     assert_never(row.state)
@@ -330,8 +393,13 @@ def _render_seal(row: SealRow) -> str:
 def render_row(row: TraceRow) -> str:
     """Render ONE row into ONE line. Pure, total, exhaustive.
 
-    ``assert_never`` is the exhaustiveness guard: a sixth variant added without a
-    branch here is a mypy error, not a silently unrendered row.
+    ``assert_never`` is the house exhaustiveness idiom (see ``a2a_project.py``),
+    but be honest about what it buys HERE: this project runs no type checker, so
+    it is a runtime guard, not a build-time one. A sixth variant added without a
+    branch raises ``AssertionError`` inside ``_flush``; the writer loop logs it
+    and — because ``_flush`` renders before clearing ``dirty`` — the segment stays
+    dirty and re-raises on every wake, so the trace stops rendering entirely.
+    Loud in the logs, invisible in Discord. Add the branch.
     """
     if isinstance(row, ProseRow):
         return row.text

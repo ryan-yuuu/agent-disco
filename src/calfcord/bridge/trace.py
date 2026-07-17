@@ -381,13 +381,19 @@ class StepTraceRenderer:
             case "tool_call":
                 entry = self._entry_for(step.correlation_id, req)
                 subject, detail = _summarise_args(step.args or {})
-                key = step.tool_call_id or ""
-                self._append_keyed(
-                    entry,
-                    persona,
-                    ToolRow(key=key, name=_plain(step.name or "?"), subject=subject, detail=detail),
-                )
-                entry.started[key] = self._now()
+                key = step.tool_call_id
+                row = ToolRow(key=key or "", name=_plain(step.name or "?"), subject=subject, detail=detail)
+                if key is None:
+                    # Unkeyable, so never registered: `or ""` would alias EVERY
+                    # null id onto one key, and the second call would overwrite
+                    # the first — the first result then resolving the SECOND row,
+                    # rendering tool A's outcome on tool B's line. An unkeyed row
+                    # can never be resolved, so the seal interrupts it honestly.
+                    logger.warning("trace: tool_call %r has no tool_call_id; its row cannot resolve", step.name)
+                    self._append(entry, persona, row)
+                else:
+                    self._append_keyed(entry, persona, row)
+                    entry.started[key] = self._now()
                 entry.tool_count += 1
             case "tool_result":
                 entry = self._entry_for(step.correlation_id, req)
@@ -428,7 +434,7 @@ class StepTraceRenderer:
         appended to (cap rollover mid-flight) — that is fine: every segment
         carries its own ``message_id``, so it simply goes dirty and is edited.
         """
-        key = step.tool_call_id or ""
+        key = step.tool_call_id
         state = _RESULT_STATE.get(step.outcome)
         if state is None:
             # A future calfkit outcome. Degrade to `failed` (visible, honest
@@ -437,7 +443,7 @@ class StepTraceRenderer:
             logger.warning("trace: unknown tool outcome %r; rendering as failed", step.outcome)
             state = "failed"
         note = _plain(step.text)
-        located = entry.locate.get(key)
+        located = entry.locate.get(key) if key is not None else None
         if located is None:
             # Orphan: no call row was ever seen for this id. Append a resolved
             # row rather than raise — the drain's contract is that the render
@@ -449,7 +455,7 @@ class StepTraceRenderer:
                 entry,
                 persona,
                 ToolRow(
-                    key=key,
+                    key=key or "",
                     name=_plain(step.name or "?"),
                     subject=subject,
                     detail=detail,
@@ -461,14 +467,14 @@ class StepTraceRenderer:
         segment, index = located
         row = segment.rows[index]
         assert isinstance(row, ToolRow)  # locate only ever holds keyed rows
-        started = entry.started.pop(key, None)
+        started = entry.started.pop(key, None) if key is not None else None
         elapsed_ms = int((self._now() - started) * 1000) if started is not None else None
         segment.replace(index, replace(row, state=state, note=note, elapsed_ms=elapsed_ms))
         # Retire the key. A resolved row books ZERO growth reserve, so letting a
         # second result re-resolve it would grow the segment into budget nobody
         # reserved — past fits() and into the silent hard cap. A duplicate id now
         # lands as an orphan row instead, which is visible rather than corrupting.
-        entry.locate.pop(key, None)
+        entry.locate.pop(key, None)  # type: ignore[arg-type]
 
     async def on_consult(
         self,
@@ -526,7 +532,7 @@ class StepTraceRenderer:
         row = segment.rows[index]
         if not isinstance(row, ConsultRow):
             return
-        segment.replace(index, replace(row, state=state, note=_plain(note)))
+        segment.replace(index, replace(row, state=state, denial_reason=_plain(note)))
         entry.locate.pop(key, None)  # see _resolve_tool: a resolved row reserves nothing
         entry.wake.set()
 

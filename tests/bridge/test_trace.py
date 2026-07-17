@@ -344,14 +344,14 @@ class TestSegmentHoldsRows:
         seg = self._segment()
         seg.append(ProseRow(text="Let me look into that."))
         seg.append(ToolRow(key="t1", name="read_file", subject="a.py", state="ok", elapsed_ms=40))
-        assert seg.body() == "Let me look into that.\n-# ● read_file a.py · 40ms"
+        assert seg.body() == r"Let me look into that." + "\n" + r"-# ● read\_file a.py · 40ms"
 
     def test_replacing_a_row_re_renders_it_in_place(self) -> None:
         seg = self._segment()
         index = seg.append(ToolRow(key="t1", name="read_file", subject="a.py"))
-        assert seg.body() == "◐ read_file a.py"
+        assert seg.body() == r"◐ read\_file a.py"
         seg.replace(index, ToolRow(key="t1", name="read_file", subject="a.py", state="ok", elapsed_ms=40))
-        assert seg.body() == "-# ● read_file a.py · 40ms"
+        assert seg.body() == r"-# ● read\_file a.py · 40ms"
 
     def test_append_and_replace_both_mark_the_segment_dirty(self) -> None:
         seg = self._segment()
@@ -469,6 +469,26 @@ class TestRowLifecycle:
         entry = r._entries[_CORRELATION_ID]
         assert "t1" not in entry.locate, "a resolved row is still re-resolvable"
         await _end(r)
+
+    async def test_calls_without_an_id_are_never_aliased_onto_each_other(self, sender: _FakeSender) -> None:
+        # `key = step.tool_call_id or ""` aliased every null id onto ONE key, so
+        # the second call overwrote the first in `locate` and the first result
+        # then resolved the SECOND row — tool A's outcome rendered on tool B's
+        # line. Misattribution, not a missed resolve. An unkeyable row is
+        # appended unkeyed instead: it can never be resolved anyway, so the seal
+        # interrupts it honestly.
+        r = _renderer(sender)
+        await r.on_step(_step("tool_call", name="alpha"), _req(), acting_agent="aksel")
+        await r.on_step(_step("tool_call", name="beta"), _req(), acting_agent="aksel")
+        await r.on_step(
+            _step("tool_result", name="alpha", outcome="failed", text="alpha blew up"),
+            _req(),
+            acting_agent="aksel",
+        )
+        await _end(r)
+        body = _last_body(sender)
+        assert "beta — alpha blew up" not in body, "alpha's result resolved beta's row"
+        assert "❌ alpha — alpha blew up" in body
 
     async def test_an_orphan_result_appends_instead_of_raising(self, sender: _FakeSender) -> None:
         # The drain's contract is that the render path can NEVER fault the turn.
@@ -836,11 +856,11 @@ class TestAggregation:
 
     async def test_second_step_edits_instead_of_posting(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="read_file"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-read_file", "read_file"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         assert sender.sends[0]["body"] == r"◐ read\_file"
 
-        await renderer.on_step(_step("tool_result", name="read_file"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-read_file", "read_file"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
 
         # The edit re-renders the WHOLE segment: both lines, joined.
@@ -851,18 +871,18 @@ class TestAggregation:
     async def test_first_step_posts_immediately_even_with_long_interval(self, sender: _FakeSender) -> None:
         """Leading edge: an idle writer flushes a new step with no interval wait."""
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)  # far sooner than 60s
 
     async def test_burst_coalesces_into_one_final_edit(self, sender: _FakeSender) -> None:
         """Steps landing inside the interval produce NO interim edits; finish
         flushes them all as ONE edit carrying the full trace."""
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_step("tool_call", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
-        await renderer.on_step(_step("tool_result", name="a"), _req(), acting_agent="aksel")
-        await renderer.on_step(_step("tool_call", name="b"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-b", "b"), _req(), acting_agent="aksel")
         await _settle()
         assert sender.edits == []  # writer is parked in its interval
 
@@ -876,9 +896,9 @@ class TestAggregation:
         """finish() must not wait out the edit interval (the terminal reply is
         behind it in the handler)."""
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_step("tool_call", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
-        await renderer.on_step(_step("tool_result", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
 
         loop = asyncio.get_running_loop()
         start = loop.time()
@@ -888,7 +908,7 @@ class TestAggregation:
 
     async def test_clean_finish_makes_no_extra_calls(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         await renderer.seal(_CORRELATION_ID, faulted=False)
         await _until(lambda: len(sender.edits) == 1)  # the seal is real content
@@ -916,7 +936,7 @@ class TestPersonaSegmentation:
         renderer's contract shouldn't depend on that history.
         """
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_result", name="todo", emitter="todo"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-todo", "todo", emitter="todo"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         assert sender.sends[0]["persona"].name == "aksel"
 
@@ -930,14 +950,14 @@ class TestPersonaSegmentation:
         """The handoff announcement aggregates under the handing-off agent; the
         receiving agent's first step opens a NEW message under its persona."""
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
         await renderer.on_step(_step("handoff", target="/billing", emitter="aksel"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
         assert sender.edits[0]["body"] == "◐ t\n➜ handed off to billing"
 
-        await renderer.on_step(_step("tool_call", name="u"), _req(), acting_agent="billing")
+        await renderer.on_step(_call("id-u", "u"), _req(), acting_agent="billing")
         await _until(lambda: len(sender.sends) == 2)
         assert sender.sends[1]["persona"].name == "billing"
         assert sender.sends[1]["body"] == "◐ u"
@@ -966,7 +986,7 @@ class TestRollover:
         renderer = _renderer(sender)
         await renderer.on_step(_step("agent_message", text="y" * 3000), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
-        await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
         assert sender.edits[0]["body"] == "y" * 3000 + "\n◐ t"
         assert len(sender.sends) == 1
@@ -995,12 +1015,12 @@ class TestThreadRouting:
         thread_id = 555_001
         renderer = _renderer(sender)
         req = _req(source_channel_id=thread_id)
-        await renderer.on_step(_step("tool_call", name="t"), req, acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), req, acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         assert sender.sends[0]["channel_id"] == _CHANNEL_ID  # webhook host = parent
         assert sender.sends[0]["thread_id"] == thread_id  # routed into the thread
 
-        await renderer.on_step(_step("tool_result", name="t"), req, acting_agent="aksel")
+        await renderer.on_step(_result("id-t", "t"), req, acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
         assert sender.edits[0]["channel_id"] == _CHANNEL_ID
         assert sender.edits[0]["thread_id"] == thread_id
@@ -1102,11 +1122,11 @@ class TestFailureSemantics:
     async def test_failed_post_retries_on_next_wake_with_full_body(self, sender: _FakeSender) -> None:
         sender.send_failures.append(_http_exc(discord.Forbidden, 403))
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)  # the failing attempt
         assert sender.ok_sends() == []
 
-        await renderer.on_step(_step("tool_result", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.ok_sends()) == 1)
         # The retry is a POST (no message exists yet) carrying BOTH lines.
         assert sender.ok_sends()[0]["body"] == "-# ● a · 0ms"
@@ -1115,7 +1135,7 @@ class TestFailureSemantics:
     async def test_failed_post_retried_by_final_flush(self, sender: _FakeSender) -> None:
         sender.send_failures.append(_http_exc(discord.Forbidden, 403))
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_step("tool_call", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         await _end(renderer)
         assert len(sender.ok_sends()) == 1  # finish retried the post
@@ -1128,11 +1148,11 @@ class TestFailureSemantics:
         # it — so that is what this asserts: no edit happens between the failure
         # and the next append.
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
         sender.edit_failures.append(_http_exc(discord.NotFound, 404))
-        await renderer.on_step(_step("tool_result", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)  # the failing attempt
         await _settle()
         assert len(sender.edits) == 1, "the dropped edit was hot-retried with no new content"
@@ -1140,14 +1160,14 @@ class TestFailureSemantics:
 
     async def test_failed_edit_recovers_on_next_step(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
         sender.edit_failures.append(_http_exc(discord.NotFound, 404))
-        await renderer.on_step(_step("tool_result", name="a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
 
-        await renderer.on_step(_step("tool_call", name="b"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-b", "b"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.ok_edits()) == 1)
         # The recovery edit re-renders the FULL segment — the dropped window heals.
         assert sender.ok_edits()[0]["body"] == "-# ● a · 0ms\n◐ b"
@@ -1158,7 +1178,7 @@ class TestFailureSemantics:
         sender.send_failures.append(_http_exc(discord.Forbidden, 403))
         renderer = _renderer(sender)
         with caplog.at_level(logging.WARNING, logger="calfcord.bridge.trace"):
-            await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+            await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
             await _until(lambda: len(sender.sends) == 1)
             await renderer.finish(_CORRELATION_ID)  # must not raise
         assert any("Forbidden" in r.getMessage() for r in caplog.records)
@@ -1168,7 +1188,7 @@ class TestFailureSemantics:
         # broader catch must funnel it through.
         sender.send_failures.append(discord.RateLimited(retry_after=1.0))
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
         await renderer.finish(_CORRELATION_ID)  # must not raise
 
     async def test_non_discord_error_never_escapes_finish(self, sender: _FakeSender) -> None:
@@ -1176,7 +1196,7 @@ class TestFailureSemantics:
         unwind the drain or block the terminal reply."""
         sender.send_failures.append(RuntimeError("sender not started"))
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
         await renderer.finish(_CORRELATION_ID)  # must not raise
 
 
@@ -1185,11 +1205,11 @@ class TestConcurrentRuns:
 
     async def test_two_correlations_get_separate_messages(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_step("tool_call", name="a", correlation_id="run-1"), _req(), acting_agent="aksel")
-        await renderer.on_step(_step("tool_call", name="b", correlation_id="run-2"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a", correlation_id="run-1"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-b", "b", correlation_id="run-2"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 2)
 
-        await renderer.on_step(_step("tool_result", name="a", correlation_id="run-1"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a", correlation_id="run-1"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
         by_body = {c["body"]: c for c in sender.sends}
         assert sender.edits[0]["message_id"] == by_body["◐ a"]["message_id"]
@@ -1204,6 +1224,6 @@ class TestTypingDisabled:
     async def test_typing_notifier_is_not_fired(self, sender: _FakeSender) -> None:
         notifier = SimpleNamespace(fire=lambda _cid: pytest.fail("typing must stay dormant"))
         renderer = StepTraceRenderer(sender, notifier, min_edit_interval=0.0)  # type: ignore[arg-type]
-        await renderer.on_step(_step("tool_call", name="t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         await renderer.finish(_CORRELATION_ID)

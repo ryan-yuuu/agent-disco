@@ -23,6 +23,7 @@ import calfcord.bridge.trace_rows as trace_rows
 from calfcord.bridge.trace_rows import (
     ConsultRow,
     HandoffRow,
+    Plain,
     ProseRow,
     SealRow,
     ToolRow,
@@ -146,15 +147,15 @@ class TestRenderRow:
     def test_pending_tool_is_bright_with_the_in_flight_glyph(self) -> None:
         # Bright because it is the live edge; Discord has no spinner to offer.
         row = ToolRow(key="t1", name="read_file", subject="invoices/4417.json")
-        assert render_row(row) == "◐ read_file invoices/4417.json"
+        assert render_row(row) == r"◐ read\_file invoices/4417.json"
 
     def test_ok_tool_dims_and_carries_its_duration(self) -> None:
         row = ToolRow(key="t1", name="read_file", subject="invoices/4417.json", state="ok", elapsed_ms=40)
-        assert render_row(row) == "-# ● read_file invoices/4417.json · 40ms"
+        assert render_row(row) == r"-# ● read\_file invoices/4417.json · 40ms"
 
     def test_ok_tool_keeps_its_bracketed_args(self) -> None:
         row = ToolRow(key="t1", name="read_file", subject="a.py", detail="[limit=130]", state="ok", elapsed_ms=40)
-        assert render_row(row) == "-# ● read_file a.py [limit=130] · 40ms"
+        assert render_row(row) == r"-# ● read\_file a.py [limit=130] · 40ms"
 
     def test_failed_tool_escapes_the_dim_register_and_shows_the_error(self) -> None:
         # THE attention mechanism: no `-# `, an emoji, and the error itself.
@@ -165,28 +166,28 @@ class TestRenderRow:
             state="failed",
             note="connection timed out after 5s",
         )
-        assert render_row(row) == "❌ search_docs rejection codes — connection timed out after 5s"
+        assert render_row(row) == r"❌ search\_docs rejection codes — connection timed out after 5s"
 
     def test_denied_tool_is_dim_and_struck_not_red(self) -> None:
         # opencode separates these deliberately: a denial is routine (a winning
         # handoff stubs its siblings), a failure is not. Red is not spent here.
         row = ToolRow(key="t1", name="search_docs", state="denied", note="superseded by handoff")
-        assert render_row(row) == "-# ~~⊘ search_docs~~ — superseded by handoff"
+        assert render_row(row) == r"-# ~~⊘ search\_docs~~ — superseded by handoff"
 
     def test_denied_tool_without_a_note_renders_no_dangling_dash(self) -> None:
         row = ToolRow(key="t1", name="search_docs", state="denied")
-        assert render_row(row) == "-# ~~⊘ search_docs~~"
+        assert render_row(row) == r"-# ~~⊘ search\_docs~~"
 
     def test_interrupted_tool_states_it_without_needing_a_note(self) -> None:
         # What the seal rewrites an unresolved row to when the run faults.
         row = ToolRow(key="t1", name="lookup_account", subject="acct_88213", state="interrupted")
-        assert render_row(row) == "-# ~~⊘ lookup_account acct_88213~~ — interrupted"
+        assert render_row(row) == r"-# ~~⊘ lookup\_account acct\_88213~~ — interrupted"
 
     def test_ok_tool_without_a_measured_duration_omits_it(self) -> None:
         # An orphan result (no call row was ever seen) has nothing to measure
         # from. Rendering "· 0ms" would state a timing that was never taken.
         row = ToolRow(key="t1", name="read_file", subject="a.py", state="ok", elapsed_ms=None)
-        assert render_row(row) == "-# ● read_file a.py"
+        assert render_row(row) == r"-# ● read\_file a.py"
 
     def test_tool_with_no_subject_or_detail_renders_bare(self) -> None:
         assert render_row(ToolRow(key="t1", name="ping", state="ok", elapsed_ms=5)) == "-# ● ping · 5ms"
@@ -208,7 +209,7 @@ class TestRenderRow:
         assert render_row(row) == f"❌ conan didn't answer · [view exchange]({_URL})"
 
     def test_denied_consult_is_dim_and_struck_with_its_reason(self) -> None:
-        row = ConsultRow(key="c1", peer="conan", thread_url=_URL, state="denied", note="cycle detected")
+        row = ConsultRow(key="c1", peer="conan", thread_url=_URL, state="denied", denial_reason="cycle detected")
         assert render_row(row) == f"-# ~~⊘ conan~~ — cycle detected · [view exchange]({_URL})"
 
     def test_interrupted_consult_says_the_peer_never_replied(self) -> None:
@@ -318,7 +319,7 @@ class TestGrowthReserve:
         for url in (None, self._LONG_URL):
             pending = ConsultRow(key="c1", peer="conan", thread_url=url)
             for state in ("ok", "failed", "denied", "interrupted"):
-                resolved = dataclasses.replace(pending, state=state, note=self._NOTE)  # type: ignore[arg-type]
+                resolved = dataclasses.replace(pending, state=state, denial_reason=self._NOTE)  # type: ignore[arg-type]
                 growth = self._growth(pending, resolved)
                 assert growth <= trace_rows._ROW_GROWTH_RESERVE, f"{state} with url={url!r} grew by {growth}"
 
@@ -326,3 +327,49 @@ class TestGrowthReserve:
         # Headroom is cheap but not free: every pending row's reserve is
         # subtracted from a 4000-char segment. Keep the constant honest.
         assert trace_rows._ROW_GROWTH_RESERVE < trace_rows._DETAIL_MAX * 2
+
+
+class TestPlainIsIdempotent:
+    """``_plain`` must be safe to apply again.
+
+    The contract used to be "call ``_plain`` EXACTLY once" — the hardest kind to
+    keep: zero lets a newline break out of the per-line ``-# `` prefix, twice
+    double-escapes visibly. It spanned two modules, and three fields (`name`,
+    `peer`, `target`) missed it. Idempotency makes the contract "at least once",
+    which is trivially satisfiable — so a row can hygienise its own fields
+    without caring whether the caller already did.
+    """
+
+    def test_applying_plain_twice_changes_nothing(self) -> None:
+        once = _plain(r"a\*b **bold** ~s~")
+        assert _plain(once) == once
+
+    def test_the_result_is_marked_as_already_plain(self) -> None:
+        assert isinstance(_plain("hi"), Plain)
+
+    def test_a_plain_value_passes_through_untouched(self) -> None:
+        # _summarise_args already returns hygienised text; a row coercing its
+        # fields must not escape it a second time.
+        assert _plain(Plain(r"already \*escaped\*")) == r"already \*escaped\*"
+
+    def test_rows_hygienise_their_own_fields(self) -> None:
+        # The fields a model or peer controls, coerced by the row itself — so a
+        # caller that forgets cannot reintroduce the break-out.
+        assert "\n" not in render_row(ToolRow(key="t", name="evil\nrm -rf /"))
+        assert "\n" not in render_row(ConsultRow(key="c", peer="bob\n# HUGE"))
+        assert "\n" not in render_row(HandoffRow(target="peer\n-# fake", reason="x\ny"))
+
+    def test_replace_does_not_double_escape(self) -> None:
+        # THE reason a transforming __post_init__ was rejected before: replace()
+        # re-runs it. Idempotency is what makes it safe.
+        import dataclasses
+
+        row = ToolRow(key="t", name="a_b", note=r"x\*y")
+        for _ in range(3):
+            row = dataclasses.replace(row, state="failed")
+        assert render_row(row) == render_row(ToolRow(key="t", name="a_b", note=r"x\*y", state="failed"))
+
+    def test_prose_is_never_hygienised(self) -> None:
+        # Prose is the agent's own markdown, rendered bright with no `-# `
+        # prefix — escaping it would corrupt the answer.
+        assert render_row(ProseRow(text="**bold**\nsecond line")) == "**bold**\nsecond line"
