@@ -67,7 +67,7 @@ class TestA2ADispatcher:
         assert isinstance(rep, A2AReply)
         assert (rep.peer, rep.text, rep.tool_call_id) == ("scribe", "here is the summary", "t1")
 
-    def test_non_message_agent_tool_call_is_live_progress(self) -> None:
+    def test_non_message_agent_tool_call_is_a_trace_row(self) -> None:
         d = A2ADispatcher()
         step = StepEvent(
             kind="tool_call",
@@ -80,7 +80,7 @@ class TestA2ADispatcher:
         )
         assert d.classify(step) is None
 
-    def test_unpaired_tool_result_is_live_progress(self) -> None:
+    def test_unpaired_tool_result_is_a_trace_row(self) -> None:
         d = A2ADispatcher()
         assert d.classify(_result("never-a-consult", emitter="x", text="tool output")) is None
 
@@ -116,7 +116,7 @@ class TestA2ADispatcher:
         # A handoff transfers conversation control (the peer replies in the
         # caller's place), unlike a ``message_agent`` consult — it is rendered
         # inline in the MAIN step stream, so the dispatcher must NOT claim it:
-        # classify → None means the step falls through to the progress renderer.
+        # classify → None means the step falls through to the step-trace renderer.
         d = A2ADispatcher()
         assert (
             d.classify(
@@ -132,7 +132,7 @@ class TestA2ADispatcher:
             is None
         )
 
-    def test_agent_message_step_is_live_progress(self) -> None:
+    def test_agent_message_step_is_a_trace_row(self) -> None:
         d = A2ADispatcher()
         assert (
             d.classify(StepEvent(kind="agent_message", correlation_id="c1", depth=0, emitter="alice", text="thinking…"))

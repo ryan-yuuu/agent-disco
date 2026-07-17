@@ -696,7 +696,7 @@ class ChannelHistoryFetcher:
 
     def _is_v2_step_message(self, msg: Any) -> bool:
         """A persona-webhook Components-V2 message is a display-only step trace
-        (posted by :class:`~calfcord.bridge.progress.ProgressRenderer`) and is
+        (posted by :class:`~calfcord.bridge.trace.StepTraceRenderer`) and is
         NEVER part of history.
 
         v2 messages carry no ``content`` (Discord forbids it under the

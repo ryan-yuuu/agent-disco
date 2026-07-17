@@ -30,7 +30,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Final, Literal, Self
 
 import discord
 
@@ -66,6 +66,20 @@ _EMBED_SNIPPET_MAX_LEN = 60
 _BUTTON_LABEL_MAX_LEN = 80
 
 ReplyStyle = Literal["embed", "button"]
+
+_NO_MENTIONS: Final[discord.AllowedMentions] = discord.AllowedMentions.none()
+"""Mention suppression for the step trace's v2 messages.
+
+A trace row carries arbitrary tool output, which can contain ``<@id>`` or
+``@everyone``. ``silent=True`` only suppresses the *push*; the mention would
+still resolve and highlight. Discord's Components-V2 docs add a sharper reason:
+an edit that omits ``allowed_mentions`` re-parses the message with DEFAULT
+allowances, *regardless* of what the original send allowed — and the trace edits
+constantly, so both paths must pass this explicitly.
+
+Suppression lives here rather than in the row renderer's escaping: this is where
+Discord actually decides, and escaping ``@`` in every path and identifier would
+be both noisy and easy to get subtly wrong."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,6 +436,7 @@ class DiscordPersonaSender:
             thread=thread,
             wait=True,  # required so the response carries the message ID
             silent=True,  # step traces must not fire a push notification
+            allowed_mentions=_NO_MENTIONS,
         )
 
         message_channel = thread_id if thread_id is not None else channel_id
@@ -470,7 +485,7 @@ class DiscordPersonaSender:
         webhook = await self._get_or_create_webhook(channel_id)
         thread = discord.Object(id=thread_id) if thread_id is not None else discord.utils.MISSING
 
-        await webhook.edit_message(message_id, view=view, thread=thread)
+        await webhook.edit_message(message_id, view=view, thread=thread, allowed_mentions=_NO_MENTIONS)
         logger.debug(
             "edited persona v2 step message id=%s channel=%s",
             message_id,

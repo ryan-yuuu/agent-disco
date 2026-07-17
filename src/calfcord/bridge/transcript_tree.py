@@ -1,22 +1,19 @@
-"""Pure step-render helpers — no Discord, no Kafka, no state (spec §5.1).
+"""The persisted transcript's tree renderer — pure, no Discord, no Kafka, no
+state (spec §5.1).
 
-Two render surfaces share this module:
+**Full transcript** — :func:`_render_tree_blocks` projects a turn's
+``message_history`` slice into the Claude-Code-style ``● tool(args)`` /
+``⎿ result`` blocks; its block COUNT gates whether the reply poster persists a
+transcript row (for tool-call replay). It operates on ``Sequence[ModelMessage]``
+because it renders persisted deltas, and its output is byte-for-byte stable so
+stored transcripts keep rendering the same.
 
-* **Live step messages** — :func:`render_step_message` turns ONE normalized
-  :class:`~calfcord.bridge.step_events.StepEvent` into the body/bodies of the
-  persistent Components-V2 step messages: a ``🔧 `tool` called`` /
-  ``✅ `tool` returned`` short line, a ``➡️ handed off to `peer``` note, or the
-  full agent text split into ≤-cap chunks. The stateful posting lives in
-  :mod:`calfcord.bridge.progress`.
-* **Full transcript** — :func:`_render_tree_blocks` projects a turn's
-  ``message_history`` slice into the Claude-Code-style ``● tool(args)`` /
-  ``⎿ result`` blocks; its block COUNT gates whether the reply poster persists a
-  transcript row (for tool-call replay). This surface operates on
-  ``Sequence[ModelMessage]`` because it renders persisted deltas, and its output
-  is byte-for-byte stable so stored transcripts keep rendering the same.
+This module once also held the live step renderer. That surface is now row
+values (:mod:`calfcord.bridge.trace_rows`) posted by
+:class:`~calfcord.bridge.trace.StepTraceRenderer`: rows are markdown rather than
+fenced code, so the two shared nothing once the split landed.
 
-Everything here is pure: no I/O, no time, no mutable module state. That keeps
-both surfaces trivially unit-testable.
+Everything here is pure: no I/O, no time, no mutable module state.
 """
 
 from __future__ import annotations
@@ -35,8 +32,6 @@ from calfkit._vendor.pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
-
-from calfcord.bridge.step_events import StepEvent
 
 logger = logging.getLogger(__name__)
 
@@ -232,94 +227,3 @@ def _render_tree_blocks(messages: Sequence[ModelMessage]) -> list[str]:
 # with the name in monospace; an ``agent_message`` carries the FULL prose,
 # chunked to the v2 cap; a ``handoff`` shows the bare target. Unknown/future
 # kinds are a safe no-op so a new calfkit event can never fault the drain.
-
-_V2_TEXT_LIMIT: Final[int] = 4000
-"""Discord's Components-V2 hard cap — per ``TextDisplay`` AND per whole message
-(the sum of all text across every container/text display). Verified against the
-live API (4000 accepted, 4001 rejected); discord.py does not enforce it
-client-side. The renderer honors it *transitively*: it chunks agent text to
-:data:`_V2_CHUNK` (< this) and posts one ``TextDisplay`` per message, so no
-explicit 4000-char check is needed."""
-
-_V2_CHUNK: Final[int] = 3900
-"""Chunk target for a full ``agent_message`` body — one chunk per v2 message,
-kept under :data:`_V2_TEXT_LIMIT` for headroom."""
-
-
-def _chunk_text(text: str, limit: int) -> list[str]:
-    """Split ``text`` into non-empty ≤``limit``-char pieces on line boundaries.
-
-    Greedily packs whole lines; a single line longer than ``limit`` is
-    hard-split into ``limit``-sized pieces. ``current is None`` marks "no line
-    accumulated yet", distinct from an accumulated *blank* line (``""``), so
-    blank lines between paragraphs survive within a chunk. An empty piece (a
-    blank line flushed exactly at a cap boundary) is dropped so no empty body is
-    ever emitted — every returned chunk is 1..``limit`` chars.
-    """
-    chunks: list[str] = []
-    current: str | None = None
-    for line in text.split("\n"):
-        while len(line) > limit:
-            if current is not None:
-                chunks.append(current)
-                current = None
-            chunks.append(line[:limit])
-            line = line[limit:]
-        candidate = line if current is None else f"{current}\n{line}"
-        if current is not None and len(candidate) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current is not None:
-        chunks.append(current)
-    # Drop any empty piece: a blank line flushed at an exact-cap boundary yields
-    # ``""``, and Discord rejects an empty TextDisplay (min length 1). A blank
-    # line at a message boundary is cosmetically irrelevant (chunks post as
-    # separate messages). This upholds "render_step_message never emits an empty
-    # body". Non-empty input always leaves at least one non-empty chunk.
-    return [chunk for chunk in chunks if chunk]
-
-
-def render_consult_marker(peer: str, thread_url: str | None) -> str:
-    """The one line a ``message_agent`` consult leaves in the human's thread.
-
-    The exchange itself is private — it projects to the A2A audit channel — so the
-    live trace carries only that the consult happened, plus a jump link into the
-    thread holding it. ``thread_url`` is ``None`` when the projection failed (it is
-    best-effort, so the failure was swallowed); the marker then states the audit gap
-    instead of linking nowhere, because a consult that silently renders nothing is
-    exactly the invisibility this marker exists to fix.
-    """
-    if thread_url is None:
-        return f"💬 consulted `{peer}` — ⚠️ couldn't write the audit log"
-    return f"💬 consulted `{peer}` — [view exchange]({thread_url})"
-
-
-def render_step_message(step: StepEvent) -> list[str]:
-    """Render ONE :class:`StepEvent` into Components-V2 message bodies.
-
-    Returns one body per message to post (usually a single-element list; a long
-    ``agent_message`` yields several). An empty list means "post nothing".
-    """
-    if step.kind == "tool_call":
-        return [f"🔧 `{step.name}` called"]
-    if step.kind == "tool_result":
-        return {
-            "success": [f"✅ `{step.name}` returned"],
-            "failed": [f"❌ `{step.name}` failed"],
-            "denied": [f"🚫 `{step.name}` denied"],
-        }[step.outcome]
-    if step.kind == "handoff":
-        target = (step.target or "").removeprefix("/")
-        return [f"➡️ handed off to `{target}`"]
-    if step.kind == "agent_message":
-        text = step.text.strip()
-        if not text:
-            return []
-        return _chunk_text(text, _V2_CHUNK)
-    # Defensive: unreachable for the current StepKind set, but a future calfkit
-    # kind (e.g. ``agent_thinking``) must render nothing rather than fault the
-    # drain — logged so the coverage gap is visible.
-    logger.warning("steps: no v2 renderer for step kind %r; rendering nothing", step.kind)
-    return []

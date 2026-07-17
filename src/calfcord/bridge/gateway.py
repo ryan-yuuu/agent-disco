@@ -13,7 +13,7 @@ The bridge is a pure calfkit :class:`~calfkit.client.Client` (no embedded Worker
 no consumers). For each ``!mention`` it builds a :class:`MentionRequest` and runs
 :class:`~calfcord.bridge.mention_handler.MentionHandler.handle` as a tracked task:
 the handler resolves the target against the live mesh roster, ``start()``s the
-agent, drains its run ``stream()`` (live progress + A2A projection), and posts the
+agent, drains its run ``stream()`` (the step trace + A2A projection), and posts the
 terminal reply under the responding agent's persona. Non-``!mention`` ("ambient")
 messages go unanswered (C2). The bridge owns SIGINT/SIGTERM for its foreground
 (the Discord gateway) and tears down by cancelling in-flight handler tasks then
@@ -48,7 +48,6 @@ from calfcord.bridge.history import ChannelHistoryFetcher, DiscordHistoryProvide
 from calfcord.bridge.mention_handler import MentionHandler, MentionRequest
 from calfcord.bridge.normalizer import MessageNormalizer, extract_mention_ids
 from calfcord.bridge.overrides import EffortOverrides
-from calfcord.bridge.progress import ProgressRenderer
 from calfcord.bridge.reply_poster import ReplyPoster
 from calfcord.bridge.roster import MeshRoster
 from calfcord.bridge.settings import (
@@ -57,6 +56,7 @@ from calfcord.bridge.settings import (
     resolve_settings_path,
 )
 from calfcord.bridge.slash import SlashCommandManager
+from calfcord.bridge.trace import StepTraceRenderer
 from calfcord.bridge.transcripts import (
     NullTranscriptStore,
     TranscriptStore,
@@ -238,7 +238,7 @@ class DiscordIngressGateway:
         roster: MeshRoster,
         overrides: EffortOverrides,
         a2a: A2AProjector,
-        progress: ProgressRenderer,
+        trace: StepTraceRenderer,
         reply: ReplyPoster,
         memory_deps: MemoryPromptDeps,
         bridge_settings: BridgeSettings | None = None,
@@ -271,7 +271,7 @@ class DiscordIngressGateway:
             history=history,
             overrides=overrides,
             a2a=a2a,
-            progress=progress,
+            trace=trace,
             reply=reply,
             memory_deps=memory_deps,
             sticky=handler_sticky,
@@ -680,7 +680,7 @@ def main() -> None:
                         roster=MeshRoster(calfkit_client),
                         overrides=overrides,
                         a2a=A2AProjector(resolver, persona_sender),
-                        progress=ProgressRenderer(persona_sender, typing_notifier),
+                        trace=StepTraceRenderer(persona_sender, typing_notifier),
                         reply=ReplyPoster(persona_sender, transcript_store),
                         memory_deps=MemoryPromptDeps(),
                         bridge_settings=bridge_settings,
