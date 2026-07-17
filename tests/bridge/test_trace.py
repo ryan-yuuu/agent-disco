@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import aiohttp
 import discord
 import pytest
 
@@ -955,6 +956,24 @@ class TestFailureSemantics:
     """Best-effort: no Discord failure ever escapes on_step/finish; a failed
     post is retried (content must not be lost); a failed edit is dropped
     (the next flush re-renders the full body anyway)."""
+
+    async def test_a_transport_error_leaves_the_segment_dirty_for_retry(self, sender: _FakeSender) -> None:
+        # Observed against LIVE Discord: aiohttp raises ServerDisconnectedError
+        # on a dropped keep-alive, and it is NOT a discord.DiscordException — so
+        # it escaped _best_effort_trace, and `_flush` had already cleared `dirty`,
+        # leaving the segment clean and its content gone. A transient blip must
+        # degrade to "post failed, retry", like every other transient failure.
+        #
+        # Asserts on `dirty` rather than on a later post, because any subsequent
+        # append (the seal, in a real turn) re-marks it and would mask the loss.
+        sender.send_failures.append(aiohttp.ServerDisconnectedError())
+        r = _renderer(sender)
+        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await _until(lambda: len(sender.sends) == 1)  # the failing attempt
+        assert sender.ok_sends() == []
+        segment = r._entries[_CORRELATION_ID].segments[0]
+        assert segment.dirty is True, "a transport error dropped the segment's content"
+        await _end(r)
 
     async def test_failed_post_retries_on_next_wake_with_full_body(self, sender: _FakeSender) -> None:
         sender.send_failures.append(_http_exc(discord.Forbidden, 403))

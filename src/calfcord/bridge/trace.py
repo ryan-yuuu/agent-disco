@@ -73,6 +73,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final
 
+import aiohttp
 import discord
 
 from calfcord.bridge.persona_resolve import accent_for, persona_for
@@ -276,6 +277,15 @@ async def _best_effort_trace[T](coro: Awaitable[T], *, channel_id: int) -> T | N
     ``DiscordException`` (which also funnels the sibling ``RateLimited``, NOT a
     subclass of ``HTTPException``) are WARNING. ``CancelledError`` is a
     ``BaseException`` and is intentionally not caught, so shutdown stays clean.
+
+    ``aiohttp.ClientError`` is caught too, and it is not a theoretical case:
+    a dropped keep-alive surfaces as ``ServerDisconnectedError``, which
+    discord.py does NOT wrap in a ``DiscordException`` — it comes straight from
+    the transport. Left uncaught it escapes to the writer loop, which logs it and
+    moves on, but by then ``_flush`` has cleared ``dirty``: the segment is clean,
+    never retried, and its content is silently gone. Returning ``None`` instead
+    routes a transport blip into the same "post failed, retry next wake" path as
+    every other transient failure.
     """
     try:
         return await coro
@@ -290,6 +300,8 @@ async def _best_effort_trace[T](coro: Awaitable[T], *, channel_id: int) -> T | N
             getattr(e, "status", None),
             e,
         )
+    except aiohttp.ClientError as e:
+        logger.warning("trace: call hit a transport error channel_id=%d: %r", channel_id, e)
     return None
 
 
