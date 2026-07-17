@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,17 +31,14 @@ import pytest
 
 import calfcord.bridge.trace as trace_mod
 import calfcord.bridge.trace_rows as trace_rows
-from calfcord.bridge.mention_handler import MentionRequest
 from calfcord.bridge.persona_resolve import accent_for, persona_for
 from calfcord.bridge.step_events import StepEvent
-from calfcord.bridge.trace import StepTraceRenderer, _build_segment_view, _Segment
+from calfcord.bridge.trace import Destination, StepTraceRenderer, _build_segment_view, _Segment
 from calfcord.bridge.trace_rows import ConsultRow, ProseRow, ToolRow
-from calfcord.bridge.wire import WireAuthor, WireMessage
 from calfcord.discord.messages import SentMessage
 
 _CORRELATION_ID = "evt-1"
 _CHANNEL_ID = 6789
-_MESSAGE_ID = 12345
 
 
 def _reject_what_discord_would(body: str) -> None:
@@ -231,29 +227,12 @@ async def _settle(cycles: int = 20) -> None:
         await asyncio.sleep(0.001)
 
 
-def _req(*, channel_id: int = _CHANNEL_ID, source_channel_id: int = _CHANNEL_ID) -> MentionRequest:
-    """A mention request. ``source_channel_id != channel_id`` represents a wire
-    that originated inside a Discord thread (the renderer reads only these two)."""
-    return MentionRequest(
-        content="hello",
-        mention_ids=("aksel",),
-        author_label="alice",
-        message_id=_MESSAGE_ID,
-        source_channel_id=source_channel_id,
-        channel_id=channel_id,
-        wire=WireMessage(
-            event_id="e1",
-            kind="message",
-            message_id=_MESSAGE_ID,
-            channel_id=channel_id,
-            source_channel_id=source_channel_id,
-            guild_id=1,
-            content="hello",
-            author=WireAuthor(discord_user_id=1, display_name="alice", is_bot=False, is_webhook=False),
-            created_at=datetime.now(UTC),
-        ),
-        reply_target=None,
-    )
+def _dest(*, channel_id: int = _CHANNEL_ID, thread_id: int | None = None) -> Destination:
+    """Where a trace renders. The renderer no longer derives this from the
+    inbound request — a consulted agent's trace goes to the A2A thread, not the
+    human's conversation (ADR-0026)."""
+    return Destination(channel_id=channel_id, thread_id=thread_id)
+
 
 
 def _step(
@@ -409,8 +388,8 @@ class TestRowLifecycle:
 
     async def test_call_then_result_is_one_row_not_two(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _req(), acting_agent="aksel")
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
         body = _last_body(sender)
         assert body.count("read") == 1
@@ -418,7 +397,7 @@ class TestRowLifecycle:
 
     async def test_the_pending_row_renders_before_its_result_arrives(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _dest(), acting_agent="aksel")
         await _until(lambda: bool(sender.ok_sends()))
         assert sender.ok_sends()[0]["body"] == r"◐ read\_file a.py"
         await r.finish(_CORRELATION_ID)
@@ -427,10 +406,10 @@ class TestRowLifecycle:
         # calfkit fans out parallel calls and each sibling folds on its OWN hop,
         # so results arrive in COMPLETION order with unbounded steps between.
         r = _renderer(sender)
-        await r.on_step(_call("t1", "slow", {"path": "a"}), _req(), acting_agent="aksel")
-        await r.on_step(_call("t2", "fast", {"path": "b"}), _req(), acting_agent="aksel")
-        await r.on_step(_result("t2", "fast"), _req(), acting_agent="aksel")
-        await r.on_step(_result("t1", "slow"), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "slow", {"path": "a"}), _dest(), acting_agent="aksel")
+        await r.on_step(_call("t2", "fast", {"path": "b"}), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t2", "fast"), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t1", "slow"), _dest(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
         rows = _last_body(sender).split("\n")
         assert "slow" in rows[0] and "fast" in rows[1]  # call order preserved
@@ -438,10 +417,10 @@ class TestRowLifecycle:
 
     async def test_a_failed_result_escapes_the_dim_register_with_its_error(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_call("t1", "search_docs", {"query": "x"}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "search_docs", {"query": "x"}), _dest(), acting_agent="aksel")
         await r.on_step(
             _result("t1", "search_docs", outcome="failed", text="connection timed out"),
-            _req(),
+            _dest(),
             acting_agent="aksel",
         )
         await r.finish(_CORRELATION_ID)
@@ -449,10 +428,10 @@ class TestRowLifecycle:
 
     async def test_a_denied_result_is_dim_and_struck(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_call("t1", "search_docs", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "search_docs", {}), _dest(), acting_agent="aksel")
         await r.on_step(
             _result("t1", "search_docs", outcome="denied", text="superseded by handoff"),
-            _req(),
+            _dest(),
             acting_agent="aksel",
         )
         await r.finish(_CORRELATION_ID)
@@ -464,8 +443,8 @@ class TestRowLifecycle:
         # segment's silent hard cap. Resolving retires the key, so a second
         # result for the same id is an orphan (appended) rather than a re-resolve.
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         entry = r._entries[_CORRELATION_ID]
         assert "t1" not in entry.locate, "a resolved row is still re-resolvable"
         await _end(r)
@@ -478,11 +457,11 @@ class TestRowLifecycle:
         # appended unkeyed instead: it can never be resolved anyway, so the seal
         # interrupts it honestly.
         r = _renderer(sender)
-        await r.on_step(_step("tool_call", name="alpha"), _req(), acting_agent="aksel")
-        await r.on_step(_step("tool_call", name="beta"), _req(), acting_agent="aksel")
+        await r.on_step(_step("tool_call", name="alpha"), _dest(), acting_agent="aksel")
+        await r.on_step(_step("tool_call", name="beta"), _dest(), acting_agent="aksel")
         await r.on_step(
             _step("tool_result", name="alpha", outcome="failed", text="alpha blew up"),
-            _req(),
+            _dest(),
             acting_agent="aksel",
         )
         await _end(r)
@@ -494,7 +473,7 @@ class TestRowLifecycle:
         # The drain's contract is that the render path can NEVER fault the turn.
         # A result whose call row is absent must still render, not blow up.
         r = _renderer(sender)
-        await r.on_step(_result("nope", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_result("nope", "read_file"), _dest(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
         assert sender.ok_sends()[0]["body"].startswith(r"-# ● read\_file")
 
@@ -505,12 +484,12 @@ class TestRowLifecycle:
         # _until forces a real flush, which is what makes this the cross-message
         # case rather than one coalesced post.
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.ok_sends()) == 1)
-        await r.on_step(_step("handoff", target="billing"), _req(), acting_agent="aksel")
-        await r.on_step(_step("agent_message", emitter="billing", text="on it"), _req(), acting_agent="billing")
+        await r.on_step(_step("handoff", target="billing"), _dest(), acting_agent="aksel")
+        await r.on_step(_step("agent_message", emitter="billing", text="on it"), _dest(), acting_agent="billing")
         await _until(lambda: len(sender.ok_sends()) == 2)  # the persona change opened message 2
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
         edits = [e["body"] for e in sender.ok_edits() if "read" in e["body"]]
         assert edits, "the earlier, already-posted segment was never re-edited"
@@ -519,9 +498,9 @@ class TestRowLifecycle:
     async def test_elapsed_is_measured_between_call_and_result(self, sender: _FakeSender) -> None:
         clock = _FakeClock()
         r = StepTraceRenderer(sender, min_edit_interval=0.0, now=clock)  # type: ignore[arg-type]
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         clock.advance(0.25)
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
         assert _first_row(sender) == r"-# ● read\_file · 250ms"
 
@@ -530,7 +509,7 @@ class TestRowLifecycle:
         # NO surface at all.
         r = _renderer(sender)
         await r.on_step(
-            _step("handoff", target="billing", reason="card expired"), _req(), acting_agent="aksel"
+            _step("handoff", target="billing", reason="card expired"), _dest(), acting_agent="aksel"
         )
         await r.finish(_CORRELATION_ID)
         assert _first_row(sender) == "➜ handed off to billing — card expired"
@@ -551,11 +530,11 @@ class TestNothingIsLostMidFlush:
     async def test_the_seal_survives_landing_during_an_in_flight_flush(self) -> None:
         sender = _BlockingSender()
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         await sender.in_flight.wait()  # the writer is now INSIDE the send
 
         # Everything below lands while that send is still in flight.
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         await r.seal(_CORRELATION_ID, faulted=False)
         finishing = asyncio.create_task(r.finish(_CORRELATION_ID))
         await asyncio.sleep(0)  # let finish() set `finished` before the send returns
@@ -571,14 +550,14 @@ class TestNothingIsLostMidFlush:
         # the message is long since posted, so the seal collides with an EDIT.
         sender = _BlockingSender()
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         await sender.in_flight.wait()
         sender.release.set()
         await _until(lambda: len(sender.ok_sends()) == 1)  # posted
 
         sender.release.clear()
         sender.in_flight.clear()
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         await sender.in_flight.wait()  # the writer is now INSIDE the edit
 
         await r.seal(_CORRELATION_ID, faulted=False)
@@ -603,25 +582,25 @@ class TestRemoteControlledFieldsAreHygienised:
 
     async def test_a_tool_name_cannot_break_out_of_the_row(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_call("t1", "evil\nrm -rf /", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "evil\nrm -rf /", {}), _dest(), acting_agent="aksel")
         await _end(r)
         assert "\nrm -rf /" not in _last_body(sender)
 
     async def test_a_consult_peer_cannot_break_out_of_the_row(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "bob\n# HUGE", None, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "bob\n# HUGE", None, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await _end(r)
         assert "\n# HUGE" not in _last_body(sender)
 
     async def test_a_consult_peer_cannot_blow_the_growth_reserve(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "b" * 10_000, None, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "b" * 10_000, None, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await _end(r)
         assert len(_first_row(sender)) < trace_rows._DETAIL_MAX * 2
 
     async def test_a_handoff_target_cannot_break_out_of_the_row(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_step("handoff", target="peer\n-# fake", reason="because"), _req(), acting_agent="aksel")
+        await r.on_step(_step("handoff", target="peer\n-# fake", reason="because"), _dest(), acting_agent="aksel")
         await _end(r)
         assert "\n-# fake" not in _last_body(sender)
 
@@ -640,14 +619,14 @@ class TestConsultLifecycle:
 
     async def test_a_consult_opens_in_the_present_tense_with_its_link(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await _until(lambda: bool(sender.ok_sends()))
         assert sender.ok_sends()[0]["body"] == f"◐ consulting conan · [view exchange]({self._URL})"
         await _end(r)
 
     async def test_the_consult_row_posts_under_the_caller_s_persona(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await _until(lambda: bool(sender.ok_sends()))
         assert sender.ok_sends()[0]["persona"].name == "aksel"
         await _end(r)
@@ -656,9 +635,9 @@ class TestConsultLifecycle:
         # A consult must NOT open a new message — the caller is speaking
         # continuously either side of it, so it shares their segment.
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await _until(lambda: len(sender.edits) == 1)
         assert sender.edits[0]["body"] == f"◐ read\\_file\n◐ consulting conan · [view exchange]({self._URL})"
         assert len(sender.sends) == 1  # same message, edited in place
@@ -666,21 +645,21 @@ class TestConsultLifecycle:
 
     async def test_a_reply_resolves_the_consult_row(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await r.on_consult_result("c1", state="ok", note="", correlation_id=_CORRELATION_ID)
         await _end(r)
         assert _first_row(sender) == f"-# ● consulted conan · [view exchange]({self._URL})"
 
     async def test_a_faulted_consult_escapes_the_dim_register(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await r.on_consult_result("c1", state="failed", note="", correlation_id=_CORRELATION_ID)
         await _end(r)
         assert _first_row(sender) == f"❌ conan didn't answer · [view exchange]({self._URL})"
 
     async def test_a_rejected_consult_is_dim_and_struck_with_its_reason(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await r.on_consult_result("c1", state="denied", note="conan is offline", correlation_id=_CORRELATION_ID)
         await _end(r)
         assert _first_row(sender) == f"-# ~~⊘ conan~~ — conan is offline · [view exchange]({self._URL})"
@@ -688,13 +667,13 @@ class TestConsultLifecycle:
     async def test_a_consult_still_open_at_the_seal_says_the_peer_never_replied(self, sender: _FakeSender) -> None:
         # dispatcher.dangling() territory: the run faulted with the consult open.
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await _end(r, faulted=True)
         assert _first_row(sender) == f"-# ~~⊘ conan~~ — never replied · [view exchange]({self._URL})"
 
     async def test_a_consult_without_an_audit_thread_states_the_gap(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", None, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", None, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await r.on_consult_result("c1", state="ok", note="", correlation_id=_CORRELATION_ID)
         await _end(r)
         assert _first_row(sender) == "-# ● consulted conan · ⚠️ couldn't write the audit log"
@@ -711,7 +690,7 @@ class TestConsultLifecycle:
         # ADR-0020: the exchange is private and lives in the audit thread. The
         # row resolves its STATE, which is not exchange content.
         r = _renderer(sender)
-        await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await r.on_consult_result("c1", state="ok", note="the secret is 42", correlation_id=_CORRELATION_ID)
         await _end(r)
         assert "secret" not in _last_body(sender)
@@ -728,8 +707,8 @@ class TestSeal:
     async def test_a_completed_run_seals_with_its_tool_count_and_duration(self, sender: _FakeSender) -> None:
         clock = _FakeClock()
         r = StepTraceRenderer(sender, min_edit_interval=0.0, now=clock)  # type: ignore[arg-type]
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         clock.advance(12.3)
         await r.seal(_CORRELATION_ID, faulted=False)
         await r.finish(_CORRELATION_ID)
@@ -737,7 +716,7 @@ class TestSeal:
 
     async def test_a_faulted_run_seals_bright_and_points_at_the_notice(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_step("agent_message", text="working"), _req(), acting_agent="aksel")
+        await r.on_step(_step("agent_message", text="working"), _dest(), acting_agent="aksel")
         await r.seal(_CORRELATION_ID, faulted=True)
         await r.finish(_CORRELATION_ID)
         assert _last_body(sender).endswith("\n⚠️ run failed after 0ms — details below")
@@ -748,7 +727,7 @@ class TestSeal:
         r = _renderer(sender)
         # The subject arrives escaped (`_plain` neutralises Discord markdown, so
         # the underscore is `\_` on the wire and a literal `_` on screen).
-        await r.on_step(_call("t1", "lookup_account", {"path": "acct_88213"}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "lookup_account", {"path": "acct_88213"}), _dest(), acting_agent="aksel")
         await r.seal(_CORRELATION_ID, faulted=True)
         await r.finish(_CORRELATION_ID)
         assert r"-# ~~⊘ lookup\_account acct\_88213~~ — interrupted" in _last_body(sender)
@@ -756,20 +735,20 @@ class TestSeal:
 
     async def test_the_seal_counts_only_tools_not_prose(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_step("agent_message", text="hi"), _req(), acting_agent="aksel")
-        await r.on_step(_call("t1", "a", {}), _req(), acting_agent="aksel")
-        await r.on_step(_result("t1", "a"), _req(), acting_agent="aksel")
-        await r.on_step(_call("t2", "b", {}), _req(), acting_agent="aksel")
-        await r.on_step(_result("t2", "b"), _req(), acting_agent="aksel")
+        await r.on_step(_step("agent_message", text="hi"), _dest(), acting_agent="aksel")
+        await r.on_step(_call("t1", "a", {}), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t1", "a"), _dest(), acting_agent="aksel")
+        await r.on_step(_call("t2", "b", {}), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t2", "b"), _dest(), acting_agent="aksel")
         await r.seal(_CORRELATION_ID, faulted=False)
         await r.finish(_CORRELATION_ID)
         assert _last_body(sender).endswith("-# 2 tools · 0ms")
 
     async def test_the_seal_lands_under_the_last_acting_persona(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_step("agent_message", emitter="aksel", text="hi"), _req(), acting_agent="aksel")
-        await r.on_step(_step("handoff", target="billing"), _req(), acting_agent="aksel")
-        await r.on_step(_step("agent_message", emitter="billing", text="on it"), _req(), acting_agent="billing")
+        await r.on_step(_step("agent_message", emitter="aksel", text="hi"), _dest(), acting_agent="aksel")
+        await r.on_step(_step("handoff", target="billing"), _dest(), acting_agent="aksel")
+        await r.on_step(_step("agent_message", emitter="billing", text="on it"), _dest(), acting_agent="billing")
         await r.seal(_CORRELATION_ID, faulted=False)
         await r.finish(_CORRELATION_ID)
         assert sender.ok_sends()[-1]["persona"].name == "billing"
@@ -781,7 +760,7 @@ class TestSeal:
         # Covers a drain that raised, a broken stream, and a calfkit contract
         # violation. An unsealed trace must never be left asserting "running".
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         with caplog.at_level(logging.WARNING, logger="calfcord.bridge.trace"):
             await r.finish(_CORRELATION_ID)
         assert r"-# ~~⊘ read\_file~~ — interrupted" in _last_body(sender)
@@ -789,7 +768,7 @@ class TestSeal:
 
     async def test_a_sealed_trace_is_not_resealed_by_finish(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
-        await r.on_step(_step("agent_message", text="hi"), _req(), acting_agent="aksel")
+        await r.on_step(_step("agent_message", text="hi"), _dest(), acting_agent="aksel")
         await r.seal(_CORRELATION_ID, faulted=False)
         await r.finish(_CORRELATION_ID)
         assert _last_body(sender).count("0ms") == 1
@@ -813,9 +792,9 @@ class TestAccentIsIdentity:
         # both land on green today), and that is fine: the persona change already
         # swaps the webhook's name and avatar, so identity never rests on colour.
         r = _renderer(sender)
-        await r.on_step(_step("agent_message", emitter="aksel", text="hi"), _req(), acting_agent="aksel")
-        await r.on_step(_step("handoff", target="billing"), _req(), acting_agent="aksel")
-        await r.on_step(_step("agent_message", emitter="billing", text="on it"), _req(), acting_agent="billing")
+        await r.on_step(_step("agent_message", emitter="aksel", text="hi"), _dest(), acting_agent="aksel")
+        await r.on_step(_step("handoff", target="billing"), _dest(), acting_agent="aksel")
+        await r.on_step(_step("agent_message", emitter="billing", text="on it"), _dest(), acting_agent="billing")
         await r.finish(_CORRELATION_ID)
         accents = [_view_accent(c) for c in sender.ok_sends()]
         assert accents == [accent_for("aksel"), accent_for("billing")]
@@ -823,8 +802,8 @@ class TestAccentIsIdentity:
     async def test_a_failure_does_not_turn_the_stripe_red(self, sender: _FakeSender) -> None:
         # Colour is identity. The failure is carried by the row escaping `-# `.
         r = _renderer(sender)
-        await r.on_step(_call("t1", "search_docs", {}), _req(), acting_agent="aksel")
-        await r.on_step(_result("t1", "search_docs", outcome="failed", text="boom"), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "search_docs", {}), _dest(), acting_agent="aksel")
+        await r.on_step(_result("t1", "search_docs", outcome="failed", text="boom"), _dest(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
         assert _view_accent(sender.ok_sends()[0]) == accent_for("aksel")
         assert _last_body(sender).startswith("❌ ")
@@ -856,11 +835,11 @@ class TestAggregation:
 
     async def test_second_step_edits_instead_of_posting(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-read_file", "read_file"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-read_file", "read_file"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         assert sender.sends[0]["body"] == r"◐ read\_file"
 
-        await renderer.on_step(_result("id-read_file", "read_file"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-read_file", "read_file"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
 
         # The edit re-renders the WHOLE segment: both lines, joined.
@@ -871,18 +850,18 @@ class TestAggregation:
     async def test_first_step_posts_immediately_even_with_long_interval(self, sender: _FakeSender) -> None:
         """Leading edge: an idle writer flushes a new step with no interval wait."""
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)  # far sooner than 60s
 
     async def test_burst_coalesces_into_one_final_edit(self, sender: _FakeSender) -> None:
         """Steps landing inside the interval produce NO interim edits; finish
         flushes them all as ONE edit carrying the full trace."""
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
-        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
-        await renderer.on_step(_call("id-b", "b"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _dest(), acting_agent="aksel")
+        await renderer.on_step(_call("id-b", "b"), _dest(), acting_agent="aksel")
         await _settle()
         assert sender.edits == []  # writer is parked in its interval
 
@@ -896,9 +875,9 @@ class TestAggregation:
         """finish() must not wait out the edit interval (the terminal reply is
         behind it in the handler)."""
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
-        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _dest(), acting_agent="aksel")
 
         loop = asyncio.get_running_loop()
         start = loop.time()
@@ -908,7 +887,7 @@ class TestAggregation:
 
     async def test_clean_finish_makes_no_extra_calls(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         await renderer.seal(_CORRELATION_ID, faulted=False)
         await _until(lambda: len(sender.edits) == 1)  # the seal is real content
@@ -936,13 +915,13 @@ class TestPersonaSegmentation:
         renderer's contract shouldn't depend on that history.
         """
         renderer = _renderer(sender)
-        await renderer.on_step(_result("id-todo", "todo", emitter="todo"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-todo", "todo", emitter="todo"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         assert sender.sends[0]["persona"].name == "aksel"
 
     async def test_agent_message_uses_emitter_not_acting_agent(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_step("agent_message", text="hi", emitter="billing"), _req(), acting_agent="aksel")
+        await renderer.on_step(_step("agent_message", text="hi", emitter="billing"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         assert sender.sends[0]["persona"].name == "billing"
 
@@ -950,14 +929,14 @@ class TestPersonaSegmentation:
         """The handoff announcement aggregates under the handing-off agent; the
         receiving agent's first step opens a NEW message under its persona."""
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
-        await renderer.on_step(_step("handoff", target="/billing", emitter="aksel"), _req(), acting_agent="aksel")
+        await renderer.on_step(_step("handoff", target="/billing", emitter="aksel"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
         assert sender.edits[0]["body"] == "◐ t\n➜ handed off to billing"
 
-        await renderer.on_step(_call("id-u", "u"), _req(), acting_agent="billing")
+        await renderer.on_step(_call("id-u", "u"), _dest(), acting_agent="billing")
         await _until(lambda: len(sender.sends) == 2)
         assert sender.sends[1]["persona"].name == "billing"
         assert sender.sends[1]["body"] == "◐ u"
@@ -970,10 +949,10 @@ class TestRollover:
     async def test_overflowing_block_rolls_to_new_message(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
         big = "y" * 3000  # one chunk, near the cap
-        await renderer.on_step(_step("agent_message", text=big), _req(), acting_agent="aksel")
+        await renderer.on_step(_step("agent_message", text=big), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
-        await renderer.on_step(_step("agent_message", text=big), _req(), acting_agent="aksel")
+        await renderer.on_step(_step("agent_message", text=big), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 2)
 
         assert sender.sends[0]["body"] == big
@@ -984,9 +963,9 @@ class TestRollover:
     async def test_small_step_still_fits_before_rollover(self, sender: _FakeSender) -> None:
         """Sanity: the cap check is about the JOINED body, not step count."""
         renderer = _renderer(sender)
-        await renderer.on_step(_step("agent_message", text="y" * 3000), _req(), acting_agent="aksel")
+        await renderer.on_step(_step("agent_message", text="y" * 3000), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
-        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
         assert sender.edits[0]["body"] == "y" * 3000 + "\n◐ t"
         assert len(sender.sends) == 1
@@ -1001,20 +980,25 @@ class TestRollover:
         assert len(expected) >= 2  # sanity: this really does chunk
 
         renderer = _renderer(sender)
-        await renderer.on_step(step, _req(), acting_agent="aksel")
+        await renderer.on_step(step, _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == len(expected))
 
         assert [c["body"] for c in sender.sends] == expected  # every chunk, in order
 
 
 class TestThreadRouting:
-    """A thread-originated request posts INTO the thread; the persona webhook
-    still hosts on the parent channel. Edits carry the same routing."""
+    """A destination with a thread posts INTO it; the persona webhook still hosts
+    on the parent channel. Edits carry the same routing.
+
+    The renderer is TOLD its destination rather than deriving one — the handler
+    owns that for the human's thread, and the A2A projector owns it for a
+    consulted agent's (ADR-0026).
+    """
 
     async def test_posts_and_edits_route_into_thread(self, sender: _FakeSender) -> None:
         thread_id = 555_001
         renderer = _renderer(sender)
-        req = _req(source_channel_id=thread_id)
+        req = _dest(thread_id=thread_id)
         await renderer.on_step(_call("id-t", "t"), req, acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         assert sender.sends[0]["channel_id"] == _CHANNEL_ID  # webhook host = parent
@@ -1031,7 +1015,7 @@ class TestNothingRenderable:
 
     async def test_whitespace_agent_message_posts_nothing(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_step("agent_message", text="   \n  "), _req(), acting_agent="aksel")
+        await renderer.on_step(_step("agent_message", text="   \n  "), _dest(), acting_agent="aksel")
         await _settle()
         assert sender.sends == [] and sender.edits == []
         await renderer.finish(_CORRELATION_ID)  # no entry — must be a no-op
@@ -1059,11 +1043,11 @@ class TestFailureSemantics:
         sender.send_failures.append(_http_exc(discord.HTTPException, 503))
         sender.send_failures.append(_http_exc(discord.HTTPException, 503))
         r = _renderer(sender)
-        await r.on_step(_step("agent_message", emitter="aksel", text="FIRST: aksel"), _req(), acting_agent="aksel")
+        await r.on_step(_step("agent_message", emitter="aksel", text="FIRST: aksel"), _dest(), acting_agent="aksel")
         await _settle()  # failure 1
-        await r.on_step(_step("handoff", target="billing"), _req(), acting_agent="aksel")
+        await r.on_step(_step("handoff", target="billing"), _dest(), acting_agent="aksel")
         await r.on_step(
-            _step("agent_message", emitter="billing", text="SECOND: billing"), _req(), acting_agent="billing"
+            _step("agent_message", emitter="billing", text="SECOND: billing"), _dest(), acting_agent="billing"
         )
         await _settle()  # failure 2 — and billing's segment must NOT post ahead of aksel's
         assert sender.ok_sends() == [], "a later segment posted while an earlier one was still unposted"
@@ -1080,7 +1064,7 @@ class TestFailureSemantics:
         # at finish: cap rollover, or a run that ends before the first flush.
         sender.send_failures.append(_http_exc(discord.HTTPException, 500))
         r = _renderer(sender, interval=60.0)  # park the writer so nothing flushes early
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         await _end(r)
         assert sender.ok_sends(), "the whole trace was lost to one transient post failure"
         assert "-# 1 tool · 0ms" in sender.ok_sends()[-1]["body"]
@@ -1092,10 +1076,10 @@ class TestFailureSemantics:
         # forever: exactly the outcome ADR-0025 exists to prevent, on Discord's
         # most common failure.
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.ok_sends()) == 1)
         sender.edit_failures.append(_http_exc(discord.HTTPException, 500))
-        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _dest(), acting_agent="aksel")
         await _end(r)
         assert sender.ok_edits(), "the seal never landed — the trace is frozen mid-flight"
         assert "-# 1 tool · 0ms" in sender.ok_edits()[-1]["body"]
@@ -1112,7 +1096,7 @@ class TestFailureSemantics:
         # append (the seal, in a real turn) re-marks it and would mask the loss.
         sender.send_failures.append(aiohttp.ServerDisconnectedError())
         r = _renderer(sender)
-        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_call("t1", "read_file", {}), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)  # the failing attempt
         assert sender.ok_sends() == []
         segment = r._entries[_CORRELATION_ID].segments[0]
@@ -1122,11 +1106,11 @@ class TestFailureSemantics:
     async def test_failed_post_retries_on_next_wake_with_full_body(self, sender: _FakeSender) -> None:
         sender.send_failures.append(_http_exc(discord.Forbidden, 403))
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)  # the failing attempt
         assert sender.ok_sends() == []
 
-        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.ok_sends()) == 1)
         # The retry is a POST (no message exists yet) carrying BOTH lines.
         assert sender.ok_sends()[0]["body"] == "-# ● a · 0ms"
@@ -1135,7 +1119,7 @@ class TestFailureSemantics:
     async def test_failed_post_retried_by_final_flush(self, sender: _FakeSender) -> None:
         sender.send_failures.append(_http_exc(discord.Forbidden, 403))
         renderer = _renderer(sender, interval=60.0)
-        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         await _end(renderer)
         assert len(sender.ok_sends()) == 1  # finish retried the post
@@ -1148,11 +1132,11 @@ class TestFailureSemantics:
         # it — so that is what this asserts: no edit happens between the failure
         # and the next append.
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
         sender.edit_failures.append(_http_exc(discord.NotFound, 404))
-        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)  # the failing attempt
         await _settle()
         assert len(sender.edits) == 1, "the dropped edit was hot-retried with no new content"
@@ -1160,14 +1144,14 @@ class TestFailureSemantics:
 
     async def test_failed_edit_recovers_on_next_step(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
 
         sender.edit_failures.append(_http_exc(discord.NotFound, 404))
-        await renderer.on_step(_result("id-a", "a"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
 
-        await renderer.on_step(_call("id-b", "b"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-b", "b"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.ok_edits()) == 1)
         # The recovery edit re-renders the FULL segment — the dropped window heals.
         assert sender.ok_edits()[0]["body"] == "-# ● a · 0ms\n◐ b"
@@ -1178,7 +1162,7 @@ class TestFailureSemantics:
         sender.send_failures.append(_http_exc(discord.Forbidden, 403))
         renderer = _renderer(sender)
         with caplog.at_level(logging.WARNING, logger="calfcord.bridge.trace"):
-            await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+            await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
             await _until(lambda: len(sender.sends) == 1)
             await renderer.finish(_CORRELATION_ID)  # must not raise
         assert any("Forbidden" in r.getMessage() for r in caplog.records)
@@ -1188,7 +1172,7 @@ class TestFailureSemantics:
         # broader catch must funnel it through.
         sender.send_failures.append(discord.RateLimited(retry_after=1.0))
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
         await renderer.finish(_CORRELATION_ID)  # must not raise
 
     async def test_non_discord_error_never_escapes_finish(self, sender: _FakeSender) -> None:
@@ -1196,7 +1180,7 @@ class TestFailureSemantics:
         unwind the drain or block the terminal reply."""
         sender.send_failures.append(RuntimeError("sender not started"))
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
         await renderer.finish(_CORRELATION_ID)  # must not raise
 
 
@@ -1205,11 +1189,11 @@ class TestConcurrentRuns:
 
     async def test_two_correlations_get_separate_messages(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
-        await renderer.on_step(_call("id-a", "a", correlation_id="run-1"), _req(), acting_agent="aksel")
-        await renderer.on_step(_call("id-b", "b", correlation_id="run-2"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-a", "a", correlation_id="run-1"), _dest(), acting_agent="aksel")
+        await renderer.on_step(_call("id-b", "b", correlation_id="run-2"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 2)
 
-        await renderer.on_step(_result("id-a", "a", correlation_id="run-1"), _req(), acting_agent="aksel")
+        await renderer.on_step(_result("id-a", "a", correlation_id="run-1"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
         by_body = {c["body"]: c for c in sender.sends}
         assert sender.edits[0]["message_id"] == by_body["◐ a"]["message_id"]
@@ -1224,6 +1208,6 @@ class TestTypingDisabled:
     async def test_typing_notifier_is_not_fired(self, sender: _FakeSender) -> None:
         notifier = SimpleNamespace(fire=lambda _cid: pytest.fail("typing must stay dormant"))
         renderer = StepTraceRenderer(sender, notifier, min_edit_interval=0.0)  # type: ignore[arg-type]
-        await renderer.on_step(_call("id-t", "t"), _req(), acting_agent="aksel")
+        await renderer.on_step(_call("id-t", "t"), _dest(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
         await renderer.finish(_CORRELATION_ID)

@@ -31,3 +31,15 @@ _Avoid_: Chunk, block, part
 **Row**:
 One line of a step trace: one thing the agent did, in one of a fixed set of states.
 _Avoid_: Block, line, entry, step line
+
+**Consult**:
+One agent asking another a question and awaiting its answer, without surrendering the human conversation — the asking agent stays in control of the turn throughout. Distinct from a handoff, which transfers that control.
+_Avoid_: Private chat, agent-to-agent message, delegation
+
+**Consulted agent**:
+The agent a consult is addressed to. It does its own work and answers, and never speaks in the human's conversation. Called a *peer* throughout the code and docs; prefer this term where the distinction from a handoff target matters, since both are "peers".
+_Avoid_: Sub-agent, callee
+
+**A2A thread**:
+The Discord thread recording one human turn's agent-to-agent interaction in full — what was asked, what each consulted agent did and answered, and any system notes. One per human turn that produced a consult. The work of the agent talking to the human is not part of it; that belongs to the human's conversation.
+_Avoid_: Exchange thread, private chat

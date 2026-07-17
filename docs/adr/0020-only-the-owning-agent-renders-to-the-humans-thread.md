@@ -15,7 +15,9 @@ peer's own preamble and tool calls arrive on the mention run's stream stamped
 mention target's own progress. The bridge therefore renders a step to the
 human's thread **only when `step.emitter` is the agent currently in control of
 the turn**; every other emitter belongs to a consulted peer's private sub-tree
-and is dropped (at DEBUG). That control is transferred by a handoff — but only
+and is routed to the A2A thread instead
+([ADR-0026](./0026-the-a2a-thread-records-the-consulted-sub-tree.md); it was
+dropped at DEBUG when this ADR was written). That control is transferred by a handoff — but only
 the *owner's* handoff, never one a peer performs inside its own sub-tree. A
 consult contributes exactly one line to the human's thread: a cross-link marker
 into the A2A audit thread holding the exchange.
@@ -30,12 +32,17 @@ into the A2A audit thread holding the exchange.
   emitter guard re-creates it.
 - **Auditing and rendering diverge on purpose.** The A2A projector still audits
   *every* consult including nested peer-to-peer ones (the audit channel is the
-  system of record for the whole run tree); only the *marker* is gated on
-  ownership. The two branches read the same `is_owner` predicate so they cannot
-  drift apart.
-- **Ownership is load-bearing for silence.** Because a non-owner step is dropped
-  invisibly, anything that wrongly advances `owning_agent` blackholes the rest
-  of the turn's trace. That is why the transfer is gated on `is_owner` too.
+  system of record for the consulted **sub-trees** — not the whole run tree: the
+  acting agent's own work is the human thread's, or it would render twice); only
+  the *marker* is gated on ownership. The two branches read the same predicate so
+  they cannot drift apart.
+- **Ownership is load-bearing for routing.** Anything that wrongly advances the
+  acting agent sends the rest of the turn's trace to the wrong surface. That is
+  why the transfer is gated on it too. Since
+  [ADR-0026](./0026-the-a2a-thread-records-the-consulted-sub-tree.md) the failure
+  is at least *visible* — a misrouted trace lands in the A2A thread rather than
+  being blackholed — but it is still the human's thread that goes quiet, so the
+  guard stands.
 - This enforces [ADR-0011](./0011-native-a2a-and-handoff.md)'s consult/handoff
   distinction (a consult *keeps* control; a handoff *transfers* it) at the
   render boundary, where it had never actually been applied.

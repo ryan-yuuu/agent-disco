@@ -38,6 +38,7 @@ from calfcord.bridge.a2a_dispatch import (
 )
 from calfcord.bridge.persona_resolve import persona_for
 from calfcord.bridge.step_events import StepEvent, normalize_run_event, normalize_terminal
+from calfcord.bridge.trace import Destination
 from calfcord.bridge.trace_rows import RowState
 from calfcord.bridge.wire import WireMessage
 from calfcord.discord.persona import Persona
@@ -256,14 +257,28 @@ class OverrideProvider(Protocol):
 class A2AProjectorLike(Protocol):
     """``project`` returns the audit thread's jump URL as a receipt for the render
     it just performed, or ``None`` when that render failed (best-effort) and there
-    is therefore nothing to link to."""
+    is therefore nothing to link to.
+
+    ``project_step`` takes a CONSULTED agent's own step (ADR-0026). ``seal``
+    closes that agent's trace with the run's outcome, exactly as the human's is
+    sealed. ``finish`` retires the turn's projector state and MUST run after the
+    terminal reply, so ``project_fault`` still finds the turn's thread.
+    """
 
     async def project(self, projection: A2AProjection) -> str | None: ...
     async def project_fault(self, call: A2ACall) -> None: ...
+    async def project_step(self, step: StepEvent) -> None: ...
+    async def seal(self, correlation_id: str, *, faulted: bool) -> None: ...
+    async def finish(self, correlation_id: str) -> None: ...
 
 
-class StepTraceRenderer(Protocol):
+class StepTraceRendererLike(Protocol):
     """The step trace's write surface.
+
+    ``…Like`` matches :class:`A2AProjectorLike`, and keeps this name clear of the
+    concrete :class:`~calfcord.bridge.trace.StepTraceRenderer` this module now
+    imports from (for :class:`~calfcord.bridge.trace.Destination`) — same name,
+    two meanings, one of which would silently shadow the other.
 
     ``on_step`` takes the run's own steps. ``on_consult``/``on_consult_result``
     take the bridge's OWN annotation of a consult — not run steps, since the A2A
@@ -274,13 +289,13 @@ class StepTraceRenderer(Protocol):
     ``seal`` never ran.
     """
 
-    async def on_step(self, step: StepEvent, req: MentionRequest, *, acting_agent: str) -> None: ...
+    async def on_step(self, step: StepEvent, dest: Destination, *, acting_agent: str) -> None: ...
     async def on_consult(
         self,
         key: str,
         peer: str,
         thread_url: str | None,
-        req: MentionRequest,
+        dest: Destination,
         *,
         correlation_id: str,
         persona_name: str,
@@ -317,7 +332,7 @@ class MentionHandler:
         history: HistoryProvider,
         overrides: OverrideProvider,
         a2a: A2AProjectorLike,
-        trace: StepTraceRenderer,
+        trace: StepTraceRendererLike,
         reply: ReplyPoster,
         memory_deps: Any = dict,
         sticky: StickyStore | None = None,
@@ -373,11 +388,44 @@ class MentionHandler:
         )
 
         dispatcher = A2ADispatcher()
-        # The owning agent is who is currently in control of the run. It starts
+        # The acting agent is who is currently in control of the run. It starts
         # as the mention target and transfers to the peer on each handoff, so
         # tool trace rows (tool_call/tool_result) after a handoff are stamped
         # with the new agent's persona, not the original target's.
         acting_agent = target
+        # The human's trace renders where the mention landed: the webhook hosts on
+        # the flattened parent, and posts into the thread when the wire came from
+        # one. Fixed for the turn — a handoff changes who speaks, never where.
+        human_dest = Destination(
+            channel_id=req.channel_id,
+            thread_id=(req.source_channel_id if req.source_channel_id != req.channel_id else None),
+        )
+        # The A2A projector is retired in the OUTER finally, after _deliver: a
+        # faulted run synthesizes its dangling-consult notes during delivery, and
+        # those need the turn's audit thread still mapped (ADR-0026). Retiring it
+        # alongside the human trace below would evict the mapping first and orphan
+        # each note in a freshly created second thread.
+        try:
+            await self._drain_and_deliver(req, handle, dispatcher, target, history, acting_agent, human_dest)
+        finally:
+            await self._a2a.finish(handle.correlation_id)
+
+    async def _drain_and_deliver(
+        self,
+        req: MentionRequest,
+        handle: Any,
+        dispatcher: A2ADispatcher,
+        target: str,
+        history: list[ModelMessage],
+        acting_agent: str,
+        human_dest: Destination,
+    ) -> None:
+        """Drain the run's stream into both trace surfaces, then post the reply.
+
+        Split out so ``handle`` can wrap it in the outer ``finally`` that retires
+        the A2A projector — which must happen after ``_deliver``, not alongside
+        the human trace's ``finish``.
+        """
         try:
             async for event in handle.stream():
                 try:
@@ -390,16 +438,19 @@ class MentionHandler:
                         # (ADR-0025). `result()` still owns the reply and the
                         # notice; this is display only, and best-effort.
                         faulted = normalize_terminal(event)
-                        if faulted is None:
-                            # Not a terminal either: an event kind the normalizer
-                            # does not know (a future calfkit step type). Dropping
-                            # it is right, dropping it SILENTLY is not — this is
-                            # the only place the two "None"s are distinguishable.
-                            logger.warning(
-                                "bridge: unrenderable run event %s; dropping", type(event).__name__
-                            )
+                        if faulted is not None:
+                            # BOTH surfaces seal: a consulted agent's trace ends
+                            # with the same run, and #124's motivating case is
+                            # exactly this — 23 tool calls then a fault, which
+                            # must read "run failed after 23 tools", not trail off.
+                            await self._trace.seal(handle.correlation_id, faulted=faulted)
+                            await self._a2a.seal(handle.correlation_id, faulted=faulted)
                             continue
-                        await self._trace.seal(handle.correlation_id, faulted=faulted)
+                        # Not a terminal either: an event kind the normalizer does
+                        # not know (a future calfkit step type). Dropping it is
+                        # right, dropping it SILENTLY is not — this is the only
+                        # place the two "None"s are distinguishable.
+                        logger.warning("bridge: unrenderable run event %s; dropping", type(event).__name__)
                         continue
                     # THE invariant, applied uniformly below: only the agent in
                     # control of the human's turn may touch the human's thread or
@@ -425,20 +476,17 @@ class MentionHandler:
                             # ACTING agent's consults earn a row — a peer's nested
                             # consult is its own private business, and rendering it
                             # here would re-create the very leak this replaced.
-                            await self._render_consult(projection, url, req)
+                            await self._render_consult(projection, url, human_dest)
                     elif is_acting:
-                        await self._trace.on_step(step, req, acting_agent=acting_agent)
+                        await self._trace.on_step(step, human_dest, acting_agent=acting_agent)
                     else:
-                        # A consulted peer's own step (its preamble, its tool calls).
-                        # That is private A2A work — the audit channel's business —
-                        # and rendering it would spill the exchange into the human's
-                        # thread.
-                        logger.debug(
-                            "bridge: not the acting agent — step from consulted peer emitter=%s owner=%s kind=%s",
-                            step.emitter,
-                            acting_agent,
-                            step.kind,
-                        )
+                        # A consulted agent's own step (its preamble, its tool
+                        # calls). That is private A2A work — the audit channel's
+                        # business — so it renders in the turn's A2A thread under
+                        # that agent's own persona (ADR-0026). Rendering it HERE
+                        # would spill the exchange into the human's conversation,
+                        # which is what the is_acting guard exists to prevent.
+                        await self._a2a.project_step(step)
                     # A handoff TRANSFERS control, so the new owner's steps keep
                     # rendering. Update AFTER rendering, so the announcement itself
                     # stays under the handing-off agent's persona — and only for the
@@ -498,7 +546,7 @@ class MentionHandler:
             return
         await self._sticky.set_sticky_owner(str(req.source_channel_id or req.channel_id), owner_agent_id)
 
-    async def _render_consult(self, projection: A2AProjection, url: str | None, req: MentionRequest) -> None:
+    async def _render_consult(self, projection: A2AProjection, url: str | None, dest: Destination) -> None:
         """Open or resolve the acting agent's consult row in the step trace.
 
         Every projection carries the ``tool_call_id``, so the request opens a
@@ -512,7 +560,7 @@ class MentionHandler:
                 projection.tool_call_id,
                 projection.peer,
                 url,
-                req,
+                dest,
                 correlation_id=projection.correlation_id,
                 persona_name=projection.caller,
             )

@@ -118,16 +118,33 @@ class _FakeA2A:
     def __init__(self, *, url: str | None = "https://discord.com/channels/42/9001") -> None:
         self.projected: list[Any] = []
         self.faults: list[Any] = []
+        # Consulted agents' own steps, routed here instead of dropped (ADR-0026).
+        self.steps: list[Any] = []
+        self.seals: list[tuple[str, bool]] = []
+        # Ordering matters and is asserted: `finish` MUST come after `fault`, or
+        # the fault note lands in a second, freshly created thread.
+        self.calls: list[str] = []
         # The audit thread's jump link; ``None`` models a swallowed projection
         # failure (no thread was anchored), which the marker must surface.
         self.url = url
 
     async def project(self, projection: Any) -> str | None:
         self.projected.append(projection)
+        self.calls.append("project")
         return self.url
 
     async def project_fault(self, call: Any) -> None:
         self.faults.append(call)
+        self.calls.append("fault")
+
+    async def project_step(self, step: Any) -> None:
+        self.steps.append(step)
+
+    async def seal(self, correlation_id: str, *, faulted: bool) -> None:
+        self.seals.append((correlation_id, faulted))
+
+    async def finish(self, correlation_id: str) -> None:
+        self.calls.append("finish")
 
 
 class _FakeTrace:
@@ -137,6 +154,8 @@ class _FakeTrace:
         # Track the owning agent passed to each on_step call so handoff-tracking
         # tests can assert that tool steps after a handoff carry the new agent.
         self.acting_agents: list[str] = []
+        # Where each step was told to render — the handler's own derivation.
+        self.dests: list[Any] = []
         # Consult rows opened (key, peer, url, persona_name) and resolved
         # (key, state) — bridge annotations on the turn, not run steps.
         self.consults: list[tuple[str, str, str | None, str]] = []
@@ -147,8 +166,9 @@ class _FakeTrace:
         # (correlation_id, faulted) per seal — driven by the stream's terminal.
         self.seals: list[tuple[str, bool]] = []
 
-    async def on_step(self, step: Any, req: MentionRequest, *, acting_agent: str) -> None:
+    async def on_step(self, step: Any, dest: Any, *, acting_agent: str) -> None:
         self.steps.append(step)
+        self.dests.append(dest)
         self.acting_agents.append(acting_agent)
 
     async def on_consult(
@@ -156,7 +176,7 @@ class _FakeTrace:
         key: str,
         peer: str,
         thread_url: str | None,
-        req: MentionRequest,
+        dest: Any,
         *,
         correlation_id: str,
         persona_name: str,
@@ -943,3 +963,71 @@ class TestConsultOutcomesReachTheTrace:
         await handler.handle(_req())
         assert fakes["trace"].consult_results == [("t1", "ok", "")]
         assert all("SECRET" not in note for _k, _s, note in fakes["trace"].consult_results)
+
+
+class TestConsultedAgentsWorkIsRouted:
+    """A consulted agent's own steps reach the A2A thread instead of nowhere.
+
+    The drain's `else` arm used to drop them at DEBUG while its own comment
+    called them "the audit channel's business" — a promise nothing kept. That is
+    invisible until a consult fails: an agent can make 23 tool calls, fault, and
+    leave only a shrug in its thread (ADR-0026).
+    """
+
+    async def test_a_consulted_agents_step_goes_to_the_a2a_projector(self) -> None:
+        steps = (_consult("t1", "conan", "q"), _agent_msg("thinking…", emitter="conan"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert [s.emitter for s in fakes["a2a"].steps] == ["conan"]
+        # …and NOT into the human's thread, which is what is_acting guards.
+        assert fakes["trace"].steps == []
+
+    async def test_the_acting_agents_own_steps_never_go_to_the_projector(self) -> None:
+        handler, _client, fakes = _make(
+            handle=_FakeHandle(steps=(_agent_msg("mine", emitter="scribe"),), result=_result("done", "scribe"))
+        )
+        await handler.handle(_req())
+        assert fakes["a2a"].steps == []
+        assert [s.emitter for s in fakes["trace"].steps] == ["scribe"]
+
+    async def test_the_human_trace_is_told_where_the_mention_landed(self) -> None:
+        # The handler owns this derivation now; the renderer is told the answer.
+        handler, _client, fakes = _make(
+            handle=_FakeHandle(steps=(_agent_msg("hi"),), result=_result("done", "scribe"))
+        )
+        await handler.handle(_req())
+        dest = fakes["trace"].dests[0]
+        assert (dest.channel_id, dest.thread_id) == (10, None)
+
+    async def test_both_surfaces_seal_from_the_stream_terminal(self) -> None:
+        # A consulted agent's trace ends with the same run. Without this the
+        # projector's finish would seal it defensively as "interrupted".
+        handler, _client, fakes = _make()
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["trace"].seals == [("c1", False)]
+        assert fakes["a2a"].seals == [("c1", False)]
+
+    async def test_a_faulted_run_seals_both_surfaces_faulted(self) -> None:
+        fault = NodeFaultError(ErrorReport(error_type="calf.test.fault", origin_node_id="conan"))
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=fault))
+        await handler.handle(_req())
+        assert fakes["a2a"].seals == [("c1", True)]
+
+    async def test_the_projector_is_retired_after_the_fault_notes_not_before(self) -> None:
+        # THE ordering trap. `_deliver`'s fault path writes the "did not reply"
+        # notes and needs the turn's thread STILL mapped — retiring first evicts
+        # the mapping, so each note creates a second thread and is orphaned in it.
+        # Pins the sequence, not just the calls.
+        fault = NodeFaultError(ErrorReport(error_type="calf.test.fault", origin_node_id="conan"))
+        handler, _client, fakes = _make(
+            handle=_FakeHandle(steps=(_consult("t1", "conan", "q"),), fault=fault)
+        )
+        await handler.handle(_req())
+        assert fakes["a2a"].calls == ["project", "fault", "finish"]
+
+    async def test_the_projector_is_retired_on_a_clean_run_too(self) -> None:
+        # Unconditional: `_threads` was never evicted at all before, which now
+        # strands a live writer task per turn.
+        handler, _client, fakes = _make()
+        await handler.handle(_req())
+        assert fakes["a2a"].calls[-1] == "finish"
