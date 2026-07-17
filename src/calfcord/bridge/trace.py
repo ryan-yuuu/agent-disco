@@ -54,7 +54,9 @@ affect the terminal reply. A failed *post* leaves the segment dirty so the next
 wake (or the final flush) retries it — unposted content is never dropped. A
 failed *edit* is dropped without a retry (avoiding a hot loop on e.g. a deleted
 message); every edit re-renders the segment's full current body, so the next
-append heals the gap. A non-Discord error inside a flush is caught and logged
+append heals the gap — EXCEPT on the final flush, which has no next append and
+therefore retries once, because the seal is always that last append and a
+frozen ``◐`` is the one outcome ADR-0025 rules out. A non-Discord error inside a flush is caught and logged
 by the writer loop itself, so it cannot unwind ``finish``. A mid-run bridge
 restart strands only a persistent partial trace (cosmetic; no state to recover)
 — the one case the seal cannot rescue, since the run dies with the bridge.
@@ -268,10 +270,25 @@ def _build_segment_view(body: str, accent: discord.Colour) -> discord.ui.LayoutV
     return _SegmentView(body, accent)
 
 
-async def _best_effort_trace[T](coro: Awaitable[T], *, channel_id: int) -> T | None:
+class _Failed:
+    """Sentinel for a swallowed best-effort call.
+
+    Not ``None``: ``edit_components`` returns ``None`` on SUCCESS, so ``None``
+    cannot distinguish "it worked" from "it was swallowed" — and the final edit
+    has to know the difference to retry.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<failed>"
+
+
+_FAILED: Final[_Failed] = _Failed()
+
+
+async def _best_effort_trace[T](coro: Awaitable[T], *, channel_id: int) -> T | _Failed:
     """Await a best-effort trace send/edit, swallowing the usual Discord
     failures so the trace can never crash the run. Returns the call's result,
-    or ``None`` if it failed.
+    or :data:`_FAILED` if it was swallowed.
 
     ``NotFound`` (already gone) is DEBUG; ``Forbidden`` and the broader
     ``DiscordException`` (which also funnels the sibling ``RateLimited``, NOT a
@@ -302,7 +319,7 @@ async def _best_effort_trace[T](coro: Awaitable[T], *, channel_id: int) -> T | N
         )
     except aiohttp.ClientError as e:
         logger.warning("trace: call hit a transport error channel_id=%d: %r", channel_id, e)
-    return None
+    return _FAILED
 
 
 class StepTraceRenderer:
@@ -445,6 +462,11 @@ class StepTraceRenderer:
         started = entry.started.pop(key, None)
         elapsed_ms = int((self._now() - started) * 1000) if started is not None else None
         segment.replace(index, replace(row, state=state, note=note, elapsed_ms=elapsed_ms))
+        # Retire the key. A resolved row books ZERO growth reserve, so letting a
+        # second result re-resolve it would grow the segment into budget nobody
+        # reserved — past fits() and into the silent hard cap. A duplicate id now
+        # lands as an orphan row instead, which is visible rather than corrupting.
+        entry.locate.pop(key, None)
 
     async def on_consult(
         self,
@@ -503,6 +525,7 @@ class StepTraceRenderer:
         if not isinstance(row, ConsultRow):
             return
         segment.replace(index, replace(row, state=state, note=_plain(note)))
+        entry.locate.pop(key, None)  # see _resolve_tool: a resolved row reserves nothing
         entry.wake.set()
 
     def _entry_for(self, correlation_id: str, req: MentionRequest) -> _Entry:
@@ -681,19 +704,41 @@ class StepTraceRenderer:
                     ),
                     channel_id=entry.channel_id,
                 )
-                if sent is not None:
+                if not isinstance(sent, _Failed):
                     segment.message_id = sent.id
                 else:
                     # Unposted content must not be lost: retry on the next wake
                     # (or the final flush). Bounded — one attempt per wake.
                     segment.dirty = True
             else:
-                await _best_effort_trace(
-                    self._persona_sender.edit_components(
-                        channel_id=entry.channel_id,
-                        message_id=segment.message_id,
-                        view=view,
-                        thread_id=entry.thread_id,
-                    ),
-                    channel_id=entry.channel_id,
-                )
+                await self._edit(entry, segment, view)
+
+    async def _edit(self, entry: _Entry, segment: _Segment, view: discord.ui.LayoutView) -> None:
+        """Edit one segment in place, retrying ONCE on a final flush.
+
+        A failed edit is normally dropped without a retry — it avoids a hot loop
+        on e.g. a deleted message, and the next append heals it because every
+        edit re-renders the segment's whole body.
+
+        That reasoning has one hole, and it is the important one: **the last edit
+        has no next append**. The seal is always the last append, so a single
+        transient 500 there would freeze the trace mid-``◐`` forever — exactly
+        what ADR-0025 exists to prevent, on Discord's most common failure. So the
+        final flush retries once. Bounded at one: a genuinely gone message stays
+        gone rather than spinning, and `finish` is not delayed beyond one extra
+        round-trip.
+        """
+
+        def _attempt() -> Awaitable[None]:
+            return self._persona_sender.edit_components(
+                channel_id=entry.channel_id,
+                message_id=segment.message_id,  # type: ignore[arg-type]
+                view=view,
+                thread_id=entry.thread_id,
+            )
+
+        if await _best_effort_trace(_attempt(), channel_id=entry.channel_id) is not _FAILED:
+            return
+        if entry.finished.is_set():
+            logger.debug("trace: retrying the final edit channel_id=%d", entry.channel_id)
+            await _best_effort_trace(_attempt(), channel_id=entry.channel_id)

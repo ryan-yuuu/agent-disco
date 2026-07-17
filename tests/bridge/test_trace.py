@@ -45,6 +45,20 @@ _CHANNEL_ID = 6789
 _MESSAGE_ID = 12345
 
 
+def _reject_what_discord_would(body: str) -> None:
+    """Fail loudly on a body the real API would reject.
+
+    The renderer swallows a 400 to a WARNING and leaves the segment dirty
+    forever, so in production this failure is silent and permanent. In tests it
+    should be the opposite: loud, and attributed to whichever test caused it.
+    """
+    assert body, "Discord rejects an empty TextDisplay (min length 1)"
+    assert len(body) <= trace_mod._V2_TEXT_LIMIT, (
+        f"body is {len(body)} chars — Discord rejects over {trace_mod._V2_TEXT_LIMIT}; "
+        "the growth reservation did not hold"
+    )
+
+
 class _FakeSender:
     """Recording stand-in for :class:`DiscordPersonaSender`.
 
@@ -52,6 +66,12 @@ class _FakeSender:
     failing ones) with the view's body extracted at call time, so tests can
     assert exactly what would have rendered on Discord. Queued exceptions are
     raised FIFO, letting tests script per-call failures.
+
+    It also ADJUDICATES, rather than accepting anything: Discord rejects a body
+    over 4000 chars or under 1, so this does too. That makes every test in this
+    file a cap regression test for free — which matters, because the growth
+    reservation's whole job is keeping the segment's silent hard cap
+    unreachable, and a fake that accepts any length can never notice it failing.
     """
 
     def __init__(self) -> None:
@@ -77,6 +97,7 @@ class _FakeSender:
             "accent": _view_accent_of(view),
             "ok": True,
         }
+        _reject_what_discord_would(call["body"])
         self.sends.append(call)
         if self.send_failures:
             call["ok"] = False
@@ -101,6 +122,7 @@ class _FakeSender:
             "accent": _view_accent_of(view),
             "ok": True,
         }
+        _reject_what_discord_would(call["body"])
         self.edits.append(call)
         if self.edit_failures:
             call["ok"] = False
@@ -424,6 +446,18 @@ class TestRowLifecycle:
         )
         await r.finish(_CORRELATION_ID)
         assert _first_row(sender) == r"-# ~~⊘ search\_docs~~ — superseded by handoff"
+
+    async def test_a_second_result_for_one_call_cannot_re_resolve_the_row(self, sender: _FakeSender) -> None:
+        # A resolved row books ZERO growth reserve, so re-resolving one lets it
+        # grow into budget nobody reserved — straight through fits() and into the
+        # segment's silent hard cap. Resolving retires the key, so a second
+        # result for the same id is an orphan (appended) rather than a re-resolve.
+        r = _renderer(sender)
+        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        entry = r._entries[_CORRELATION_ID]
+        assert "t1" not in entry.locate, "a resolved row is still re-resolvable"
+        await _end(r)
 
     async def test_an_orphan_result_appends_instead_of_raising(self, sender: _FakeSender) -> None:
         # The drain's contract is that the render path can NEVER fault the turn.
@@ -752,12 +786,15 @@ class TestBuildSegmentView:
         assert _view_body(view) == "◐ read_file"
         assert _view_accent_of(view) == accent_for("aksel")
 
-    def test_the_view_carries_no_content(self) -> None:
+    def test_the_view_carries_its_text_only_in_components(self) -> None:
         # ADR-0016's history-exclusion invariant: a v2 message carries text ONLY
-        # inside its components. If one ever gained `content` it would re-enter
-        # model history and double-count the agent's own tool activity.
+        # inside its components, and the flag is what ChannelHistoryFetcher drops
+        # on. If a trace message ever gained `content` it would re-enter model
+        # history and double-count the agent's own tool activity.
         view = _build_segment_view("◐ read_file", accent_for("aksel"))
         assert view.has_components_v2() is True
+        assert not hasattr(view, "content"), "a LayoutView must carry no content"
+        assert _view_body(view) == "◐ read_file"  # the text lives in the TextDisplay
 
 
 class TestAggregation:
@@ -957,6 +994,22 @@ class TestFailureSemantics:
     post is retried (content must not be lost); a failed edit is dropped
     (the next flush re-renders the full body anyway)."""
 
+    async def test_the_seal_s_own_edit_is_retried_when_it_fails(self, sender: _FakeSender) -> None:
+        # "A failed edit heals on the next append" holds for every edit EXCEPT
+        # the last — and the seal is always the last, so there is no next append.
+        # Without a retry a single transient 500 freezes the trace mid-`◐`
+        # forever: exactly the outcome ADR-0025 exists to prevent, on Discord's
+        # most common failure.
+        r = _renderer(sender)
+        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await _until(lambda: len(sender.ok_sends()) == 1)
+        sender.edit_failures.append(_http_exc(discord.HTTPException, 500))
+        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await _end(r)
+        assert sender.ok_edits(), "the seal never landed — the trace is frozen mid-flight"
+        assert "-# 1 tool · 0ms" in sender.ok_edits()[-1]["body"]
+        assert "◐" not in sender.ok_edits()[-1]["body"]
+
     async def test_a_transport_error_leaves_the_segment_dirty_for_retry(self, sender: _FakeSender) -> None:
         # Observed against LIVE Discord: aiohttp raises ServerDisconnectedError
         # on a dropped keep-alive, and it is NOT a discord.DiscordException — so
@@ -997,7 +1050,12 @@ class TestFailureSemantics:
         assert len(sender.ok_sends()) == 1  # finish retried the post
         assert sender.ok_sends()[0]["body"].startswith("-# ~~⊘ a~~ — interrupted")
 
-    async def test_failed_edit_not_retried_until_new_content(self, sender: _FakeSender) -> None:
+    async def test_a_mid_run_failed_edit_is_not_hot_retried(self, sender: _FakeSender) -> None:
+        # NOT a dirty-flag test: review proved this passes even with failed edits
+        # re-marking dirty, because the retry merges into the seal's flush. What
+        # actually prevents a hot loop is the `wake` gate — only an append sets
+        # it — so that is what this asserts: no edit happens between the failure
+        # and the next append.
         renderer = _renderer(sender)
         await renderer.on_step(_step("tool_call", name="a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
@@ -1005,11 +1063,9 @@ class TestFailureSemantics:
         sender.edit_failures.append(_http_exc(discord.NotFound, 404))
         await renderer.on_step(_step("tool_result", name="a"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)  # the failing attempt
+        await _settle()
+        assert len(sender.edits) == 1, "the dropped edit was hot-retried with no new content"
         await renderer.finish(_CORRELATION_ID)
-        # finish did NOT hot-retry the dropped edit; its ONE further edit is
-        # the defensive seal, which is new content rather than a retry.
-        assert len(sender.edits) == 2
-        assert "interrupted after" in sender.edits[1]["body"]
 
     async def test_failed_edit_recovers_on_next_step(self, sender: _FakeSender) -> None:
         renderer = _renderer(sender)
