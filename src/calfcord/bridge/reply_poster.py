@@ -33,7 +33,7 @@ from calfkit._vendor.pydantic_ai.messages import (
 )
 
 from calfcord.bridge.mention_handler import MentionRequest
-from calfcord.bridge.steps_render import _render_tree_blocks
+from calfcord.bridge.transcript_tree import _render_tree_blocks
 from calfcord.bridge.transcripts import TranscriptRow, TranscriptStoreLike
 from calfcord.bridge.wire import WireMessage
 from calfcord.discord.chunking import chunk_split

@@ -1,10 +1,16 @@
 # Continuous integration for pushes to main and pull-requests against main.
 #
-# Three jobs run in parallel:
+# Four jobs run in parallel:
 #   lint  — ruff check. Advisory only (``continue-on-error: true``)
 #           while we work down the 25 pre-existing baseline errors.
 #           A red ✗ surfaces in the PR check list but does not block
 #           merge.
+#   types — mypy --strict over the modules listed in ``[tool.mypy] files``.
+#           GATING, which is only affordable because the scope is small and
+#           clean: the repo has never been type-checked, so a repo-wide run
+#           would open on a wall of errors and get muted like ``lint``. Those
+#           modules are checked because they *rely* on it — ``render_row``'s
+#           ``assert_never`` and ``_is_pending``'s TypeGuard are load-bearing.
 #   test  — pytest with coverage. Hard-gates: any failing test fails CI
 #           (coverage is reported, not gated). Also publishes the coverage
 #           badge/data via python-coverage-comment-action; the companion
@@ -77,6 +83,29 @@ jobs:
         # ``uvx`` keeps ruff out of the project deps; mirrors the local
         # developer workflow documented in CONTRIBUTING.md.
         run: uvx ruff check .
+
+  types:
+    name: mypy
+    runs-on: ubuntu-latest
+    # NOT advisory, unlike ``lint``: the scope is a short, clean allowlist in
+    # ``[tool.mypy] files``, so a red ✗ here means a real regression rather
+    # than baseline noise. Widen the list as modules are cleaned; if it ever
+    # goes red on merge day, fix the code or shrink the list — do not add
+    # ``continue-on-error``, which is what turns a gate into decoration.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up uv (+ Python 3.12)
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          # Pinned for the reasons spelled out on the lint job above.
+          version: "0.11.29"
+          enable-cache: true
+      - name: Run mypy
+        # ``uv run`` (not ``uvx``): mypy needs the project's own dependencies
+        # importable to check against real signatures, and it reads its scope
+        # and strictness from ``[tool.mypy]``.
+        run: uv run mypy
 
   test:
     name: pytest

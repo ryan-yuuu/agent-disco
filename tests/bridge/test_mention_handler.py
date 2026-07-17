@@ -130,22 +130,44 @@ class _FakeA2A:
         self.faults.append(call)
 
 
-class _FakeProgress:
+class _FakeTrace:
     def __init__(self) -> None:
         self.steps: list[Any] = []
         self.finished: list[str] = []
         # Track the owning agent passed to each on_step call so handoff-tracking
         # tests can assert that tool steps after a handoff carry the new agent.
-        self.owning_agents: list[str] = []
-        # Bridge-authored annotations (text, persona_name) — not run steps.
-        self.notes: list[tuple[str, str]] = []
+        self.acting_agents: list[str] = []
+        # Consult rows opened (key, peer, url, persona_name) and resolved
+        # (key, state) — bridge annotations on the turn, not run steps.
+        self.consults: list[tuple[str, str, str | None, str]] = []
+        # (key, state, note) — `note` is recorded because ADR-0020's privacy rule
+        # lives in WHAT the handler passes here. Dropping it made the rule
+        # unobservable: a mutation leaking the peer's reply passed every test.
+        self.consult_results: list[tuple[str, str, str]] = []
+        # (correlation_id, faulted) per seal — driven by the stream's terminal.
+        self.seals: list[tuple[str, bool]] = []
 
-    async def on_step(self, step: Any, req: MentionRequest, *, owning_agent: str) -> None:
+    async def on_step(self, step: Any, req: MentionRequest, *, acting_agent: str) -> None:
         self.steps.append(step)
-        self.owning_agents.append(owning_agent)
+        self.acting_agents.append(acting_agent)
 
-    async def on_note(self, text: str, req: MentionRequest, *, correlation_id: str, persona_name: str) -> None:
-        self.notes.append((text, persona_name))
+    async def on_consult(
+        self,
+        key: str,
+        peer: str,
+        thread_url: str | None,
+        req: MentionRequest,
+        *,
+        correlation_id: str,
+        persona_name: str,
+    ) -> None:
+        self.consults.append((key, peer, thread_url, persona_name))
+
+    async def on_consult_result(self, key: str, *, state: str, note: str, correlation_id: str) -> None:
+        self.consult_results.append((key, state, note))
+
+    async def seal(self, correlation_id: str, *, faulted: bool) -> None:
+        self.seals.append((correlation_id, faulted))
 
     async def finish(self, correlation_id: str) -> None:
         self.finished.append(correlation_id)
@@ -202,6 +224,27 @@ def _consult(tcid: str, peer: str, message: str, caller: str = "scribe") -> Tool
     )
 
 
+def _consult_outcome(tcid: str, text: str, outcome: str, caller: str = "scribe") -> ToolResultEvent:
+    """A consult that was REJECTED (the caller refused to dispatch — offline,
+    self, a cycle) or FAULTED (the peer engaged, then blew up).
+
+    These are the branches this redesign exists for: today's marker is written at
+    request time in the past tense, so both of these leave an optimistic
+    "consulted" line in the human's thread while the warning goes only to the
+    audit thread.
+    """
+    return ToolResultEvent(
+        correlation_id="c1",
+        depth=1,
+        frame_id="f",
+        emitter=caller,
+        tool_call_id=tcid,
+        name="message_agent",
+        parts=[TextPart(text=text)],
+        outcome=outcome,  # type: ignore[arg-type]
+    )
+
+
 def _consult_reply(tcid: str, peer: str, text: str, caller: str = "scribe") -> ToolResultEvent:
     """A consult's reply as calfkit actually emits it.
 
@@ -227,7 +270,7 @@ def _handoff(target: str, reason: str = "", emitter: str = "scribe") -> HandoffE
 
 
 def _tool_call(tcid: str, tool_name: str, emitter: str = "scribe") -> ToolCallEvent:
-    """A non-message_agent tool call (the progress-renderer path, not A2A)."""
+    """A non-message_agent tool call (the step-trace path, not A2A)."""
     return ToolCallEvent(
         correlation_id="c1",
         depth=1,
@@ -279,7 +322,7 @@ def _make(
     handles: list[_FakeHandle] | None = None,
     overrides: dict[str, str] | None = None,
     reply_outcomes: list[str] | None = None,
-    progress: Any = None,
+    trace: Any = None,
     sticky: _FakeSticky | None = None,
 ) -> tuple[MentionHandler, _FakeClient, dict[str, Any]]:
     if handles is None:
@@ -287,7 +330,7 @@ def _make(
     client = _FakeClient(handles)
     fakes = {
         "a2a": _FakeA2A(),
-        "progress": progress if progress is not None else _FakeProgress(),
+        "trace": trace if trace is not None else _FakeTrace(),
         "reply": _FakeReply(reply_outcomes),
         "history": _FakeHistory(),
         "sticky": sticky if sticky is not None else _FakeSticky(),
@@ -298,7 +341,7 @@ def _make(
         history=fakes["history"],
         overrides=_FakeOverrides(overrides),
         a2a=fakes["a2a"],
-        progress=fakes["progress"],
+        trace=fakes["trace"],
         reply=fakes["reply"],
         memory_deps=lambda: {"memory_prompt": "tmpl"},
         sticky=fakes["sticky"],
@@ -321,7 +364,7 @@ class TestRouting:
         assert len(fakes["reply"].replies) == 1
         persona, text = fakes["reply"].replies[0]
         assert persona.name == "scribe" and text == "done"
-        assert fakes["progress"].finished == ["c1"]
+        assert fakes["trace"].finished == ["c1"]
         assert fakes["reply"].notices == []
 
     async def test_reply_uses_handoff_emitter_persona_not_target(self) -> None:
@@ -387,12 +430,12 @@ class TestRouting:
 
 
 class TestStreamDrain:
-    async def test_a2a_consult_goes_to_projector_not_progress(self) -> None:
+    async def test_a2a_consult_goes_to_projector_not_trace(self) -> None:
         steps = (_consult("t1", "conan", "summarize"), _consult_reply("t1", "conan", "the summary"))
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         await handler.handle(_req())
         assert len(fakes["a2a"].projected) == 2  # request + reply
-        assert fakes["progress"].steps == []
+        assert fakes["trace"].steps == []
 
     async def test_consulted_peer_steps_do_not_leak_into_the_human_thread(self) -> None:
         # calfkit flushes EVERY hop's steps to the ROOT caller (base.py's
@@ -401,7 +444,7 @@ class TestStreamDrain:
         # PEER as emitter. That work is the A2A audit channel's business, not live
         # progress for the human — rendering it would spill a private exchange into
         # the mention's thread (and, for the peer's tool steps, under the CALLER's
-        # persona, since ``owning_agent`` only transfers on handoff).
+        # persona, since ``acting_agent`` only transfers on handoff).
         steps = (
             _agent_msg("let me ask conan", emitter="scribe"),
             _consult("t1", "conan", "latency budget?"),
@@ -411,22 +454,22 @@ class TestStreamDrain:
         )
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         await handler.handle(_req())
-        # Only the caller's own step is live progress; the consult itself is audited.
-        assert [s.emitter for s in fakes["progress"].steps] == ["scribe"]
+        # Only the caller's own step is the step trace; the consult itself is audited.
+        assert [s.emitter for s in fakes["trace"].steps] == ["scribe"]
         assert len(fakes["a2a"].projected) == 2  # request + reply
 
     async def test_consult_leaves_a_cross_link_marker_in_the_human_thread(self) -> None:
         # The exchange is private (it projects to the audit channel), but the
         # consult itself must not be invisible from the conversation that caused
-        # it: the trace gets ONE marker per consult, under the CALLER's persona,
-        # linking into the audit thread. The reply adds no second marker — it
-        # lands in the same thread the marker already points at.
+        # it: the trace gets ONE row per consult, under the CALLER's persona,
+        # linking into the audit thread. The reply adds no second row — it
+        # RESOLVES the one already there, which is what stops a rejected or
+        # faulted consult from reading as though the peer answered.
         steps = (_consult("t1", "conan", "latency budget?"), _consult_reply("t1", "conan", "200ms"))
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         await handler.handle(_req())
-        assert fakes["progress"].notes == [
-            ("💬 consulted `conan` — [view exchange](https://discord.com/channels/42/9001)", "scribe")
-        ]
+        assert fakes["trace"].consults == [("t1", "conan", "https://discord.com/channels/42/9001", "scribe")]
+        assert fakes["trace"].consult_results == [("t1", "ok", "")]
 
     async def test_consult_marker_surfaces_the_audit_gap_when_projection_failed(self) -> None:
         # The projection is best-effort and swallows Discord failures, so a broken
@@ -436,12 +479,12 @@ class TestStreamDrain:
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         fakes["a2a"].url = None  # the projection failed; no thread was anchored
         await handler.handle(_req())
-        assert fakes["progress"].notes == [("💬 consulted `conan` — ⚠️ couldn't write the audit log", "scribe")]
+        assert fakes["trace"].consults == [("t1", "conan", None, "scribe")]
 
     async def test_peer_s_internal_handoff_does_not_hijack_the_owner(self) -> None:
         # A consulted peer may itself hand off (`handoff` defaults on), and that
         # handoff flushes to the ROOT caller like every other hop. It must not
-        # advance `owning_agent`: control of the HUMAN's turn never left scribe.
+        # advance `acting_agent`: control of the HUMAN's turn never left scribe.
         # Letting a peer's handoff transfer ownership silently blackholes every
         # later step the owner emits — the whole trace stops mid-turn.
         steps = (
@@ -452,7 +495,7 @@ class TestStreamDrain:
         )
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         await handler.handle(_req())
-        assert [s.emitter for s in fakes["progress"].steps] == ["scribe"]
+        assert [s.emitter for s in fakes["trace"].steps] == ["scribe"]
 
     async def test_nested_consult_does_not_leak_a_marker_into_the_human_thread(self) -> None:
         # A consulted peer consulting ITS own peer (B→C inside A→B) is audited —
@@ -466,30 +509,30 @@ class TestStreamDrain:
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         await handler.handle(_req())
         assert len(fakes["a2a"].projected) == 2  # both audited
-        assert [persona for _text, persona in fakes["progress"].notes] == ["scribe"]
+        assert [persona for *_rest, persona in fakes["trace"].consults] == ["scribe"]
 
-    async def test_plain_agent_message_goes_to_progress(self) -> None:
+    async def test_plain_agent_message_goes_to_the_trace(self) -> None:
         handler, _client, fakes = _make(
             handle=_FakeHandle(steps=(_agent_msg("thinking…"),), result=_result("done", "scribe"))
         )
         await handler.handle(_req())
-        assert len(fakes["progress"].steps) == 1
+        assert len(fakes["trace"].steps) == 1
         assert fakes["a2a"].projected == []
 
     async def test_handoff_goes_to_progress_not_a2a(self) -> None:
         # A handoff transfers conversation control (ADR-0019) — distinct from a
-        # message_agent consult — so it renders inline via the progress renderer
+        # message_agent consult — so it renders inline via the step-trace renderer
         # (the dispatcher no longer claims it), not the A2A audit channel.
         handler, _client, fakes = _make(
             handle=_FakeHandle(steps=(_handoff("dot", "prose is yours"),), result=_result("done", "scribe"))
         )
         await handler.handle(_req())
-        assert [s.kind for s in fakes["progress"].steps] == ["handoff"]
+        assert [s.kind for s in fakes["trace"].steps] == ["handoff"]
         assert fakes["a2a"].projected == []
 
-    async def test_owning_agent_transfers_on_handoff(self) -> None:
+    async def test_acting_agent_transfers_on_handoff(self) -> None:
         # After a handoff from scribe → dot, subsequent tool steps carry dot as
-        # the owning agent (their progress lines must appear under dot's persona,
+        # the owning agent (their trace rows must appear under dot's persona,
         # not scribe's). The handoff step itself still carries the pre-transfer
         # owner (scribe announced it).
         steps = (
@@ -497,7 +540,7 @@ class TestStreamDrain:
             _handoff("dot", "you handle this"),  # scribe hands off to dot
             # Post-handoff steps are emitted by DOT's node, so they carry dot as
             # emitter (calfkit stamps ``emitter=self.node_id`` per hop) — a handoff
-            # transfers control, so these stay live progress under the new owner.
+            # transfers control, so these stay the step trace under the new owner.
             _tool_call("t2", "read_file", emitter="dot"),  # dot's tool call
             _agent_msg("done", emitter="dot"),  # dot's reply
         )
@@ -505,24 +548,24 @@ class TestStreamDrain:
             handle=_FakeHandle(steps=steps, result=_result("done", "dot"))
         )
         await handler.handle(_req(mentions=("scribe",)))
-        # owning_agents aligns 1:1 with steps
-        assert fakes["progress"].owning_agents == ["scribe", "scribe", "dot", "dot"]
+        # acting_agents aligns 1:1 with steps
+        assert fakes["trace"].acting_agents == ["scribe", "scribe", "dot", "dot"]
 
     async def test_render_fault_in_drain_does_not_lose_terminal_reply(self) -> None:
         # I-3: a render/normalize/classify fault on a step must be swallowed (logged)
         # so it can't unwind the drain and cost the user the already-computed reply.
-        class _RaisingProgress(_FakeProgress):
-            async def on_step(self, step: Any, req: MentionRequest, *, owning_agent: str) -> None:
+        class _RaisingTrace(_FakeTrace):
+            async def on_step(self, step: Any, req: MentionRequest, *, acting_agent: str) -> None:
                 raise RuntimeError("render boom")
 
         handler, _client, fakes = _make(
             handle=_FakeHandle(steps=(_agent_msg("thinking…"),), result=_result("done", "scribe")),
-            progress=_RaisingProgress(),
+            trace=_RaisingTrace(),
         )
         await handler.handle(_req())
         # the terminal reply still posts, and finish() still ran (the drain didn't unwind).
         assert [t for _, t in fakes["reply"].replies] == ["done"]
-        assert fakes["progress"].finished == ["c1"]
+        assert fakes["trace"].finished == ["c1"]
 
 
 class TestTerminalErrors:
@@ -587,7 +630,7 @@ class TestDelivery:
             history=_FakeHistory(),
             overrides=_FakeOverrides(),
             a2a=_FakeA2A(),
-            progress=_FakeProgress(),
+            trace=_FakeTrace(),
             reply=reply,
             sticky=None,
         )
@@ -828,3 +871,75 @@ class TestFaultRootCauses:
         assert "403 Forbidden" in notice
         assert "billing.quota_exceeded" in notice  # the minted child — not silently dropped
         assert "monthly quota exhausted" in notice
+
+
+class TestTerminalSeals:
+    """The trace is sealed from the stream's terminal (ADR-0025).
+
+    ``_FakeHandle.stream()`` yields the terminal as its last event, exactly as
+    calfkit's does — which is the whole point: the outcome is available inside
+    the drain, before the ``finally`` calls ``finish``.
+    """
+
+    async def test_a_completed_run_seals_the_trace_as_not_faulted(self) -> None:
+        handler, _client, fakes = _make()
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["trace"].seals == [("c1", False)]
+        # And the seal lands BEFORE finish — finish must find it already sealed.
+        assert fakes["trace"].finished == ["c1"]
+
+    async def test_a_faulted_run_seals_the_trace_as_faulted(self) -> None:
+        fault = NodeFaultError(ErrorReport(error_type="calf.test.fault", origin_node_id="scribe"))
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=fault))
+        await handler.handle(_req(mentions=("scribe",)))
+        assert fakes["trace"].seals == [("c1", True)]
+        # The notice still rides the native-reply path — the trace seal does NOT
+        # replace it, because the trace's webhook is exactly what may be broken.
+        assert len(fakes["reply"].notices) == 1
+
+    async def test_a_seal_that_raises_never_faults_the_turn(self) -> None:
+        # The drain's contract: the render path can never cost the user the
+        # already-computed reply.
+        class _RaisingSeal(_FakeTrace):
+            async def seal(self, correlation_id: str, *, faulted: bool) -> None:
+                raise RuntimeError("boom")
+
+        handler, _client, fakes = _make(trace=_RaisingSeal())
+        await handler.handle(_req(mentions=("scribe",)))
+        assert len(fakes["reply"].replies) == 1
+
+
+class TestConsultOutcomesReachTheTrace:
+    """The redesign's stated reason for existing: a consult's OUTCOME must reach
+    the human's thread, not just its request.
+
+    Round-1 review: neither `A2AReject` nor `A2AFailed` appeared anywhere in this
+    file, so the two branches carrying that fix were untested at the seam.
+    """
+
+    async def test_a_rejected_consult_resolves_the_row_with_its_reason(self) -> None:
+        # The caller refused to dispatch (peer offline / self / a cycle). The
+        # reason is the DISPATCHER's own note about why the call never left — not
+        # part of any exchange — so ADR-0020 permits surfacing it.
+        steps = (_consult("t1", "conan", "q"), _consult_outcome("t1", "conan is offline", "denied"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["trace"].consult_results == [("t1", "denied", "conan is offline")]
+
+    async def test_a_faulted_consult_resolves_the_row_without_the_peer_s_words(self) -> None:
+        # The peer engaged and then faulted. Its text is exchange content, so the
+        # row must resolve WITHOUT it — the audit thread is where that lives.
+        steps = (_consult("t1", "conan", "q"), _consult_outcome("t1", "conan exploded: SECRET", "failed"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["trace"].consult_results == [("t1", "failed", "")]
+
+    async def test_a_successful_consult_never_forwards_the_peer_s_reply(self) -> None:
+        # THE privacy invariant (ADR-0020), asserted at the point that enforces
+        # it. It previously held only by accident — the `ok` render happens to
+        # ignore `note` — so a mutation forwarding the reply passed every test.
+        steps = (_consult("t1", "conan", "q"), _consult_reply("t1", "conan", "the SECRET is 42"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["trace"].consult_results == [("t1", "ok", "")]
+        assert all("SECRET" not in note for _k, _s, note in fakes["trace"].consult_results)

@@ -2,6 +2,12 @@
 
 **Status:** accepted
 
+> **Terminology note.** This decision stands unchanged, but the concept it calls
+> the *owning agent* is now the **acting agent** (`acting_agent`, `is_acting`).
+> "Owner" collided with the established *sticky owner* — a routing fact that
+> persists across turns — where this is control within a single run. See
+> [`CONTEXT.md`](../../CONTEXT.md). Read "owning agent" below as "acting agent".
+
 calfkit publishes *every* hop's steps to the **root** caller's topic
 (`nodes/base.py` `_flush_steps` → `stack.root.callback_topic`), so a consulted
 peer's own preamble and tool calls arrive on the mention run's stream stamped

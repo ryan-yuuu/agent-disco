@@ -72,6 +72,20 @@ branch = true
 [tool.coverage.report]
 omit = ["*/__init__.py"]
 
+[tool.mypy]
+python_version = "3.12"
+# SCOPED, deliberately. The repo has never been type-checked, so a repo-wide run
+# would open with a wall of pre-existing errors and get switched off. These two
+# modules are checked because they *rely* on it: `render_row`'s `assert_never`
+# and `_is_pending`'s TypeGuard are load-bearing claims, and until this job
+# existed they were decoration — a sixth `TraceRow` variant would have raised at
+# render time and silently stopped the trace forever. Widen the list as other
+# modules are cleaned; the job is gating precisely because the scope is clean.
+files = ["src/calfcord/bridge/trace_rows.py", "src/calfcord/bridge/trace.py"]
+strict = true
+# calfkit and discord.py ship no stubs; this scope must not turn that into noise.
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
@@ -83,6 +97,7 @@ ignore = []
 
 [dependency-groups]
 dev = [
+    "mypy>=1.18",
     "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",

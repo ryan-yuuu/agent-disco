@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
@@ -174,3 +175,47 @@ class TestEditComponents:
         sender = DiscordPersonaSender(_settings())  # _client is None
         with pytest.raises(RuntimeError):
             await sender.edit_components(channel_id=1, message_id=2, view=object())
+
+
+class TestTraceMentionSuppression:
+    """Trace rows carry arbitrary tool output, which can contain `<@id>` or
+    `@everyone`. `_plain` escapes markdown but deliberately NOT mentions —
+    suppression belongs at the send layer, where Discord actually decides.
+
+    `silent=True` only suppresses the push. The Components-V2 docs additionally
+    warn that an edit WITHOUT an explicit `allowed_mentions` re-parses with
+    DEFAULT allowances — and the trace edits constantly — so both paths must
+    pass it.
+    """
+
+    async def test_send_components_suppresses_every_mention(self) -> None:
+        settings = _settings()
+        sender = DiscordPersonaSender(settings)
+        webhook = MagicMock()
+        webhook.send = AsyncMock(return_value=SimpleNamespace(id=7))
+        sender._client = MagicMock()
+        sender._get_or_create_webhook = AsyncMock(return_value=webhook)
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(content="@everyone <@1> hi")))
+        await sender.send_components(Persona(name="aksel"), 123, view)
+
+        allowed = webhook.send.await_args.kwargs["allowed_mentions"]
+        assert allowed.everyone is False
+        assert allowed.users is False
+        assert allowed.roles is False
+
+    async def test_edit_components_suppresses_every_mention(self) -> None:
+        settings = _settings()
+        sender = DiscordPersonaSender(settings)
+        webhook = MagicMock()
+        webhook.edit_message = AsyncMock()
+        sender._client = MagicMock()
+        sender._get_or_create_webhook = AsyncMock(return_value=webhook)
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(content="@everyone <@1> hi")))
+        await sender.edit_components(channel_id=123, message_id=7, view=view)
+
+        allowed = webhook.edit_message.await_args.kwargs["allowed_mentions"]
+        assert allowed.everyone is False

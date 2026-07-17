@@ -453,7 +453,7 @@ def _fake_discord_message(
     """Hand-built ``discord.Message`` look-alike for fetcher tests.
 
     ``components_v2`` sets ``flags.components_v2`` — a real ``discord.Message``
-    always exposes a ``MessageFlags``; the progress renderer's step traces carry
+    always exposes a ``MessageFlags``; the step-trace renderer's step traces carry
     this flag, and the fetcher drops the bridge's own v2 messages from history.
     """
     author = SimpleNamespace(
@@ -730,7 +730,7 @@ class TestChannelHistoryFetcher:
     @pytest.mark.asyncio
     async def test_v2_persona_step_message_is_excluded_from_history(self) -> None:
         """A Components-V2 message from one of the bridge's persona webhooks is a
-        display-only step trace posted by the progress renderer — it must NOT
+        display-only step trace posted by the step-trace renderer — it must NOT
         enter history (the model's tool memory rides the transcript replay). The
         exclusion is by the ``components_v2`` flag, not by content, so a trace
         with non-empty content is still dropped."""

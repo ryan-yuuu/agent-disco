@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from calfkit.client import RunEvent
+from calfkit.client import RunCompleted, RunEvent, RunFailed
 
 StepKind = Literal["agent_message", "tool_call", "tool_result", "handoff"]
 
@@ -76,9 +76,40 @@ def _args_to_dict(args: str | dict[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
+def normalize_terminal(event: RunEvent) -> bool | None:
+    """Whether ``event`` is the run's terminal and, if so, whether it FAILED.
+
+    ``True`` = failed, ``False`` = completed, ``None`` = not a terminal. The
+    tri-state matters: ``False`` ("terminal, succeeded") and ``None`` ("not a
+    terminal") are different answers, so a bare bool would collapse them.
+
+    This exists because the step trace must be sealed with the run's outcome,
+    and the only place that knows it in time is the drain: calfkit's stream is
+    ``zero or more step events then exactly one terminal``, so the terminal
+    arrives as the stream's last item — BEFORE the handler's ``finally`` calls
+    ``finish``. Reading it here needs no control-flow change (ADR-0025).
+
+    ``result()`` stays the authority for the reply and the fault notice; the two
+    cannot disagree, since it derives its ``NodeFaultError`` from this same
+    terminal. Kept in this module so :func:`normalize_run_event` and this one are
+    the only code aware of calfkit's event types (spec §5.1).
+
+    Discriminated by ``isinstance`` rather than a ``kind`` tag: unlike the step
+    events, the terminals carry no ``kind`` field.
+    """
+    if isinstance(event, RunFailed):
+        return True
+    if isinstance(event, RunCompleted):
+        return False
+    return None
+
+
 def normalize_run_event(event: RunEvent) -> StepEvent | None:
     """Adapt a calfkit ``RunEvent`` into a :class:`StepEvent`, or ``None`` for the
-    terminals (``RunCompleted`` / ``RunFailed`` — handled by ``handle.result()``).
+    terminals (``RunCompleted`` / ``RunFailed``).
+
+    A terminal is :func:`normalize_terminal`'s business — it seals the trace —
+    and ``handle.result()`` remains the authority for the reply and the fault.
 
     The ONLY code that knows calfkit's step-event types; the renderers and the
     A2A dispatcher depend on :class:`StepEvent`, so the transport can change

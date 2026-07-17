@@ -1,4 +1,4 @@
-"""Stateful classifier that splits A2A activity from live progress on a run's
+"""Stateful classifier that splits A2A activity from the step trace on a run's
 stream (D-1/D-2).
 
 A native ``message_agent`` consult is a ``tool_call`` step (name
@@ -91,7 +91,7 @@ A2AProjection = A2ARequest | A2AReply | A2AReject | A2AFailed
 
 class A2ADispatcher:
     """Classify each :class:`StepEvent` as an A2A render instruction or
-    ``None`` (live progress). One dispatcher per run — its open-consult state is
+    ``None`` (the step trace). One dispatcher per run — its open-consult state is
     that run's."""
 
     def __init__(self) -> None:
@@ -102,7 +102,7 @@ class A2ADispatcher:
         # transfers conversation control (the peer replies in the caller's
         # place), unlike a ``message_agent`` consult where the caller keeps
         # control (both are ADR-0011). It is rendered inline in the main step
-        # stream by the progress renderer, so it falls through to ``return None``.
+        # stream by the step-trace renderer, so it falls through to ``return None``.
         if step.kind == "tool_call" and step.name == _MESSAGE_AGENT:
             args = step.args or {}
             call = A2ACall(

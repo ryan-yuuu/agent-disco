@@ -53,7 +53,7 @@ def _gateway() -> DiscordIngressGateway:
         roster=MagicMock(),
         overrides=MagicMock(),
         a2a=MagicMock(),
-        progress=MagicMock(),
+        trace=MagicMock(),
         reply=MagicMock(),
         memory_deps=MagicMock(),
     )

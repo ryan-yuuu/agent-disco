@@ -206,7 +206,7 @@ class A2AProjector:
             # Exhaustiveness guard: a 4th A2AProjection variant added without a
             # branch here is a mypy error, not a silent no-op render. (Handoffs
             # are NOT projected here — they render inline in the main step stream
-            # via the progress renderer; the dispatcher no longer emits them.)
+            # via the step-trace renderer; the dispatcher no longer emits them.)
             assert_never(projection)
 
     async def _channel(self) -> int:

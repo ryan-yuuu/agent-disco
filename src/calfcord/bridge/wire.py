@@ -109,7 +109,7 @@ class WireMessage(BaseModel):
         host and the Kafka topic key); ``source_channel_id`` is the
         un-flattened origin. They differ exactly when the event came from a
         Discord thread — which is precisely when an agent reply or live-step
-        progress message must be posted *into* the thread rather than the
+        step-trace message must be posted *into* the thread rather than the
         parent. Callers pass this as the ``thread_id`` argument to
         :class:`~calfcord.discord.persona.DiscordPersonaSender`.
         """
