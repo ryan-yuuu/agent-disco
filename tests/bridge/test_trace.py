@@ -112,6 +112,27 @@ class _FakeSender:
         return [c for c in self.edits if c["ok"]]
 
 
+class _BlockingSender(_FakeSender):
+    """A sender whose calls actually SUSPEND, like real HTTP does.
+
+    :class:`_FakeSender` never awaits, so the writer task can never be observed
+    mid-flush and a whole class of races is structurally invisible to the suite.
+    This one parks inside the call until released, making "content appended
+    while a flush is in flight" a deterministic scenario rather than a timing
+    accident.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_flight = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send_components(self, **kwargs: Any) -> SentMessage:
+        self.in_flight.set()
+        await self.release.wait()
+        return await super().send_components(**kwargs)
+
+
 def _view_body(view: discord.ui.LayoutView) -> str:
     """The text of the view's single ``TextDisplay`` (the segment body)."""
     bodies = [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
@@ -358,14 +379,14 @@ class TestRowLifecycle:
         await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
         body = _last_body(sender)
-        assert body.count("read_file") == 1
-        assert body.startswith("-# ● read_file a.py · ")
+        assert body.count("read") == 1
+        assert body.startswith(r"-# ● read\_file a.py · ")
 
     async def test_the_pending_row_renders_before_its_result_arrives(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
         await r.on_step(_call("t1", "read_file", {"path": "a.py"}), _req(), acting_agent="aksel")
         await _until(lambda: bool(sender.ok_sends()))
-        assert sender.ok_sends()[0]["body"] == "◐ read_file a.py"
+        assert sender.ok_sends()[0]["body"] == r"◐ read\_file a.py"
         await r.finish(_CORRELATION_ID)
 
     async def test_results_resolve_out_of_order_and_rows_keep_call_order(self, sender: _FakeSender) -> None:
@@ -390,7 +411,7 @@ class TestRowLifecycle:
             acting_agent="aksel",
         )
         await r.finish(_CORRELATION_ID)
-        assert _first_row(sender) == "❌ search_docs x — connection timed out"
+        assert _first_row(sender) == r"❌ search\_docs x — connection timed out"
 
     async def test_a_denied_result_is_dim_and_struck(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
@@ -401,7 +422,7 @@ class TestRowLifecycle:
             acting_agent="aksel",
         )
         await r.finish(_CORRELATION_ID)
-        assert _first_row(sender) == "-# ~~⊘ search_docs~~ — superseded by handoff"
+        assert _first_row(sender) == r"-# ~~⊘ search\_docs~~ — superseded by handoff"
 
     async def test_an_orphan_result_appends_instead_of_raising(self, sender: _FakeSender) -> None:
         # The drain's contract is that the render path can NEVER fault the turn.
@@ -409,7 +430,7 @@ class TestRowLifecycle:
         r = _renderer(sender)
         await r.on_step(_result("nope", "read_file"), _req(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
-        assert sender.ok_sends()[0]["body"].startswith("-# ● read_file")
+        assert sender.ok_sends()[0]["body"].startswith(r"-# ● read\_file")
 
     async def test_a_result_resolves_a_row_in_an_earlier_posted_segment(self, sender: _FakeSender) -> None:
         # The call row lives in an ALREADY-POSTED message while a later segment
@@ -425,9 +446,9 @@ class TestRowLifecycle:
         await _until(lambda: len(sender.ok_sends()) == 2)  # the persona change opened message 2
         await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
-        edits = [e["body"] for e in sender.ok_edits() if "read_file" in e["body"]]
+        edits = [e["body"] for e in sender.ok_edits() if "read" in e["body"]]
         assert edits, "the earlier, already-posted segment was never re-edited"
-        assert edits[-1].startswith("-# ● read_file a.py · ")
+        assert edits[-1].startswith(r"-# ● read\_file a.py · ")
 
     async def test_elapsed_is_measured_between_call_and_result(self, sender: _FakeSender) -> None:
         clock = _FakeClock()
@@ -436,7 +457,7 @@ class TestRowLifecycle:
         clock.advance(0.25)
         await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
         await r.finish(_CORRELATION_ID)
-        assert _first_row(sender) == "-# ● read_file · 250ms"
+        assert _first_row(sender) == r"-# ● read\_file · 250ms"
 
     async def test_a_handoff_renders_its_reason(self, sender: _FakeSender) -> None:
         # `reason` is always populated by calfkit and is currently rendered in
@@ -447,6 +468,73 @@ class TestRowLifecycle:
         )
         await r.finish(_CORRELATION_ID)
         assert _first_row(sender) == "➜ handed off to billing — card expired"
+
+
+class TestNothingIsLostMidFlush:
+    """``finish`` promises "pending content is never lost". It must hold even
+    when the content lands WHILE a flush is in flight.
+
+    The writer clears ``wake`` before flushing, so an append during the flush
+    re-sets it. Exiting on ``finished`` alone would drop that content forever:
+    the entry is already popped and the writer is gone, so the Discord message
+    stays as-is. The seal is the likeliest victim — it is appended at exactly
+    the moment the writer is busy — which would silently defeat ADR-0025 and
+    leave the frozen ``◐`` the seal exists to prevent.
+    """
+
+    async def test_the_seal_survives_landing_during_an_in_flight_flush(self) -> None:
+        sender = _BlockingSender()
+        r = _renderer(sender)
+        await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
+        await sender.in_flight.wait()  # the writer is now INSIDE the send
+
+        # Everything below lands while that send is still in flight.
+        await r.on_step(_result("t1", "read_file"), _req(), acting_agent="aksel")
+        await r.seal(_CORRELATION_ID, faulted=False)
+        finishing = asyncio.create_task(r.finish(_CORRELATION_ID))
+        await asyncio.sleep(0)  # let finish() set `finished` before the send returns
+        sender.release.set()
+        await finishing
+
+        body = _last_body(sender)
+        assert "-# 1 tool · 0ms" in body, "the seal was dropped by the writer's exit"
+        assert "◐" not in body, "a resolved row was left frozen as pending"
+
+
+class TestRemoteControlledFieldsAreHygienised:
+    """`_plain` must reach EVERY field a model or peer controls.
+
+    A newline breaks out of the per-line ``-# `` prefix and renders the
+    remainder bright; an unbounded value blows the growth reserve and forces the
+    segment's silent hard cap. Subject/detail/note/reason were covered from the
+    start — these three were not, and ``peer`` is the sharpest: it is the
+    model's own ``message_agent`` argument, unvalidated and unbounded, and its
+    row is rendered at REQUEST time even if the call is then rejected.
+    """
+
+    async def test_a_tool_name_cannot_break_out_of_the_row(self, sender: _FakeSender) -> None:
+        r = _renderer(sender)
+        await r.on_step(_call("t1", "evil\nrm -rf /", {}), _req(), acting_agent="aksel")
+        await _end(r)
+        assert "\nrm -rf /" not in _last_body(sender)
+
+    async def test_a_consult_peer_cannot_break_out_of_the_row(self, sender: _FakeSender) -> None:
+        r = _renderer(sender)
+        await r.on_consult("c1", "bob\n# HUGE", None, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await _end(r)
+        assert "\n# HUGE" not in _last_body(sender)
+
+    async def test_a_consult_peer_cannot_blow_the_growth_reserve(self, sender: _FakeSender) -> None:
+        r = _renderer(sender)
+        await r.on_consult("c1", "b" * 10_000, None, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
+        await _end(r)
+        assert len(_first_row(sender)) < trace_rows._DETAIL_MAX * 2
+
+    async def test_a_handoff_target_cannot_break_out_of_the_row(self, sender: _FakeSender) -> None:
+        r = _renderer(sender)
+        await r.on_step(_step("handoff", target="peer\n-# fake", reason="because"), _req(), acting_agent="aksel")
+        await _end(r)
+        assert "\n-# fake" not in _last_body(sender)
 
 
 class TestConsultLifecycle:
@@ -483,7 +571,7 @@ class TestConsultLifecycle:
         await _until(lambda: len(sender.sends) == 1)
         await r.on_consult("c1", "conan", self._URL, _req(), correlation_id=_CORRELATION_ID, persona_name="aksel")
         await _until(lambda: len(sender.edits) == 1)
-        assert sender.edits[0]["body"] == f"◐ read_file\n◐ consulting conan · [view exchange]({self._URL})"
+        assert sender.edits[0]["body"] == f"◐ read\\_file\n◐ consulting conan · [view exchange]({self._URL})"
         assert len(sender.sends) == 1  # same message, edited in place
         await _end(r)
 
@@ -574,7 +662,7 @@ class TestSeal:
         await r.on_step(_call("t1", "lookup_account", {"path": "acct_88213"}), _req(), acting_agent="aksel")
         await r.seal(_CORRELATION_ID, faulted=True)
         await r.finish(_CORRELATION_ID)
-        assert r"-# ~~⊘ lookup_account acct\_88213~~ — interrupted" in _last_body(sender)
+        assert r"-# ~~⊘ lookup\_account acct\_88213~~ — interrupted" in _last_body(sender)
         assert "◐" not in _last_body(sender)
 
     async def test_the_seal_counts_only_tools_not_prose(self, sender: _FakeSender) -> None:
@@ -607,7 +695,7 @@ class TestSeal:
         await r.on_step(_call("t1", "read_file", {}), _req(), acting_agent="aksel")
         with caplog.at_level(logging.WARNING, logger="calfcord.bridge.trace"):
             await r.finish(_CORRELATION_ID)
-        assert "-# ~~⊘ read_file~~ — interrupted" in _last_body(sender)
+        assert r"-# ~~⊘ read\_file~~ — interrupted" in _last_body(sender)
         assert any("unsealed" in rec.message for rec in caplog.records)
 
     async def test_a_sealed_trace_is_not_resealed_by_finish(self, sender: _FakeSender) -> None:
@@ -678,13 +766,13 @@ class TestAggregation:
         renderer = _renderer(sender)
         await renderer.on_step(_step("tool_call", name="read_file"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.sends) == 1)
-        assert sender.sends[0]["body"] == "◐ read_file"
+        assert sender.sends[0]["body"] == r"◐ read\_file"
 
         await renderer.on_step(_step("tool_result", name="read_file"), _req(), acting_agent="aksel")
         await _until(lambda: len(sender.edits) == 1)
 
         # The edit re-renders the WHOLE segment: both lines, joined.
-        assert sender.edits[0]["body"] == "-# ● read_file · 0ms"
+        assert sender.edits[0]["body"] == r"-# ● read\_file · 0ms"
         assert sender.edits[0]["message_id"] == sender.sends[0]["message_id"]
         assert len(sender.sends) == 1  # still one message
 

@@ -193,8 +193,19 @@ class _Segment:
         over-cap body is a 400, which the best-effort send swallows to a
         WARNING, leaving the segment dirty and retried on every wake — forever,
         and never rendered.
+
+        Reaching it means the growth-reservation invariant broke, so it warns:
+        this is the one place that can silently drop real trace.
         """
-        return self._join(self.rows)[:_V2_TEXT_LIMIT]
+        rendered = self._join(self.rows)
+        if len(rendered) > _V2_TEXT_LIMIT:
+            logger.warning(
+                "trace: segment over the v2 cap (%d chars across %d rows); truncating — "
+                "the fits() growth reservation did not hold",
+                len(rendered),
+                len(self.rows),
+            )
+        return rendered[:_V2_TEXT_LIMIT]
 
 
 @dataclass(slots=True)
@@ -343,7 +354,7 @@ class StepTraceRenderer:
                 self._append_keyed(
                     entry,
                     persona,
-                    ToolRow(key=key, name=step.name or "?", subject=subject, detail=detail),
+                    ToolRow(key=key, name=_plain(step.name or "?"), subject=subject, detail=detail),
                 )
                 entry.started[key] = self._now()
                 entry.tool_count += 1
@@ -355,7 +366,10 @@ class StepTraceRenderer:
                 self._append(
                     entry,
                     persona,
-                    HandoffRow(target=(step.target or "").removeprefix("/"), reason=_plain(step.reason or "")),
+                    HandoffRow(
+                        target=_plain((step.target or "").removeprefix("/")),
+                        reason=_plain(step.reason or ""),
+                    ),
                 )
             case "agent_message":
                 text = step.text.strip()
@@ -384,7 +398,13 @@ class StepTraceRenderer:
         carries its own ``message_id``, so it simply goes dirty and is edited.
         """
         key = step.tool_call_id or ""
-        state = _RESULT_STATE[step.outcome]
+        state = _RESULT_STATE.get(step.outcome)
+        if state is None:
+            # A future calfkit outcome. Degrade to `failed` (visible, honest
+            # about not having succeeded) rather than KeyError the step, which
+            # would leave the row pending until the seal called it interrupted.
+            logger.warning("trace: unknown tool outcome %r; rendering as failed", step.outcome)
+            state = "failed"
         note = _plain(step.text)
         located = entry.locate.get(key)
         if located is None:
@@ -399,7 +419,7 @@ class StepTraceRenderer:
                 persona,
                 ToolRow(
                     key=key,
-                    name=step.name or "?",
+                    name=_plain(step.name or "?"),
                     subject=subject,
                     detail=detail,
                     state=state,
@@ -440,7 +460,13 @@ class StepTraceRenderer:
         consult happened and where to read it.
         """
         entry = self._entry_for(correlation_id, req)
-        self._append_keyed(entry, persona_for(persona_name), ConsultRow(key=key, peer=peer, thread_url=thread_url))
+        self._append_keyed(
+            entry,
+            persona_for(persona_name),
+            # `peer` is the MODEL's own message_agent argument — unvalidated and
+            # unbounded — and this row renders even if the call is then rejected.
+            ConsultRow(key=key, peer=_plain(peer), thread_url=thread_url),
+        )
         entry.wake.set()
 
     async def on_consult_result(self, key: str, *, state: RowState, note: str, correlation_id: str) -> None:
@@ -597,7 +623,19 @@ class StepTraceRenderer:
                 await self._flush(entry)
             except Exception:
                 logger.exception("trace: flush failed; continuing")
-            if entry.finished.is_set():
+            # `and not wake` is load-bearing: a flush awaits a full Discord
+            # round-trip, and anything appended DURING it re-sets `wake`.
+            # Exiting on `finished` alone would drop that content permanently —
+            # the entry is already popped and the writer is gone, so the message
+            # would stay as-is forever. The seal is the likeliest casualty: it
+            # lands exactly when the writer is busy, so the trace would freeze
+            # mid-`◐`, which is what ADR-0025 exists to prevent.
+            #
+            # It cannot spin: only an append sets `wake`, and after `finish` the
+            # drain is done, so at most one more pass runs. A failed POST
+            # re-marks `dirty` WITHOUT setting `wake`, so a persistently failing
+            # send still exits after one retry rather than hot-looping.
+            if entry.finished.is_set() and not entry.wake.is_set():
                 return
             if self._min_edit_interval > 0:
                 with contextlib.suppress(TimeoutError):
@@ -616,8 +654,11 @@ class StepTraceRenderer:
         for segment in list(entry.segments):
             if not segment.dirty:
                 continue
-            segment.dirty = False
+            # Render BEFORE clearing dirty: if the render raises, the writer
+            # loop logs it and continues — and a segment already marked clean
+            # would never be retried, so its content would be gone silently.
             view = _build_segment_view(segment.body(), accent_for(segment.persona.name))
+            segment.dirty = False
             if segment.message_id is None:
                 sent = await _best_effort_trace(
                     self._persona_sender.send_components(

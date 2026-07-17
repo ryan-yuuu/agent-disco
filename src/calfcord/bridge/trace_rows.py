@@ -15,6 +15,14 @@ prefix IS the attention mechanism — a row that needs the reader jumps to full
 brightness. This mirrors opencode's colour cascade, where a completed row fades
 to muted and only failure, permission, or hover pulls it back.
 
+**The hygiene contract.** EVERY field a model, tool, or peer controls must be
+passed through :func:`_plain` by whoever builds the row — names, subjects,
+details, notes, reasons, peers, and handoff targets alike. Rendering trusts that
+and never re-escapes (escaping twice is visible). Miss one and two things break
+at once: a newline escapes the per-line ``-# `` prefix and renders the rest
+bright, and an unbounded value blows the growth reserve into the segment's hard
+cap.
+
 **The glyph register** (settled by probing the live API):
 
 * text glyph + ``-# `` → routine, finished — ``●``, ``⊘``, the seal

@@ -390,8 +390,16 @@ class MentionHandler:
                         # (ADR-0025). `result()` still owns the reply and the
                         # notice; this is display only, and best-effort.
                         faulted = normalize_terminal(event)
-                        if faulted is not None:
-                            await self._trace.seal(handle.correlation_id, faulted=faulted)
+                        if faulted is None:
+                            # Not a terminal either: an event kind the normalizer
+                            # does not know (a future calfkit step type). Dropping
+                            # it is right, dropping it SILENTLY is not — this is
+                            # the only place the two "None"s are distinguishable.
+                            logger.warning(
+                                "bridge: unrenderable run event %s; dropping", type(event).__name__
+                            )
+                            continue
+                        await self._trace.seal(handle.correlation_id, faulted=faulted)
                         continue
                     # THE invariant, applied uniformly below: only the agent in
                     # control of the human's turn may touch the human's thread or
