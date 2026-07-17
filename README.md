@@ -34,7 +34,7 @@
 | src/calfcord/bridge/transcripts.py            |      154 |        3 |       18 |        0 |     98% |   181-185 |
 | src/calfcord/bridge/wire.py                   |       40 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/broker/runner.py                 |       30 |        1 |        6 |        1 |     94% |        80 |
-| src/calfcord/cli/\_agents.py                  |      113 |        6 |       20 |        2 |     94% |238-239, 278-280, 361, 368-\>370 |
+| src/calfcord/cli/\_agents.py                  |      113 |        6 |       20 |        2 |     94% |238-239, 281-283, 364, 371-\>373 |
 | src/calfcord/cli/\_editor.py                  |       28 |        1 |       12 |        1 |     95% |        92 |
 | src/calfcord/cli/\_envfile.py                 |       55 |        2 |       32 |        2 |     95% |   75, 141 |
 | src/calfcord/cli/\_fields.py                  |       76 |        0 |       28 |        0 |    100% |           |
