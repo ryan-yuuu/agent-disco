@@ -43,3 +43,7 @@ _Avoid_: Sub-agent, callee
 **A2A thread**:
 The Discord thread recording one human turn's agent-to-agent interaction in full — what was asked, what each consulted agent did and answered, and any system notes. One per human turn that produced a consult. The work of the agent talking to the human is not part of it; that belongs to the human's conversation.
 _Avoid_: Exchange thread, private chat
+
+**Nested consult**:
+A consult made *by* a consulted agent — one peer consulting another (B→C inside A→B). It lands in the same A2A thread as the turn's other consults, announced by a resolving row in the consulting agent's own trace so the peer's work never appears unannounced.
+_Avoid_: Sub-consult, transitive consult

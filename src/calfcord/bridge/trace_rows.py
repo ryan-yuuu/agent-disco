@@ -252,8 +252,23 @@ class ConsultRow:
     the human's thread. Named for the one thing it may carry so that omission
     cannot look like an inconsistency worth "fixing"."""
 
+    inline: bool = False
+    """Whether this row's exchange is inline in the SAME thread (a nested consult,
+    ADR-0027) rather than in a separate thread it links to (a top-level consult).
+    It is the discriminant for the tail slot — NOT a non-empty ``request_preview``,
+    because a nested consult with an empty prompt still has no thread to link and
+    must not fall through to the ``⚠️ couldn't write the audit log`` marker a
+    top-level row shows when its projection failed."""
+
+    request_preview: str = ""
+    """A glimpse of the caller's ``message_agent`` prompt, shown for an ``inline``
+    (nested) consult in the link's slot — there is no separate thread to link.
+    Empty for a top-level consult, whose row stays content-free per ADR-0020 (the
+    prompt is the audit thread's starter message). Model-controlled, so
+    hygienised and bounded like every other such field."""
+
     def __post_init__(self) -> None:
-        _hygienise(self, "peer", "denial_reason")
+        _hygienise(self, "peer", "denial_reason", "request_preview")
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,27 +362,36 @@ def _render_tool(row: ToolRow) -> str:
 
 
 def _render_consult(row: ConsultRow) -> str:
-    link = f"[view exchange]({row.thread_url})" if row.thread_url else _AUDIT_GAP
+    # The tail slot (after `· `) is chosen by the row's KIND, not by whether a
+    # field happens to be non-empty: an INLINE (nested) row shows a glimpse of the
+    # ask — or nothing, when the ask was empty — because its exchange is right
+    # here with no thread to link; a top-level row links to its audit thread, or
+    # names the gap when that render failed. `inline` is the discriminant so an
+    # empty nested prompt never masquerades as a failed audit render.
+    if row.inline:
+        tail = f'"{row.request_preview}"' if row.request_preview else ""
+    elif row.thread_url:
+        tail = f"[view exchange]({row.thread_url})"
+    else:
+        tail = _AUDIT_GAP
+    # An inline row with an empty ask has no tail at all — otherwise the tail is
+    # present in every state (pending AND resolved), so it books no resolve-time
+    # growth and keeps the reservation invariant (TestGrowthReserve). Named apart
+    # from the `_suffix()` helper, which appends a DIFFERENT (em-dash) separator.
+    tail_slot = f" · {tail}" if tail else ""
     match row.state:
         case "pending":
             # Present tense. Today's marker says "consulted" the moment the
             # consult STARTS and never updates — it states what has not happened.
-            #
-            # The link is here, not only on resolve, for two reasons: the audit
-            # thread already exists at request time (the projection is awaited
-            # before the row is built), so it is clickable immediately — and a
-            # link that appeared only on resolve would be unbudgeted growth that
-            # breaks the reservation invariant (TestGrowthReserve caught exactly
-            # this).
-            return f"{_PENDING} consulting {row.peer} · {link}"
+            return f"{_PENDING} consulting {row.peer}{tail_slot}"
         case "ok":
-            return f"{_DIM}{_OK} consulted {row.peer} · {link}"
+            return f"{_DIM}{_OK} consulted {row.peer}{tail_slot}"
         case "failed":
-            return f"{_FAILED} {row.peer} didn't answer · {link}"
+            return f"{_FAILED} {row.peer} didn't answer{tail_slot}"
         case "denied":
-            return f"{_struck(row.peer, row.denial_reason)} · {link}"
+            return f"{_struck(row.peer, row.denial_reason)}{tail_slot}"
         case "interrupted":
-            return f"{_struck(row.peer, 'never replied')} · {link}"
+            return f"{_struck(row.peer, 'never replied')}{tail_slot}"
     assert_never(row.state)
 
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from calfcord.bridge.step_events import StepEvent
+from calfcord.bridge.trace_rows import RowState
 
 _MESSAGE_AGENT = "message_agent"
 
@@ -87,6 +88,21 @@ class A2AFailed:
 
 
 A2AProjection = A2ARequest | A2AReply | A2AReject | A2AFailed
+
+
+def consult_outcome(projection: A2AReply | A2AReject | A2AFailed) -> tuple[RowState, str]:
+    """A resolved consult projection → the row state it resolves to and the note
+    the row may carry.
+
+    Shared by the two surfaces that resolve a consult row — the human's thread
+    (``mention_handler._render_consult``) and the audit thread
+    (``A2AProjector.project_consult_result``) — so the mapping lives once. Only a
+    REJECTION's reason reaches the row: the dispatcher's own note about why the
+    call never left, not part of any exchange. A reply's or a fault's prose is the
+    peer's own words and stays out of the trace (ADR-0020).
+    """
+    state: RowState = {A2AReply: "ok", A2AFailed: "failed", A2AReject: "denied"}[type(projection)]
+    return state, projection.text if isinstance(projection, A2AReject) else ""
 
 
 class A2ADispatcher:

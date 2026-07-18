@@ -513,6 +513,8 @@ class StepTraceRenderer:
         *,
         correlation_id: str,
         persona_name: str,
+        inline: bool = False,
+        request_preview: str = "",
     ) -> None:
         """Open a PENDING consult row — the bridge's own annotation on the turn.
 
@@ -527,7 +529,11 @@ class StepTraceRenderer:
         tool row.
 
         Per ADR-0020 the exchange itself is private: this shows only THAT the
-        consult happened and where to read it.
+        consult happened and where to read it. The exception is a nested consult
+        (``inline=True``, ADR-0027): it renders in this same audit thread, so it
+        has no thread to link — instead the caller passes ``request_preview``, a
+        glimpse of the ask shown in the link's slot. The human's thread never
+        sets either, so its consult rows stay content-free.
         """
         entry = self._entry_for(correlation_id, dest)
         self._append_keyed(
@@ -535,7 +541,11 @@ class StepTraceRenderer:
             persona_for(persona_name),
             # `peer` is the MODEL's own message_agent argument — unvalidated and
             # unbounded — and this row renders even if the call is then rejected.
-            ConsultRow(key=key, peer=_plain(peer), thread_url=thread_url),
+            # `request_preview` is likewise model-controlled; ConsultRow
+            # hygienises and bounds both.
+            ConsultRow(
+                key=key, peer=_plain(peer), thread_url=thread_url, inline=inline, request_preview=request_preview
+            ),
         )
         entry.wake.set()
 

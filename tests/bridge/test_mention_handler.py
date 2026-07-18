@@ -120,6 +120,10 @@ class _FakeA2A:
         self.faults: list[Any] = []
         # Consulted agents' own steps, routed here instead of dropped (ADR-0026).
         self.steps: list[Any] = []
+        # Nested-consult rows (announce) and their resolutions — kept apart from
+        # `projected` so the suppressed raw prompt message is assertable (ADR-0026).
+        self.consult_rows: list[Any] = []
+        self.consult_row_results: list[Any] = []
         self.seals: list[tuple[str, bool]] = []
         # Ordering matters and is asserted: `finish` MUST come after `fault`, or
         # the fault note lands in a second, freshly created thread.
@@ -139,6 +143,14 @@ class _FakeA2A:
 
     async def project_step(self, step: Any) -> None:
         self.steps.append(step)
+
+    async def project_consult(self, request: Any) -> None:
+        self.consult_rows.append(request)
+        self.calls.append("project_consult")
+
+    async def project_consult_result(self, projection: Any) -> None:
+        self.consult_row_results.append(projection)
+        self.calls.append("project_consult_result")
 
     async def seal(self, correlation_id: str, *, faulted: bool) -> None:
         self.seals.append((correlation_id, faulted))
@@ -520,15 +532,17 @@ class TestStreamDrain:
     async def test_nested_consult_does_not_leak_a_marker_into_the_human_thread(self) -> None:
         # A consulted peer consulting ITS own peer (B→C inside A→B) is audited —
         # the dispatcher classifies it from any hop — but it is the peer's private
-        # business. Only the owner's own consults earn a marker in the human's
-        # thread; otherwise the cross-link becomes the very leak it replaced.
+        # business. It is announced as a row in the peer's OWN trace inside the
+        # audit thread (ADR-0026), never as a marker in the human's thread;
+        # otherwise the cross-link becomes the very leak it replaced.
         steps = (
             _consult("t1", "conan", "q"),  # scribe → conan: the owner's consult
             _consult("t2", "dot", "z", caller="conan"),  # conan → dot: PRIVATE
         )
         handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
         await handler.handle(_req())
-        assert len(fakes["a2a"].projected) == 2  # both audited
+        assert len(fakes["a2a"].projected) == 1  # only the owner's consult is a projected message...
+        assert len(fakes["a2a"].consult_rows) == 1  # ...the nested one is audited as a row instead
         assert [persona for *_rest, persona in fakes["trace"].consults] == ["scribe"]
 
     async def test_plain_agent_message_goes_to_the_trace(self) -> None:
@@ -963,6 +977,80 @@ class TestConsultOutcomesReachTheTrace:
         await handler.handle(_req())
         assert fakes["trace"].consult_results == [("t1", "ok", "")]
         assert all("SECRET" not in note for _k, _s, note in fakes["trace"].consult_results)
+
+
+class TestNestedConsultIsAnnounced:
+    """A nested consult (a consulted agent consulting a peer) is announced by a
+    resolving row in the CALLER's trace inside the audit thread, so the peer's
+    work never appears unannounced (ADR-0026). The standalone prompt message is
+    suppressed — the row is the single signal — while the peer's reply is kept.
+    """
+
+    @staticmethod
+    def _nested_run() -> tuple[Any, ...]:
+        # scribe→conan (top-level, acting), then conan→dot (nested), both replied.
+        return (
+            _consult("t1", "conan", "q"),
+            _consult("t2", "dot", "review the auth changes", caller="conan"),
+            _consult_reply("t2", "dot", "sub-answer", caller="conan"),
+            _consult_reply("t1", "conan", "answer"),
+        )
+
+    async def test_a_nested_request_becomes_a_row_not_a_projected_message(self) -> None:
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=self._nested_run(), result=_result("done", "scribe")))
+        await handler.handle(_req())
+        # the nested conan→dot request is announced as a row...
+        assert [(r.caller, r.peer) for r in fakes["a2a"].consult_rows] == [("conan", "dot")]
+        # ...and never projected as a standalone [conan] prompt message; only the
+        # top-level scribe→conan request is a projected message.
+        projected_requests = [p for p in fakes["a2a"].projected if hasattr(p, "message")]
+        assert [p.caller for p in projected_requests] == ["scribe"]
+
+    async def test_a_nested_reply_resolves_the_row_and_still_posts_the_answer(self) -> None:
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=self._nested_run(), result=_result("done", "scribe")))
+        await handler.handle(_req())
+        # the row resolves from the nested reply...
+        assert [(r.caller, r.peer) for r in fakes["a2a"].consult_row_results] == [("conan", "dot")]
+        # ...and the peer's answer is STILL projected for the audit (kept, not suppressed).
+        projected_replies = [(p.caller, p.peer) for p in fakes["a2a"].projected if hasattr(p, "text")]
+        assert ("conan", "dot") in projected_replies
+
+    async def test_a_nested_consult_never_touches_the_humans_thread(self) -> None:
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=self._nested_run(), result=_result("done", "scribe")))
+        await handler.handle(_req())
+        # only the top-level (acting) consult earns a human-thread row + resolution.
+        assert [(key, peer, persona) for key, peer, _url, persona in fakes["trace"].consults] == [
+            ("t1", "conan", "scribe")
+        ]
+        assert fakes["trace"].consult_results == [("t1", "ok", "")]
+
+    async def test_the_acting_agents_consult_never_uses_the_nested_row_path(self) -> None:
+        steps = (_consult("t1", "conan", "q"), _consult_reply("t1", "conan", "answer"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert fakes["a2a"].consult_rows == []
+        assert fakes["a2a"].consult_row_results == []
+        # the top-level consult still projects its message + opens the human row.
+        assert fakes["trace"].consults == [("t1", "conan", fakes["a2a"].url, "scribe")]
+
+    async def test_a_nested_reject_resolves_the_row_and_keeps_the_system_note(self) -> None:
+        # A nested consult the caller refused to dispatch takes branch 3 too: the
+        # system note still projects (kept for the audit) AND the row resolves,
+        # and neither touches the human trace.
+        steps = (
+            _consult("t1", "conan", "q"),  # scribe→conan (acting)
+            _consult("t2", "dot", "z", caller="conan"),  # conan→dot nested request
+            _consult_outcome("t2", "dot is offline", "denied", caller="conan"),  # nested reject
+            _consult_reply("t1", "conan", "answer"),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert [(r.caller, r.peer) for r in fakes["a2a"].consult_row_results] == [("conan", "dot")]
+        # the reject's system note is still projected for the audit record...
+        projected_notes = [(p.caller, p.peer) for p in fakes["a2a"].projected if hasattr(p, "text")]
+        assert ("conan", "dot") in projected_notes
+        # ...and only the top-level consult ever reached the human trace.
+        assert [key for key, *_rest in fakes["trace"].consults] == ["t1"]
 
 
 class TestConsultedAgentsWorkIsRouted:
