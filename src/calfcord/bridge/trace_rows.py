@@ -42,6 +42,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal, assert_never
 
+from calfcord.discord.chunking import chunk_split
+
 # --- text hygiene -----------------------------------------------------------
 
 _DETAIL_MAX: Final[int] = 120
@@ -449,36 +451,12 @@ than truncating: an answer must never be silently cut."""
 
 
 def _chunk_text(text: str, limit: int) -> list[str]:
-    """Split ``text`` into non-empty ≤``limit``-char pieces on line boundaries.
+    """Split ``text`` into non-empty ≤``limit``-char pieces, one per
+    :class:`ProseRow`.
 
-    Greedily packs whole lines; a single line longer than ``limit`` is
-    hard-split into ``limit``-sized pieces. ``current is None`` marks "no line
-    accumulated yet", distinct from an accumulated *blank* line (``""``), so
-    blank lines between paragraphs survive within a chunk. An empty piece (a
-    blank line flushed exactly at a cap boundary) is dropped so no empty body is
-    ever emitted — every returned chunk is 1..``limit`` chars.
+    Delegates to the shared splitter (:func:`calfcord.discord.chunking.chunk_split`)
+    so the live trace and user-facing replies chunk identically — a cut never
+    lands inside a fenced code block, and whitespace-only pieces are dropped so
+    no empty body reaches Discord (which rejects a zero-length TextDisplay).
     """
-    chunks: list[str] = []
-    current: str | None = None
-    for line in text.split("\n"):
-        while len(line) > limit:
-            if current is not None:
-                chunks.append(current)
-                current = None
-            chunks.append(line[:limit])
-            line = line[limit:]
-        candidate = line if current is None else f"{current}\n{line}"
-        if current is not None and len(candidate) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current is not None:
-        chunks.append(current)
-    # Drop any empty piece: a blank line flushed at an exact-cap boundary yields
-    # ``""``, and Discord rejects an empty TextDisplay (min length 1). A blank
-    # line at a message boundary is cosmetically irrelevant (chunks post as
-    # separate messages). This upholds "a ProseRow is never empty" — Discord
-    # rejects a zero-length TextDisplay. Non-empty input always leaves at least
-    # one non-empty chunk.
-    return [chunk for chunk in chunks if chunk]
+    return chunk_split(text, max_chars=limit)
