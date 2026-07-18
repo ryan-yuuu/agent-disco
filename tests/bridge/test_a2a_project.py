@@ -438,6 +438,24 @@ class TestProjectStep:
         assert {s["thread_id"] for s in personas.component_sends} == {9001}
 
 
+class TestRequestPreview:
+    """The consult-request preview budget (ADR-0027)."""
+
+    def test_a_short_prompt_is_kept_whole_and_trimmed(self) -> None:
+        from calfcord.bridge.a2a_project import _request_preview
+
+        assert _request_preview("  review the auth  ") == "review the auth"
+        assert _request_preview("") == ""  # a blank ask stays blank (renders a bare inline marker)
+
+    def test_a_long_prompt_is_cut_to_the_budget_with_an_ellipsis(self) -> None:
+        from calfcord.bridge.a2a_project import _REQUEST_PREVIEW_MAX, _request_preview
+
+        out = _request_preview("x" * 200)
+        assert out.endswith("…")
+        # Pins the budget: a mutation moving _REQUEST_PREVIEW_MAX off 60 fails here.
+        assert len(out) == _REQUEST_PREVIEW_MAX + 1
+
+
 class TestNestedConsultRow:
     """A nested consult (a consulted agent consulting a peer) is announced by a
     RESOLVING row in the consulting agent's trace inside the audit thread
@@ -493,6 +511,21 @@ class TestNestedConsultRow:
         assert body.endswith('…"')  # truncated
         assert len(body) < 100  # bounded, not the full 200 chars
 
+    async def test_an_empty_prompt_does_not_masquerade_as_an_audit_gap(self) -> None:
+        # A nested consult with a blank message is still an inline row — its
+        # exchange is right below — so it must NOT render the top-level
+        # "couldn't write the audit log" marker, which would send an operator
+        # chasing a nonexistent permissions problem.
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="   ")
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        body = personas.component_sends[0]["body"]
+        assert body == "◐ consulting terra"  # bare marker, no tail
+        assert "audit log" not in body
+
     async def test_no_thread_drops_the_row_and_never_creates_one(self) -> None:
         # No top-level consult was projected, so there is no thread; a nested row
         # must not invent one (same contract as project_step).
@@ -542,6 +575,56 @@ class TestNestedConsultRow:
         )
         await _until(lambda: len(personas.component_edits) == 1)
         assert personas.component_edits[-1]["body"] == '❌ terra didn\'t answer · "hi"'
+
+    async def test_a_dangling_nested_consult_seals_to_never_replied(self) -> None:
+        # The peer faulted and never replied, so no project_consult_result ever
+        # comes. The seal must resolve the still-pending row to "never replied"
+        # (keeping its ask) — never a frozen ◐. This is the failure the resolving
+        # row exists to prevent.
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="review the auth")
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        await proj.seal("c1", faulted=True)
+        await proj.finish("c1")
+        body = _last_component_body(personas)
+        assert '~~⊘ terra~~ — never replied · "review the auth"' in body
+        assert "◐" not in body  # nothing left claiming to be in flight
+
+    async def test_the_row_posts_before_the_peers_box(self) -> None:
+        # The feature's payoff: the "consulting" row is announced FIRST, then the
+        # peer's own work renders below it, under the peer's own persona, in a
+        # separate message (persona change opens one), in that order.
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="review")
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        await proj.project_step(_step("tool_call", emitter="terra", name="read_file", tool_call_id="x1", args={}))
+        await _until(lambda: len(personas.component_sends) == 2)
+        first, second = personas.component_sends[0], personas.component_sends[1]
+        assert first["persona"].name == "sol"
+        assert first["body"].startswith("◐ consulting terra")
+        assert second["persona"].name == "terra"  # the peer's box, strictly after the row
+
+    async def test_a_result_for_a_dropped_row_is_a_harmless_no_op(self) -> None:
+        # When the top-level render failed there is no thread, so project_consult
+        # opens no row. A subsequent outcome must be a silent no-op — not a crash,
+        # not a conjured thread — matching the best-effort contract.
+        proj, personas, resolver = _make()
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="q")
+        )
+        await proj.project_consult_result(
+            A2AReply(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", text="done")
+        )
+        await _settle()
+        assert personas.component_sends == []
+        assert personas.component_edits == []
+        assert resolver.created == []
 
 
 class TestFinish:

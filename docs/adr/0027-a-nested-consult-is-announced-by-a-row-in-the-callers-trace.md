@@ -55,3 +55,15 @@ instead, and the row carries no cross-link because the exchange is inline right 
   the row, then re-hygienised and hard-bounded by `ConsultRow` like every other
   model-controlled field, so a hostile prompt can neither break the row nor blow the
   growth reserve.
+- **The nested request's full prompt is no longer preserved anywhere.** Suppressing the
+  standalone message means the audit thread keeps only a ~60-char preview of what a nested
+  caller asked — the peer's *answer* and *steps* are still recorded in full, so the
+  exchange stays legible, but the request side loses verbatim fidelity. Accepted
+  deliberately: the full prompt is redundant with the row and the peer's visible work, and
+  the bare `[caller] <prompt>` line it replaced was the confusion this ADR removes. A
+  top-level consult still keeps its full prompt (the thread's starter message).
+- **`inline` is an explicit flag, not an inferred one.** The row's kind (inline nested vs.
+  linked top-level) is a field, not a guess from "is the preview non-empty" — an earlier
+  draft inferred it and rendered the `⚠️ couldn't write the audit log` marker for a
+  blank-prompt nested consult, a false alarm pointing operators at a nonexistent
+  permission problem.

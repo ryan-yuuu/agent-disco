@@ -35,6 +35,7 @@ from calfcord.bridge.a2a_dispatch import (
     A2AReject,
     A2AReply,
     A2ARequest,
+    consult_outcome,
 )
 from calfcord.bridge.persona_resolve import persona_for
 from calfcord.bridge.step_events import StepEvent, normalize_run_event, normalize_terminal
@@ -265,7 +266,7 @@ class A2AProjectorLike(Protocol):
     terminal reply, so ``project_fault`` still finds the turn's thread.
 
     ``project_consult``/``project_consult_result`` announce a NESTED consult as a
-    resolving row in the caller's trace inside the audit thread (ADR-0026) — the
+    resolving row in the caller's trace inside the audit thread (ADR-0027) — the
     audit-thread counterpart of ``_render_consult``'s human-thread row, for the
     consults ``is_acting`` routes here instead.
     """
@@ -481,10 +482,16 @@ class MentionHandler:
                     elif isinstance(projection, A2ARequest):
                         # A NESTED consult's request (the peer is not the acting
                         # agent). Announce it as a resolving row in the caller's
-                        # OWN trace inside the audit thread (ADR-0026), and SUPPRESS
+                        # OWN trace inside the audit thread (ADR-0027), and SUPPRESS
                         # the standalone prompt message — the row is the single
                         # signal, not a bare `[caller] <prompt>` line that reads as
                         # the peer's own words and leaves its work unannounced.
+                        #
+                        # Edge: if a handoff makes this exact caller the acting
+                        # agent BETWEEN its request and its reply, the reply routes
+                        # to the human thread (is_acting) and this audit row goes
+                        # unresolved — the seal then closes it "interrupted". A
+                        # visible, bounded degradation, not a silent drop.
                         await self._a2a.project_consult(projection)
                     elif projection is not None:
                         # A nested consult's reply/reject/fault: keep the peer's
@@ -580,14 +587,14 @@ class MentionHandler:
                 persona_name=projection.caller,
             )
             return
-        state: RowState = {A2AReply: "ok", A2AFailed: "failed", A2AReject: "denied"}[type(projection)]
+        # Shared with the audit-thread row (A2AProjector.project_consult_result):
+        # the peer's own words never reach the human's thread — only a REJECTION's
+        # reason does, the dispatcher's own note about why the call never left.
+        state, note = consult_outcome(projection)
         await self._trace.on_consult_result(
             projection.tool_call_id,
             state=state,
-            # The peer's own words never reach the human's thread — only a
-            # REJECTION's reason does, which is the dispatcher's own note about
-            # why the call never left, not part of the exchange.
-            note=projection.text if isinstance(projection, A2AReject) else "",
+            note=note,
             correlation_id=projection.correlation_id,
         )
 

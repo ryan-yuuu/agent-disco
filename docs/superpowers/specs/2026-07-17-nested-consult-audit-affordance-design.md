@@ -88,14 +88,14 @@ known cosmetic mis-ordering caveat in `a2a-threads.md`.
 ```
 ┌ sol
 │ -# ● read_file CONTEXT.md · 90ms
-│ ◐ consulting terra — "review the auth changes in src/…"      ← opens (present tense)
+│ ◐ consulting terra · "review the auth changes in src/…"      ← opens (present tense)
 └
 ┌ terra
 │ -# ● read_file src/main.py · 120ms
 │ … 40 tool calls …
 └   ⚠️ run failed after 40 tools · 3m        (seal, only if terra faults — ADR-0025)
 ┌ sol  (continues)
-│ -# ● consulted terra — "review the auth changes in src/…"    ← resolves in place
+│ -# ● consulted terra · "review the auth changes in src/…"    ← resolves in place
 └
 [terra]  <terra's reply to sol>
 ```
@@ -111,7 +111,7 @@ interrupted — so the row can never freeze mid-`◐`.
    persona-provenance label). Most consistent with existing design language and
    the only option with guaranteed ordering.
 2. **Request text: fold a truncated preview onto the row** (Option C), e.g.
-   `◐ consulting terra — "review the auth changes in src/…"` (≈60 chars of the
+   `◐ consulting terra · "review the auth changes in src/…"` (≈60 chars of the
    caller's `message` arg). The standalone raw-prompt message is **suppressed**
    for nested consults — it is the very "sol preamble then terra" line that
    confused readers. This keeps a glimpse of the ask without the noisy message.

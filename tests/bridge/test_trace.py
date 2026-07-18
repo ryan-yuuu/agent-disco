@@ -647,6 +647,7 @@ class TestConsultLifecycle:
             _dest(),
             correlation_id=_CORRELATION_ID,
             persona_name="sol",
+            inline=True,
             request_preview="review the auth changes",
         )
         await _until(lambda: bool(sender.ok_sends()))

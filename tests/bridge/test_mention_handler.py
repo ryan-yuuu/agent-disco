@@ -1033,6 +1033,25 @@ class TestNestedConsultIsAnnounced:
         # the top-level consult still projects its message + opens the human row.
         assert fakes["trace"].consults == [("t1", "conan", fakes["a2a"].url, "scribe")]
 
+    async def test_a_nested_reject_resolves_the_row_and_keeps_the_system_note(self) -> None:
+        # A nested consult the caller refused to dispatch takes branch 3 too: the
+        # system note still projects (kept for the audit) AND the row resolves,
+        # and neither touches the human trace.
+        steps = (
+            _consult("t1", "conan", "q"),  # scribe→conan (acting)
+            _consult("t2", "dot", "z", caller="conan"),  # conan→dot nested request
+            _consult_outcome("t2", "dot is offline", "denied", caller="conan"),  # nested reject
+            _consult_reply("t1", "conan", "answer"),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        await handler.handle(_req())
+        assert [(r.caller, r.peer) for r in fakes["a2a"].consult_row_results] == [("conan", "dot")]
+        # the reject's system note is still projected for the audit record...
+        projected_notes = [(p.caller, p.peer) for p in fakes["a2a"].projected if hasattr(p, "text")]
+        assert ("conan", "dot") in projected_notes
+        # ...and only the top-level consult ever reached the human trace.
+        assert [key for key, *_rest in fakes["trace"].consults] == ["t1"]
+
 
 class TestConsultedAgentsWorkIsRouted:
     """A consulted agent's own steps reach the A2A thread instead of nowhere.

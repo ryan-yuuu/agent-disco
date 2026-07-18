@@ -33,6 +33,7 @@ from calfcord.bridge.a2a_dispatch import (
     A2AReject,
     A2AReply,
     A2ARequest,
+    consult_outcome,
 )
 from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.bridge.persona_resolve import persona_for
@@ -85,17 +86,19 @@ def _build_thread_name(caller: str, peer: str, content: str) -> str:
 
 
 _REQUEST_PREVIEW_MAX = 60
-"""How much of a NESTED consult's prompt to fold onto its trace row (ADR-0026).
+"""How much of a NESTED consult's prompt to fold onto its trace row (ADR-0027).
 A glimpse of the ask, not the whole thing — the row is a signal, not the message.
 The row itself re-hygienises and hard-bounds this, so it is a display budget, not
 a safety one."""
 
 
-def _preview(message: str) -> str:
+def _request_preview(message: str) -> str:
     """A short, single-line glimpse of a consult's prompt for its trace row.
 
     Truncation is on the raw text; the row's own ``_plain`` then flattens and
-    markdown-escapes it, so this need only decide *how much* to show.
+    markdown-escapes it, so this need only decide *how much* to show. May be empty
+    (a blank prompt) — the row renders as inline regardless, so a blank ask shows
+    a bare marker rather than a link or the audit-gap.
     """
     trimmed = message.strip()
     if len(trimmed) <= _REQUEST_PREVIEW_MAX:
@@ -236,13 +239,15 @@ class A2AProjector:
 
     async def project_consult(self, request: A2ARequest) -> None:
         """Announce a NESTED consult as a resolving row in the CALLER's trace
-        (ADR-0026): ``◐ consulting <peer>`` under the caller's persona, with a
+        (ADR-0027): ``◐ consulting <peer>`` under the caller's persona, with a
         glimpse of the ask folded on. Its peer's work then renders below in the
         same thread, so the peer no longer appears unannounced.
 
         This REPLACES the standalone prompt message for a nested consult — the
         drain does not also ``project`` the request — so the row is the single,
-        resolving signal rather than a bare ``[caller] <prompt>`` line.
+        resolving signal rather than a bare ``[caller] <prompt>`` line. The row is
+        ``inline`` (its exchange is in this thread, nothing to link), so it never
+        renders the top-level audit-gap marker even when the ask is blank.
 
         Thread lookup mirrors :meth:`project_step`: a nested consult cannot precede
         the top-level one that named the thread, so a missing thread means that
@@ -267,24 +272,19 @@ class A2AProjector:
             Destination(channel_id=channel_id, thread_id=thread_id),
             correlation_id=request.correlation_id,
             persona_name=request.caller,
-            request_preview=_preview(request.message),
+            inline=True,
+            request_preview=_request_preview(request.message),
         )
 
     async def project_consult_result(self, projection: A2AReply | A2AReject | A2AFailed) -> None:
-        """Resolve a nested consult's row from its outcome (ADR-0026).
+        """Resolve a nested consult's row from its outcome (ADR-0027).
 
-        Only the ``denied`` render carries a reason (the caller's own note on why
-        it refused), so a reply and a fault pass none — a faulted peer's prose is
-        the ``💥`` system note's business, never the row's. A never-seen key or
+        The state/note mapping is shared with the human-thread row via
+        :func:`~calfcord.bridge.a2a_dispatch.consult_outcome`. A never-seen key or
         correlation is silently ignored by the renderer (its row may have been
         dropped for want of a thread), matching the best-effort contract.
         """
-        if isinstance(projection, A2AReject):
-            state, note = "denied", projection.text
-        elif isinstance(projection, A2AFailed):
-            state, note = "failed", ""
-        else:
-            state, note = "ok", ""
+        state, note = consult_outcome(projection)
         await self._steps.on_consult_result(
             projection.tool_call_id,
             state=state,
