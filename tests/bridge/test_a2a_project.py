@@ -438,6 +438,112 @@ class TestProjectStep:
         assert {s["thread_id"] for s in personas.component_sends} == {9001}
 
 
+class TestNestedConsultRow:
+    """A nested consult (a consulted agent consulting a peer) is announced by a
+    RESOLVING row in the consulting agent's trace inside the audit thread
+    (ADR-0026), so its peer's work never appears unannounced. The row reuses the
+    ConsultRow grammar; the request text is folded onto it and the standalone
+    prompt message is suppressed.
+    """
+
+    async def _open_turn(self, proj: A2AProjector) -> None:
+        # marketing→sol creates the turn's thread; sol is a consulted agent.
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="sol", message="review")
+        )
+
+    async def test_renders_a_pending_row_under_the_callers_persona_with_a_preview(self) -> None:
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(
+                correlation_id="c1",
+                tool_call_id="t2",
+                caller="sol",
+                peer="terra",
+                message="review the auth changes in src",
+            )
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        sent = personas.component_sends[0]
+        assert sent["body"] == '◐ consulting terra · "review the auth changes in src"'
+        assert sent["persona"].name == "sol"  # the consulting agent's identity
+        assert sent["thread_id"] == 9001  # the turn's one thread
+
+    async def test_posts_no_standalone_prompt_message(self) -> None:
+        # The whole point: the raw prompt no longer posts as a [sol] message —
+        # only the top-level starter is a plain send.
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="hi terra")
+        )
+        await _settle()
+        assert len(personas.sends) == 1  # only marketing→sol's starter
+
+    async def test_a_long_prompt_is_truncated_to_a_bounded_preview(self) -> None:
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="x" * 200)
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        body = personas.component_sends[0]["body"]
+        assert body.startswith('◐ consulting terra · "')
+        assert body.endswith('…"')  # truncated
+        assert len(body) < 100  # bounded, not the full 200 chars
+
+    async def test_no_thread_drops_the_row_and_never_creates_one(self) -> None:
+        # No top-level consult was projected, so there is no thread; a nested row
+        # must not invent one (same contract as project_step).
+        proj, personas, resolver = _make()
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="q")
+        )
+        await _settle()
+        assert personas.component_sends == []
+        assert resolver.created == []
+
+    async def test_a_reply_resolves_the_row_in_place(self) -> None:
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="review the auth")
+        )
+        await _until(lambda: len(personas.component_sends) == 1)  # pending row posted
+        await proj.project_consult_result(
+            A2AReply(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", text="done")
+        )
+        await _until(lambda: len(personas.component_edits) == 1)  # resolved in the SAME message
+        assert personas.component_edits[-1]["body"] == '-# ● consulted terra · "review the auth"'
+
+    async def test_a_rejected_consult_resolves_to_denied_with_its_reason(self) -> None:
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="hi")
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        await proj.project_consult_result(
+            A2AReject(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", text="terra is offline")
+        )
+        await _until(lambda: len(personas.component_edits) == 1)
+        assert personas.component_edits[-1]["body"] == '-# ~~⊘ terra~~ — terra is offline · "hi"'
+
+    async def test_a_faulted_consult_resolves_to_the_bright_failed_row(self) -> None:
+        proj, personas, _ = _make()
+        await self._open_turn(proj)
+        await proj.project_consult(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="hi")
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        await proj.project_consult_result(
+            A2AFailed(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", text="boom")
+        )
+        await _until(lambda: len(personas.component_edits) == 1)
+        assert personas.component_edits[-1]["body"] == '❌ terra didn\'t answer · "hi"'
+
+
 class TestFinish:
     """The turn's per-correlation state is retired — the trace is flushed and the
     thread mapping evicted, so neither leaks for the bridge's lifetime."""

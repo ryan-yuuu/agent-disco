@@ -60,10 +60,15 @@ bridge  client.agent(<name>).start(...)  ──►  agent runtime
    │    post request (caller persona), reply (peer persona),
    │    and any reject/handoff/fault notes (system "a2a" persona)
    │
-   └─ A2AProjector.project_step(...)      # steps of a CONSULTED agent
-        every step whose emitter is not the turn's owner
-        folded into that agent's aggregated trace in the same thread
-        (ADR-0017 rendering, ADR-0026 routing)
+   ├─ A2AProjector.project_step(...)      # steps of a CONSULTED agent
+   │    every step whose emitter is not the turn's owner
+   │    folded into that agent's aggregated trace in the same thread
+   │    (ADR-0017 rendering, ADR-0026 routing)
+   │
+   └─ A2AProjector.project_consult(...) / project_consult_result(...)
+        a NESTED consult's request → a resolving row in the CALLER's trace
+        (the prompt message is suppressed); its outcome resolves the row
+        (ADR-0027)
 ```
 
 The dispatcher is **stateful**: there is no `message_agent` step *kind* —
@@ -141,9 +146,31 @@ rest and bright only where something needs you:
 That last row is the seal ([ADR-0025](./adr/0025-seal-the-step-trace-from-the-streams-terminal.md)):
 a consulted agent's trace closes with the run's outcome, so a thread says where
 the work stopped rather than trailing off. Before this, that whole message was a
-shrug. A nested consult — the peer
-consulting a peer — lands in the same thread, each agent under its own identity
-(see [ADR-0026](./adr/0026-the-a2a-thread-records-the-consulted-sub-tree.md)).
+shrug.
+
+A **nested consult** — the peer consulting a peer (B→C inside A→B) — lands in the
+same thread, each agent under its own identity. So the peer's work never appears
+unannounced, it is announced by a **resolving row in the *consulting* agent's own
+trace** — the same `◐ consulting C` → `● consulted C` affordance the human's thread
+uses for a top-level consult, relocated here because a nested consult has no thread
+of its own to name. The row carries no cross-link (the exchange is right below) and
+folds a glimpse of the ask onto itself; the standalone prompt message is suppressed
+([ADR-0027](./adr/0027-a-nested-consult-is-announced-by-a-row-in-the-callers-trace.md)):
+
+```
+┌ sol
+│ -# ● read_file CONTEXT.md · 90ms
+│ ◐ consulting terra · "review the auth changes in src…"     ← opens; resolves in place
+└
+┌ terra
+│ -# ● read_file src/main.py · 120ms
+│ … terra's own working trace …
+└
+```
+
+Because the row and the peer's box share one writer, `◐ consulting terra` always
+posts *before* terra's box — the ordering caveat below applies to inline
+projections (requests, replies, notes), not to this announcement.
 
 The working trace is rendered by the same aggregated, throttled step renderer the
 human's thread uses ([ADR-0017](./adr/0017-aggregated-step-messages-throttled-edits.md)):

@@ -84,6 +84,25 @@ def _build_thread_name(caller: str, peer: str, content: str) -> str:
     return name[:_THREAD_NAME_MAX_TOTAL]
 
 
+_REQUEST_PREVIEW_MAX = 60
+"""How much of a NESTED consult's prompt to fold onto its trace row (ADR-0026).
+A glimpse of the ask, not the whole thing — the row is a signal, not the message.
+The row itself re-hygienises and hard-bounds this, so it is a display budget, not
+a safety one."""
+
+
+def _preview(message: str) -> str:
+    """A short, single-line glimpse of a consult's prompt for its trace row.
+
+    Truncation is on the raw text; the row's own ``_plain`` then flattens and
+    markdown-escapes it, so this need only decide *how much* to show.
+    """
+    trimmed = message.strip()
+    if len(trimmed) <= _REQUEST_PREVIEW_MAX:
+        return trimmed
+    return trimmed[:_REQUEST_PREVIEW_MAX].rstrip() + "…"
+
+
 class A2AProjector:
     """Renders :class:`A2AProjection`s into the unified A2A audit channel.
 
@@ -213,6 +232,64 @@ class A2AProjector:
             step,
             Destination(channel_id=channel_id, thread_id=thread_id),
             acting_agent=step.emitter,
+        )
+
+    async def project_consult(self, request: A2ARequest) -> None:
+        """Announce a NESTED consult as a resolving row in the CALLER's trace
+        (ADR-0026): ``◐ consulting <peer>`` under the caller's persona, with a
+        glimpse of the ask folded on. Its peer's work then renders below in the
+        same thread, so the peer no longer appears unannounced.
+
+        This REPLACES the standalone prompt message for a nested consult — the
+        drain does not also ``project`` the request — so the row is the single,
+        resolving signal rather than a bare ``[caller] <prompt>`` line.
+
+        Thread lookup mirrors :meth:`project_step`: a nested consult cannot precede
+        the top-level one that named the thread, so a missing thread means that
+        render failed (best-effort) — drop, rather than anchor an unnameable one.
+        """
+        thread_id = self._threads.get(request.correlation_id)
+        if thread_id is None:
+            logger.debug(
+                "A2A: no thread for correlation=%s; dropping nested consult row caller=%s peer=%s",
+                request.correlation_id,
+                request.caller,
+                request.peer,
+            )
+            return
+        channel_id = self._channel_id
+        if channel_id is None:  # pragma: no cover - a thread implies a channel
+            return
+        await self._steps.on_consult(
+            request.tool_call_id,
+            request.peer,
+            None,  # the exchange is inline in THIS thread — nothing to link to
+            Destination(channel_id=channel_id, thread_id=thread_id),
+            correlation_id=request.correlation_id,
+            persona_name=request.caller,
+            request_preview=_preview(request.message),
+        )
+
+    async def project_consult_result(self, projection: A2AReply | A2AReject | A2AFailed) -> None:
+        """Resolve a nested consult's row from its outcome (ADR-0026).
+
+        Only the ``denied`` render carries a reason (the caller's own note on why
+        it refused), so a reply and a fault pass none — a faulted peer's prose is
+        the ``💥`` system note's business, never the row's. A never-seen key or
+        correlation is silently ignored by the renderer (its row may have been
+        dropped for want of a thread), matching the best-effort contract.
+        """
+        if isinstance(projection, A2AReject):
+            state, note = "denied", projection.text
+        elif isinstance(projection, A2AFailed):
+            state, note = "failed", ""
+        else:
+            state, note = "ok", ""
+        await self._steps.on_consult_result(
+            projection.tool_call_id,
+            state=state,
+            note=note,
+            correlation_id=projection.correlation_id,
         )
 
     async def seal(self, correlation_id: str, *, faulted: bool) -> None:

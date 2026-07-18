@@ -223,6 +223,34 @@ class TestRenderRow:
         row = ConsultRow(key="c1", peer="conan", thread_url=None, state="ok")
         assert render_row(row) == "-# ● consulted conan · ⚠️ couldn't write the audit log"
 
+    def test_pending_consult_with_a_request_preview_shows_the_ask_inline(self) -> None:
+        # A NESTED consult renders in the caller's trace INSIDE the same audit
+        # thread, so its exchange sits right below — there is no separate thread
+        # to link. The preview shows a glimpse of the ask in the link's slot; a
+        # None thread_url here is deliberate, NOT an audit gap.
+        row = ConsultRow(key="c1", peer="terra", request_preview="review the auth changes in src")
+        assert render_row(row) == '◐ consulting terra · "review the auth changes in src"'
+
+    def test_resolved_consult_keeps_the_request_preview(self) -> None:
+        row = ConsultRow(key="c1", peer="terra", request_preview="review the auth changes", state="ok")
+        assert render_row(row) == '-# ● consulted terra · "review the auth changes"'
+
+    def test_denied_consult_with_a_preview_appends_it_after_the_reason(self) -> None:
+        # The preview takes the link's slot (same `·` separator), so the denied
+        # reason and the preview coexist without a doubled em-dash.
+        row = ConsultRow(
+            key="c1", peer="terra", state="denied", denial_reason="cycle detected", request_preview="review the auth"
+        )
+        assert render_row(row) == '-# ~~⊘ terra~~ — cycle detected · "review the auth"'
+
+    def test_request_preview_is_hygienised(self) -> None:
+        # The preview is the model's own message arg: it MUST be flattened and
+        # markdown-escaped like every other model-controlled field, or a newline
+        # breaks out of the per-line prefix.
+        row = ConsultRow(key="c1", peer="terra", request_preview="line1\n*bold*")
+        assert "\n" not in render_row(row)
+        assert render_row(row) == r'◐ consulting terra · "line1 \*bold\*"'
+
     def test_handoff_is_bright_and_carries_the_model_s_reason(self) -> None:
         # `reason` is always populated (calfkit rejects a blank one) and is
         # currently rendered in NO surface at all.
@@ -322,6 +350,17 @@ class TestGrowthReserve:
                 resolved = dataclasses.replace(pending, state=state, denial_reason=self._NOTE)  # type: ignore[arg-type]
                 growth = self._growth(pending, resolved)
                 assert growth <= trace_rows._ROW_GROWTH_RESERVE, f"{state} with url={url!r} grew by {growth}"
+
+    def test_no_resolved_state_grows_a_consult_row_with_a_preview_beyond_the_reserve(self) -> None:
+        # The preview sits in BOTH the pending and resolved renders (it is the
+        # link's slot), so it must not add resolve-time growth over the reserve.
+        import dataclasses
+
+        pending = ConsultRow(key="c1", peer="conan", request_preview="p" * 60)
+        for state in ("ok", "failed", "denied", "interrupted"):
+            resolved = dataclasses.replace(pending, state=state, denial_reason=self._NOTE)  # type: ignore[arg-type]
+            growth = self._growth(pending, resolved)
+            assert growth <= trace_rows._ROW_GROWTH_RESERVE, f"{state} with a preview grew by {growth}"
 
     def test_the_reserve_is_not_wastefully_larger_than_the_worst_case(self) -> None:
         # Headroom is cheap but not free: every pending row's reserve is

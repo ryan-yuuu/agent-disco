@@ -252,8 +252,16 @@ class ConsultRow:
     the human's thread. Named for the one thing it may carry so that omission
     cannot look like an inconsistency worth "fixing"."""
 
+    request_preview: str = ""
+    """A glimpse of the caller's ``message_agent`` prompt, shown for a NESTED
+    consult whose exchange renders inline in the same audit thread (ADR-0026) —
+    there is no separate thread to link, so this takes the link's slot instead.
+    Empty for a top-level consult, whose row stays content-free per ADR-0020 (the
+    prompt is the audit thread's starter message). Model-controlled, so
+    hygienised and bounded like every other such field."""
+
     def __post_init__(self) -> None:
-        _hygienise(self, "peer", "denial_reason")
+        _hygienise(self, "peer", "denial_reason", "request_preview")
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,7 +355,18 @@ def _render_tool(row: ToolRow) -> str:
 
 
 def _render_consult(row: ConsultRow) -> str:
-    link = f"[view exchange]({row.thread_url})" if row.thread_url else _AUDIT_GAP
+    # The tail slot (after `· `) carries ONE of three things, in precedence: a
+    # nested consult's request preview (its exchange is inline in this thread, so
+    # there is nothing to link); else the audit thread link; else the audit-gap
+    # marker when the projection failed. Preview wins because a nested row is
+    # never given a thread_url — the two are mutually exclusive in practice, and
+    # the order just makes that explicit.
+    if row.request_preview:
+        tail = f'"{row.request_preview}"'
+    elif row.thread_url:
+        tail = f"[view exchange]({row.thread_url})"
+    else:
+        tail = _AUDIT_GAP
     match row.state:
         case "pending":
             # Present tense. Today's marker says "consulted" the moment the
@@ -359,15 +378,15 @@ def _render_consult(row: ConsultRow) -> str:
             # link that appeared only on resolve would be unbudgeted growth that
             # breaks the reservation invariant (TestGrowthReserve caught exactly
             # this).
-            return f"{_PENDING} consulting {row.peer} · {link}"
+            return f"{_PENDING} consulting {row.peer} · {tail}"
         case "ok":
-            return f"{_DIM}{_OK} consulted {row.peer} · {link}"
+            return f"{_DIM}{_OK} consulted {row.peer} · {tail}"
         case "failed":
-            return f"{_FAILED} {row.peer} didn't answer · {link}"
+            return f"{_FAILED} {row.peer} didn't answer · {tail}"
         case "denied":
-            return f"{_struck(row.peer, row.denial_reason)} · {link}"
+            return f"{_struck(row.peer, row.denial_reason)} · {tail}"
         case "interrupted":
-            return f"{_struck(row.peer, 'never replied')} · {link}"
+            return f"{_struck(row.peer, 'never replied')} · {tail}"
     assert_never(row.state)
 
 

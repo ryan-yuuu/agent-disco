@@ -635,6 +635,24 @@ class TestConsultLifecycle:
         assert sender.ok_sends()[0]["body"] == f"◐ consulting conan · [view exchange]({self._URL})"
         await _end(r)
 
+    async def test_a_nested_consult_row_carries_the_request_preview(self, sender: _FakeSender) -> None:
+        # A nested consult (ADR-0026) renders inline in the caller's trace inside
+        # the audit thread — no separate thread to link, so the row shows a
+        # glimpse of the ask in the link's slot instead.
+        r = _renderer(sender)
+        await r.on_consult(
+            "c1",
+            "terra",
+            None,
+            _dest(),
+            correlation_id=_CORRELATION_ID,
+            persona_name="sol",
+            request_preview="review the auth changes",
+        )
+        await _until(lambda: bool(sender.ok_sends()))
+        assert sender.ok_sends()[0]["body"] == '◐ consulting terra · "review the auth changes"'
+        await _end(r)
+
     async def test_the_consult_row_posts_under_the_caller_s_persona(self, sender: _FakeSender) -> None:
         r = _renderer(sender)
         await r.on_consult("c1", "conan", self._URL, _dest(), correlation_id=_CORRELATION_ID, persona_name="aksel")
