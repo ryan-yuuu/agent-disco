@@ -996,6 +996,24 @@ class TestRollover:
 
         assert [c["body"] for c in sender.sends] == expected  # every chunk, in order
 
+    async def test_agent_message_with_fenced_code_is_balanced_per_message(self, sender: _FakeSender) -> None:
+        # The delegation to chunk_split makes the live trace fence-aware: a code
+        # block in an agent_message that overflows the v2 cap must never post a
+        # message with a dangling fence. Asserted on the posted bodies directly,
+        # independently of _chunk_text.
+        code = "\n".join(f"line{i}" for i in range(600))
+        text = f"intro prose\n```python\n{code}\n```"
+        renderer = _renderer(sender)
+        await renderer.on_step(_step("agent_message", text=text), _dest(), acting_agent="aksel")
+        await _until(lambda: len(sender.sends) >= 2)  # it really chunked
+
+        bodies = [c["body"] for c in sender.sends]
+        for body in bodies:
+            assert body.count("```") % 2 == 0, body  # balanced — no dangling fence
+        fenced = [b for b in bodies if "```python" in b]
+        assert fenced  # the block chunked into ≥1 self-contained python message
+        assert all(f"line{i}" in "\n".join(bodies) for i in range(600))  # no code lost
+
 
 class TestThreadRouting:
     """A destination with a thread posts INTO it; the persona webhook still hosts
