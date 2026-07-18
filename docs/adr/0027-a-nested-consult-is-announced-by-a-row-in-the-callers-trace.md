@@ -43,11 +43,14 @@ instead, and the row carries no cross-link because the exchange is inline right 
   route to `project` *and* resolve the row. The asymmetry is deliberate: the prompt is
   redundant with the row and the peer's visible work, while the peer's reply and any
   system note are the audit's record of what came back.
-- **A `None` thread_url with a preview is not an audit gap.** The top-level row renders
-  `⚠️ couldn't write the audit log` when it has no thread to link; a nested row
-  deliberately has none (its exchange is inline), so the preview takes the link's slot and
-  the gap marker is suppressed. Precedence: preview, else link, else gap. They are mutually
-  exclusive in practice — a nested row is never given a thread_url.
+- **`inline` — an explicit flag — decides the row's tail, not the presence of a preview.**
+  A nested row is `inline`: its exchange is right here, so it shows a glimpse of the ask (or
+  a bare marker when the ask was blank) and never links out. A top-level row is not inline:
+  it links to its audit thread, or renders `⚠️ couldn't write the audit log` when that
+  render failed. Precedence: inline (preview, else nothing), else link, else gap. An earlier
+  draft inferred the kind from a *non-empty preview* instead, so it rendered the audit-gap
+  marker for a blank-prompt nested consult — a false alarm pointing operators at a
+  nonexistent permission problem. The flag makes the kind a field, not a guess.
 - **The human's thread is untouched.** Only the `is_acting` consult still routes to
   `_render_consult`; ADR-0020's boundary is unchanged, so a nested consult never leaks a
   marker into the human's conversation.
@@ -59,11 +62,5 @@ instead, and the row carries no cross-link because the exchange is inline right 
   standalone message means the audit thread keeps only a ~60-char preview of what a nested
   caller asked — the peer's *answer* and *steps* are still recorded in full, so the
   exchange stays legible, but the request side loses verbatim fidelity. Accepted
-  deliberately: the full prompt is redundant with the row and the peer's visible work, and
-  the bare `[caller] <prompt>` line it replaced was the confusion this ADR removes. A
-  top-level consult still keeps its full prompt (the thread's starter message).
-- **`inline` is an explicit flag, not an inferred one.** The row's kind (inline nested vs.
-  linked top-level) is a field, not a guess from "is the preview non-empty" — an earlier
-  draft inferred it and rendered the `⚠️ couldn't write the audit log` marker for a
-  blank-prompt nested consult, a false alarm pointing operators at a nonexistent
-  permission problem.
+  deliberately — the bare `[caller] <prompt>` line it replaced was the confusion this ADR
+  removes. A top-level consult still keeps its full prompt (the thread's starter message).

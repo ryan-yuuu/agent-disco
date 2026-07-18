@@ -376,21 +376,22 @@ def _render_consult(row: ConsultRow) -> str:
         tail = _AUDIT_GAP
     # An inline row with an empty ask has no tail at all — otherwise the tail is
     # present in every state (pending AND resolved), so it books no resolve-time
-    # growth and keeps the reservation invariant (TestGrowthReserve).
-    suffix = f" · {tail}" if tail else ""
+    # growth and keeps the reservation invariant (TestGrowthReserve). Named apart
+    # from the `_suffix()` helper, which appends a DIFFERENT (em-dash) separator.
+    tail_slot = f" · {tail}" if tail else ""
     match row.state:
         case "pending":
             # Present tense. Today's marker says "consulted" the moment the
             # consult STARTS and never updates — it states what has not happened.
-            return f"{_PENDING} consulting {row.peer}{suffix}"
+            return f"{_PENDING} consulting {row.peer}{tail_slot}"
         case "ok":
-            return f"{_DIM}{_OK} consulted {row.peer}{suffix}"
+            return f"{_DIM}{_OK} consulted {row.peer}{tail_slot}"
         case "failed":
-            return f"{_FAILED} {row.peer} didn't answer{suffix}"
+            return f"{_FAILED} {row.peer} didn't answer{tail_slot}"
         case "denied":
-            return f"{_struck(row.peer, row.denial_reason)}{suffix}"
+            return f"{_struck(row.peer, row.denial_reason)}{tail_slot}"
         case "interrupted":
-            return f"{_struck(row.peer, 'never replied')}{suffix}"
+            return f"{_struck(row.peer, 'never replied')}{tail_slot}"
     assert_never(row.state)
 
 

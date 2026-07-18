@@ -587,9 +587,8 @@ class MentionHandler:
                 persona_name=projection.caller,
             )
             return
-        # Shared with the audit-thread row (A2AProjector.project_consult_result):
-        # the peer's own words never reach the human's thread — only a REJECTION's
-        # reason does, the dispatcher's own note about why the call never left.
+        # State/note mapping shared with the audit-thread row via consult_outcome
+        # (ADR-0020's privacy rule — only a rejection's reason surfaces — lives there).
         state, note = consult_outcome(projection)
         await self._trace.on_consult_result(
             projection.tool_call_id,
