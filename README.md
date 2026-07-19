@@ -81,7 +81,7 @@
 | src/calfcord/mcp/capability\_read.py          |       22 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/mcp/config.py                    |      133 |        2 |       60 |        1 |     98% |  158, 220 |
 | src/calfcord/mcp/config\_write.py             |       44 |        1 |       14 |        0 |     98% |        82 |
-| src/calfcord/mcp/runner.py                    |       39 |       13 |        2 |        1 |     66% |68-79, 83-92, 96 |
+| src/calfcord/mcp/runner.py                    |       37 |        8 |        2 |        1 |     77% | 80-89, 93 |
 | src/calfcord/mcp/selector.py                  |       35 |        0 |       12 |        0 |    100% |           |
 | src/calfcord/providers/codex/\_paths.py       |        6 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/providers/codex/cli.py           |      151 |       79 |       40 |        1 |     43% |79-100, 104-111, 115-134, 144-154, 188-189, 223-247, 251 |
@@ -103,7 +103,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |606-607, 673-675 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **9015** |  **517** | **2388** |  **116** | **94%** |           |
+| **TOTAL**                                     | **9013** |  **512** | **2388** |  **116** | **94%** |           |
 
 
 ## Setup coverage badge
