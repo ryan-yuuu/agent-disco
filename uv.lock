@@ -518,7 +518,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "authlib", specifier = ">=1.7.2" },
-    { name = "calfkit", specifier = ">=0.12.9" },
+    { name = "calfkit", specifier = ">=0.12.10" },
     { name = "calfkit-mesh", specifier = ">=0.1.2" },
     { name = "calfkit-tools", specifier = ">=0.1.3" },
     { name = "discord-py", specifier = ">=2.7.1" },
@@ -544,7 +544,7 @@ dev = [
 
 [[package]]
 name = "calfkit"
-version = "0.12.9"
+version = "0.12.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -567,9 +567,9 @@ dependencies = [
     { name = "uuid-utils" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5d/23/8a94899d7bbb0db445088e0685b27938b2138d3d7521708e7891b2c94d58/calfkit-0.12.9.tar.gz", hash = "sha256:593d74a751d11dfec325aba497f6d8434850f83af0fbc38670dddc08645abe4a", size = 1306591, upload-time = "2026-07-15T01:18:25.857Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/cf/97610c8104bbb0905608e30f85c81972237356ce787b9c2b67398757b3d7/calfkit-0.12.10.tar.gz", hash = "sha256:f8115ac819fde664771384309809cb5bcba11b34eb77236c1d1195fc530b8af9", size = 1321332, upload-time = "2026-07-19T01:49:38.529Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/9a/54fb21095e9f5c44b467ef24088e5c365a96f477be3d497266ad898f0a34/calfkit-0.12.9-py3-none-any.whl", hash = "sha256:4c86d397cf67079f1acf122f1280329adacea86e2a79173b13acdac1171e1d9b", size = 860203, upload-time = "2026-07-15T01:18:23.962Z" },
+    { url = "https://files.pythonhosted.org/packages/44/3d/cd76f2e650c91c1319cd85d0e14d285b4bc70b504416dc9dd99369e1b9d6/calfkit-0.12.10-py3-none-any.whl", hash = "sha256:4cd66b7dd90095455341c253c2145d89158c7fcd0c631b523d6942da168ce5c9", size = 865640, upload-time = "2026-07-19T01:49:36.701Z" },
 ]
 
 [[package]]
@@ -1769,14 +1769,14 @@ wheels = [
 
 [[package]]
 name = "ktables"
-version = "1.1.1"
+version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiokafka" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/10/3899d2653f41da58a48c3fc8c8cb8922885b1d1f3d7d1d22cb4a60041ff4/ktables-1.1.1.tar.gz", hash = "sha256:4e0c71312203a126ab87dfc2aa7594942c958b66d99eca3b551db42994424694", size = 161185, upload-time = "2026-07-03T05:01:39.117Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/83/f545b43381f86f072f45405bf2316780eff2cd7d61cc45038df7d861d644/ktables-2.0.0.tar.gz", hash = "sha256:cded685e437b416fc429bdfb816fae7641aa0bfc87b23bc59e5bbc7aa04208d5", size = 189971, upload-time = "2026-07-18T06:53:20.252Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d1/c9/5dddcf60613210f4c2b15632148d8cf989cb2311fc0b80fa1f3b3f815e71/ktables-1.1.1-py3-none-any.whl", hash = "sha256:35aca66e37a129df1c6b5a97026d92a035334de85d72da1c7105fea97264f028", size = 29188, upload-time = "2026-07-03T05:01:38.019Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/8d/4a6c02a5e2d324e94e355352c97f30e637787941a01bf55f401b0aef19ec/ktables-2.0.0-py3-none-any.whl", hash = "sha256:9a0e9663af273bfc983cf316cb627e535d95b0f52265fa85cb371710f0ca56f2", size = 34417, upload-time = "2026-07-18T06:53:18.971Z" },
 ]
 
 [[package]]
