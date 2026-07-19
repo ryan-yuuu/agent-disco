@@ -37,11 +37,6 @@ from calfcord.mcp.config import McpConfigError, load_one_server, resolve_config_
 
 logger = logging.getLogger(__name__)
 
-_REPLY_TOPIC = "calfkit.mcp.reply"
-"""Named reply topic for the MCP client. A distinct, dedicated topic so this
-process's replies land on their own lane rather than sharing another process's
-reply topic."""
-
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -66,9 +61,11 @@ async def _amain(server_name: str) -> None:
         raise SystemExit(f"failed to load MCP server {server_name!r}: {exc}") from exc
 
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"
-    async with Client.connect(
-        server_urls, reply_topic=_REPLY_TOPIC, provisioning=PROVISIONING
-    ) as client:
+    # Like the tools runner, a toolbox host is a plain Worker: agents dispatch
+    # INTO its tool node, so it claims no named reply inbox (it owns no reply
+    # dispatcher) and takes calfcord's shared provisioning policy for its
+    # node-topic + inbox auto-provisioning at broker start.
+    async with Client.connect(server_urls, provisioning=PROVISIONING) as client:
         worker = Worker(client, [toolbox])
         logger.info(
             "starting calfkit-mcp worker server=%s dispatch_topic=%s broker=%s",
