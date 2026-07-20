@@ -98,6 +98,11 @@ def test_list_human_tools_summary(tmp_path: Path) -> None:
     assert _tools_summary(("read_file", "shell"), ()) == "2"
     assert _tools_summary(None, ("github",)) == "all+1mcp"
     assert _tools_summary(("read_file", "shell"), ("github", "docs/search")) == "2+2mcp"
+    # The MCP discover default (mcp: true) — now the most common cell — reads
+    # ``+mcp*``; opt-out (mcp: false) appends nothing.
+    assert _tools_summary(None, True) == "all+mcp*"
+    assert _tools_summary((), True) == "0+mcp*"
+    assert _tools_summary(("read_file",), False) == "1"
 
 
 def test_list_json_is_valid_and_contains_both(tmp_path: Path, capsys) -> None:
@@ -113,7 +118,8 @@ def test_list_json_is_valid_and_contains_both(tmp_path: Path, capsys) -> None:
     by_name = {row["name"]: row for row in data}
     assert by_name["penny"]["tools"] == []
     assert by_name["scribe"]["tools"] == ["read_file", "shell"]
-    assert by_name["scribe"]["mcp"] == []
+    # ``mcp:`` omitted → the discover default serializes as the JSON boolean ``true``.
+    assert by_name["scribe"]["mcp"] is True
     assert by_name["scribe"]["provider"] == "anthropic"
 
 
@@ -123,6 +129,16 @@ def test_list_json_includes_mcp(tmp_path: Path, capsys) -> None:
     assert agent_inspect.run_list(agents_dir, as_json=True) == 0
     data = json.loads(capsys.readouterr().out)
     assert data[0]["mcp"] == ["github", "docs/search"]
+
+
+def test_list_json_mcp_false_serializes_as_bool(tmp_path: Path, capsys) -> None:
+    """The opt-out pole (``mcp: false``) rides through ``--json`` as the JSON
+    boolean ``false``, not an empty list — the tri-state stays faithful."""
+    agents_dir = tmp_path / "agents"
+    _seed_agent(agents_dir, "scribe", mcp_line="false")
+    assert agent_inspect.run_list(agents_dir, as_json=True) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data[0]["mcp"] is False
 
 
 def test_list_empty_dir_human_friendly_line(tmp_path: Path, capsys) -> None:

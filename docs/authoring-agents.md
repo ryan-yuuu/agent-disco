@@ -59,8 +59,8 @@ description: A demo agent.              # AgentCard + slash-picker blurb; 1-100 
 provider: anthropic                     # "anthropic" | "openai" | "openai-codex"
 model: claude-sonnet-4-5                # provider-specific model name
 tools: [read_file, web_search]          # builtin tools only
-# mcp: [github/search_issues]           # optional MCP grants
 thinking_effort: medium                 # see §6 for the seven tiers
+# mcp defaults to true — this agent already discovers every live MCP server; set mcp: false or a named list to narrow (see MCP-server tools)
 # a2a / handoff default to true — this agent can already consult and hand off to peers (§8)
 ---
 
@@ -177,34 +177,42 @@ the security note above.
 
 #### MCP-server tools
 
-MCP tools from [MCP](https://modelcontextprotocol.io) servers configured in
-`mcp.json` use the separate `mcp:` field:
+MCP tools from [MCP](https://modelcontextprotocol.io) servers use the separate
+`mcp:` field. It is a **tri-state**, mirroring the `a2a`/`handoff` fields:
+
+| `mcp:` value | Grants |
+|---|---|
+| omitted, or `mcp: true` | **The default.** Discover *every* live MCP server on the network and bind its tools each turn. |
+| `mcp: false` | No MCP tools (explicit opt-out). |
+| `mcp: [<server>]` | Every tool the named server currently advertises (a wildcard — a server that later advertises a new tool enlarges the agent's surface). |
+| `mcp: [<server>/<tool>]` | Exactly that one tool. |
 
 ```yaml
 tools: [read_file]
-mcp: [github, docs/search]
+mcp: [github, docs/search]   # or omit for discover-all, or `mcp: false` to opt out
 ```
-
-| Grant | Grants |
-|---|---|
-| `<server>` | Every tool the named server currently advertises (a wildcard — a server that later advertises a new tool enlarges the agent's surface). |
-| `<server>/<tool>` | Exactly that one tool. |
 
 The `<server>` segment matches `[a-z0-9_]{1,64}` (it doubles as a Kafka topic
 segment) and `<tool>` matches `[a-zA-Z0-9_-]{1,128}` (the upstream server's own
 name). The LLM sees each tool under the name the server advertises — no rename.
 
-Two rules to remember:
+Three things to remember:
 
-- **MCP is never part of the "all builtins" default.** Omitting `tools:` grants
-  every builtin but *no* MCP tools — MCP grants are always explicit.
+- **Discover is the default, and it is broad.** An agent that omits `mcp:` binds
+  *all* networked MCP tools — their trust boundary is the MCP server, not this
+  agent. Set `mcp: false`, or a narrow named list, for an agent that takes input
+  from untrusted users. (This is the same posture as `a2a`/`handoff`, which also
+  default to discover.)
+- **`mcp:` is independent of `tools:`.** They are different node kinds: omitting
+  `tools:` discovers builtins, `mcp:` (default `true`) discovers MCP servers, and
+  the two coexist — an agent can discover both planes at once.
 - **Validation here is syntax-only.** Whether the server is configured or
   running is a runtime concern: the agent resolves selectors against the live
   capability advertisement per turn, so there's no static catalog to check
-  against (a down server simply degrades that turn). A server's tool list can
-  therefore change with no agent restart — but a change to the agent's *own
-  `mcp:` field* still needs a restart because the selector set is baked in at
-  boot, like builtins.
+  against (a down server simply degrades that turn). The set of live servers —
+  and each server's tool list — can therefore change with no agent restart, but a
+  change to the agent's *own `mcp:` field* still needs a restart because the
+  selector set is baked in at boot, like builtins.
 
 The full MCP workflow — `mcp.json` schema, `disco mcp add`, lifecycle — is in
 [`mcp-tools.md`](mcp-tools.md).

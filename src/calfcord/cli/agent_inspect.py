@@ -49,7 +49,7 @@ _DESCRIPTION_TRUNCATE = 48
 _PROMPT_PREVIEW_LEN = 200
 
 
-def _tools_summary(tools: tuple[str, ...] | None, mcp: tuple[str, ...] = ()) -> str:
+def _tools_summary(tools: tuple[str, ...] | None, mcp: bool | tuple[str, ...]) -> str:
     """Summarize an agent's ``tools`` for the ``list`` table's TOOLS column.
 
     Mirrors the loader's omitted/empty/explicit semantics
@@ -57,9 +57,24 @@ def _tools_summary(tools: tuple[str, ...] | None, mcp: tuple[str, ...] = ()) -> 
     means "all builtins" → ``"all"``; an explicit empty tuple is the deliberate
     no-tools opt-out → ``"0"``; otherwise the count. A scalar the operator can
     scan beats a wrapping comma list in a table cell.
+
+    The MCP tri-state appends ``+mcp*`` for discover (``mcp: true``), ``+<n>mcp``
+    for a named grant list, and nothing when opted out (``mcp: false``).
     """
     base = "all" if tools is None else str(len(tools))
+    if mcp is True:
+        return f"{base}+mcp*"
     return f"{base}+{len(mcp)}mcp" if mcp else base
+
+
+def _mcp_json(mcp: bool | tuple[str, ...]) -> bool | list[str]:
+    """Serialize the tri-state ``mcp`` field for ``--json`` output.
+
+    The discover/off poles (``True``/``False``) ride through as JSON booleans; a
+    named grant tuple becomes a list — a faithful, machine-readable image of the
+    declaration, not the table's summary string.
+    """
+    return mcp if isinstance(mcp, bool) else list(mcp)
 
 
 def _provider_model(defn: AgentDefinition) -> str:
@@ -90,7 +105,7 @@ def _list_row(defn: AgentDefinition) -> dict[str, Any]:
         "provider": defn.provider,
         "model": defn.model,
         "tools": list(defn.tools) if defn.tools is not None else None,
-        "mcp": list(defn.mcp),
+        "mcp": _mcp_json(defn.mcp),
         "description": defn.description,
     }
 
@@ -221,7 +236,7 @@ def _show_object(defn: AgentDefinition) -> dict[str, Any]:
         "provider": defn.provider,
         "model": defn.model,
         "tools": list(defn.tools) if defn.tools is not None else None,
-        "mcp": list(defn.mcp),
+        "mcp": _mcp_json(defn.mcp),
         "thinking_effort": defn.thinking_effort,
         "memory": defn.memory,
         "system_prompt": defn.system_prompt,

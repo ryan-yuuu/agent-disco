@@ -262,7 +262,8 @@ def create_agent(
     tool_grants = (
         pick_tools(prompter, name, live_tools_fn=live_tools_fn)
         if select_tools
-        else ToolGrantSelection(tools=None, mcp=[])
+        # No tool step → the hand-authored default: all builtins + MCP discover.
+        else ToolGrantSelection(tools=None, mcp=True)
     )
 
     # 5. Write (validate-before-write; prune only when the caller opted in).

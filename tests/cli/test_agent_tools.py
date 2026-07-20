@@ -16,6 +16,7 @@ import frontmatter
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import agent_tools
+from calfcord.cli._agents import MCP_DISCOVER_ROW
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.tools import TOOL_REGISTRY
 
@@ -109,7 +110,9 @@ def _checked(choices: list[Choice]) -> set[str]:
 
 
 def test_omitted_tools_prechecks_all_builtins(tmp_path: Path) -> None:
-    _seed_agent(tmp_path, "assistant", tools_line=None)
+    # ``mcp: false`` isolates the builtin pre-check from the MCP discover row
+    # (which is covered by the discover-row tests below).
+    _seed_agent(tmp_path, "assistant", tools_line=None, mcp_line="false")
     fake = FakePrompter(checkbox_result=[])
     agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
 
@@ -119,7 +122,7 @@ def test_omitted_tools_prechecks_all_builtins(tmp_path: Path) -> None:
 
 
 def test_empty_tools_prechecks_none(tmp_path: Path) -> None:
-    _seed_agent(tmp_path, "assistant", tools_line="[]")
+    _seed_agent(tmp_path, "assistant", tools_line="[]", mcp_line="false")
     fake = FakePrompter(checkbox_result=[])
     agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
 
@@ -128,12 +131,67 @@ def test_empty_tools_prechecks_none(tmp_path: Path) -> None:
 
 
 def test_explicit_tools_prechecks_exactly_those(tmp_path: Path) -> None:
-    _seed_agent(tmp_path, "assistant", tools_line="[read_file]")
+    _seed_agent(tmp_path, "assistant", tools_line="[read_file]", mcp_line="false")
     fake = FakePrompter(checkbox_result=[])
     agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
 
     assert fake.last_checkbox_choices is not None
     assert _checked(fake.last_checkbox_choices) == {"read_file"}
+
+
+def test_omitted_mcp_prechecks_discover_row(tmp_path: Path) -> None:
+    """An agent with ``mcp:`` omitted (the discover default) opens with the
+    discover row pre-checked, so its state is visible and not silently lost."""
+    _seed_agent(tmp_path, "assistant", tools_line="[]")  # mcp omitted → discover
+    fake = FakePrompter(checkbox_result=[])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    assert fake.last_checkbox_choices is not None
+    assert _checked(fake.last_checkbox_choices) == {MCP_DISCOVER_ROW}
+
+
+def test_mcp_false_offers_discover_row_unchecked(tmp_path: Path) -> None:
+    """``mcp: false`` still offers the discover row — unchecked — so the operator
+    can opt back into discover."""
+    _seed_agent(tmp_path, "assistant", tools_line="[]", mcp_line="false")
+    fake = FakePrompter(checkbox_result=[])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    by_value = {c.value: c for c in fake.last_checkbox_choices}
+    assert MCP_DISCOVER_ROW in by_value
+    assert by_value[MCP_DISCOVER_ROW].checked is False
+
+
+def test_selecting_discover_row_writes_mcp_discover(tmp_path: Path) -> None:
+    _seed_agent(tmp_path, "assistant", tools_line="[read_file]", mcp_line="false")
+    fake = FakePrompter(checkbox_result=["read_file", MCP_DISCOVER_ROW])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    reparsed = parse_agent_md(tmp_path / "assistant.md")
+    assert reparsed.mcp is True
+
+
+def test_editing_discover_agent_without_mcp_writes_false(tmp_path: Path) -> None:
+    """A discover agent edited with no MCP row ticked persists as explicit
+    ``mcp: false`` — never silently reverting to discover via an omitted key."""
+    _seed_agent(tmp_path, "assistant", tools_line="[read_file]")  # mcp discover
+    fake = FakePrompter(checkbox_result=["read_file"])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    reparsed = parse_agent_md(tmp_path / "assistant.md")
+    assert reparsed.mcp is False
+
+
+def test_discover_row_subsumes_named_mcp_rows(tmp_path: Path) -> None:
+    """Ticking discover AND a named ``mcp/<server>`` row resolves to discover —
+    the exclusive pole wins (it already binds that server), so the named row is
+    dropped rather than producing a mixed, uninterpretable grant."""
+    _seed_agent(tmp_path, "assistant", tools_line="[read_file]", mcp_line="false")
+    fake = FakePrompter(checkbox_result=["read_file", "mcp/gmail", MCP_DISCOVER_ROW])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    reparsed = parse_agent_md(tmp_path / "assistant.md")
+    assert reparsed.mcp is True
 
 
 # ---------------------------------------------------------------------- writing ---

@@ -162,13 +162,16 @@ def render_value(defn: AgentDefinition, field: Field) -> str:
     return str(value)
 
 
-def _render_tools(tools: tuple[str, ...] | None, mcp: tuple[str, ...] = ()) -> str:
+def _render_tools(tools: tuple[str, ...] | None, mcp: bool | tuple[str, ...]) -> str:
     """Render builtin and MCP grants as a short label.
 
     ``None`` (frontmatter ``tools:`` omitted) means "all builtins" — shown as
     ``(all builtins)`` rather than an empty cell, matching the loader's
     omitted→all semantics. An explicit empty tuple is the deliberate "no tools"
     opt-out, shown as ``(none)``.
+
+    ``mcp`` is tri-state: ``True`` (discover) → ``; mcp: discover``; ``False`` /
+    ``()`` (opt out) → no MCP suffix; a named tuple → ``; mcp: <grants>``.
     """
     if tools is None:
         builtin = "(all builtins)"
@@ -179,6 +182,8 @@ def _render_tools(tools: tuple[str, ...] | None, mcp: tuple[str, ...] = ()) -> s
         extra = len(tools) - _TOOLS_PREVIEW_COUNT
         builtin = f"{head} (+{extra})" if extra > 0 else head
 
+    if mcp is True:
+        return f"{builtin}; mcp: discover"
     if not mcp:
         return builtin
     head = ", ".join(mcp[:_TOOLS_PREVIEW_COUNT])

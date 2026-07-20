@@ -314,7 +314,34 @@ def test_update_tool_grants_none_tools_removes_key_and_writes_mcp(tmp_path: Path
     assert updated.mcp == ("gmail", "docs/search")
 
 
-def test_update_tool_grants_empty_mcp_removes_key(tmp_path: Path) -> None:
+def test_update_tool_grants_true_mcp_removes_key_for_discover(tmp_path: Path) -> None:
+    """``mcp=True`` is the discover default; its canonical on-disk form is an
+    omitted ``mcp:`` key (an omitted field parses back to ``True``)."""
+    md_path = _seed_md(tmp_path)
+    update_tool_grants(md_path, tools=["read_file"], mcp=["gmail"])
+
+    updated = update_tool_grants(md_path, tools=["read_file"], mcp=True)
+
+    metadata = frontmatter.load(md_path).metadata
+    assert metadata["tools"] == ["read_file"]
+    assert "mcp" not in metadata
+    assert updated.mcp is True
+
+
+def test_update_tool_grants_false_mcp_writes_false(tmp_path: Path) -> None:
+    """``mcp=False`` is the explicit opt-out; it must persist as ``mcp: false``,
+    NOT an omitted key (which would now mean discover)."""
+    md_path = _seed_md(tmp_path)
+    updated = update_tool_grants(md_path, tools=["read_file"], mcp=False)
+
+    metadata = frontmatter.load(md_path).metadata
+    assert metadata["mcp"] is False
+    assert updated.mcp is False
+
+
+def test_update_tool_grants_empty_mcp_writes_false(tmp_path: Path) -> None:
+    """An empty grant list is the off-state; it persists as ``mcp: false`` (the
+    field normalizes ``[]`` → ``False``) rather than an omitted key."""
     md_path = _seed_md(tmp_path)
     update_tool_grants(md_path, tools=["read_file"], mcp=["gmail"])
 
@@ -322,8 +349,8 @@ def test_update_tool_grants_empty_mcp_removes_key(tmp_path: Path) -> None:
 
     metadata = frontmatter.load(md_path).metadata
     assert metadata["tools"] == ["read_file"]
-    assert "mcp" not in metadata
-    assert updated.mcp == ()
+    assert metadata["mcp"] is False
+    assert updated.mcp is False
 
 
 def test_update_tool_grants_explicit_empty_tools_writes_empty_list(tmp_path: Path) -> None:

@@ -28,7 +28,7 @@ from pathlib import Path
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.agents.md_writer import update_tool_grants
-from calfcord.cli._agents import _split_tool_selection, detect_agents
+from calfcord.cli._agents import MCP_DISCOVER_ROW, _split_tool_selection, detect_agents
 from calfcord.cli._fields import truncate
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.cli.tui import render
@@ -115,12 +115,15 @@ def _build_choices(
     Builtins enumerate the schema-only :data:`calfcord.tools.TOOL_REGISTRY`
     seam (no transport, no secrets), checked iff in ``current``.
 
-    MCP rows merge two sources: ``mcp_servers`` (this host's mcp.json names)
-    and ``live_tools`` (the broker's capability view — which also surfaces
+    A leading MCP-discover row (:data:`MCP_DISCOVER_ROW`) represents
+    ``mcp: true`` — discover every live server; it is checked iff discover is
+    the agent's current MCP state, and ticking it opts into discover mode.
+
+    Below it, MCP rows merge two sources: ``mcp_servers`` (this host's mcp.json
+    names) and ``live_tools`` (the broker's capability view — which also surfaces
     servers OTHER hosts run). Each server gets an ``mcp/<server>`` "all
     tools" row; each live-advertised tool gets an ``mcp/<server>/<tool>``
-    row. Never pre-checked unless already in ``current`` — MCP is always an
-    explicit grant.
+    row. Named rows are pre-checked only when already in ``current``.
 
     Anything in ``current`` the rows above did not cover (a server that's
     gone from config and view, a builtin this host doesn't carry) is
@@ -135,6 +138,14 @@ def _build_choices(
         summary = first_line(TOOL_REGISTRY[name].tool_schema.description)
         label = f"{name} — {summary}" if summary else name
         choices.append(Choice(name, label, name in current))
+
+    choices.append(
+        Choice(
+            MCP_DISCOVER_ROW,
+            f"{MCP_DISCOVER_ROW} — discover every live MCP server (default)",
+            MCP_DISCOVER_ROW in current,
+        )
+    )
 
     mcp_servers = mcp_servers or []
     live_tools = live_tools or {}
@@ -225,7 +236,12 @@ def run(
     # ``tools:`` omitted means "all builtins" — pre-check exactly the
     # builtins, matching the loader's default expansion.
     current = set(raw.tools) if raw.tools is not None else set(TOOL_REGISTRY)
-    current.update(f"mcp/{entry}" for entry in raw.mcp)
+    # ``mcp`` is tri-state: ``True`` pre-checks the discover row; a named tuple
+    # pre-checks its ``mcp/<server>`` rows; ``False`` pre-checks nothing.
+    if raw.mcp is True:
+        current.add(MCP_DISCOVER_ROW)
+    elif raw.mcp:
+        current.update(f"mcp/{entry}" for entry in raw.mcp)
 
     mcp_servers = (mcp_servers_fn or _default_mcp_servers)()
     live_tools = (live_tools_fn or _default_live_tools)()

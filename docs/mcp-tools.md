@@ -31,11 +31,12 @@ the MCP processes sit in the topology, see
 - That toolbox connects to the server, lists its tools, and **advertises**
   them on the compacted `calf.capabilities` topic — tool names, JSON schemas,
   and the dispatch topic `mcp_server.<name>`.
-- An agent grants itself MCP tools with a `mcp: [<server>]` or
-  `mcp: [<server>/<tool>]` frontmatter entry. The agent resolves
-  those grants against the advertisement **per turn** — runtime discovery,
-  no schemas committed to the repo, no agent restart when a server's tool list
-  changes.
+- By default an agent discovers **every** live MCP server (the `mcp:` field
+  defaults to `true`); it can instead name servers with `mcp: [<server>]` /
+  `mcp: [<server>/<tool>]`, or opt out with `mcp: false` (see
+  [Grant grammar](#grant-grammar)). Either way the agent resolves against the
+  advertisement **per turn** — runtime discovery, no schemas committed to the
+  repo, no agent restart when a server's tool list changes.
 - Only the `mcp-<server>` processes (and the `disco mcp` CLI) ever read
   `mcp.json`. Agents read the advertisement from the broker, so on a
   distributed deploy the agent hosts hold no MCP config and no MCP secrets.
@@ -208,27 +209,32 @@ invalid name is rejected at add time and at load time.
 
 ## Grant grammar
 
-Agents declare MCP tools in the separate `mcp:` field:
+Agents declare MCP tools in the separate `mcp:` field — a **tri-state** that
+mirrors the `a2a`/`handoff` fields:
 
-| Grant | Grants |
+| `mcp:` value | Grants |
 |---|---|
-| `<server>` | **Every** tool the server currently advertises (a wildcard — a server that later advertises new tools enlarges the agent's surface). |
-| `<server>/<tool>` | **Exactly** that one tool. The tool segment matches `[a-zA-Z0-9_-]{1,128}` (the upstream server's own name, which may be mixed-case or hyphenated). |
+| omitted, or `mcp: true` | **The default.** Discover *every* live MCP server on the network and bind its tools each turn. |
+| `mcp: false` | No MCP tools (explicit opt-out). |
+| `mcp: [<server>]` | **Every** tool the server currently advertises (a wildcard — a server that later advertises new tools enlarges the agent's surface). |
+| `mcp: [<server>/<tool>]` | **Exactly** that one tool. The tool segment matches `[a-zA-Z0-9_-]{1,128}` (the upstream server's own name, which may be mixed-case or hyphenated). |
 
-Merge rules when a server appears more than once: a bare `<server>`
-subsumes that server's explicit `<server>/<tool>` entries (the wildcard
-wins); explicit-only entries dedupe into a fixed include set.
+Merge rules when a server appears more than once in a named list: a bare
+`<server>` subsumes that server's explicit `<server>/<tool>` entries (the
+wildcard wins); explicit-only entries dedupe into a fixed include set.
 
 Two properties worth internalizing:
 
-- **MCP is never part of the "all builtins" default.** Omitting `tools:`
-  entirely grants every builtin — but *no* MCP tools. MCP grants are always
-  explicit.
-- **Validation at parse/write time is syntax-only.** Whether the named server
-  is configured or running is a runtime concern — there is no static catalog to
-  check a grant against (that is the point of runtime discovery). A
-  malformed grant (bad grammar) is rejected immediately, naming the
-  offending line.
+- **Discover is the default, and it is broad** ([ADR-0028](./adr/0028-mcp-field-discovers-all-servers-by-default.md)).
+  An agent that omits `mcp:` binds *all* networked MCP tools — their trust
+  boundary is the MCP server, not the agent. Set `mcp: false`, or a narrow named
+  list, for an agent that takes input from untrusted users. `mcp:` is independent
+  of `tools:`: omitting `tools:` discovers builtins, `mcp:` (default `true`)
+  discovers MCP servers, and the two coexist.
+- **Validation at parse/write time is syntax-only.** Whether a named server is
+  configured or running is a runtime concern — there is no static catalog to
+  check a grant against (that is the point of runtime discovery). A malformed
+  grant (bad grammar) is rejected immediately, naming the offending line.
 
 ## Runtime discovery
 

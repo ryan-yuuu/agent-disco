@@ -19,7 +19,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from calfkit import Handoff, Messaging
+from calfkit import Handoff, Messaging, Toolboxes
 from calfkit.mcp import MCPToolbox
 from calfkit.nodes import Agent
 from calfkit.nodes.tool import Tools
@@ -37,7 +37,7 @@ def _definition(
     provider: Provider | None = None,
     model: str | None = None,
     tools: tuple[str, ...] = (),
-    mcp: tuple[str, ...] = (),
+    mcp: bool | tuple[str, ...] = (),
     thinking_effort: str | None = None,
     a2a: bool | tuple[str, ...] = True,
     handoff: bool | tuple[str, ...] = True,
@@ -356,14 +356,16 @@ class TestResolveProviderModuleFunction:
 
 
 class TestToolsWiring:
-    """``definition.tools`` maps to calfkit runtime *selectors*, resolved per
-    turn against the capability view — never against a local registry at build
-    time. Omitted ``tools:`` → ``Tools(discover=True)`` (every live tool node);
-    an explicit builtin list → one ``Tools(names=[...])``; and the separate
-    ``mcp:`` field → one ``MCPToolbox`` per server. Because these are deferred
-    selectors, the agent carries no eager bindings (``Agent.tools == []``); the
-    surface rides on ``Agent._tool_selectors``, which is also what makes the
-    Worker auto-register the capability view."""
+    """``definition.tools`` and ``definition.mcp`` map to calfkit runtime
+    *selectors*, resolved per turn against the capability view — never against a
+    local registry at build time. Omitted ``tools:`` → ``Tools(discover=True)``
+    (every live tool node); an explicit builtin list → one ``Tools(names=[...])``.
+    The tri-state ``mcp:`` field → ``Toolboxes(discover=True)`` (default, every
+    live MCP server), a named ``Toolboxes`` for a grant list, or nothing when
+    ``false``. Because these are deferred selectors, the agent carries no eager
+    bindings (``Agent.tools == []``); the surface rides on
+    ``Agent._tool_selectors``, which is also what makes the Worker auto-register
+    the capability view."""
 
     def test_omitted_tools_yields_discover_selector(self) -> None:
         """``tools:`` omitted (None) → a single ``Tools(discover=True)`` so the
@@ -394,49 +396,59 @@ class TestToolsWiring:
         agent = _factory().build_node(_definition(tools=("terminal", "read_file", "terminal")))
         assert agent._tool_selectors == [Tools(names=["terminal", "read_file"])]
 
-    def test_restricted_builtins_and_mcp_yield_both_selectors_builtins_first(self) -> None:
-        """A builtin list plus ``mcp:`` grants yields a leading
-        ``Tools(names=[...])`` for the builtins plus one ``MCPToolbox`` per
-        server."""
+    def test_restricted_builtins_and_named_mcp_yield_both_selectors_builtins_first(self) -> None:
+        """A builtin list plus a named ``mcp:`` grant list yields a leading
+        ``Tools(names=[...])`` for the builtins plus one named ``Toolboxes``."""
         agent = _factory().build_node(_definition(tools=("terminal",), mcp=("gmail",)))
-        assert agent._tool_selectors == [Tools(names=["terminal"]), MCPToolbox("gmail")]
+        assert agent._tool_selectors == [Tools(names=["terminal"]), Toolboxes(MCPToolbox("gmail"))]
 
     def test_mcp_only_agent_has_no_tools_selector(self) -> None:
-        """``tools: []`` plus ``mcp:`` yields just the MCPToolbox(es) — no ``Tools``
-        selector is created (an empty ``Tools(names=[])`` would raise)."""
+        """``tools: []`` plus a named ``mcp:`` list yields just the ``Toolboxes`` —
+        no ``Tools`` selector is created (an empty ``Tools(names=[])`` would raise)."""
         agent = _factory().build_node(_definition(tools=(), mcp=("gmail/search",)))
         assert agent.tools == []
-        assert agent._tool_selectors == [MCPToolbox("gmail", include=("search",))]
+        assert agent._tool_selectors == [Toolboxes(MCPToolbox("gmail", include=("search",)))]
 
-    def test_mcp_selectors_collapse_per_server_sorted(self) -> None:
-        """Multiple ``mcp:`` entries collapse to one MCPToolbox per server;
-        explicit tool picks merge into a sorted ``include``; servers come back
-        sorted so the surface is deterministic regardless of declaration order."""
+    def test_named_mcp_entries_collapse_per_server_sorted(self) -> None:
+        """Multiple named ``mcp:`` entries collapse to one ``Toolbox`` entry per
+        server inside a single ``Toolboxes``; explicit tool picks merge into a
+        sorted ``include``; servers come back sorted so the surface is
+        deterministic regardless of declaration order."""
         agent = _factory().build_node(
             _definition(tools=(), mcp=("gmail/send", "gmail/search", "docs")),
         )
         assert agent._tool_selectors == [
-            MCPToolbox("docs"),
-            MCPToolbox("gmail", include=("search", "send")),
+            Toolboxes(MCPToolbox("docs"), MCPToolbox("gmail", include=("search", "send"))),
         ]
 
-    def test_omitted_tools_with_mcp_discovers_builtins_plus_named_mcp(self) -> None:
-        """The split fields represent "all live builtins plus named MCP" without
-        pinning the builtin set in frontmatter."""
+    def test_mcp_true_yields_discover_toolboxes(self) -> None:
+        """``mcp: true`` (the default) → a single discover-mode ``Toolboxes`` so the
+        agent binds every live MCP server on the network at runtime."""
+        agent = _factory().build_node(_definition(tools=(), mcp=True))
+        assert agent._tool_selectors == [Toolboxes(discover=True)]
+
+    def test_mcp_false_yields_no_toolbox_selector(self) -> None:
+        """``mcp: false`` is the explicit opt-out — no ``Toolboxes`` is created."""
+        agent = _factory().build_node(_definition(tools=(), mcp=False))
+        assert agent._tool_selectors == []
+
+    def test_default_agent_discovers_builtins_and_mcp(self) -> None:
+        """The new default posture for a general agent — omitted ``tools:`` and
+        ``mcp: true`` — discovers both live planes: builtins and MCP servers."""
+        agent = _factory().build_node(_definition(tools=None, mcp=True))
+        assert agent._tool_selectors == [Tools(discover=True), Toolboxes(discover=True)]
+
+    def test_omitted_tools_with_named_mcp_discovers_builtins_plus_named_mcp(self) -> None:
+        """Omitted builtins with a named MCP list: "all live builtins plus named
+        MCP" without pinning the builtin set in frontmatter."""
         agent = _factory().build_node(_definition(tools=None, mcp=("github",)))
-        assert agent._tool_selectors == [Tools(discover=True), MCPToolbox("github")]
+        assert agent._tool_selectors == [Tools(discover=True), Toolboxes(MCPToolbox("github"))]
 
-    def test_omitted_tools_never_adds_mcp(self) -> None:
-        """Discover binds only ``node_kind == 'tool'`` (builtins); MCP is always
-        an explicit grant, so the omitted default never yields an MCPToolbox."""
-        agent = _factory().build_node(_definition(tools=None))
-        assert all(not isinstance(s, MCPToolbox) for s in agent._tool_selectors)
-
-    def test_build_log_describes_selector_surface(self, caplog: pytest.LogCaptureFixture) -> None:
-        """The build log records the selector surface for operators: named
-        builtins inline and ``mcp:<server>`` per toolbox. The MCP label rides on
-        the public ``MCPToolbox.name`` field, so a silent upstream rename must
-        fail here, not in production logs."""
+    def test_build_log_describes_named_selector_surface(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The build log records the selector surface for operators: named builtins
+        inline and ``mcp:<server>`` per toolbox entry. The MCP label rides on the
+        public ``Toolbox.name`` field, so a silent upstream rename must fail here,
+        not in production logs."""
         with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
             _factory().build_node(_definition(tools=("terminal",), mcp=("gmail/send", "docs")))
         message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
@@ -444,13 +456,21 @@ class TestToolsWiring:
         assert "mcp:gmail" in message
         assert "terminal" in message
 
-    def test_build_log_marks_discover(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_build_log_marks_builtin_discover(self, caplog: pytest.LogCaptureFixture) -> None:
         """An omitted-tools agent logs the discover handle explicitly so an
         operator can see at a glance that the agent binds the live tool plane."""
         with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
-            _factory().build_node(_definition(tools=None))
+            _factory().build_node(_definition(tools=None, mcp=False))
         message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
         assert "discover:*" in message
+
+    def test_build_log_marks_mcp_discover(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A discover-mode ``mcp: true`` agent logs the MCP discover handle so an
+        operator sees at a glance that the agent binds the live MCP plane."""
+        with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
+            _factory().build_node(_definition(tools=(), mcp=True))
+        message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
+        assert "mcp:discover:*" in message
 
 
 class TestPublishTopicValidation:

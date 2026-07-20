@@ -16,11 +16,12 @@ import asyncio
 from collections import deque
 from pathlib import Path
 
+import frontmatter
 import pytest
 
 from calfcord.agents.definition import parse_agent_md
 from calfcord.cli import _agents, agent_create
-from calfcord.cli._agents import STARTER_AGENT_NAME
+from calfcord.cli._agents import MCP_DISCOVER_ROW, STARTER_AGENT_NAME
 from calfcord.cli._prompts import Choice, Prompter
 
 _FIXED_PROVIDER = ("anthropic", "claude-haiku-4-5")
@@ -453,10 +454,10 @@ def test_fake_prompter_satisfies_protocol() -> None:
     assert isinstance(FakePrompter(), Prompter)
 
 
-def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
-    """The create wizard's tool checkbox includes ``mcp/<server>`` (and live
-    per-tool) rows alongside the pre-checked builtins — unchecked, because
-    MCP is an explicit grant that never rides the all-builtins default."""
+def test_pick_tools_prechecks_discover_row_named_rows_unchecked(monkeypatch) -> None:
+    """The create wizard pre-checks builtins AND the MCP discover row (so a
+    wizard agent matches a hand-authored ``mcp: true`` default); the *named*
+    ``mcp/<server>`` and live per-tool rows start unchecked."""
     from calfcord.cli import _agents
 
     prompter = FakePrompter(checkboxes=[["terminal"]])
@@ -469,10 +470,21 @@ def test_pick_tools_offers_unchecked_mcp_rows(monkeypatch) -> None:
     assert selected.tools == ["terminal"]
     assert selected.mcp == []
     by_value = {c.value: c for c in prompter.last_checkbox_choices}
+    assert by_value[MCP_DISCOVER_ROW].checked is True
     assert by_value["mcp/github"].checked is False
     assert by_value["mcp/github/search"].checked is False
     # Builtins are still the pre-checked default.
     assert by_value["terminal"].checked is True
+
+
+def test_pick_tools_default_selection_yields_discover(monkeypatch) -> None:
+    """Leaving the pre-checked discover row ticked yields ``mcp=True`` — the
+    wizard's default posture, matching a frontmatter that omits ``mcp:``."""
+    from calfcord.cli import _agents
+
+    prompter = FakePrompter(checkboxes=[["terminal", MCP_DISCOVER_ROW]])
+    selected = _agents.pick_tools(prompter, "helper", mcp_servers_fn=lambda: [], live_tools_fn=lambda: {})
+    assert selected.mcp is True
 
 
 def test_pick_tools_splits_selected_mcp_rows(monkeypatch) -> None:
@@ -489,6 +501,43 @@ def test_pick_tools_splits_selected_mcp_rows(monkeypatch) -> None:
     )
     assert selected.tools == ["terminal"]
     assert selected.mcp == ["github", "github/search"]
+
+
+def _write_agent_tri(agents_dir: Path, mcp) -> Path:
+    """Create an agent via the create-path ``write_agent`` and return its path."""
+    return _agents.write_agent(
+        agents_dir,
+        name="scout",
+        description="A scout.",
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        tools=["read_file"],
+        mcp=mcp,
+    )
+
+
+def test_write_agent_discover_omits_mcp_key(tmp_path: Path) -> None:
+    """The create path writes discover (``mcp=True``) as an omitted key, which
+    parses back to the discover default."""
+    md = _write_agent_tri(tmp_path, True)
+    assert "mcp" not in frontmatter.load(md).metadata
+    assert parse_agent_md(md).mcp is True
+
+
+def test_write_agent_opt_out_writes_false(tmp_path: Path) -> None:
+    """The create path writes opt-out (``mcp=False`` / ``[]``) as ``mcp: false``,
+    NOT an omitted key — so a wizard-created builtins-only agent doesn't silently
+    discover every MCP server."""
+    for value in (False, []):
+        md = _write_agent_tri(tmp_path, value)
+        assert frontmatter.load(md).metadata["mcp"] is False
+        assert parse_agent_md(md).mcp is False
+
+
+def test_write_agent_named_grants_write_list(tmp_path: Path) -> None:
+    md = _write_agent_tri(tmp_path, ["github"])
+    assert frontmatter.load(md).metadata["mcp"] == ["github"]
+    assert parse_agent_md(md).mcp == ("github",)
 
 
 def test_create_agent_forwards_live_tools_fn_to_pick_tools(tmp_path: Path) -> None:

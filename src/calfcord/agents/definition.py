@@ -103,16 +103,21 @@ class AgentDefinition(BaseModel):
     explicitly. If you need a restricted-tools agent, add the
     ``tools:`` line. See :doc:`docs/authoring-agents` for the security
     model."""
-    mcp: tuple[str, ...] = ()
-    """MCP toolbox grants for this agent.
+    mcp: bool | tuple[str, ...] = True
+    """MCP toolbox grants for this agent — a tri-state mirroring ``a2a``/``handoff``.
 
-    Entries use canonical ``mcp:`` field syntax:
-        - ``mcp: [github]`` — all live tools from the named server.
-        - ``mcp: [github/search]`` — exactly one tool from the named server.
+    - ``True`` (default, or ``mcp:`` omitted) — discover every live MCP server on
+      the network at runtime (``Toolboxes(discover=True)``). calfkit 0.13 resolves
+      the set fresh each turn, so a server that starts later is picked up with no
+      agent restart.
+    - ``False`` (or ``mcp: []``) — no MCP toolbox surface (explicit opt-out).
+    - ``[github, github/search]`` — a named grant list (``Toolboxes(...)``); a bare
+      ``<server>`` exposes every tool it advertises, ``<server>/<tool>`` exactly one.
 
-    MCP grants are separate from ``tools:`` because they have a different trust
-    boundary and are never part of the omitted-``tools:`` builtin-discovery
-    default."""
+    Discover-by-default binds *all* networked MCP tools (their trust boundary is the
+    server, not this agent); narrow to a named list or ``false`` for a restricted
+    agent. Separate from ``tools:`` because MCP is a different node kind — the
+    omitted-``tools:`` builtin discovery never reaches MCP servers."""
     thinking_effort: ThinkingEffort | None = None
     memory: bool = False
     """Opt in to a persistent per-agent notepad. When ``True``, the factory
@@ -185,22 +190,22 @@ class AgentDefinition(BaseModel):
             raise ValueError("system_prompt (markdown body) must be non-empty")
         return v
 
-    @field_validator("a2a", "handoff")
+    @field_validator("a2a", "handoff", "mcp")
     @classmethod
-    def _normalize_empty_peer_list(cls, v: bool | tuple[str, ...]) -> bool | tuple[str, ...]:
-        """Treat an empty peer list (``a2a: []`` / ``handoff: []``) as ``False``.
+    def _normalize_empty_tristate(cls, v: bool | tuple[str, ...]) -> bool | tuple[str, ...]:
+        """Treat an empty list (``a2a: []`` / ``handoff: []`` / ``mcp: []``) as ``False``.
 
-        An empty tuple has no useful meaning — the ``message_agent`` / handoff
-        capability injected with zero reachable peers — and if it reached calfkit
-        as a bare ``Messaging()`` / ``Handoff()`` it would be rejected (calfkit
-        needs at least one peer name or ``discover=True``), crashing the agent
-        worker at boot with an error that names neither the agent nor the field.
-        Canonicalizing ``()`` → ``False`` here keeps the field a clean tri-state
-        (``True`` / ``False`` / non-empty tuple) and the persisted/echoed value
-        canonical. :meth:`AgentFactory._build_peers` independently reads the field
-        with a truthiness guard, so the two are defense-in-depth: a hand-built
-        definition that skips validation (``model_construct``) still can't produce
-        a peerless handle.
+        The three fields share one shape — ``True`` (discover) / ``False`` (off) /
+        non-empty tuple (named). An empty tuple has no useful meaning as a named
+        list, and if it reached calfkit as a bare ``Messaging()`` / ``Handoff()`` /
+        ``Toolboxes()`` it would be rejected (each needs at least one name or
+        ``discover=True``), crashing the agent worker at boot with an error that
+        names neither the agent nor the field. Canonicalizing ``()`` → ``False``
+        here keeps every field a clean tri-state and the persisted/echoed value
+        canonical. The factory's :func:`_build_peers` and :func:`_build_tool_selectors`
+        independently read the fields with a truthiness guard, so the two are
+        defense-in-depth: a hand-built definition that skips validation
+        (``model_construct``) still can't produce a peerless / entryless handle.
         """
         if isinstance(v, tuple) and not v:
             return False
@@ -222,8 +227,11 @@ class AgentDefinition(BaseModel):
 
     @field_validator("mcp")
     @classmethod
-    def _validate_mcp(cls, v: tuple[str, ...]) -> tuple[str, ...]:
-        """Syntax-check canonical ``mcp:`` grants."""
+    def _validate_mcp(cls, v: bool | tuple[str, ...]) -> bool | tuple[str, ...]:
+        """Syntax-check canonical ``mcp:`` grants; the ``True``/``False`` tri-state
+        poles carry no entries to check and pass through untouched."""
+        if isinstance(v, bool):
+            return v
         bad: list[str] = []
         for entry in v:
             try:

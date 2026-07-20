@@ -1,5 +1,11 @@
 # Runtime tool discovery for agents - rescoped spec & implementation plan
 
+> **Partly superseded.** This plan's `mcp:` semantics ("omitted → no MCP
+> selector; MCP is named-only") no longer hold. Under calfkit 0.13 the `mcp:`
+> field is a tri-state that *discovers every live MCP server by default* — see
+> [ADR-0028](../adr/0028-mcp-field-discovers-all-servers-by-default.md). The
+> builtin-`Tools`-discovery half of this plan is unchanged.
+
 **Status:** Implemented in `feat/runtime-tool-discovery`.
 **Scope:** Replace build-time builtin-tool resolution in agent construction with
 calfkit runtime `Tools` selectors, and hard-cut MCP grants over to a dedicated
