@@ -20,7 +20,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "readchar>=4.2.2",
     "rich>=15.0.0",
-    "uuid-utils>=0.16.0",
+    "uuid-utils>=0.17.0",
 ]
 
 [project.scripts]
