@@ -157,24 +157,42 @@ def test_render_provider_model_unset_shows_default() -> None:
 
 
 def test_render_tools_collapses_tail() -> None:
-    defn = _make_definition(tools=("read_file", "web_search", "shell", "glob"))
+    # ``mcp=False`` isolates the builtin rendering (the MCP tri-state is covered
+    # by its own tests below).
+    defn = _make_definition(tools=("read_file", "web_search", "shell", "glob"), mcp=False)
     # First two spelled out, the remaining two collapsed into a count.
     assert render_value(defn, FIELDS_BY_KEY["tools"]) == "read_file, web_search (+2)"
 
 
 def test_render_tools_short_list_no_count() -> None:
-    defn = _make_definition(tools=("read_file", "web_search"))
+    defn = _make_definition(tools=("read_file", "web_search"), mcp=False)
     assert render_value(defn, FIELDS_BY_KEY["tools"]) == "read_file, web_search"
 
 
 def test_render_tools_omitted_is_all_builtins() -> None:
-    defn = _make_definition(tools=None)
+    defn = _make_definition(tools=None, mcp=False)
     assert render_value(defn, FIELDS_BY_KEY["tools"]) == "(all builtins)"
 
 
 def test_render_tools_explicit_empty_is_none() -> None:
-    defn = _make_definition(tools=())
+    defn = _make_definition(tools=(), mcp=False)
     assert render_value(defn, FIELDS_BY_KEY["tools"]) == "(none)"
+
+
+def test_render_tools_mcp_discover_default() -> None:
+    """The default MCP state (``mcp: true``) renders a ``; mcp: discover`` suffix."""
+    defn = _make_definition(tools=())  # mcp defaults to True
+    assert render_value(defn, FIELDS_BY_KEY["tools"]) == "(none); mcp: discover"
+
+
+def test_render_tools_mcp_named_grants() -> None:
+    defn = _make_definition(tools=("read_file",), mcp=("gmail", "docs"))
+    assert render_value(defn, FIELDS_BY_KEY["tools"]) == "read_file; mcp: gmail, docs"
+
+
+def test_render_tools_mcp_off_has_no_suffix() -> None:
+    defn = _make_definition(tools=("read_file",), mcp=False)
+    assert render_value(defn, FIELDS_BY_KEY["tools"]) == "read_file"
 
 
 def test_render_prompt_single_line_preview() -> None:

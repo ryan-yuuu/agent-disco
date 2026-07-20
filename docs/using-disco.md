@@ -210,10 +210,11 @@ disco mcp remove github          # delete the entry (--force to skip the confirm
 ```
 
 A server you add *after* `disco start` spawns as its own detached process, so
-`disco mcp start github` brings it online immediately — no workspace reload. Then grant the tools
-to an agent by adding `mcp: [<server>]` (or `mcp: [<server>/<tool>]`) to its
-agent file — `disco agent tools <name>` offers those rows — and restart the
-agent to apply.
+`disco mcp start github` brings it online immediately — no workspace reload. Any
+agent on the default `mcp: true` (discover) already picks it up on its next turn.
+To *narrow* an agent to specific servers instead, set `mcp: [<server>]` (or
+`mcp: [<server>/<tool>]`) in its agent file — `disco agent tools <name>` offers
+those rows — and restart the agent to apply.
 
 → The full end-to-end walkthrough, `mcp.json` schema, and selector grammar:
 [mcp-tools.md](mcp-tools.md).

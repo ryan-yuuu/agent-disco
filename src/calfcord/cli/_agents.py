@@ -104,16 +104,24 @@ CREATE_SENTINEL = "/create"
 _CREATE_LABEL = "+ Create a new agent…"
 
 
+# The synthetic checkbox row that represents MCP discover mode (``mcp: true``).
+# Deliberately colon-separated, not ``mcp/``-prefixed, so it never collides with a
+# named ``mcp/<server>`` grant row when the split partitions the selection.
+MCP_DISCOVER_ROW = "mcp:discover"
+
+
 @dataclass(frozen=True)
 class ToolGrantSelection:
     """Structured result from the tools checkbox.
 
     ``tools=None`` means omit ``tools:`` and discover all live builtins.
-    ``mcp`` entries are canonical ``server`` / ``server/tool`` values.
+    ``mcp`` is the field's tri-state: ``True`` (discover every live MCP server),
+    ``False`` / ``[]`` (opt out), or a list of canonical ``server`` /
+    ``server/tool`` grants.
     """
 
     tools: list[str] | None
-    mcp: list[str]
+    mcp: bool | list[str]
 
 
 def pick_agent(
@@ -311,7 +319,7 @@ def write_agent(
     provider: str,
     model: str,
     tools: list[str] | None,
-    mcp: list[str] | tuple[str, ...] = (),
+    mcp: bool | list[str] | tuple[str, ...] = True,
     prune_seed: bool = False,
 ) -> Path:
     """Create or update ``agents_dir/<name>.md`` for the wizard's agent.
@@ -360,8 +368,9 @@ def write_agent(
     }
     if tools is not None:
         metadata["tools"] = list(tools)
-    if mcp:
-        metadata["mcp"] = list(mcp)
+    # Shared with the update path (md_writer.update_tool_grants) so the two
+    # cannot diverge on how a tri-state serializes.
+    md_writer.apply_mcp_metadata(metadata, mcp)
     # Validate the full definition in memory FIRST (mirrors
     # md_writer._update_fields): a bad free-text value raises here, before any
     # bytes touch disk, so the create path can never leave an unloadable file.
@@ -395,10 +404,12 @@ def pick_tools(
 
     Every builtin (sorted :data:`calfcord.tools.TOOL_REGISTRY`) is offered
     pre-checked so the default is the same "all builtins" set a frontmatter that
-    omits ``tools:`` would expand to; MCP rows (``mcp/<server>`` from mcp.json
-    plus live-discovered per-tool rows) are offered UNCHECKED because MCP is an
-    explicit grant that never rides that default. Row building is shared with
-    the ``agent tools`` editor (:func:`calfcord.cli.agent_tools._build_choices`)
+    omits ``tools:`` would expand to, and the MCP discover row is likewise
+    pre-checked so a wizard-created agent matches a hand-authored one (which
+    defaults to ``mcp: true``). The *named* MCP rows (``mcp/<server>`` from
+    mcp.json plus live-discovered per-tool rows) start UNCHECKED — deselect
+    discover to opt out or to pick named servers instead. Row building is shared
+    with the ``agent tools`` editor (:func:`calfcord.cli.agent_tools._build_choices`)
     so the two surfaces can't drift. If a write/shell tool ends up selected we
     print the security caution, because anyone who can !mention the agent can
     then drive it.
@@ -411,7 +422,10 @@ def pick_tools(
     from calfcord.tools import TOOL_REGISTRY
 
     choices = _build_choices(
-        set(TOOL_REGISTRY),  # builtins pre-checked; MCP rows start unchecked
+        # Builtins AND MCP-discover pre-checked, so a wizard-created agent's default
+        # matches a hand-authored one (omitted ``tools:`` + ``mcp: true``); named MCP
+        # rows start unchecked. Deselect discover to opt out or to pick named servers.
+        set(TOOL_REGISTRY) | {MCP_DISCOVER_ROW},
         mcp_servers=(mcp_servers_fn or _default_mcp_servers)(),
         live_tools=(live_tools_fn or _default_live_tools)(),
     )
@@ -438,12 +452,24 @@ def pick_tools(
 
 
 def _split_tool_selection(selected: list[str], builtin_names: set[str]) -> ToolGrantSelection:
-    """Convert checkbox UI values into canonical frontmatter fields."""
-    builtin_tokens = [token for token in selected if not token.startswith("mcp/")]
+    """Convert checkbox UI values into canonical frontmatter fields.
+
+    The MCP surface is tri-state: the synthetic :data:`MCP_DISCOVER_ROW` maps to
+    ``mcp=True`` (discover every live server) and, being exclusive, subsumes any
+    named ``mcp/<server>`` rows also ticked; otherwise the named rows form the
+    grant list, and an empty selection is ``[]`` (opt out).
+    """
+    builtin_tokens = [
+        token for token in selected if not token.startswith("mcp/") and token != MCP_DISCOVER_ROW
+    ]
     selected_known_builtins = {token for token in builtin_tokens if token in builtin_names}
     has_unknown_builtin = any(token not in builtin_names for token in builtin_tokens)
 
     tools = None if not has_unknown_builtin and selected_known_builtins == builtin_names else builtin_tokens
 
-    mcp = [token.removeprefix("mcp/") for token in selected if token.startswith("mcp/")]
+    mcp: bool | list[str]
+    if MCP_DISCOVER_ROW in selected:
+        mcp = True
+    else:
+        mcp = [token.removeprefix("mcp/") for token in selected if token.startswith("mcp/")]
     return ToolGrantSelection(tools=tools, mcp=mcp)

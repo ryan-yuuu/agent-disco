@@ -24,11 +24,11 @@ agent's persona from the emitter without any application-level identity
 stamping.
 
 Builtin tools declared under ``tools:`` become calfkit runtime
-:class:`~calfkit.nodes.tool.Tools` selectors; MCP grants declared under
-``mcp:`` collapse into one :class:`~calfkit.mcp.MCPToolbox` per server.
-Both are resolved per turn against the capability view. The actual tool body
-runs in the ``calfkit-tools`` or ``calfkit-mcp`` deployment, not in the agent
-process.
+:class:`~calfkit.nodes.tool.Tools` selectors; the tri-state ``mcp:`` field
+becomes a single :class:`~calfkit.nodes.toolbox.Toolboxes` selector — discover
+mode by default, or a named grant list. Both are resolved per turn against the
+capability view. The actual tool body runs in the ``calfkit-tools`` or
+``calfkit-mcp`` deployment, not in the agent process.
 
 Two public entry points:
 
@@ -59,9 +59,8 @@ import logging
 import os
 from collections.abc import Callable
 
-from calfkit import Handoff, Messaging, surface_to_model
+from calfkit import Handoff, Messaging, Toolboxes, surface_to_model
 from calfkit.client import Client
-from calfkit.mcp import MCPToolbox
 from calfkit.nodes import Agent
 from calfkit.nodes.tool import Tools
 from calfkit.providers import AnthropicModelClient, OpenAIModelClient
@@ -72,7 +71,7 @@ from calfcord.agents.definition import AgentDefinition, Provider
 from calfcord.agents.memory import memory_instructions
 from calfcord.agents.thinking import build_model_settings
 from calfcord.discord.persona import DiscordPersonaSender
-from calfcord.mcp.agent_select import selectors_from_entries
+from calfcord.mcp.agent_select import toolbox_selector
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +195,7 @@ def _build_peers(definition: AgentDefinition) -> list[Messaging | Handoff]:
 
     Truthiness (not ``is not False``) is the capability guard: an empty tuple is
     already canonicalized to ``False`` by
-    :meth:`AgentDefinition._normalize_empty_peer_list`, but reading it as falsy
+    :meth:`AgentDefinition._normalize_empty_tristate`, but reading it as falsy
     here also keeps a hand-built definition (e.g. ``model_construct``, which
     skips validators) from constructing a peerless ``Messaging()``/``Handoff()``
     that calfkit would reject.
@@ -209,20 +208,25 @@ def _build_peers(definition: AgentDefinition) -> list[Messaging | Handoff]:
     return peers
 
 
-def _describe_selectors(selectors: list[Tools | MCPToolbox]) -> list[str]:
+def _describe_selectors(selectors: list[Tools | Toolboxes]) -> list[str]:
     """Render the tool-selector surface for the operator-facing build log.
 
-    ``discover:*`` for the discover handle, the raw name list for named builtins,
-    and ``mcp:<server>`` per toolbox — the MCP label rides on the public
-    :attr:`MCPToolbox.name`, so a silent upstream rename surfaces in tests, not
-    in production logs.
+    For builtins (:class:`~calfkit.nodes.tool.Tools`): ``discover:*`` for the
+    discover handle, else the raw name list. For MCP
+    (:class:`~calfkit.nodes.toolbox.Toolboxes`): ``mcp:discover:*`` for the
+    discover handle, else ``mcp:<server>`` per named toolbox entry — the label
+    rides on the public :attr:`Toolbox.name`, so a silent upstream rename
+    surfaces in tests, not in production logs.
     """
     described: list[str] = []
     for selector in selectors:
         if isinstance(selector, Tools):
             described.append("discover:*" if selector.discover else f"tools:{list(selector.names)}")
-        else:
-            described.append(f"mcp:{selector.name}")
+        elif isinstance(selector, Toolboxes):
+            if selector.discover:
+                described.append("mcp:discover:*")
+            else:
+                described.extend(f"mcp:{entry.name}" for entry in selector.entries)
     return described
 
 
@@ -395,33 +399,41 @@ class AgentFactory:
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
 
-    def _build_tool_selectors(self, definition: AgentDefinition) -> list[Tools | MCPToolbox]:
+    def _build_tool_selectors(self, definition: AgentDefinition) -> list[Tools | Toolboxes]:
         """Map builtin ``tools:`` and MCP ``mcp:`` grants to runtime selectors.
 
         Nothing is resolved against a local registry: every selector is an
-        identity-only handle the capability view resolves per turn. Builtin
-        names become one :class:`~calfkit.nodes.tool.Tools` selector; canonical
-        ``mcp:`` entries become one :class:`~calfkit.mcp.MCPToolbox` per server
-        via :func:`~calfcord.mcp.agent_select.selectors_from_entries`.
+        identity-only handle the capability view resolves per turn. Builtin names
+        become one :class:`~calfkit.nodes.tool.Tools` selector; the tri-state
+        ``mcp:`` field becomes at most one :class:`~calfkit.nodes.toolbox.Toolboxes`
+        via :func:`~calfcord.mcp.agent_select.toolbox_selector`.
 
-        Semantics (mirrors :attr:`AgentDefinition.tools`):
-            - ``tools is None``: ``Tools(discover=True)`` — bind every live
-              builtin tool node at runtime.
+        Semantics:
+            - ``tools is None``: ``Tools(discover=True)`` — bind every live builtin
+              tool node at runtime.
             - ``tools == ()``: no builtin selector.
             - non-empty ``tools``: ``Tools(names=[...])``.
-            - non-empty ``mcp``: one ``MCPToolbox`` per named server.
+            - ``mcp is True`` (default): ``Toolboxes(discover=True)`` — bind every
+              live MCP server on the network.
+            - ``mcp is False`` / ``()``: no MCP selector.
+            - non-empty ``mcp``: one named ``Toolboxes`` covering the grant list.
 
-        Unknown builtin names are NOT rejected here — an unresolved name
-        degrades at runtime (calfkit logs it, the tool is simply absent),
-        matching the deploy-time-authority model: the tools host, not this
+        A discover-mode ``Tools`` and a discover-mode ``Toolboxes`` coexist without
+        conflict — calfkit's exclusivity rails are per node kind (a ``Tools``
+        discover owns only the tool-node surface, a ``Toolboxes`` discover only the
+        toolbox surface). Unknown builtin names are NOT rejected here — an
+        unresolved name degrades at runtime (calfkit logs it, the tool is simply
+        absent), matching the deploy-time-authority model: the tools host, not this
         process, owns which tools are live.
         """
-        selectors: list[Tools | MCPToolbox] = []
+        selectors: list[Tools | Toolboxes] = []
         if definition.tools is None:
             selectors.append(Tools(discover=True))
         elif definition.tools:
             selectors.append(Tools(names=list(definition.tools)))
-        selectors.extend(selectors_from_entries(definition.mcp))
+        toolboxes = toolbox_selector(definition.mcp)
+        if toolboxes is not None:
+            selectors.append(toolboxes)
         return selectors
 
     def _require_memory_tools(self, definition: AgentDefinition) -> None:

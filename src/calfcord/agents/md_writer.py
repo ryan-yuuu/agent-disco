@@ -45,9 +45,9 @@ import logging
 import os
 import stat
 import tempfile
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import frontmatter
 import yaml
@@ -191,13 +191,14 @@ def update_tool_grants(
     md_path: Path,
     *,
     tools: Sequence[str] | None,
-    mcp: Sequence[str] = (),
+    mcp: bool | Sequence[str] = True,
 ) -> AgentDefinition:
-    """Rewrite builtin ``tools:`` and MCP ``mcp:`` grants atomically.
+    """Rewrite builtin ``tools:`` and the tri-state MCP ``mcp:`` grant atomically.
 
     ``tools=None`` removes the ``tools:`` key, expressing runtime discovery of
     all live builtin tools. ``tools=[]`` writes an explicit empty builtin list.
-    ``mcp=[]`` removes the ``mcp:`` key for canonical output.
+    The ``mcp`` tri-state (``True`` / ``False`` / a named grant list) is written
+    by :func:`apply_mcp_metadata`, which owns the canonical on-disk form.
     """
     from calfcord.tools import TOOL_REGISTRY
 
@@ -215,14 +216,36 @@ def update_tool_grants(
     else:
         post.metadata["tools"] = list(tools)
 
-    if mcp:
-        post.metadata["mcp"] = list(mcp)
-    else:
-        post.metadata.pop("mcp", None)
+    apply_mcp_metadata(post.metadata, mcp)
 
     validated = _validate_and_write(md_path, post)
     logger.info("rewrote tool grants in %s", md_path)
     return validated
+
+
+def apply_mcp_metadata(metadata: MutableMapping[str, Any], mcp: bool | Sequence[str]) -> None:
+    """Write the tri-state ``mcp`` field into a frontmatter ``metadata`` mapping.
+
+    The single source of truth for the canonical on-disk form of each state,
+    shared by the update (:func:`update_tool_grants`) and create
+    (:func:`calfcord.cli._agents.write_agent`) paths so a change to how a state
+    serializes cannot silently diverge between them — a real risk here because
+    the poles carry security weight (an omitted key now means discover-all, not
+    off):
+
+    * ``True`` — remove the ``mcp:`` key. An omitted key parses back to ``True``
+      (discover every live MCP server), so this is discover's canonical form.
+      ``pop`` is a harmless no-op on the create path's fresh mapping.
+    * ``False`` / ``[]`` — write ``mcp: false`` (explicit opt-out). It must NOT
+      be an omitted key, which would mean discover.
+    * a non-empty sequence — write ``mcp: [<grants>]`` (a named grant list).
+    """
+    if mcp is True:
+        metadata.pop("mcp", None)
+    elif mcp:
+        metadata["mcp"] = list(mcp)
+    else:  # False or []
+        metadata["mcp"] = False
 
 
 def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
@@ -275,9 +298,12 @@ def _validate_builtin_tools(tools: Sequence[str], registry: dict[str, object]) -
             raise ValueError(f"unknown tool {token!r}; expected a builtin ({valid})")
 
 
-def _validate_mcp_grants(mcp: Sequence[str]) -> None:
+def _validate_mcp_grants(mcp: bool | Sequence[str]) -> None:
     from calfcord.mcp.selector import validate_mcp_selector
 
+    if isinstance(mcp, bool):
+        # The ``True``/``False`` tri-state poles carry no grant tokens to check.
+        return
     for token in mcp:
         if not isinstance(token, str):
             raise ValueError(f"invalid MCP grant {token!r}: expected a string")

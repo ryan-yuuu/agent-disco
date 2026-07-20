@@ -70,15 +70,14 @@ model: claude-sonnet-4-5
 # Tools (optional). `tools:` is builtin-only. Each entry is a builtin tool name
 # that resolves against the live tools host at runtime.
 #
-# MCP tools use the separate `mcp:` field:
-#   - mcp: [github]          every tool that server advertises
-#   - mcp: [github/search]   exactly that one tool
+# MCP tools use the separate `mcp:` field, a tri-state documented in its own
+# section below (default: discover every live MCP server).
 #
-# MCP grants are validated for syntax here; the agent resolves them per turn
-# against the live capability advertisement, so a server's tool list can change
-# with no agent restart. Editing `tools:` or `mcp:` still needs an agent restart
-# because the selector set is baked into the agent node at boot. See
-# docs/mcp-tools.md.
+# The agent resolves the live MCP plane per turn against the capability
+# advertisement, so a server's tool list — and, in discover mode, the set of
+# servers — can change with no agent restart. Editing `tools:` or `mcp:` still
+# needs an agent restart because the selector set is baked into the agent node
+# at boot. See docs/mcp-tools.md.
 # ----------------------------------------------------------------------------
 
 # Available builtins (vendored from calfkit-tools):
@@ -98,17 +97,15 @@ model: claude-sonnet-4-5
 # their state by the calling agent's identity, so one agent's shell session,
 # working directory, and task list are invisible to another.
 #
-# Semantics of the `tools:` line:
-#   - omitted entirely  → agent discovers EVERY live builtin (but NO MCP tools;
-#                         MCP grants are always explicit). Convenient, but means a
-#                         new agent ships with terminal/write_file/execute_code
-#                         access to the shared workspace — narrow the list if the
-#                         agent takes input from untrusted users.
-#   - tools: []         → agent gets NO tools (text-only).
+# Semantics of the `tools:` line (builtins only — MCP is the separate `mcp:`
+# field below):
+#   - omitted entirely  → agent discovers EVERY live builtin. Convenient, but
+#                         means a new agent ships with terminal/write_file/
+#                         execute_code access to the shared workspace — narrow
+#                         the list if the agent takes input from untrusted users.
+#   - tools: []         → agent gets NO builtins (text-only unless `mcp:` grants).
 #   - tools: [a, b]     → exactly those builtins, e.g.
 #                         tools: [read_file, web_search]
-#   - mcp: [github]     → every tool the github MCP server advertises.
-#   - mcp: [docs/search] → exactly one MCP tool.
 #
 # Filesystem/shell tools start in one shared workspace on the calfkit-tools
 # host (CALFCORD_WORKSPACE_DIR, default state/workspace/). Each agent gets its
@@ -116,6 +113,24 @@ model: claude-sonnet-4-5
 # docs/security.md before adding terminal/file/execute_code tools to an agent
 # that takes input from untrusted users.
 tools: []
+
+# ----------------------------------------------------------------------------
+# MCP servers (optional) — a tri-state, mirroring the a2a/handoff fields.
+# ----------------------------------------------------------------------------
+#
+#   - omitted / mcp: true → discover EVERY live MCP server on the network and
+#                           bind its tools each turn (resolved fresh, so a
+#                           server that starts later is picked up with no
+#                           restart). This is the DEFAULT.
+#   - mcp: false          → no MCP tools (explicit opt-out).
+#   - mcp: [github]       → every tool the github MCP server advertises.
+#   - mcp: [docs/search]  → exactly one MCP tool from that server.
+#
+# SECURITY: the discover default binds ALL networked MCP tools — their trust
+# boundary is the MCP server, not this agent. Set `mcp: false`, or a narrow
+# named list, for an agent that takes input from untrusted users. See
+# docs/security.md.
+mcp: true
 
 # ----------------------------------------------------------------------------
 # Thinking effort (optional)

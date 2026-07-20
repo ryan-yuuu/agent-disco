@@ -357,7 +357,8 @@ src/calfcord/
 │   ├── deploy_filters.py # pure INCLUDE/ALIAS transform -> TOOL_REGISTRY
 │   └── runner.py         # calfkit-tools entry point
 └── mcp/           # MCP integration: mcp: grant grammar,
-                   # agent_select (frontmatter -> MCPToolbox handles),
+                   # agent_select (mcp: tri-state -> a Toolboxes selector,
+                   # discover-by-default or a named grant list),
                    # config + config_write (mcp.json), capability_read
                    # (live per-tool display), runner (calfkit-mcp entry point)
 

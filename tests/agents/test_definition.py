@@ -86,9 +86,23 @@ class TestAgentDefinitionValidators:
         d = _make_definition(tools=["calendar", "email"])
         assert d.tools == ("calendar", "email")
 
-    def test_mcp_defaults_to_empty_tuple(self) -> None:
+    def test_mcp_defaults_to_discover(self) -> None:
+        """Omitted ``mcp:`` → ``True``, which the factory expands to
+        ``Toolboxes(discover=True)`` so the agent binds every live MCP server on
+        the network at runtime. Mirrors the ``a2a``/``handoff`` discover default."""
         d = _make_definition()
-        assert d.mcp == ()
+        assert d.mcp is True
+
+    def test_mcp_false_disables(self) -> None:
+        """``mcp: false`` is the explicit opt-out: no MCP toolbox surface."""
+        d = _make_definition(mcp=False)
+        assert d.mcp is False
+
+    def test_mcp_empty_list_normalizes_to_false(self) -> None:
+        """``mcp: []`` has no useful meaning as a grant list, so it canonicalizes
+        to ``False`` (off) — parallel to ``a2a: []`` / ``handoff: []``."""
+        d = _make_definition(mcp=[])
+        assert d.mcp is False
 
     @pytest.mark.parametrize(
         "grant",
@@ -325,6 +339,27 @@ class TestParseAgentMd:
         definition = parse_agent_md(path)
         assert definition.tools == ("shell",)
         assert definition.mcp == ("gmail", "docs/search")
+
+    def test_mcp_omitted_in_frontmatter_is_discover(self, tmp_path: Path) -> None:
+        """An on-disk ``.md`` with no ``mcp:`` key parses to the discover default."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, tools="[shell]")
+        assert parse_agent_md(path).mcp is True
+
+    def test_mcp_true_in_frontmatter_is_discover(self, tmp_path: Path) -> None:
+        """A literal YAML ``mcp: true`` parses to ``True`` (not a coercion to
+        ``()`` — the union/YAML-bool footgun this pins against)."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, mcp="true")
+        assert parse_agent_md(path).mcp is True
+
+    def test_mcp_false_in_frontmatter_is_off(self, tmp_path: Path) -> None:
+        """A literal YAML ``mcp: false`` parses to ``False`` (the opt-out pole),
+        NOT to an empty tuple or the discover default — the whole tri-state
+        hinges on this on-disk read."""
+        path = tmp_path / "scheduler.md"
+        self._write_md(path, mcp="false")
+        assert parse_agent_md(path).mcp is False
 
     def test_legacy_mcp_tool_in_tools_frontmatter_rejected(self, tmp_path: Path) -> None:
         """Legacy flat MCP syntax fails the load with migration guidance, so a

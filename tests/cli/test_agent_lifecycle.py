@@ -167,6 +167,18 @@ def test_set_tools_preserves_existing_mcp(tmp_path: Path) -> None:
     assert reparsed.mcp == ("github",)
 
 
+def test_set_tools_preserves_mcp_false_opt_out(tmp_path: Path) -> None:
+    """Editing an unrelated field must NOT silently re-enable MCP discovery on an
+    agent that explicitly opted out (``mcp: false``) — the highest-blast-radius
+    silent flip, since an omitted key now means discover-every-server."""
+    agents_dir = tmp_path / "agents"
+    md_path = _seed_agent(agents_dir, "scribe", tools_line=None, mcp_line="false")
+    assert agent_lifecycle.run_set(agents_dir, "scribe", {"tools": "read_file"}) == 0
+    reparsed = parse_agent_md(md_path)
+    assert reparsed.tools == ("read_file",)
+    assert reparsed.mcp is False
+
+
 def test_set_tools_rejects_legacy_mcp_selector(tmp_path: Path, capsys) -> None:
     agents_dir = tmp_path / "agents"
     md_path = _seed_agent(agents_dir, "scribe", tools_line="[read_file]")
