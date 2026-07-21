@@ -92,7 +92,7 @@ class TestOpenAICodexMapping:
 class TestUnknownProvider:
     def test_unknown_provider_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown provider"):
-            build_model_settings("xai", "high")  # type: ignore[arg-type]
+            build_model_settings("gemini", "high")  # type: ignore[arg-type]
 
 
 class TestBuildModelSettingsUnion:

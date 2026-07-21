@@ -107,10 +107,12 @@ def build_model_settings(
             return {}
         return {"anthropic_thinking": {"type": "enabled", "budget_tokens": budget}}
 
-    if provider in ("openai", "openai-codex"):
-        # ``openai-codex`` is the ChatGPT-subscription backend; it speaks the
-        # same OpenAI Responses API as ``openai`` and accepts the same
-        # ``reasoning_effort`` setting, so the effort ramp is identical.
+    if provider in ("openai", "openai-codex", "xai", "xai-grok"):
+        # ``openai-codex`` (ChatGPT subscription) and the two xAI providers all
+        # speak the OpenAI Responses API and accept the same ``reasoning_effort``
+        # dial, so the effort ramp is identical. The Grok client drops the dial
+        # for models that reject it (``grok_supports_reasoning_effort``), so a
+        # non-reasoning Grok model never 400s on an operator's effort setting.
         value = _OPENAI_REASONING_EFFORT.get(effort)
         if value is None:
             logger.warning(
@@ -121,7 +123,8 @@ def build_model_settings(
         return {"openai_reasoning_effort": value}
 
     raise ValueError(
-        f"unknown provider {provider!r}; expected 'anthropic', 'openai', or 'openai-codex'"
+        f"unknown provider {provider!r}; expected 'anthropic', 'openai', "
+        f"'openai-codex', 'xai', or 'xai-grok'"
     )
 
 

@@ -40,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from calfcord.agents.identifier import AGENT_ID_PATTERN, reserved_agent_id_error
 from calfcord.mcp.selector import is_mcp_selector, validate_mcp_selector
 
-Provider = Literal["anthropic", "openai", "openai-codex"]
+Provider = Literal["anthropic", "openai", "openai-codex", "xai", "xai-grok"]
 """Supported LLM provider tags for the ``provider`` frontmatter field.
 
 The factory maps each provider to a concrete model-client class:
@@ -50,6 +50,10 @@ The factory maps each provider to a concrete model-client class:
       :class:`calfcord.providers.codex.CodexSubscriptionModelClient`
       (routes through ChatGPT Plus/Pro subscription billing rather than
       OpenAI API credits; requires ``uv run calfkit-auth codex login``).
+    - ``"xai"`` → :class:`calfcord.providers.grok.model_client.GrokModelClient`
+      via the metered ``XAI_API_KEY`` (xAI's OpenAI-compatible Responses API).
+    - ``"xai-grok"`` → the same client over device-code OAuth, billed against a
+      SuperGrok / X Premium+ subscription (``uv run calfkit-auth grok login``).
 """
 
 ThinkingEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]

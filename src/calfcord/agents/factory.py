@@ -94,6 +94,11 @@ _PROVIDER_DEFAULT_MODELS: dict[Provider, str | None] = {
     # construction. The key is kept so ``resolve_provider`` still recognises
     # the provider.
     "openai-codex": None,
+    # Both xAI providers likewise resolve their default from the live
+    # ``/language-models`` catalog (with a pinned fallback) at construction, so
+    # an unset ``model:`` never pins a Grok slug that xAI later retires.
+    "xai": None,
+    "xai-grok": None,
 }
 """Default model name per provider when neither ``definition.model`` nor
 ``CALFKIT_AGENT_DEFAULT_MODEL`` is set. Each provider's model namespace is
@@ -117,11 +122,12 @@ def _default_model_client_factory(provider: Provider, model_name: str | None) ->
     handle keys. A missing key surfaces on first invocation, not at
     construction.
 
-    ``model_name`` is ``None`` only when the resolved provider is
-    ``openai-codex`` and no model was configured (the Codex client resolves a
-    catalog default). The other providers always carry a static default from
-    :data:`_PROVIDER_DEFAULT_MODELS`, so a ``None`` reaching them is a bug —
-    guarded explicitly rather than passed through as an invalid model name.
+    ``model_name`` is ``None`` only for the catalog-resolved providers
+    (``openai-codex`` / ``xai`` / ``xai-grok``) when no model was configured;
+    their clients resolve a live-catalog default. The other providers always
+    carry a static default from :data:`_PROVIDER_DEFAULT_MODELS`, so a ``None``
+    reaching them is a bug — guarded explicitly rather than passed through as an
+    invalid model name.
     """
     if provider == "anthropic":
         return AnthropicModelClient(model_name=_require_model(provider, model_name))
@@ -133,6 +139,16 @@ def _default_model_client_factory(provider: Provider, model_name: str | None) ->
         from calfcord.providers.codex import build_codex_subscription_client
 
         return build_codex_subscription_client(model_name=model_name)
+    if provider == "xai":
+        # Lazy import: keeps the xAI client + model catalog out of the import
+        # graph unless a ``provider: xai`` agent is built.
+        from calfcord.providers.grok import build_grok_api_key_client
+
+        return build_grok_api_key_client(model_name=model_name)
+    if provider == "xai-grok":
+        from calfcord.providers.grok import build_grok_subscription_client
+
+        return build_grok_subscription_client(model_name=model_name)
     # Unreachable when ``provider`` is typed as Provider; defensive for
     # runtime callers that bypass the Literal.
     raise ValueError(f"unknown provider {provider!r}; expected one of {list(_PROVIDER_DEFAULT_MODELS)}")
@@ -141,8 +157,10 @@ def _default_model_client_factory(provider: Provider, model_name: str | None) ->
 def _require_model(provider: Provider, model_name: str | None) -> str:
     """Return ``model_name`` or raise — for providers that need an explicit slug.
 
-    Only ``openai-codex`` tolerates ``None`` (it resolves a catalog default);
-    every other provider must have a concrete model by this point.
+    Only the catalog-resolved providers (``openai-codex`` / ``xai`` / ``xai-grok``)
+    tolerate ``None``; every other provider must have a concrete model by this
+    point. Those providers pass ``model_name`` straight to their client (which
+    resolves the catalog default), so this guard is never reached for them.
     """
     if model_name is None:
         raise ValueError(

@@ -53,11 +53,13 @@ class ProviderModel(NamedTuple):
 # the first *available* model id containing any of these wins.
 _CHEAP_HINTS = ("haiku", "nano", "mini", "flash", "lite")
 
-# Provider env-var conventions. ``openai-codex`` is intentionally absent: it
-# authenticates via the OAuth flow in :func:`_codex_login`, not a key in ``.env``.
+# Provider env-var conventions. ``openai-codex`` and ``xai-grok`` are
+# intentionally absent: they authenticate via an OAuth flow (:func:`_codex_login`
+# / :func:`_grok_login`), not a key in ``.env``.
 _PROVIDER_KEY_VAR: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "xai": "XAI_API_KEY",
 }
 
 # The selectable providers, with operator-facing labels, shared by every wizard
@@ -67,6 +69,8 @@ PROVIDERS: list[Choice] = [
     Choice("anthropic", "Anthropic"),
     Choice("openai", "OpenAI"),
     Choice("openai-codex", "Codex subscription"),
+    Choice("xai", "xAI Grok (API key)"),
+    Choice("xai-grok", "xAI Grok subscription"),
 ]
 
 # OpenAI's ``models.list()`` returns the *entire* account catalog — embeddings,
@@ -123,6 +127,34 @@ def _is_openai_chat_model(model_id: str) -> bool:
     if not model_id.startswith(_OPENAI_CHAT_PREFIXES):
         return False
     return not any(marker in model_id for marker in _OPENAI_NON_CHAT_MARKERS)
+
+
+async def _load_grok_slugs(provider: str, api_key: str | None) -> list[str]:
+    """Load selectable Grok model ids for the setup wizard.
+
+    Fetches the authenticated live catalog with the credential the wizard has —
+    the API key for ``xai``, the stored OAuth bearer for ``xai-grok``. Uses a
+    throwaway resolver so the wizard never mutates the process-wide singleton.
+
+    For ``xai`` a rejected key (xAI answers 400/401/403) raises
+    :class:`ModelAuthError` so :func:`pick_model` warns loudly — the same
+    treatment openai/anthropic get, since a rejected key means the agent won't
+    work. For ``xai-grok`` a 403 is an expected tier-gate, not a bad key, so we
+    return the pinned fallback quietly.
+    """
+    from calfcord.providers.grok.models import GrokModelResolver
+
+    bearer = api_key or ""
+    if provider == "xai-grok":
+        from calfcord.providers.grok.token_store import load_credentials
+
+        creds = load_credentials()
+        bearer = creds.access_token if creds else ""
+    resolver = GrokModelResolver()
+    await resolver.ensure_loaded(bearer)
+    if provider == "xai" and resolver.source == "fallback" and resolver.fallback_status in (400, 401, 403):
+        raise ModelAuthError(f"xAI rejected the API key (HTTP {resolver.fallback_status}).")
+    return resolver.selectable_models()
 
 
 async def _load_codex_slugs() -> list[str]:
@@ -186,6 +218,19 @@ def list_models(provider: str, *, api_key: str | None) -> list[Choice]:
         if provider == "openai-codex":
             slugs = asyncio.run(_load_codex_slugs())
             return [Choice(s, s) for s in slugs]
+
+        if provider in ("xai", "xai-grok"):
+            # The Grok catalog fetch is authenticated: ``xai`` uses the API key,
+            # ``xai-grok`` the stored OAuth bearer. The resolver degrades to the
+            # pinned fallback rather than raising — except that a rejected ``xai``
+            # key raises ModelAuthError (see _load_grok_slugs) so it surfaces
+            # loudly like openai/anthropic.
+            slugs = asyncio.run(_load_grok_slugs(provider, api_key))
+            return [Choice(s, s) for s in slugs]
+    except ModelListError:
+        # Already the right exception type (e.g. a rejected-key ModelAuthError
+        # from the grok path) — propagate it unchanged to the loud handler.
+        raise
     except Exception as exc:
         # Broad on purpose: each provider branch can fail in a different way
         # (httpx errors, auth errors, SDK-internal errors) and the callers want
@@ -246,11 +291,17 @@ def _build_fallback_models() -> dict[str, list[str]]:
     factory still degrades to a known-good slug rather than crashing the wizard.
     """
     from calfcord.agents.factory import _PROVIDER_DEFAULT_MODELS
+    from calfcord.providers.grok.models import fallback_model_slugs
 
+    # Both xAI providers resolve live (factory default ``None``); their pinned
+    # fallback is the grok module's own list so the two can't drift.
+    grok_fallback = fallback_model_slugs()
     return {
         "anthropic": [_PROVIDER_DEFAULT_MODELS["anthropic"] or "claude-sonnet-4-5", "claude-haiku-4-5"],
         "openai": [_PROVIDER_DEFAULT_MODELS["openai"] or "gpt-5-mini", "gpt-5-nano"],
         "openai-codex": ["gpt-5-codex-mini"],
+        "xai": grok_fallback,
+        "xai-grok": grok_fallback,
     }
 
 
@@ -369,16 +420,17 @@ def ensure_credentials(
 ) -> str | None:
     """Ensure the chosen ``provider`` can authenticate, writing keys to ``env_path``.
 
-    For key-based providers (``anthropic`` / ``openai``) it prompts for the
-    provider's API-key var, masking the input and writing it only when a value
-    was entered — an empty answer keeps whatever is already on disk, the
-    keep-existing-on-empty contract that makes re-runs safe. For ``openai-codex``
-    it runs the inline OAuth flow in :func:`_codex_login`. Unknown providers are
-    a no-op.
+    For key-based providers (``anthropic`` / ``openai`` / ``xai``) it prompts for
+    the provider's API-key var, masking the input and writing it only when a
+    value was entered — an empty answer keeps whatever is already on disk, the
+    keep-existing-on-empty contract that makes re-runs safe. For the OAuth
+    subscription providers it runs the inline device-code flow (:func:`_codex_login`
+    for ``openai-codex``, :func:`_grok_login` for ``xai-grok``). Unknown providers
+    are a no-op.
 
     Returns the API key now in effect for key-based providers (the freshly
     entered value, or the existing one when the operator kept it), or ``None``
-    for ``openai-codex`` / unknown providers. Callers feed the returned key to
+    for the OAuth / unknown providers. Callers feed the returned key to
     :func:`pick_model` so the live model list can be fetched with it.
     """
     key_var = _PROVIDER_KEY_VAR.get(provider)
@@ -392,6 +444,8 @@ def ensure_credentials(
 
     if provider == "openai-codex":
         _codex_login()
+    elif provider == "xai-grok":
+        _grok_login()
     return None
 
 
@@ -479,3 +533,40 @@ def _codex_login() -> None:
         )
         return
     print("Logged in to ChatGPT.")
+
+
+def _grok_login() -> None:
+    """Run the inline xAI Grok (SuperGrok / Premium+) device-code OAuth flow.
+
+    Mirrors :func:`_codex_login`: if cached credentials still resolve, report and
+    stop; otherwise run the device-code flow (URL + code, works over SSH). Any
+    failure is caught, surfaced with a resume hint (``disco calfkit-auth grok
+    login``), and swallowed so the wizard still finishes. Imports are lazy so this
+    module stays SDK-free at import time.
+    """
+    from calfcord.providers.grok import credentials, oauth, token_store
+    from calfcord.providers.grok.credentials import GrokNotLoggedInError
+    from calfcord.providers.grok.oauth import GrokAuthError
+    from calfcord.providers.grok.token_store import GrokCredentials
+
+    try:
+        asyncio.run(credentials.resolve_credentials())
+        print("Already authenticated with Grok.")
+        return
+    except GrokNotLoggedInError:
+        pass
+    except (GrokAuthError, OSError) as exc:
+        # OSError = a lock timeout / unreadable cred dir — never abort the wizard.
+        print(f"Cached Grok credentials unusable ({exc}); logging in again.")
+
+    print("Logging in to Grok — open the URL below and enter the code:")
+    try:
+        payload = asyncio.run(oauth.device_code_login(open_browser=False))
+        token_store.save_credentials(GrokCredentials.from_login(payload))
+    except (GrokAuthError, OSError) as exc:
+        print(
+            f"warning: Grok login did not complete ({exc}). "
+            "You can finish it later with: disco calfkit-auth grok login"
+        )
+        return
+    print("Logged in to Grok.")

@@ -11,6 +11,7 @@ dependencies = [
     "calfkit-mesh>=0.1.2",
     "calfkit-tools>=0.1.4",
     "discord-py>=2.7.1",
+    "filelock>=3.29.0",
     "httpx>=0.28.1",
     "openhands-sdk>=1.23.1",
     "prompt-toolkit>=3.0.52,<4",
@@ -28,7 +29,7 @@ calfkit-bridge = "calfcord.bridge.gateway:main"
 calfkit-agent = "calfcord.agents.runner:main"
 calfkit-tools = "calfcord.tools.runner:main"
 calfkit-mcp = "calfcord.mcp.runner:main"
-calfkit-auth = "calfcord.providers.codex.cli:main"
+calfkit-auth = "calfcord.providers.auth_cli:main"
 calfcord-cli = "calfcord.cli.main:main"
 calfcord-broker = "calfcord.broker.runner:main"
 
