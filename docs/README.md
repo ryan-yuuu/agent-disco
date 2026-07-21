@@ -7,6 +7,7 @@
 | Create or customize an agent (fields, models, tools) | [`docs/authoring-agents.md`](./docs/authoring-agents.md) |
 | Give agents more tools | [`docs/authoring-tools.md`](./docs/authoring-tools.md) |
 | Use my ChatGPT Plus/Pro subscription (Codex) | [`docs/codex-auth.md`](./docs/codex-auth.md) |
+| Use my SuperGrok / X Premium+ subscription (Grok) | [`docs/grok-auth.md`](./grok-auth.md) |
 | Have agents talk to each other (A2A) | [`docs/a2a-threads.md`](./docs/a2a-threads.md) |
 | Run agents across machines / go to production | [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) |
 | Understand how it works | [`docs/architecture.md`](./docs/architecture.md) (or run `disco explain topology`) |
@@ -28,6 +29,7 @@
 - [`docs/bridge-settings.md`](./docs/bridge-settings.md) — configure bridge behavior in `settings.json`.
 - [`docs/security.md`](./docs/security.md) — deployment patterns and threat model.
 - [`docs/codex-auth.md`](./docs/codex-auth.md) — use a ChatGPT Plus/Pro subscription via Codex.
+- [`docs/grok-auth.md`](./grok-auth.md) — use a SuperGrok / X Premium+ subscription (or an `XAI_API_KEY`) via Grok.
 - [`docs/a2a-threads.md`](./docs/a2a-threads.md) — agent-to-agent messaging + handoff (native `message_agent`).
 - [`docs/distributed-deployment.md`](./docs/distributed-deployment.md) — split tools/agents across hosts.
 - [`docs/troubleshooting.md`](./docs/troubleshooting.md) — diagnose and fix common problems.
