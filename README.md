@@ -18,7 +18,7 @@ Message your agent team and watch them work in real time. When an agent needs a 
 **Fully open source and self-hostable on your machine.**
 
 <p align="center">
-  <img src="docs/assets/demo.webp" alt="Agent Disco demo: a team of agents investigates a Python CVE over Discord threads, patches it, and opens a real pull request" width="820">
+  <img src="docs/assets/demo.webp" alt="Agent Disco demo: a team of agents investigates a Python CVE over Discord threads, patches it, and opens a real pull request">
 </p>
 
 ### 🐮 Built on [calfkit](https://github.com/calf-ai/calfkit-sdk)
