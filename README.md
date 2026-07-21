@@ -32,7 +32,7 @@ Message your agent team and watch them work in real time. When an agent needs a 
 - 🤝 **Agents choreograph work with no central orchestrator.** Agents dynamically consult peers and transfer work when someone else is a better fit. Using calfkit's native agent-to-agent `Messaging` + `Handoff` with runtime **mesh discovery**, any agent can reach any other. Every A2A exchange is streamed in a dedicated Discord thread.
 - 🌎 **Self host and split the team across machines.** Every agent and tool is an independent service that talks over the mesh — run the whole team on one laptop or spread it across twenty hosts.
 - ✏️ **Onboard new agents in <1 min.** A new agent can be configured in a Markdown file and added to the team instantly.
-- 🧠 **Any model — including your ChatGPT subscription.** Each agent can run on its own provider: Anthropic, OpenAI, any OpenAI-compatible APIs, or **use your ChatGPT Plus/Pro plan**.
+- 🧠 **Any model — including subscriptions you already pay for.** Each agent can run on its own provider: Anthropic, OpenAI, xAI, any OpenAI-compatible APIs — or bill against your **ChatGPT Plus/Pro** ([Codex](./docs/codex-auth.md)) or **SuperGrok / X Premium+** ([Grok](./docs/grok-auth.md)) plan instead of metered API credits.
 - 🛠️ **Built-in tools.** Agents get task-tracking, coding, and web search tools right out of the box.
 - 🔌 **Proxy any MCP servers.** Agent disco is compatible with [Model Context Protocol](https://modelcontextprotocol.io). MCP servers are proxied through the mesh so agents discover it like any other tool.
 
