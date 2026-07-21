@@ -221,6 +221,56 @@ async def _prewarm_codex_if_needed(definitions: list[AgentDefinition]) -> None:
         ) from exc
 
 
+async def _prewarm_grok_if_needed(definitions: list[AgentDefinition]) -> None:
+    """Best-effort load of the xAI Grok model catalog for xai / xai-grok agents.
+
+    Unlike codex (whose prompts are mandatory), this never hard-fails: the
+    catalog degrades to a pinned fallback when xAI's allowlist 403s, when no
+    credential is available, or on any network error. A genuinely misconfigured
+    ``xai-grok`` agent (not logged in) still fails loudly — but from the per-agent
+    factory build (:func:`_build_node_or_exit`), with a login hint, not here.
+
+    Credential preference: an OAuth bearer if any ``xai-grok`` agent is present
+    (and login succeeds), else ``XAI_API_KEY`` for ``xai`` agents, else empty —
+    which loads the pinned fallback catalog.
+    """
+    providers = {resolve_provider(d) for d in definitions}
+    needs_oauth = "xai-grok" in providers
+    needs_api_key = "xai" in providers
+    if not (needs_oauth or needs_api_key):
+        return
+
+    from calfcord.providers.grok import prewarm_grok_models
+    from calfcord.providers.grok.credentials import resolve_access_token
+    from calfcord.providers.grok.oauth import (
+        DEFAULT_XAI_BASE_URL,
+        GrokAuthError,
+        validate_inference_base_url,
+    )
+
+    bearer = ""
+    if needs_oauth:
+        try:
+            bearer = await resolve_access_token()
+        except (GrokAuthError, OSError) as exc:
+            # Best-effort: a login/tier error (GrokAuthError) OR a transport/lock/
+            # persist failure (now normalized to GrokAuthError in oauth.py, with
+            # OSError still possible from the file lock) must degrade to the pinned
+            # catalog, never crash the shared Worker at boot. A genuinely
+            # misconfigured agent still fails loudly — from its own factory build.
+            logger.warning(
+                "xai-grok agents declared but Grok credentials are unavailable (%s); "
+                "using the pinned Grok model catalog. Run: uv run calfkit-auth grok login",
+                exc,
+            )
+    if not bearer and needs_api_key:
+        bearer = os.getenv("XAI_API_KEY", "").strip()
+    # Fetch the catalog from the same (host-pinned) endpoint the client will use,
+    # so a valid XAI_BASE_URL override doesn't cause a catalog/inference mismatch.
+    base_url = validate_inference_base_url(os.getenv("XAI_BASE_URL", ""), fallback=DEFAULT_XAI_BASE_URL)
+    await prewarm_grok_models(bearer, base_url=base_url)
+
+
 async def _amain(args: argparse.Namespace) -> None:
     """Build and run the agent(s). Pure-ish: callers configure logging+env."""
     agents_dir = Path(os.getenv(_AGENTS_DIR_ENV, _AGENTS_DIR_DEFAULT))
@@ -228,6 +278,7 @@ async def _amain(args: argparse.Namespace) -> None:
     targets = [Path(t) for t in args.targets] if args.targets else None
     definitions = _resolve_definitions(args.agent, agents_dir, targets=targets)
     await _prewarm_codex_if_needed(definitions)
+    await _prewarm_grok_if_needed(definitions)
 
     settings = DiscordSettings()  # type: ignore[call-arg]
     server_urls = os.getenv("CALF_HOST_URL") or "localhost"

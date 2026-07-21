@@ -19,31 +19,28 @@ consistent.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
 
 from openhands.sdk.llm.auth import CredentialStore, OAuthCredentials
 
-from calfcord.providers.codex._paths import calfcord_home
+from calfcord.providers._paths import provider_auth_dir
 
 logger = logging.getLogger(__name__)
 
 _VENDOR = "openai"
-_AUTH_DIR_ENV = "CALFCORD_AUTH_DIR"
 
 
 def get_credentials_dir() -> Path:
-    """Resolve the credential directory.
+    """Resolve the credential directory (shared with every OAuth provider).
 
     ``CALFCORD_AUTH_DIR`` wins (explicit operator intent); otherwise the
     credentials live beside the rest of the install at ``$CALFCORD_HOME/auth``
     (``~/.agent-disco/auth`` when ``CALFCORD_HOME`` is unset) so they move with a
     relocated or per-host install rather than always landing at the default home.
     """
-    override = os.environ.get(_AUTH_DIR_ENV)
-    return Path(override) if override else calfcord_home() / "auth"
+    return provider_auth_dir()
 
 
 def get_credential_store() -> CredentialStore:

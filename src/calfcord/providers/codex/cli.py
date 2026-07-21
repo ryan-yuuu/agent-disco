@@ -50,10 +50,13 @@ from calfcord.providers.codex.token_store import (
 )
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="calfkit-auth", description="Authentication for Agent Disco LLM providers.")
-    sub = parser.add_subparsers(dest="provider", required=True)
+def register(sub: argparse._SubParsersAction) -> None:
+    """Add the ``codex`` provider subparser to a shared ``calfkit-auth`` parser.
 
+    Exposed so the unified ``calfkit-auth`` entry point
+    (:mod:`calfcord.providers.auth_cli`) can compose codex alongside other
+    providers without this module owning the top-level parser.
+    """
     codex = sub.add_parser("codex", help="OpenAI ChatGPT subscription auth (Codex models).")
     codex_sub = codex.add_subparsers(dest="command", required=True)
 
@@ -72,7 +75,32 @@ def _build_parser() -> argparse.ArgumentParser:
     codex_sub.add_parser("prompt-status", help="Show cached Codex prompt files, ETags, and ages.")
     codex_sub.add_parser("clear-prompts", help="Delete cached Codex prompt files.")
 
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="calfkit-auth", description="Authentication for Agent Disco LLM providers.")
+    sub = parser.add_subparsers(dest="provider", required=True)
+    register(sub)
     return parser
+
+
+def dispatch(args: argparse.Namespace) -> int:
+    """Route a parsed ``codex`` subcommand to its handler. Returns an exit code."""
+    if args.command == "login":
+        return asyncio.run(_cmd_login(args))
+    if args.command == "logout":
+        return _cmd_logout(args)
+    if args.command == "status":
+        return _cmd_status(args)
+    if args.command == "refresh":
+        return asyncio.run(_cmd_refresh(args))
+    if args.command == "refresh-prompts":
+        return asyncio.run(_cmd_refresh_prompts(args))
+    if args.command == "prompt-status":
+        return _cmd_prompt_status(args)
+    if args.command == "clear-prompts":
+        return _cmd_clear_prompts(args)
+    # Unreachable: ``command`` is a required, constrained subparser choice.
+    raise ValueError(f"unknown codex command: {args.command}")
 
 
 async def _cmd_login(args: argparse.Namespace) -> int:
@@ -224,27 +252,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # Only the ``codex`` provider exists today; future expansion would dispatch here.
+    # ``calfkit-auth codex ...`` standalone entry; the unified ``calfkit-auth``
+    # (auth_cli) composes this via ``register``/``dispatch``.
     if args.provider != "codex":
         parser.error(f"unknown provider: {args.provider}")
-
-    if args.command == "login":
-        return asyncio.run(_cmd_login(args))
-    if args.command == "logout":
-        return _cmd_logout(args)
-    if args.command == "status":
-        return _cmd_status(args)
-    if args.command == "refresh":
-        return asyncio.run(_cmd_refresh(args))
-    if args.command == "refresh-prompts":
-        return asyncio.run(_cmd_refresh_prompts(args))
-    if args.command == "prompt-status":
-        return _cmd_prompt_status(args)
-    if args.command == "clear-prompts":
-        return _cmd_clear_prompts(args)
-
-    parser.error(f"unknown command: {args.command}")
-    return 2  # unreachable; parser.error exits
+    return dispatch(args)
 
 
 if __name__ == "__main__":
