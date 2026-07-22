@@ -384,6 +384,25 @@ class TestPostReplyMultiChunk:
         assert len(store.rows) == 1
         assert store.rows[0].final_message_id == str(personas.sends[-1]["sent"].id)
 
+    async def test_first_chunk_failure_final_success_still_anchors_and_writes(self) -> None:
+        """Losing an early chunk must not drop the final anchor or transcript."""
+        personas = _FakePersonas()
+        personas.errors = [_http(400), None, None]
+        poster, _, store = _poster(personas)
+        out = await poster.post_reply(
+            _req(),
+            Persona(name="scribe"),
+            _result("x" * 4500, message_history=_tool_history()),
+            initial_len=1,
+            correlation_id="c1",
+        )
+        assert out == "posted"
+        assert len(personas.sends) == 2
+        assert all(s["reply_to"] is None for s in personas.sends[:-1])
+        assert personas.sends[-1]["reply_to"] is not None
+        assert len(store.rows) == 1
+        assert store.rows[0].final_message_id == str(personas.sends[-1]["sent"].id)
+
     async def test_all_chunks_fail_returns_lost(self) -> None:
         personas = _FakePersonas()
         personas.errors = [_http(403)] * 10
