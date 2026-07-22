@@ -67,7 +67,7 @@
             <a id="nextFileLink" class="nav" href="z_addbe4257791824e__worker_runtime_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.3">coverage.py v7.14.3</a>,
-            created at 2026-07-22 05:03 +0000
+            created at 2026-07-22 07:35 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -96,9 +96,9 @@
     <p class="pln"><span class="n"><a id="t12" href="#t12">12</a></span><span class="t"><span class="str">  declares :func:`~calfkit.provisioning.topics_for_nodes` into the same ensurer.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t13" href="#t13">13</a></span><span class="t"><span class="str">  The **tools and agents runners** use the embedded managed ``Worker.start()``</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t14" href="#t14">14</a></span><span class="t"><span class="str">  surface, so every Worker-hosted process gets its node topics for free. The</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t15" href="#t15">15</a></span><span class="t"><span class="str">  **bridge is a pure** :class:`~calfkit.client.Client` (no Worker, no consumers)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t16" href="#t16">16</a></span><span class="t"><span class="str">  &#8212; it hosts no nodes and so declares no node topics; its only topic is the</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t17" href="#t17">17</a></span><span class="t"><span class="str">  client reply topic, covered by the pre-start hook above.</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t15" href="#t15">15</a></span><span class="t"><span class="str">  **bridge** also uses the managed Worker surface for its co-located read-only</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t16" href="#t16">16</a></span><span class="t"><span class="str">  Discord tool nodes. The Worker startup pass declares those node topics while</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t17" href="#t17">17</a></span><span class="t"><span class="str">  the shared Client pre-start hook declares the bridge reply topic.</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t18" href="#t18">18</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t19" href="#t19">19</a></span><span class="t"><span class="str">After the calfkit 0.12 migration removed the bespoke control plane, calfcord has</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t20" href="#t20">20</a></span><span class="t"><span class="str">no blind-spot topics left to declare: agent presence and the live roster now ride</span>&nbsp;</span><span class="r"></span></p>
@@ -210,7 +210,7 @@
             <a class="nav" href="z_addbe4257791824e__worker_runtime_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.14.3">coverage.py v7.14.3</a>,
-            created at 2026-07-22 05:03 +0000
+            created at 2026-07-22 07:35 +0000
         </p>
     </div>
 </footer>
