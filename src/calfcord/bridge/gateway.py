@@ -686,6 +686,7 @@ async def _run_bridge_runtime(
     refresher_task: asyncio.Task[None] | None = None
     worker_start_task: asyncio.Task[None] | None = None
     worker_started = False
+    shutdown_won = False
     primary_error: BaseException | None = None
 
     try:
@@ -708,8 +709,9 @@ async def _run_bridge_runtime(
                 raise _unexpected_task_exit(gateway_task, "Discord gateway")
             if stop.is_set():
                 # Stop has precedence when startup and the signal complete in
-                # the same event-loop turn. Cleanup resolves Worker ownership.
-                pass
+                # the same event-loop turn. Cleanup resolves Worker ownership
+                # but does not turn an orderly shutdown into a startup failure.
+                shutdown_won = True
             elif worker_start_task in done:
                 await worker_start_task
                 worker_started = True
@@ -754,6 +756,7 @@ async def _run_bridge_runtime(
                 worker_started = True
             elif (
                 primary_error is None
+                and not shutdown_won
                 and isinstance(start_result, BaseException)
                 and not isinstance(start_result, asyncio.CancelledError)
             ):

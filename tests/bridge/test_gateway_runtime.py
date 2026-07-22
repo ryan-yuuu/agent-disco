@@ -162,6 +162,36 @@ async def test_shutdown_during_worker_start_never_opens_ingress(monkeypatch, tmp
     assert calls.count("worker.stop") == 1
 
 
+async def test_shutdown_tied_with_worker_start_failure_remains_orderly(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    loop = _FakeLoop()
+    start_gate = asyncio.Event()
+    gateway = _Gateway(calls)
+    worker = _Worker(
+        calls,
+        loop,
+        start_gate=start_gate,
+        error=RuntimeError("startup fails"),
+    )
+    monkeypatch.setattr(gateway_module.asyncio, "get_running_loop", lambda: loop)
+    monkeypatch.setattr(gateway_module, "run_refresher", _never_refresher)
+
+    runtime = asyncio.create_task(
+        gateway_module._run_bridge_runtime(  # type: ignore[arg-type]
+            gateway, worker, health_home=tmp_path, worker_is_healthy=lambda: True
+        )
+    )
+    await worker.start_entered.wait()
+    loop.handlers[signal.SIGTERM]()
+    start_gate.set()
+    await runtime
+
+    assert "gateway.accept" not in calls
+    assert gateway.accepting is False
+    assert "worker.stop" not in calls
+    assert calls[-1] == "gateway.close"
+
+
 async def test_gateway_exit_tied_with_worker_start_never_opens_ingress(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
     loop = _FakeLoop()
