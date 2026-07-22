@@ -170,8 +170,11 @@ thinking_effort: medium
 # A memory-enabled agent MUST also declare the read_file and write_file
 # tools (it manages the notepad with them); the factory fails fast at boot
 # otherwise. Omitting `tools:` grants all builtins and satisfies this.
-# Default false.
-memory: false
+#
+# Schema default when this key is omitted: false (hand-authored / older
+# agents stay off). `disco agent create` and `disco init` write true for
+# new agents.
+memory: true
 ---
 
 The body of this .md file (everything after the closing `---` of the frontmatter) 

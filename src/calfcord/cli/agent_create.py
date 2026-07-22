@@ -6,6 +6,8 @@ create`` command *and* ``init``'s first-run setup — can never drift on
 *how* an agent is brought into being. :func:`create_agent` is the extracted
 flow; :func:`run` is the thin ``agent create`` wrapper around it (no seed prune,
 offers the optional ``$EDITOR`` prompt step, then offers to start the agent).
+New agents default to ``memory: true`` via :func:`~calfcord.cli._agents.write_agent`
+(no create-time prompt); turn it off afterward with ``disco agent set``.
 
 Two design rules keep the two callers honest:
 
@@ -215,7 +217,8 @@ def create_agent(
        picker when it is used: standalone ``agent create`` leaves it ``None``
        (probe the broker's capability view for live ``mcp/<server>/<tool>`` rows).
     5. **Write.** :func:`~calfcord.cli._agents.write_agent` (validate before
-       write; ``prune_seed`` only when the caller opted in).
+       write; defaults ``memory: true`` on new agents; ``prune_seed`` only when
+       the caller opted in).
     6. **Optional prompt edit.** When ``offer_prompt`` and the operator
        confirms, open the new agent's system prompt in ``$EDITOR`` via
        :func:`calfcord.cli.agent_edit.edit_system_prompt` (imported lazily to
@@ -266,7 +269,9 @@ def create_agent(
         else ToolGrantSelection(tools=None, mcp=True)
     )
 
-    # 5. Write (validate-before-write; prune only when the caller opted in).
+    # 5. Write (validate-before-write; memory on by default for new agents;
+    # prune only when the caller opted in). Re-runs against an existing file
+    # leave that agent's memory setting untouched inside write_agent.
     md_path = write_agent(
         agents_dir,
         name=name,
@@ -275,6 +280,7 @@ def create_agent(
         model=model,
         tools=tool_grants.tools,
         mcp=tool_grants.mcp,
+        memory=True,
         prune_seed=prune_seed,
     )
 

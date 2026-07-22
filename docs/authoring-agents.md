@@ -235,7 +235,7 @@ into the calfkit `Agent` at boot, the edit takes effect on the next
 
 | Field     | Type                    | Default | Effect                                                                    |
 | --------- | ----------------------- | ------- | ------------------------------------------------------------------------- |
-| `memory`  | bool                    | `false` | Opt in to a persistent per-agent notepad (see below).                     |
+| `memory`  | bool                    | `false` when omitted; `disco agent create` / `disco init` write `true` | Opt in to a persistent per-agent notepad (see below). |
 | `a2a`     | bool \| list of names   | `true`  | Whether this agent can **consult** peers via calfkit's `message_agent` tool. |
 | `handoff` | bool \| list of names   | `true`  | Whether this agent can **hand off** the turn to a peer.                   |
 
@@ -270,6 +270,16 @@ in the shared workspace, managed with the ordinary `read_file` / `write_file` /
 `tools:` to grant all, or list them explicitly); the factory raises at build
 time otherwise. Memory lives in the same shared workspace as everything else,
 so per-agent directories are a convention for tidiness, not a sandbox.
+
+Two defaults to keep straight:
+
+- **Schema / omitted field:** if `memory` is absent from frontmatter, it
+  parses as `false`. Existing and hand-authored agents stay off unless they
+  opt in.
+- **CLI create:** `disco agent create` and `disco init` write `memory: true`
+  explicitly on new agent files (no create-time prompt). Turn it off later
+  with `disco agent set <name> --memory off`. If the tools checkbox left off
+  `read_file` / `write_file`, create adds them so the agent can still boot.
 
 The explanation text is **not** bundled into agent deployments. The
 `calfkit-bridge` process is the single reader of the editable
