@@ -810,6 +810,11 @@ def build_message_history(
             attributes them to the right viewer. ``None`` (default) reproduces
             the no-replay output exactly. Pure: never touches the DB.
 
+            Multi-chunk replies key the transcript on the **first successfully
+            posted** chunk (see :class:`~calfcord.bridge.reply_poster.ReplyPoster`);
+            later chunks are bare text with no row, so tools land before the
+            whole answer without a walkback heuristic.
+
     Returns:
         A list suitable for ``start(message_history=...)``. May be empty.
 

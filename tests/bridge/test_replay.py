@@ -11,7 +11,9 @@ Coverage:
   IMMEDIATELY BEFORE that reply's ``ModelResponse`` — and is byte-identical
   when ``hydration=None``. POV-agnostic: every agent record (``is_agent``) is
   eligible; a human record is never hydrated; a leading agent reply (no
-  preceding human request) is dropped, not spliced.
+  preceding human request) is dropped, not spliced. Multi-chunk replies key
+  the transcript on the first successful chunk so tools land before the whole
+  answer without a walkback.
 * :class:`DiscordHistoryProvider` joins (never DB-scans) the fetched,
   ``/clear``-truncated records against the transcript store, stamps the agent
   name on the replayed responses, and returns the hydrated history. A reply
@@ -307,6 +309,55 @@ class TestBuildMessageHistoryHydration:
             for p in m.parts:
                 assert not isinstance(p, ToolCallPart | ToolReturnPart)
 
+    def test_multi_chunk_reply_keyed_on_first_chunk_splices_before_whole_answer(self) -> None:
+        """ReplyPoster keys the transcript on the first successful chunk.
+        History splices tools immediately before that id, so later bare
+        chunks follow as plain answer text — tools → full answer, never
+        answer-prefix → tools → answer-suffix.
+        """
+        records = [
+            _record(message_id=1, content="write a long answer", author_display_name="ryan"),
+            _record(message_id=2, content="chunk one", author_display_name="Scribe", is_agent=True),
+            _record(message_id=3, content="chunk two", author_display_name="Scribe", is_agent=True),
+            _record(message_id=4, content="chunk three", author_display_name="Scribe", is_agent=True),
+        ]
+        delta = _tool_delta()
+        # Join key is the first chunk — matches ReplyPoster's first-success write.
+        out = build_message_history(records, hydration={2: delta})
+
+        # req, [tool call, tool return], chunk1, chunk2, chunk3 → 6 entries.
+        assert len(out) == 6
+        assert isinstance(out[0], ModelRequest)
+        assert out[0].parts[0].content == "write a long answer"
+        assert out[1] is delta[0]
+        assert out[2] is delta[1]
+        assert [m.parts[0].content for m in out[3:]] == ["chunk one", "chunk two", "chunk three"]
+        assert all(isinstance(m, ModelResponse) for m in out[3:])
+
+    def test_adjacent_same_agent_turns_do_not_cross_contaminate(self) -> None:
+        """Two consecutive completed turns from the same agent (reachable via
+        concurrent gateway handlers) each keep their own tool delta immediately
+        before their own reply — no walkback that would merge them.
+        """
+        records = [
+            _record(message_id=1, content="question 1", author_display_name="ryan"),
+            _record(message_id=2, content="question 2", author_display_name="ryan"),
+            _record(message_id=3, content="answer 1", author_display_name="Scribe", is_agent=True),
+            _record(message_id=4, content="answer 2", author_display_name="Scribe", is_agent=True),
+        ]
+        delta_a = _tool_delta(tool_name="alpha", content="A-result")
+        delta_b = _tool_delta(tool_name="beta", content="B-result")
+        out = build_message_history(records, hydration={3: delta_a, 4: delta_b})
+
+        # q1, q2, [delta_a], a1, [delta_b], a2 → 8 entries.
+        assert len(out) == 8
+        assert out[0].parts[0].content == "question 1"
+        assert out[1].parts[0].content == "question 2"
+        assert out[2] is delta_a[0] and out[3] is delta_a[1]
+        assert out[4].parts[0].content == "answer 1"
+        assert out[5] is delta_b[0] and out[6] is delta_b[1]
+        assert out[7].parts[0].content == "answer 2"
+
 
 # ---------------------------------------------------------------------------
 # DiscordHistoryProvider — fetch + join + two-turn replay
@@ -347,6 +398,30 @@ class TestDiscordHistoryProvider:
         # Final answer text last.
         assert isinstance(message_history[3], ModelResponse)
         assert message_history[3].parts[0].content == "It's 18C."
+
+    async def test_multi_chunk_reply_joins_on_first_chunk_and_replays_before_all(self) -> None:
+        """End-to-end: fetcher returns three agent chunks; store row is keyed
+        on the first chunk's id (ReplyPoster contract). Provider must join that
+        row and splice tools before chunk one; later chunks follow as bare text.
+        """
+        records = [
+            _record(message_id=10, content="long answer please", author_display_name="ryan"),
+            _record(message_id=21, content="part A", author_display_name="Scribe", is_agent=True),
+            _record(message_id=22, content="part B", author_display_name="Scribe", is_agent=True),
+            _record(message_id=23, content="part C", author_display_name="Scribe", is_agent=True),
+        ]
+        provider = DiscordHistoryProvider(
+            _fake_fetcher(records),
+            _fake_store({"21": _transcript_row(final_message_id=21)}),
+        )
+
+        message_history = await provider.message_history(_req(message_id=30))
+
+        assert len(message_history) == 6
+        assert isinstance(message_history[0], ModelRequest)
+        assert any(isinstance(p, ToolCallPart) for p in message_history[1].parts)
+        assert any(isinstance(p, ToolReturnPart) for p in message_history[2].parts)
+        assert [m.parts[0].content for m in message_history[3:]] == ["part A", "part B", "part C"]
 
     async def test_history_is_bounded_by_max_json_bytes(self) -> None:
         """The provider applies the serialized-size bound before handing the
