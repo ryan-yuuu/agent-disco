@@ -116,9 +116,8 @@ is observable (it carries the same `correlation_id`, `emitter=C`,
   deterministic [DiceBear](https://www.dicebear.com) image seeded by the
   name (`https://api.dicebear.com/9.x/glass/png?seed=<name>`). There is no
   roster lookup and no configured avatar.
-- **Meta notes** (rejections, handoffs, faults) are posted under a system
-  `a2a` persona, not attributed to any agent — they are annotations, not a
-  peer's own words.
+- **Rejected and faulted consultations resolve their route card in place.** They
+  do not add a second system message that repeats the same outcome.
 
 ## What humans see in Discord
 
@@ -128,18 +127,18 @@ message per human turn that produced A2A activity, each anchoring a thread:
 ```
 [#private-a2a-chats]
 ─────────────────────────────────────────
-[Conan]   please summarize the design doc for...
-          ↪ Thread: "conan→scribe: please summarize the design doc..."
-                    (3 messages)
+[Conan]   ↗ conan → scribe
+          Consulting · "please summarize the design doc for..."
+          ↪ Thread: "conan · summarize the design doc"
 
-[Scribe]  what's the latency budget on the ingest path?
-          ↪ Thread: "scribe→librarian: what's the latency budget..."
-                    (3 messages)
+[Scribe]  ↗ scribe → librarian
+          Consulting · "what's the latency budget on the ingest path?"
+          ↪ Thread: "scribe · find the ingest latency budget"
 ```
 
-Click a thread to see the whole consulted sub-tree in order: the caller's consult
-(caller persona), **the consulted agent's own working trace** (its persona), its
-reply (same persona), and any system notes. The working trace reads in the same
+Click a thread to see the whole consulted sub-tree in order: the caller's route
+card, **the consulted agent's own working trace** (its persona), and its routed
+reply (same persona). The working trace reads in the same
 row grammar as the human's thread — one row per tool, resolving in place, dim at
 rest and bright only where something needs you:
 
@@ -160,7 +159,7 @@ shrug.
 A **nested consult** — the peer consulting a peer (B→C inside A→B) — lands in the
 same thread, each agent under its own identity. So the peer's work never appears
 unannounced, it is announced by a **resolving row in the *consulting* agent's own
-trace** — the same `◐ consulting C` → `● consulted C` affordance the human's thread
+trace** — an explicit `◐ B → C` → `● B → C · consulted` route
 uses for a top-level consult, relocated here because a nested consult has no thread
 of its own to name. The row carries no cross-link (the exchange is right below) and
 folds a glimpse of the ask onto itself; the standalone prompt message is suppressed
@@ -169,7 +168,7 @@ folds a glimpse of the ask onto itself; the standalone prompt message is suppres
 ```
 ┌ sol
 │ -# ● read_file CONTEXT.md · 90ms
-│ ◐ consulting terra · "review the auth changes in src…"     ← opens; resolves in place
+│ ◐ sol → terra · "review the auth changes in src…"     ← opens; resolves in place
 └
 ┌ terra
 │ -# ● read_file src/main.py · 120ms
@@ -177,7 +176,7 @@ folds a glimpse of the ask onto itself; the standalone prompt message is suppres
 └
 ```
 
-Because the row and the peer's box share one writer, `◐ consulting terra` always
+Because the row and the peer's box share one writer, `◐ sol → terra` always
 posts *before* terra's box — the ordering caveat below applies to inline
 projections (requests, replies, notes), not to this announcement.
 
@@ -226,18 +225,20 @@ saying nothing would hide the gap from the one person watching.
 
 ### Reject and fault rendering
 
-Not every A2A event is a peer speaking, so two cases render as system
-`a2a` notes rather than peer posts:
+Not every A2A event produces a peer response. These outcomes update the original
+route card instead of appending a duplicate system note:
 
 | Case | What you see |
 |---|---|
-| **Rejected consult** (peer offline / cycle / self) | `⚠️ consult to <peer> was rejected: <reason>` |
-| **Faulted peer** (no reply came back) | `⚠️ <peer> did not reply — the consult faulted before a response.` |
+| **Rejected consult** (peer offline / cycle / self) | `⊘ Not dispatched · <reason>` |
+| **Faulted peer** | `❌ Failed · <reason>` |
+| **Interrupted / no result** | `⚠ No response` |
 
 (Handoffs are no longer rendered here — see the note at the top of this doc.)
 
-The happy-path consult renders the request under the caller's persona, the
-consulted agent's working trace and its reply under that agent's persona.
+The happy path renders the route card under the caller's persona, then the
+consulted agent's working trace and `↩ peer → caller · response` under the peer's
+persona.
 
 ## Operator setup
 
@@ -289,7 +290,7 @@ never faults the human turn. But it is not silent. The first failure logs at
 to DEBUG so one broken channel cannot bury the log under identical tracebacks
 (a recovery re-arms the loud line).
 
-That loud line covers the **projections** (requests, replies, system notes). A
+That loud line covers the **projections** (route cards, card edits, and replies). A
 consulted agent's *step trace* is written by the step renderer instead, whose
 failures are best-effort in its own way: an unposted trace message stays dirty
 and is retried on the next step or the final flush, and a failed edit heals on

@@ -67,6 +67,12 @@ class TestA2ADispatcher:
         assert isinstance(rep, A2AReply)
         assert (rep.peer, rep.text, rep.tool_call_id) == ("scribe", "here is the summary", "t1")
 
+    def test_message_agent_without_a_tool_call_id_stays_in_the_ordinary_trace(self) -> None:
+        d = A2ADispatcher()
+        step = _call("", peer="scribe", message="summarize")
+        assert d.classify(step) is None
+        assert d.dangling() == []
+
     def test_non_message_agent_tool_call_is_a_trace_row(self) -> None:
         d = A2ADispatcher()
         step = StepEvent(

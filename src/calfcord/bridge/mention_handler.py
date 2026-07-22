@@ -396,12 +396,6 @@ class MentionHandler:
             author=req.author_label,
             model_settings=model_settings,
         )
-        await self._a2a.begin_turn(
-            correlation_id=handle.correlation_id,
-            root_agent=target,
-            subject=req.content,
-        )
-
         dispatcher = A2ADispatcher()
         # The acting agent is who is currently in control of the run. It starts
         # as the mention target and transfers to the peer on each handoff, so
@@ -421,6 +415,11 @@ class MentionHandler:
         # alongside the human trace below would evict the mapping first and orphan
         # each note in a freshly created second thread.
         try:
+            await self._a2a.begin_turn(
+                correlation_id=handle.correlation_id,
+                root_agent=target,
+                subject=req.content,
+            )
             await self._drain_and_deliver(req, handle, dispatcher, target, history, acting_agent, human_dest)
         finally:
             await self._a2a.finish(handle.correlation_id)
@@ -500,11 +499,12 @@ class MentionHandler:
                         # visible, bounded degradation, not a silent drop.
                         await self._a2a.project_consult(projection)
                     elif projection is not None:
-                        # A nested consult's reply/reject/fault: keep the peer's
-                        # answer (or the system note) for the audit's record, AND
-                        # resolve the caller's row from the same outcome.
-                        await self._a2a.project(projection)
+                        # Resolve the nested route row BEFORE posting any peer
+                        # response. The response path flushes the trace, so this
+                        # ordering guarantees the row cannot remain pending above
+                        # an answer that has already arrived.
                         await self._a2a.project_consult_result(projection)
+                        await self._a2a.project(projection)
                     elif is_acting:
                         await self._trace.on_step(step, human_dest, acting_agent=acting_agent)
                     else:

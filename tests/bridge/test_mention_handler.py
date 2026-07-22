@@ -1027,6 +1027,9 @@ class TestNestedConsultIsAnnounced:
         # ...and the peer's answer is STILL projected for the audit (kept, not suppressed).
         projected_replies = [(p.caller, p.peer) for p in fakes["a2a"].projected if hasattr(p, "text")]
         assert ("conan", "dot") in projected_replies
+        result_index = fakes["a2a"].calls.index("project_consult_result")
+        reply_index = fakes["a2a"].calls.index("project", result_index)
+        assert result_index < reply_index
 
     async def test_a_nested_consult_never_touches_the_humans_thread(self) -> None:
         handler, _client, fakes = _make(handle=_FakeHandle(steps=self._nested_run(), result=_result("done", "scribe")))

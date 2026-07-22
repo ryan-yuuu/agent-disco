@@ -262,6 +262,7 @@ class _Entry:
     tool_count: int = 0
     sealed: bool = False
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    flush_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     flush_requested: asyncio.Event = field(default_factory=asyncio.Event)
     flushed: asyncio.Event = field(default_factory=asyncio.Event)
     finished: asyncio.Event = field(default_factory=asyncio.Event)
@@ -653,13 +654,21 @@ class StepTraceRenderer:
         entry = self._entries.get(correlation_id)
         if entry is None:
             return
-        entry.flushed.clear()
-        entry.flush_requested.set()
-        entry.wake.set()
+        await entry.flush_lock.acquire()
         try:
-            await asyncio.wait_for(entry.flushed.wait(), timeout=2.0)
-        except TimeoutError:
-            logger.warning("trace: timed out flushing correlation_id=%s before response", correlation_id)
+            entry.flushed.clear()
+            entry.flush_requested.set()
+            entry.wake.set()
+            try:
+                await asyncio.wait_for(entry.flushed.wait(), timeout=2.0)
+            except TimeoutError:
+                # The barrier is best-effort. Do not leave the interrupt armed: an
+                # already-set event would bypass every later throttle wait during a
+                # sticky Discord outage and amplify rate-limit pressure.
+                entry.flush_requested.clear()
+                logger.warning("trace: timed out flushing correlation_id=%s before response", correlation_id)
+        finally:
+            entry.flush_lock.release()
 
     async def finish(self, correlation_id: str) -> None:
         """Flush pending content and retire the correlation's writer.
@@ -839,6 +848,11 @@ class StepTraceRenderer:
         round-trip.
         """
 
+        # Snapshot before the potentially slow Discord attempt. A barrier waiter
+        # may time out and clear its interrupt while this await is in flight; that
+        # must not revoke the one retry already promised for this flush attempt.
+        retry_once = entry.finished.is_set() or entry.flush_requested.is_set()
+
         def _attempt() -> Awaitable[None]:
             return self._persona_sender.edit_components(
                 channel_id=entry.channel_id,
@@ -849,6 +863,7 @@ class StepTraceRenderer:
 
         if not isinstance(await _best_effort_trace(_attempt(), channel_id=entry.channel_id), _Failed):
             return
-        if entry.finished.is_set():
-            logger.debug("trace: retrying the final edit channel_id=%d", entry.channel_id)
+        if retry_once:
+            reason = "final" if entry.finished.is_set() else "barrier"
+            logger.debug("trace: retrying the %s edit channel_id=%d", reason, entry.channel_id)
             await _best_effort_trace(_attempt(), channel_id=entry.channel_id)

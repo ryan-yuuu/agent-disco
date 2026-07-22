@@ -177,6 +177,22 @@ class TestEditComponents:
             await sender.edit_components(channel_id=1, message_id=2, view=object())
 
 
+class TestPlainMessageMentionSuppression:
+    async def test_opt_in_disables_every_mention(self) -> None:
+        sender = DiscordPersonaSender(_settings())
+        webhook = MagicMock()
+        webhook.send = AsyncMock(return_value=SimpleNamespace(id=7))
+        sender._client = MagicMock()
+        sender._get_or_create_webhook = AsyncMock(return_value=webhook)
+
+        await sender.send(Persona(name="aksel"), 123, "@everyone <@1> hi", suppress_mentions=True)
+
+        allowed = webhook.send.await_args.kwargs["allowed_mentions"]
+        assert allowed.everyone is False
+        assert allowed.users is False
+        assert allowed.roles is False
+
+
 class TestTraceMentionSuppression:
     """Trace rows carry arbitrary tool output, which can contain `<@id>` or
     `@everyone`. `_plain` escapes markdown but deliberately NOT mentions —

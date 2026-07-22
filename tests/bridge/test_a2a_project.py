@@ -45,11 +45,20 @@ class _FakePersonas:
         content: str,
         *,
         thread_id: int | None = None,
+        suppress_mentions: bool = False,
     ) -> SentMessage:
         if self.fail_on_send:
             raise discord.HTTPException(response=_FakeResponse(), message="boom")
         self._next_id += 1
-        self.sends.append({"persona": persona, "channel_id": channel_id, "content": content, "thread_id": thread_id})
+        self.sends.append(
+            {
+                "persona": persona,
+                "channel_id": channel_id,
+                "content": content,
+                "thread_id": thread_id,
+                "suppress_mentions": suppress_mentions,
+            }
+        )
         return SentMessage(id=self._next_id, channel_id=thread_id or channel_id)
 
     async def send_components(
@@ -96,12 +105,15 @@ class _FakeResolver:
         self.resolve_calls = 0
         self.created: list[dict[str, Any]] = []
         self._next_thread = 9000
+        self.fail_on_create = False
 
     async def resolve_unified_channel(self) -> int:
         self.resolve_calls += 1
         return self._channel_id
 
     async def create_anchored_thread(self, channel_id: int, anchor_message_id: int, *, name: str) -> int:
+        if self.fail_on_create:
+            raise discord.HTTPException(response=_FakeResponse(), message="boom")
         self._next_thread += 1
         self.created.append({"channel_id": channel_id, "anchor": anchor_message_id, "name": name})
         return self._next_thread
@@ -180,6 +192,7 @@ class TestTurnScopedConsultCards:
             ("grok", "-# **↩ grok → marketing · response**\n\nnew hook"),
         ]
         assert all("✓ marketing →" not in send["content"] for send in personas.sends)
+        assert all(send["suppress_mentions"] is True for send in personas.sends)
 
     async def test_rejection_and_dangling_fault_resolve_the_original_card_without_extra_messages(self) -> None:
         proj, personas, _ = _make()
@@ -203,6 +216,51 @@ class TestTurnScopedConsultCards:
         assert "Not dispatched" in personas.card_edits[0]["body"]
         assert "cycle" in personas.card_edits[0]["body"]
         assert "No response" in personas.card_edits[1]["body"]
+
+    async def test_thread_create_failure_keeps_the_card_resolvable_without_a_false_link(self) -> None:
+        proj, personas, resolver = _make()
+        resolver.fail_on_create = True
+        assert await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy")
+        ) is None
+        await proj.project_fault(
+            A2ACall(tool_call_id="t1", correlation_id="c1", caller="marketing", peer="grok", message="copy")
+        )
+        assert "No response" in personas.card_edits[-1]["body"]
+        assert personas.card_edits[-1]["thread_id"] is None
+
+    async def test_thread_create_failure_still_posts_a_successful_reply_beside_the_parent_card(self) -> None:
+        proj, personas, resolver = _make()
+        resolver.fail_on_create = True
+        request = A2ARequest(
+            correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy"
+        )
+        assert await proj.project(request) is None
+
+        assert await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", text="answer")
+        ) is None
+
+        assert "Consulted" in personas.card_edits[-1]["body"]
+        assert personas.card_edits[-1]["thread_id"] is None
+        assert personas.sends[-1]["thread_id"] is None
+        assert personas.sends[-1]["content"].endswith("answer")
+        await proj.finish("c1")
+        assert not any("No response" in edit["body"] for edit in personas.card_edits)
+
+    async def test_thread_create_failure_posts_a_later_reply_beside_the_orphan_card(self) -> None:
+        proj, personas, resolver = _make()
+        resolver.fail_on_create = True
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy")
+        )
+        assert await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", text="answer")
+        ) is None
+        assert personas.sends[-1]["thread_id"] is None
+        assert personas.sends[-1]["content"].endswith("answer")
+        await proj.finish("c1")
+        assert not any("No response" in edit["body"] for edit in personas.card_edits)
 
     async def test_a_failed_card_edit_does_not_suppress_the_peer_response(self) -> None:
         proj, personas, _ = _make()
@@ -264,6 +322,21 @@ async def _until(predicate: Callable[[], bool], timeout: float = 2.0) -> None:
         await asyncio.sleep(0.001)
 
 
+class TestResponseDeliveryFailure:
+    async def test_failed_body_send_allows_finish_to_correct_the_card(self) -> None:
+        proj, personas, _ = _make()
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
+        )
+        personas.fail_on_send = True
+        assert await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="answer")
+        ) is None
+        personas.fail_on_send = False
+        await proj.finish("c1")
+        assert "No response" in personas.card_edits[-1]["body"]
+
+
 class TestResponseChunking:
     async def test_oversized_response_labels_only_the_first_chunk(self) -> None:
         proj, personas, _ = _make()
@@ -313,6 +386,39 @@ class TestProjectReturnsAReceipt:
         personas.fail_on_component_send = True
         assert await proj.project(self._req(tcid="t2", peer="dot", msg="q2")) is None
 
+    @pytest.mark.parametrize("outcome", ["reject", "failed"])
+    async def test_an_outcome_for_a_missing_card_never_returns_an_existing_thread(self, outcome: str) -> None:
+        proj, personas, _resolver = _make()
+        assert await proj.project(self._req(tcid="t1", peer="conan", msg="q1")) is not None
+        personas.fail_on_component_send = True
+        assert await proj.project(self._req(tcid="t2", peer="dot", msg="q2")) is None
+        projection: A2AReject | A2AFailed
+        if outcome == "reject":
+            projection = A2AReject(
+                correlation_id="c1", tool_call_id="t2", caller="scribe", peer="dot", text="offline"
+            )
+        else:
+            projection = A2AFailed(
+                correlation_id="c1", tool_call_id="t2", caller="scribe", peer="dot", text="boom"
+            )
+        assert await proj.project(projection) is None
+
+    async def test_a_nested_reply_without_a_thread_returns_no_receipt(self) -> None:
+        proj, _personas, _resolver = _make()
+        assert await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="nested", caller="conan", peer="dot", text="answer")
+        ) is None
+
+    async def test_begin_turn_is_idempotent_and_does_not_discard_open_cards(self) -> None:
+        proj, personas, _resolver = _make()
+        await _begin(proj)
+        await proj.project(self._req())
+        await proj.begin_turn(correlation_id="c1", root_agent="wrong", subject="wrong")
+        await proj.project(
+            A2AReject(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="offline")
+        )
+        assert "Not dispatched" in personas.card_edits[-1]["body"]
+
 
 class TestFailureIsLoudButNotSpammy:
     """A swallowed audit gap must still be findable.
@@ -353,14 +459,16 @@ class TestFailureIsLoudButNotSpammy:
         proj, personas, _resolver = _make()
         personas.fail_on_component_send = True
         await proj.project(self._req("c1"))  # arms the latch
-        personas.fail_on_send = False
+        personas.fail_on_component_send = False
+        await proj.project(self._req("c2"))
         await proj.project_fault(
             A2ACall(tool_call_id="t1", correlation_id="c2", caller="scribe", peer="conan", message="q")
         )
         personas.fail_on_component_send = True
+        caplog.clear()
         with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
             await proj.project(self._req("c3"))
-        assert [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
 
     async def test_recovery_re_arms_the_error(self, caplog: pytest.LogCaptureFixture) -> None:
         # A channel fixed and then re-broken must announce itself again — the latch
@@ -368,12 +476,28 @@ class TestFailureIsLoudButNotSpammy:
         proj, personas, _resolver = _make()
         personas.fail_on_component_send = True
         await proj.project(self._req("c1"))
-        personas.fail_on_send = False
+        personas.fail_on_component_send = False
         await proj.project(self._req("c2"))  # recovered
         personas.fail_on_component_send = True
+        caplog.clear()
         with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
             await proj.project(self._req("c3"))
-        assert [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+
+    async def test_a_nested_dangling_fault_does_not_poison_the_gap_latch(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        proj, personas, _resolver = _make()
+        await proj.project(self._req("c1"))
+        await proj.project_fault(
+            A2ACall(tool_call_id="nested", correlation_id="c1", caller="conan", peer="dot", message="q")
+        )
+        assert proj._degraded is False
+        personas.fail_on_component_send = True
+        caplog.clear()
+        with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
+            await proj.project(self._req("c2"))
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
 
 
 class TestBestEffort:
