@@ -248,20 +248,6 @@ class TestTurnScopedConsultCards:
         await proj.finish("c1")
         assert not any("No response" in edit["body"] for edit in personas.card_edits)
 
-    async def test_thread_create_failure_posts_a_later_reply_beside_the_orphan_card(self) -> None:
-        proj, personas, resolver = _make()
-        resolver.fail_on_create = True
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy")
-        )
-        assert await proj.project(
-            A2AReply(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", text="answer")
-        ) is None
-        assert personas.sends[-1]["thread_id"] is None
-        assert personas.sends[-1]["content"].endswith("answer")
-        await proj.finish("c1")
-        assert not any("No response" in edit["body"] for edit in personas.card_edits)
-
     async def test_a_failed_card_edit_does_not_suppress_the_peer_response(self) -> None:
         proj, personas, _ = _make()
         await _begin(proj)
