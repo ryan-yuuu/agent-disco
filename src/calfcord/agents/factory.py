@@ -23,8 +23,9 @@ The agent's identity rides on every outbound publish via calfkit's
 agent's persona from the emitter without any application-level identity
 stamping.
 
-Builtin tools declared under ``tools:`` become calfkit runtime
-:class:`~calfkit.nodes.tool.Tools` selectors; the tri-state ``mcp:`` field
+Builtin tools declared under ``tools:`` become calfkit runtime selectors;
+omitted tools use a filtered default-discovery selector so sensitive Discord
+history is opt-in. The tri-state ``mcp:`` field
 becomes a single :class:`~calfkit.nodes.toolbox.Toolboxes` selector — discover
 mode by default, or a named grant list. Both are resolved per turn against the
 capability view. The actual tool body runs in the ``calfkit-tools`` or
@@ -70,6 +71,7 @@ from calfkit.worker import Worker
 from calfcord.agents.definition import AgentDefinition, Provider
 from calfcord.agents.memory import memory_instructions
 from calfcord.agents.thinking import build_model_settings
+from calfcord.agents.tool_selectors import DiscoverDefaultTools
 from calfcord.discord.persona import DiscordPersonaSender
 from calfcord.mcp.agent_select import toolbox_selector
 
@@ -226,7 +228,9 @@ def _build_peers(definition: AgentDefinition) -> list[Messaging | Handoff]:
     return peers
 
 
-def _describe_selectors(selectors: list[Tools | Toolboxes]) -> list[str]:
+def _describe_selectors(
+    selectors: list[Tools | Toolboxes | DiscoverDefaultTools],
+) -> list[str]:
     """Render the tool-selector surface for the operator-facing build log.
 
     For builtins (:class:`~calfkit.nodes.tool.Tools`): ``discover:*`` for the
@@ -238,7 +242,9 @@ def _describe_selectors(selectors: list[Tools | Toolboxes]) -> list[str]:
     """
     described: list[str] = []
     for selector in selectors:
-        if isinstance(selector, Tools):
+        if isinstance(selector, DiscoverDefaultTools):
+            described.append("discover:default")
+        elif isinstance(selector, Tools):
             described.append("discover:*" if selector.discover else f"tools:{list(selector.names)}")
         elif isinstance(selector, Toolboxes):
             if selector.discover:
@@ -417,7 +423,9 @@ class AgentFactory:
             or _PROVIDER_DEFAULT_MODELS[provider]
         )
 
-    def _build_tool_selectors(self, definition: AgentDefinition) -> list[Tools | Toolboxes]:
+    def _build_tool_selectors(
+        self, definition: AgentDefinition
+    ) -> list[Tools | Toolboxes | DiscoverDefaultTools]:
         """Map builtin ``tools:`` and MCP ``mcp:`` grants to runtime selectors.
 
         Nothing is resolved against a local registry: every selector is an
@@ -427,8 +435,8 @@ class AgentFactory:
         via :func:`~calfcord.mcp.agent_select.toolbox_selector`.
 
         Semantics:
-            - ``tools is None``: ``Tools(discover=True)`` — bind every live builtin
-              tool node at runtime.
+            - ``tools is None``: discover live default tools, excluding sensitive
+              opt-in surfaces such as Discord server history.
             - ``tools == ()``: no builtin selector.
             - non-empty ``tools``: ``Tools(names=[...])``.
             - ``mcp is True`` (default): ``Toolboxes(discover=True)`` — bind every
@@ -444,9 +452,9 @@ class AgentFactory:
         absent), matching the deploy-time-authority model: the tools host, not this
         process, owns which tools are live.
         """
-        selectors: list[Tools | Toolboxes] = []
+        selectors: list[Tools | Toolboxes | DiscoverDefaultTools] = []
         if definition.tools is None:
-            selectors.append(Tools(discover=True))
+            selectors.append(DiscoverDefaultTools())
         elif definition.tools:
             selectors.append(Tools(names=list(definition.tools)))
         toolboxes = toolbox_selector(definition.mcp)

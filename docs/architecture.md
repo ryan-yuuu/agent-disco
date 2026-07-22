@@ -13,8 +13,11 @@ running underneath.
 
 ## The four processes
 
-- **`calfkit-bridge`** — the single Discord gateway, a **pure calfkit
-  `Client`** (the caller surface — no embedded Worker, no consumers). It owns
+- **`calfkit-bridge`** — the single Discord gateway. Its calfkit `Client` calls
+  agents and shares its broker with a co-located Worker that hosts the read-only
+  `discord_list_channels` and `discord_read_messages` tools. These tools are
+  security-sensitive explicit opt-ins in an agent's `tools:` list; default tool
+  discovery excludes them. The bridge owns
   all Discord I/O: it normalizes inbound events, resolves each mention
   against calfkit's live agent **mesh**, invokes the agent by name
   (`client.agent(<name>).start(...)`), drains that run's event `stream()` for

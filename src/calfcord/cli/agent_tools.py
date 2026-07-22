@@ -132,12 +132,17 @@ def _build_choices(
     a selector the editor failed to enumerate.
     """
     from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
     choices: list[Choice] = []
     for name in sorted(TOOL_REGISTRY):
         summary = first_line(TOOL_REGISTRY[name].tool_schema.description)
         label = f"{name} — {summary}" if summary else name
         choices.append(Choice(name, label, name in current))
+    for name in sorted(DISCORD_TOOL_NAMES):
+        choices.append(
+            Choice(name, f"{name} — read Discord server data (explicit opt-in)", name in current)
+        )
 
     choices.append(
         Choice(
@@ -232,9 +237,10 @@ def run(
         return 1
 
     from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
-    # ``tools:`` omitted means "all builtins" — pre-check exactly the
-    # builtins, matching the loader's default expansion.
+    # ``tools:`` omitted means "all default builtins" — Discord reads remain
+    # unchecked because they are security-sensitive explicit opt-ins.
     current = set(raw.tools) if raw.tools is not None else set(TOOL_REGISTRY)
     # ``mcp`` is tri-state: ``True`` pre-checks the discover row; a named tuple
     # pre-checks its ``mcp/<server>`` rows; ``False`` pre-checks nothing.
@@ -253,6 +259,8 @@ def run(
     )
 
     try:
+        # Only the generic registry is the implicit default. Discord tool rows
+        # intentionally count as non-default, forcing an explicit tools: list.
         grants = _split_tool_selection(selected, set(TOOL_REGISTRY))
         update_tool_grants(md_path, tools=grants.tools, mcp=grants.mcp)
     except (ValueError, OSError) as e:

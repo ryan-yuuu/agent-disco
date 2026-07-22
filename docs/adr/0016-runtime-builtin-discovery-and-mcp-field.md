@@ -1,8 +1,12 @@
 # Runtime builtin discovery and split MCP grants
 
 Agent `tools:` frontmatter is builtin-only and is converted to calfkit runtime
-`Tools` selectors: omitted `tools:` discovers every live builtin tool node,
+tool selectors: omitted `tools:` discovers the default live builtin tool nodes,
 `tools: []` grants no builtins, and explicit names become `Tools(names=[...])`.
+
+Amendment: bridge-hosted Discord history tools are security-sensitive and are
+filtered out of omitted-field discovery. They remain ordinary named tool
+capabilities and require an explicit `tools:` grant.
 MCP grants moved to a separate `mcp:` field (`server` or `server/tool`) because
 MCP has a different secrets boundary and trust model: agents must name MCP
 servers explicitly, but the server's internal tool list remains runtime

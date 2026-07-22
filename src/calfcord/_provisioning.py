@@ -12,9 +12,9 @@ topics — notably Tansu — for everything its startup ensurer can declare:
   declares :func:`~calfkit.provisioning.topics_for_nodes` into the same ensurer.
   The **tools and agents runners** use the embedded managed ``Worker.start()``
   surface, so every Worker-hosted process gets its node topics for free. The
-  **bridge is a pure** :class:`~calfkit.client.Client` (no Worker, no consumers)
-  — it hosts no nodes and so declares no node topics; its only topic is the
-  client reply topic, covered by the pre-start hook above.
+  **bridge** also uses the managed Worker surface for its co-located read-only
+  Discord tool nodes. The Worker startup pass declares those node topics while
+  the shared Client pre-start hook declares the bridge reply topic.
 
 After the calfkit 0.12 migration removed the bespoke control plane, calfcord has
 no blind-spot topics left to declare: agent presence and the live roster now ride

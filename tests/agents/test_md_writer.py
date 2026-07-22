@@ -278,6 +278,14 @@ def test_update_tools_writes_explicit_list(tmp_path: Path) -> None:
     assert reloaded.metadata["tools"] == ["read_file", "write_file"]
 
 
+def test_update_tools_accepts_explicit_discord_read_grant(tmp_path: Path) -> None:
+    md_path = _seed_md(tmp_path)
+    updated = update_tools(md_path, ["discord_read_messages"])
+
+    assert updated.tools == ("discord_read_messages",)
+    assert frontmatter.load(md_path).metadata["tools"] == ["discord_read_messages"]
+
+
 def test_update_tools_preserves_other_frontmatter_fields(tmp_path: Path) -> None:
     md_path = _seed_md(tmp_path, agent_id="scheduler", provider="anthropic")
     update_tools(md_path, ["read_file"])

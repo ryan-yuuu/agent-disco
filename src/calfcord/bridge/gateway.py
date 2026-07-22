@@ -9,8 +9,10 @@ The daemon depends on a running Kafka broker reachable at ``CALF_HOST_URL``
 (defaults to ``localhost``) and a Discord bot configured via the ``DISCORD_*``
 environment variables (see ``.env.example``).
 
-The bridge is a pure calfkit :class:`~calfkit.client.Client` (no embedded Worker,
-no consumers). For each ``!mention`` it builds a :class:`MentionRequest` and runs
+The bridge owns one calfkit :class:`~calfkit.client.Client`: its caller surface
+invokes agents, while a co-located :class:`~calfkit.worker.Worker` hosts the
+read-only Discord tools against the same broker. For each ``!mention`` it builds
+a :class:`MentionRequest` and runs
 :class:`~calfcord.bridge.mention_handler.MentionHandler.handle` as a tracked task:
 the handler resolves the target against the live mesh roster, ``start()``s the
 agent, drains its run ``stream()`` (the step trace + A2A projection), and posts the
@@ -30,15 +32,15 @@ import re
 import signal
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import discord
 from aiokafka.errors import KafkaConnectionError
 from calfkit.client import Client, MeshViewConfig
+from calfkit.worker import Worker
 
 from calfcord._provisioning import PROVISIONING
 from calfcord.agents.memory import MemoryPromptDeps
@@ -64,10 +66,11 @@ from calfcord.bridge.transcripts import (
 )
 from calfcord.bridge.wire import WireMessage
 from calfcord.discord.persona import DiscordPersonaSender
+from calfcord.discord.read_service import DiscordReadService
 from calfcord.discord.settings import DiscordSettings
 from calfcord.discord.typing import TypingNotifier
-from calfcord.health.heartbeat import write_beat
 from calfcord.health.refresher import run_refresher
+from calfcord.tools.discord import build_discord_tool_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +289,8 @@ class DiscordIngressGateway:
         # every beat write on it, so a dropped gateway ages the beat past its TTL.
         self._connected: bool = False
         self._bot_identity: str | None = None
+        self._ready = asyncio.Event()
+        self._accepting_messages = True
 
         self._slash = SlashCommandManager(
             client=self._client,
@@ -311,6 +316,19 @@ class DiscordIngressGateway:
     def bot_identity(self) -> str | None:
         """The bot's display identity (``name (id)``), or ``None`` before ready (§12.3)."""
         return self._bot_identity
+
+    @property
+    def discord_client(self) -> discord.Client:
+        """The gateway client, usable by read tools after :meth:`wait_until_ready`."""
+        return self._client
+
+    async def wait_until_ready(self) -> None:
+        """Wait for Discord authentication and the first ready event."""
+        await self._ready.wait()
+
+    def quiesce(self) -> None:
+        """Stop accepting new Discord messages while current work drains."""
+        self._accepting_messages = False
 
     async def start(self) -> None:
         """Connect to the Discord gateway. Blocks until cancelled or disconnect."""
@@ -346,23 +364,11 @@ class DiscordIngressGateway:
         )
         logger.info("gateway ready as %s (id=%s)", bot_user, bot_user.id)
 
-        # Discord is connected as of on_ready — record liveness + identity, then
-        # write the FIRST heartbeat BEFORE slash-sync (§12.1): slash-sync can be
-        # slow / 429 on a cold tree, and readiness must not hinge on it.
+        # Unblock the co-located tool worker before slash-sync: sync can be slow
+        # or rate-limited, while Discord reads do not depend on it.
         self._connected = True
         self._bot_identity = f"{bot_user} ({bot_user.id})"
-        try:
-            write_beat(
-                _resolve_health_home(),
-                _HEALTH_COMPONENT,
-                status="healthy",
-                identity=self._bot_identity,
-                now=datetime.now(UTC),
-            )
-        except Exception:
-            logger.exception(
-                "failed to write initial bridge heartbeat; continuing boot"
-            )
+        self._ready.set()
 
         await self._slash.sync(self._settings.guild_id)
 
@@ -379,6 +385,8 @@ class DiscordIngressGateway:
         logger.info("discord gateway resumed; bridge heartbeat restored")
 
     async def _on_message(self, message: discord.Message) -> None:
+        if not self._accepting_messages:
+            return
         if message.guild is None:
             return
         if (
@@ -616,6 +624,140 @@ class _GatewayClient(discord.Client):
         await self._gateway._on_message(message)
 
 
+async def _run_bridge_runtime(
+    gateway: DiscordIngressGateway,
+    worker: Worker,
+    *,
+    health_home: Path,
+    worker_is_healthy: Callable[[], bool],
+) -> None:
+    """Run the Discord gateway and co-located tool worker as one service."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    gateway_task = asyncio.create_task(gateway.start(), name="discord-gateway")
+    stop_task = asyncio.create_task(stop.wait(), name="bridge-stop")
+    ready_task = asyncio.create_task(gateway.wait_until_ready(), name="discord-ready")
+    refresher_task: asyncio.Task[None] | None = None
+    worker_start_task: asyncio.Task[None] | None = None
+    worker_started = False
+    primary_error: BaseException | None = None
+
+    try:
+        # Do not advertise Discord tools before their live client is authenticated.
+        done, _ = await asyncio.wait(
+            {gateway_task, stop_task, ready_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if gateway_task in done:
+            raise _unexpected_task_exit(gateway_task, "Discord gateway")
+        if stop_task not in done:
+            worker_start_task = asyncio.create_task(
+                worker.start(), name="discord-tool-worker-start"
+            )
+            done, _ = await asyncio.wait(
+                {gateway_task, stop_task, worker_start_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if gateway_task in done:
+                raise _unexpected_task_exit(gateway_task, "Discord gateway")
+            if worker_start_task in done:
+                await worker_start_task
+                worker_started = True
+                # The first heartbeat now means Discord AND the tool consumer serve.
+                refresher_task = asyncio.create_task(
+                    run_refresher(
+                        health_home,
+                        _HEALTH_COMPONENT,
+                        is_healthy=lambda: gateway.connected and worker_is_healthy(),
+                        identity=lambda: gateway.bot_identity,
+                    ),
+                    name="bridge-heartbeat",
+                )
+                done, _ = await asyncio.wait(
+                    {gateway_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if gateway_task in done:
+                    raise _unexpected_task_exit(gateway_task, "Discord gateway")
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        gateway.quiesce()
+
+        # A signal may land during provisioning. Worker.start performs failed-start
+        # cleanup when cancellation is delivered, so cancel and await it explicitly.
+        if worker_start_task is not None and not worker_start_task.done():
+            worker_start_task.cancel()
+        if worker_start_task is not None:
+            results = await asyncio.gather(worker_start_task, return_exceptions=True)
+            start_result = results[0]
+            if start_result is None:
+                # The signal/worker-start race can wake on the signal just as
+                # startup commits. Record ownership so the live Worker is stopped.
+                worker_started = True
+            elif (
+                primary_error is None
+                and isinstance(start_result, BaseException)
+                and not isinstance(start_result, asyncio.CancelledError)
+            ):
+                primary_error = start_result
+
+        if refresher_task is not None and not refresher_task.done():
+            refresher_task.cancel()
+        if refresher_task is not None:
+            await asyncio.gather(refresher_task, return_exceptions=True)
+
+        # Bridge turns use the shared calfkit Client, so cancel them before the
+        # Worker drains and stops that broker. Tool calls drain while Discord lives.
+        primary_error = await _capture_cleanup_error(
+            gateway.drain_inflight(), "draining bridge turns", primary_error
+        )
+        if worker_started:
+            primary_error = await _capture_cleanup_error(
+                worker.stop(), "stopping Discord tool worker", primary_error
+            )
+        primary_error = await _capture_cleanup_error(
+            gateway.close(), "closing Discord gateway", primary_error
+        )
+
+        for task in (gateway_task, stop_task, ready_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(gateway_task, stop_task, ready_task, return_exceptions=True)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
+
+    if primary_error is not None:
+        raise primary_error
+
+
+def _unexpected_task_exit(task: asyncio.Task[Any], label: str) -> BaseException:
+    """Return the task error, or synthesize one for an unexpected clean exit."""
+    if task.cancelled():
+        return RuntimeError(f"{label} was cancelled unexpectedly")
+    exception = task.exception()
+    if exception is not None:
+        return exception
+    return RuntimeError(f"{label} returned unexpectedly without a shutdown signal")
+
+
+async def _capture_cleanup_error(
+    awaitable: Any,
+    label: str,
+    primary_error: BaseException | None,
+) -> BaseException | None:
+    """Run cleanup without masking an earlier runtime failure."""
+    try:
+        await awaitable
+    except BaseException as exc:
+        logger.error("error while %s", label, exc_info=exc)
+        return primary_error or exc
+    return primary_error
+
+
 def main() -> None:
     """CLI entry point. Loads config, constructs the gateway, runs until SIGINT/SIGTERM."""
     logging.basicConfig(
@@ -632,9 +774,10 @@ def main() -> None:
 
     async def _run() -> None:
         # The bridge owns its persona sender (it posts on behalf of every agent).
-        # The calfkit Client is a pure caller surface: a durable inbox + the mesh
-        # view; no Worker, no consumers. Nested ``async with`` (not combined) keeps
-        # each context's rationale attached to it.
+        # One Client owns the durable caller inbox, mesh view, and the broker shared
+        # with the co-located Discord-tool Worker. Nested contexts keep each external
+        # resource's ownership explicit; the runtime stops the Worker before this
+        # Client context exits.
         async with DiscordPersonaSender(settings) as persona_sender:  # noqa: SIM117
             async with Client.connect(
                 server_urls,
@@ -694,47 +837,32 @@ def main() -> None:
                         bridge_settings=bridge_settings,
                         sticky_store=transcript_store,
                     )
+                    discord_service = DiscordReadService(
+                        gateway.discord_client, settings.guild_id
+                    )
+                    discord_nodes = build_discord_tool_nodes(discord_service)
+                    # Co-location is intentional: this Worker shares the bridge
+                    # Client/broker, while the authenticated Discord client remains
+                    # bridge-local. _run_bridge_runtime owns their combined lifecycle.
+                    discord_worker = Worker(
+                        calfkit_client,
+                        discord_nodes,
+                        id="discord-bridge-tools",
+                        name="Discord bridge tools",
+                    )
+                    logger.info(
+                        "bridge hosting Discord read tools=%s",
+                        sorted(node.tool_schema.name for node in discord_nodes),
+                    )
                     try:
-                        stop = asyncio.Event()
-                        loop = asyncio.get_running_loop()
-                        for sig in (signal.SIGINT, signal.SIGTERM):
-                            loop.add_signal_handler(sig, stop.set)
-
-                        gateway_task = asyncio.create_task(gateway.start())
-                        stop_task = asyncio.create_task(stop.wait())
-                        # Refresh the bridge heartbeat on a timer, gated on the live
-                        # Discord connection so a dropped gateway ages the beat (§12.1).
-                        refresher_task = asyncio.create_task(
-                            run_refresher(
-                                _resolve_health_home(),
-                                _HEALTH_COMPONENT,
-                                is_healthy=lambda: gateway.connected,
-                                identity=lambda: gateway.bot_identity,
-                            )
+                        await _run_bridge_runtime(
+                            gateway,
+                            discord_worker,
+                            health_home=_resolve_health_home(),
+                            worker_is_healthy=lambda: calfkit_client.broker.running,
                         )
-                        try:
-                            done, _ = await asyncio.wait(
-                                {gateway_task, stop_task},
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-                            # A fatal gateway crash (not a signal) must surface as a
-                            # non-zero exit so the supervisor restarts us; asyncio.wait
-                            # does not propagate a task's exception.
-                            if gateway_task in done and not gateway_task.cancelled():
-                                exc = gateway_task.exception()
-                                if exc is not None:
-                                    raise exc
-                        finally:
-                            for t in (gateway_task, stop_task, refresher_task):
-                                if not t.done():
-                                    t.cancel()
-                            await asyncio.gather(refresher_task, return_exceptions=True)
-                            await gateway.close()
                     finally:
-                        # Cancel in-flight handler tasks BEFORE the client context
-                        # exits (which closes the broker), then close typing — a
-                        # cancelled run can still have fired a typing task.
-                        await gateway.drain_inflight()
+                        # A cancelled run can still have fired a typing task.
                         await typing_notifier.aclose()
 
     asyncio.run(_run())

@@ -1,8 +1,9 @@
 """Unit tests for the gateway's ``_on_message`` intake and handler-task lifecycle.
 
-Post-0.12 the gateway is a pure caller surface: for each ``!mention`` it builds a
+The gateway's ingress path remains a caller surface: for each ``!mention`` it builds a
 :class:`MentionRequest` and runs :meth:`MentionHandler.handle` as a tracked
-asyncio task. There is no ingress/outbox/Worker anymore. These tests pin the
+asyncio task. The co-located Discord tool Worker has its own lifecycle tests;
+these tests pin the
 intake seam and the task machinery, all offline (no Discord, no broker):
 
 * **Filtering** — DMs, wrong-guild, pre-ready, the bot's own non-webhook posts
