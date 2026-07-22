@@ -27,7 +27,7 @@ from pydantic import SecretStr
 
 from calfcord.bridge.gateway import DiscordIngressGateway
 from calfcord.discord.settings import DiscordSettings
-from calfcord.health.heartbeat import is_fresh, read_beat
+from calfcord.health.heartbeat import read_beat
 
 
 def _settings() -> DiscordSettings:

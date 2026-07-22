@@ -23,13 +23,12 @@ from calfkit import Handoff, Messaging, Toolboxes
 from calfkit.mcp import MCPToolbox
 from calfkit.nodes import Agent
 from calfkit.nodes.tool import Tools
-
-from calfcord.agents.tool_selectors import DiscoverDefaultTools
 from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 
 from calfcord.agents.definition import AgentDefinition, Provider
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.agents.memory import MEMORY_PROMPT_DEPS_KEY
+from calfcord.agents.tool_selectors import DiscoverDefaultTools
 
 
 def _definition(

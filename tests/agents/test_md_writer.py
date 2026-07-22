@@ -446,3 +446,94 @@ def test_update_fields_preserves_existing_file_mode(tmp_path: Path) -> None:
     # The body-rewrite path shares ``_atomic_write_text`` — preserve mode there too.
     update_system_prompt(md_path, "Fresh body for the mode check.")
     assert stat.S_IMODE(md_path.stat().st_mode) == 0o644
+
+
+# --------------------------------------------------------- malformed on disk ---
+
+
+def _seed_malformed(tmp_path: Path) -> Path:
+    """An ``.md`` whose frontmatter is syntactically invalid YAML."""
+    md_path = tmp_path / "broken.md"
+    md_path.write_text("---\nname: broken\ntools: [unclosed\n---\n\nBody.\n", encoding="utf-8")
+    return md_path
+
+
+def test_update_tool_grants_rejects_malformed_frontmatter(tmp_path: Path) -> None:
+    """A hand-corrupted ``.md`` must surface as a caller-handled ``ValueError``
+    naming the file — the CLI turns that into an ``error:`` line, whereas a raw
+    ``yaml`` error would escape as a traceback."""
+    md_path = _seed_malformed(tmp_path)
+    before = md_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="malformed YAML") as excinfo:
+        update_tool_grants(md_path, tools=["read_file"], mcp=False)
+
+    # The message must name the offending file; the operator has to find it.
+    assert str(md_path) in str(excinfo.value)
+    # A failed load must not touch the file.
+    assert md_path.read_text(encoding="utf-8") == before
+
+
+def test_update_system_prompt_rejects_malformed_frontmatter(tmp_path: Path) -> None:
+    md_path = _seed_malformed(tmp_path)
+
+    with pytest.raises(ValueError, match="malformed YAML"):
+        update_system_prompt(md_path, "New body.")
+
+
+def test_update_tool_grants_validates_before_reading_the_file(tmp_path: Path) -> None:
+    """An unknown builtin is rejected on the argument, so a malformed file is
+    never even loaded — the validation error names the tool, not the YAML."""
+    md_path = _seed_malformed(tmp_path)
+
+    with pytest.raises(ValueError, match="unknown tool 'nope'"):
+        update_tool_grants(md_path, tools=["nope"], mcp=False)
+
+
+def test_update_tool_grants_rejects_non_string_mcp_grants(tmp_path: Path) -> None:
+    """The ``mcp:`` list is operator-authored; a stray YAML int/None must be
+    named as an invalid grant rather than reaching the selector validator."""
+    md_path = _seed_md(tmp_path)
+
+    with pytest.raises(ValueError, match="invalid MCP grant 7"):
+        update_tool_grants(md_path, tools=None, mcp=[7])
+
+
+def test_update_tool_grants_accepts_discord_reads_alongside_builtins(tmp_path: Path) -> None:
+    """Discord read tools are not in the generic registry, but they are a valid
+    explicit grant — the writer's allow-list is the registry plus Discord names."""
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
+
+    md_path = _seed_md(tmp_path)
+    updated = update_tool_grants(
+        md_path, tools=["read_file", *sorted(DISCORD_TOOL_NAMES)], mcp=False
+    )
+
+    assert set(updated.tools) == {"read_file", *DISCORD_TOOL_NAMES}
+
+
+def test_atomic_write_survives_an_unfsyncable_parent_directory(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The rename is already committed by the time the parent-dir fsync runs, so
+    a filesystem that refuses it (network mounts, some containers) must warn —
+    never fail the caller's edit and never leave a ``.tmp`` behind."""
+    import logging
+    import os
+
+    real_open = os.open
+
+    def _refuse_dir_fd(path, flags, *args, **kwargs):
+        if flags == os.O_RDONLY and Path(path).is_dir():
+            raise OSError("fsync unsupported on this filesystem")
+        return real_open(path, flags, *args, **kwargs)
+
+    md_path = _seed_md(tmp_path)
+    monkeypatch.setattr(os, "open", _refuse_dir_fd)
+
+    with caplog.at_level(logging.WARNING):
+        update_system_prompt(md_path, "Body written despite an unfsyncable parent.")
+
+    assert "Body written despite an unfsyncable parent." in md_path.read_text(encoding="utf-8")
+    assert "durability" in caplog.text
+    assert list(tmp_path.glob(".*.tmp")) == []

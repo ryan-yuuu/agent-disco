@@ -19,8 +19,15 @@ from calfcord.cli import agent_tools
 from calfcord.cli._agents import MCP_DISCOVER_ROW
 from calfcord.cli._prompts import Choice, Prompter
 from calfcord.tools import TOOL_REGISTRY
+from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
 BUILTIN_NAMES = set(TOOL_REGISTRY)
+
+# The package's autouse ``_offline_mcp_enumeration_defaults`` fixture replaces
+# this module attribute with an offline stub, so the two tests that exercise the
+# real enumeration must hold the original — captured here at import time, before
+# any fixture runs.
+_REAL_DEFAULT_MCP_SERVERS = agent_tools._default_mcp_servers
 
 
 class FakePrompter:
@@ -455,3 +462,93 @@ def test_default_live_tools_prints_note_when_view_unreachable(monkeypatch, capsy
     monkeypatch.setattr(capability_read, "snapshot_capability_tools", lambda *a, **k: {})
     assert agent_tools._default_live_tools() == {}
     assert capsys.readouterr().out == ""
+
+
+def test_default_mcp_servers_reads_configured_names(monkeypatch, tmp_path: Path) -> None:
+    from calfcord.mcp import config as mcp_config
+
+    monkeypatch.setattr(mcp_config, "resolve_config_path", lambda: tmp_path / "mcp.json")
+    monkeypatch.setattr(mcp_config, "list_server_names", lambda _p: ["github", "linear"])
+
+    assert _REAL_DEFAULT_MCP_SERVERS() == ["github", "linear"]
+
+
+def test_default_mcp_servers_degrades_to_none_on_broken_config(monkeypatch, tmp_path: Path) -> None:
+    """A malformed mcp.json must not block the tool editor from opening — the
+    strict readers are where that error is surfaced, not here."""
+    from calfcord.mcp import config as mcp_config
+
+    def _boom(_path: Path) -> list[str]:
+        raise mcp_config.McpConfigError("mcp.json: not valid JSON")
+
+    monkeypatch.setattr(mcp_config, "resolve_config_path", lambda: tmp_path / "mcp.json")
+    monkeypatch.setattr(mcp_config, "list_server_names", _boom)
+
+    assert _REAL_DEFAULT_MCP_SERVERS() == []
+
+
+def test_write_failure_reports_and_returns_1(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A failed write must exit non-zero with an actionable line, not a traceback
+    and not the cheerful "Updated ..." banner that implies the grant landed."""
+    _seed_agent(tmp_path, "assistant", tools_line="[read_file]", mcp_line="false")
+    fake = FakePrompter(checkbox_result=["read_file"])
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(agent_tools, "update_tool_grants", _boom)
+    rc = agent_tools.run(
+        fake, agents_dir=tmp_path, name="assistant", mcp_servers_fn=lambda: [], live_tools_fn=lambda: {}
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "error: failed to update 'assistant': read-only file system" in out
+    assert "Updated assistant" not in out
+
+
+def test_first_line_returns_empty_for_blank_only_descriptions() -> None:
+    """A description of nothing but whitespace has no summary to show; the row
+    must fall back to the bare tool name rather than a label of blanks."""
+    assert agent_tools.first_line("\n   \n\t\n") == ""
+
+
+# ------------------------------------------------------------- discord opt-in ---
+
+
+def test_discord_rows_are_offered_but_unchecked_when_tools_is_omitted(tmp_path: Path) -> None:
+    """``tools:`` omitted means "all default builtins". Discord reads are NOT
+    default — they are security-sensitive, so they must be visible in the menu
+    yet pre-checked off, forcing an explicit operator opt-in."""
+    _seed_agent(tmp_path, "assistant", tools_line=None, mcp_line="false")
+    fake = FakePrompter(checkbox_result=[])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    assert fake.last_checkbox_choices is not None
+    offered = {c.value for c in fake.last_checkbox_choices}
+    assert offered >= DISCORD_TOOL_NAMES
+    assert _checked(fake.last_checkbox_choices) & DISCORD_TOOL_NAMES == set()
+
+
+def test_explicit_discord_grant_is_prechecked(tmp_path: Path) -> None:
+    _seed_agent(tmp_path, "assistant", tools_line="[discord_read_messages]", mcp_line="false")
+    fake = FakePrompter(checkbox_result=[])
+    agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    assert fake.last_checkbox_choices is not None
+    assert _checked(fake.last_checkbox_choices) == {"discord_read_messages"}
+
+
+def test_selecting_a_discord_tool_writes_an_explicit_tools_list(tmp_path: Path) -> None:
+    """Discord tools never count toward the "everything is selected" shortcut that
+    drops the ``tools:`` key — dropping it would silently revoke the grant, since
+    an omitted list means generic builtins only."""
+    _seed_agent(tmp_path, "assistant", tools_line="[]", mcp_line="false")
+    fake = FakePrompter(checkbox_result=[*sorted(BUILTIN_NAMES), "discord_list_channels"])
+    rc = agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+
+    assert rc == 0
+    written = frontmatter.load(tmp_path / "assistant.md").metadata["tools"]
+    assert "discord_list_channels" in written
+    assert set(written) == BUILTIN_NAMES | {"discord_list_channels"}
+    assert parse_agent_md(tmp_path / "assistant.md").tools is not None

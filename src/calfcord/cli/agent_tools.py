@@ -237,7 +237,6 @@ def run(
         return 1
 
     from calfcord.tools import TOOL_REGISTRY
-    from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
     # ``tools:`` omitted means "all default builtins" — Discord reads remain
     # unchecked because they are security-sensitive explicit opt-ins.
