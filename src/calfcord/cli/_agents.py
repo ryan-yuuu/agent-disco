@@ -357,7 +357,9 @@ def write_agent(
       :func:`md_writer.update_tool_grants`. Both are validated-atomic, so a bad
       value leaves the file untouched. The existing ``memory`` setting is left
       alone — re-running create against an on-disk agent must not silently flip
-      it.
+      it — but if that existing value is on, the same ``read_file`` /
+      ``write_file`` top-up applied on create runs against the new tools list
+      so an update cannot leave a memory-enabled agent factory-rejected.
     * **Target missing** — build the frontmatter as a mapping and serialize it
       with :func:`frontmatter.dumps` (NOT string interpolation), which
       YAML-quotes free-text values so a description like ``"Calendar: book
@@ -389,6 +391,10 @@ def write_agent(
     target = agents_dir / f"{name}.md"
 
     if target.exists():
+        # Honor the on-disk memory bit (do not apply the create-time default),
+        # but still satisfy the factory's fs-tool requirement when it is on.
+        existing_memory = parse_agent_md(target).memory
+        tools = _ensure_memory_tools(tools, memory=existing_memory)
         md_writer._update_fields(target, {"description": description, "provider": provider, "model": model})
         md_writer.update_tool_grants(target, tools=tools, mcp=mcp)
         return target

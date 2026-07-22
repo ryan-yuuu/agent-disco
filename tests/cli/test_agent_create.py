@@ -618,6 +618,64 @@ def test_write_agent_update_preserves_existing_memory(tmp_path: Path) -> None:
     assert md.read_text(encoding="utf-8").endswith("Body stays.\n")
 
 
+def test_write_agent_update_memory_on_tops_up_fs_tools(tmp_path: Path) -> None:
+    """Updating a memory-on agent with a restricted tools list still gets fs tools."""
+    md = tmp_path / "scribe.md"
+    md.write_text(
+        "---\n"
+        "name: scribe\n"
+        "description: old\n"
+        "provider: anthropic\n"
+        "model: claude-sonnet-4-5\n"
+        "memory: true\n"
+        "tools: [read_file, write_file]\n"
+        "---\n"
+        "Body stays.\n",
+        encoding="utf-8",
+    )
+    _agents.write_agent(
+        tmp_path,
+        name="scribe",
+        description="new",
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        tools=["terminal"],
+        memory=False,  # ignored on update; on-disk memory stays true
+    )
+    agent = parse_agent_md(md)
+    assert agent.memory is True
+    assert agent.tools == ("terminal", "read_file", "write_file")
+
+
+def test_write_agent_update_memory_off_does_not_add_fs_tools(tmp_path: Path) -> None:
+    """Updating a memory-off agent must not inject filesystem tools."""
+    md = tmp_path / "scribe.md"
+    md.write_text(
+        "---\n"
+        "name: scribe\n"
+        "description: old\n"
+        "provider: anthropic\n"
+        "model: claude-sonnet-4-5\n"
+        "memory: false\n"
+        "tools: [terminal]\n"
+        "---\n"
+        "Body stays.\n",
+        encoding="utf-8",
+    )
+    _agents.write_agent(
+        tmp_path,
+        name="scribe",
+        description="new",
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        tools=["terminal", "web_search"],
+        memory=True,  # ignored on update
+    )
+    agent = parse_agent_md(md)
+    assert agent.memory is False
+    assert agent.tools == ("terminal", "web_search")
+
+
 def test_create_agent_forwards_live_tools_fn_to_pick_tools(tmp_path: Path) -> None:
     """``create_agent`` threads an injected ``live_tools_fn`` into the tools
     checkbox, so a caller (``init``) can supply the live MCP view — or suppress
