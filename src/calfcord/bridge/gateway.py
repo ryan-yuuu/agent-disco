@@ -290,7 +290,12 @@ class DiscordIngressGateway:
         self._connected: bool = False
         self._bot_identity: str | None = None
         self._ready = asyncio.Event()
-        self._accepting_messages = True
+        # Admission is separate from Discord authentication. The combined
+        # runtime opens it only after the co-located Worker/shared broker serves.
+        # Quiescence is terminal: shutdown may never reopen ingress.
+        self._accepting_messages = False
+        self._ingress_terminal = False
+        self._ingress: set[asyncio.Task[Any]] = set()
 
         self._slash = SlashCommandManager(
             client=self._client,
@@ -327,8 +332,32 @@ class DiscordIngressGateway:
         await self._ready.wait()
 
     def quiesce(self) -> None:
-        """Stop accepting new Discord messages while current work drains."""
+        """Permanently close ingress while admitted work drains."""
+        self._ingress_terminal = True
         self._accepting_messages = False
+
+    def start_accepting_messages(self) -> None:
+        """Open ingress after every serving dependency has started.
+
+        This synchronous transition intentionally contains no await: the runtime
+        checks shutdown and gateway failure immediately before calling it.
+        """
+        if not self._ingress_terminal:
+            self._accepting_messages = True
+
+    async def drain_ingress(self) -> None:
+        """Cancel routing callbacks admitted before :meth:`quiesce`.
+
+        Sticky routing and commands await I/O before spawning handlers. Draining
+        their whole callbacks before :meth:`drain_inflight` guarantees none can
+        add a handler after the handler-task snapshot is taken.
+        """
+        current = asyncio.current_task()
+        tasks = [task for task in self._ingress if task is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def start(self) -> None:
         """Connect to the Discord gateway. Blocks until cancelled or disconnect."""
@@ -387,6 +416,20 @@ class DiscordIngressGateway:
     async def _on_message(self, message: discord.Message) -> None:
         if not self._accepting_messages:
             return
+        # No await separates admission from registration. On one event loop,
+        # either this callback registers first and shutdown owns it, or terminal
+        # quiescence wins and the callback returns above.
+        ingress_task = asyncio.current_task()
+        if ingress_task is None:  # defensive; Discord callbacks always have one
+            return
+        self._ingress.add(ingress_task)
+        try:
+            await self._route_message(message)
+        finally:
+            self._ingress.discard(ingress_task)
+
+    async def _route_message(self, message: discord.Message) -> None:
+        """Route one message already admitted into the bridge lifecycle."""
         if message.guild is None:
             return
         if (
@@ -663,9 +706,20 @@ async def _run_bridge_runtime(
             )
             if gateway_task in done:
                 raise _unexpected_task_exit(gateway_task, "Discord gateway")
-            if worker_start_task in done:
+            if stop.is_set():
+                # Stop has precedence when startup and the signal complete in
+                # the same event-loop turn. Cleanup resolves Worker ownership.
+                pass
+            elif worker_start_task in done:
                 await worker_start_task
                 worker_started = True
+                # Keep terminal checks adjacent to the synchronous admission
+                # commit: gateway failure and shutdown always beat opening ingress.
+                if gateway_task.done():
+                    raise _unexpected_task_exit(gateway_task, "Discord gateway")
+                if stop.is_set():
+                    return
+                gateway.start_accepting_messages()
                 # The first heartbeat now means Discord AND the tool consumer serve.
                 refresher_task = asyncio.create_task(
                     run_refresher(
@@ -710,6 +764,12 @@ async def _run_bridge_runtime(
         if refresher_task is not None:
             await asyncio.gather(refresher_task, return_exceptions=True)
 
+        # Quiescence prevents new callback registration. Drain whole ingress
+        # callbacks before handler tasks so a suspended sticky/command route
+        # cannot spawn a turn after the handler snapshot is taken.
+        primary_error = await _capture_cleanup_error(
+            gateway.drain_ingress(), "draining Discord ingress", primary_error
+        )
         # Bridge turns use the shared calfkit Client, so cancel them before the
         # Worker drains and stops that broker. Tool calls drain while Discord lives.
         primary_error = await _capture_cleanup_error(
