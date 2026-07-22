@@ -4,10 +4,15 @@ On the calfkit 0.12 caller surface the final reply is the return value of
 ``handle.result()`` (awaited by the :class:`~calfcord.bridge.mention_handler.MentionHandler`),
 not a Kafka outbox message. Every reply is delivered as consecutive
 ≤ :data:`~calfcord.discord.chunking.CHUNK_SAFE_SIZE` chunks — one chunk for a
-normal-length reply — with the first chunk carrying the inline-reply anchor and
-(if the turn used tools) the durable transcript row (for tool-call replay).
-Chunking is the only delivery mechanism: there is no retry that re-invokes the
-agent to shorten a rejected reply.
+normal-length reply — with the **final** chunk carrying the inline-reply anchor
+and (if the turn used tools) the durable transcript row (for tool-call replay).
+Earlier chunks are bare continuations. Chunking is the only delivery mechanism:
+there is no retry that re-invokes the agent to shorten a rejected reply.
+
+Anchoring the last chunk (rather than the first) keeps the "↩ Replying to"
+affordance on the message the reader finishes on, and keys
+``final_message_id`` to the same Discord message history joins against for
+tool-call replay.
 
 Per-chunk failures are logged independently so partial delivery survives; a
 single Discord 5xx per chunk is smoothed with one delayed re-send.
@@ -120,10 +125,13 @@ class ReplyPoster:
     ) -> Literal["posted", "empty", "lost"]:
         """Chunk-split ``result``'s final answer and post each chunk under ``persona``.
 
-        The first chunk carries the inline-reply anchor + (if the turn used
-        tools) the persisted transcript row; later chunks are bare
+        The **final** chunk carries the inline-reply anchor + (if the turn used
+        tools) the persisted transcript row; earlier chunks are bare
         continuations. Per-chunk failures are logged independently so partial
-        delivery survives.
+        delivery survives. If the final chunk fails after earlier chunks
+        posted, the reply still counts as ``"posted"`` but has no anchor and
+        no transcript row (same degradation the first-chunk design had when
+        the anchor send failed).
 
         Returns ``"posted"`` if at least one chunk was delivered, ``"empty"``
         if there was nothing to post (Discord rejects an empty webhook send;
@@ -140,16 +148,18 @@ class ReplyPoster:
         rendered = _render_step_count(delta)
         write_transcript = bool(rendered) and self._store.enabled
         total = len(chunks)
+        last_i = total - 1
         posted_any = False
         failures: list[int | None] = []
         for i, chunk in enumerate(chunks):
+            is_final = i == last_i
             try:
                 sent = await _send_with_one_retry_on_outage(
                     self._personas,
                     persona=persona,
                     channel_id=wire.channel_id,
                     content=chunk,
-                    reply_to=ReplyContext.from_wire(wire) if i == 0 else None,
+                    reply_to=ReplyContext.from_wire(wire) if is_final else None,
                     thread_id=wire.thread_id,
                 )
             except (discord.DiscordException, TypeError, RuntimeError) as e:
@@ -173,7 +183,7 @@ class ReplyPoster:
                 )
                 continue
             posted_any = True
-            if i == 0 and write_transcript:
+            if is_final and write_transcript:
                 await _write_transcript(
                     self._store,
                     correlation_id=correlation_id,

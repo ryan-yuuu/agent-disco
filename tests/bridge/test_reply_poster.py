@@ -152,6 +152,7 @@ class _FakePersonas:
             if err is not None:
                 raise err
         self._next_id += 1
+        sent = SentMessage(id=self._next_id, channel_id=thread_id or channel_id)
         self.sends.append(
             {
                 "persona": persona,
@@ -159,9 +160,10 @@ class _FakePersonas:
                 "content": content,
                 "reply_to": reply_to,
                 "thread_id": thread_id,
+                "sent": sent,
             }
         )
-        return SentMessage(id=self._next_id, channel_id=thread_id or channel_id)
+        return sent
 
 
 class _FakeStore:
@@ -301,7 +303,7 @@ class TestPostReplySingleChunk:
 
 # --- multi-chunk replies -----------------------------------------------------
 class TestPostReplyMultiChunk:
-    async def test_long_reply_splits_first_chunk_anchored_and_writes_row(self) -> None:
+    async def test_long_reply_splits_final_chunk_anchored_and_writes_row(self) -> None:
         poster, personas, store = _poster()
         big = "x" * 4500
         out = await poster.post_reply(
@@ -313,9 +315,11 @@ class TestPostReplyMultiChunk:
         )
         assert out == "posted"
         assert len(personas.sends) >= 3  # >2 chunks
-        assert personas.sends[0]["reply_to"] is not None  # anchor on first chunk only
-        assert all(s["reply_to"] is None for s in personas.sends[1:])
+        # Anchor + transcript row live on the final chunk only.
+        assert all(s["reply_to"] is None for s in personas.sends[:-1])
+        assert personas.sends[-1]["reply_to"] is not None
         assert len(store.rows) == 1  # the turn used tools → one transcript row
+        assert store.rows[0].final_message_id == str(personas.sends[-1]["sent"].id)
 
     async def test_chunks_post_in_original_order(self) -> None:
         poster, personas, _ = _poster()
@@ -325,6 +329,9 @@ class TestPostReplyMultiChunk:
         )
         assert out == "posted"
         assert [s["content"] for s in personas.sends] == chunk_split(big.strip())
+        # Pure-text multi-chunk: still anchors the last message only.
+        assert all(s["reply_to"] is None for s in personas.sends[:-1])
+        assert personas.sends[-1]["reply_to"] is not None
 
     async def test_partial_failure_still_posts_remaining_and_returns_posted(
         self, caplog: pytest.LogCaptureFixture
@@ -340,10 +347,12 @@ class TestPostReplyMultiChunk:
         assert len(personas.sends) == 2  # chunks 1 and 3 delivered despite the gap
         failed = [r for r in caplog.records if "chunk" in r.message and "failed" in r.message]
         assert len(failed) == 1
+        # Surviving final chunk still carries the anchor.
+        assert personas.sends[-1]["reply_to"] is not None
 
-    async def test_first_chunk_failure_skips_transcript_row(self) -> None:
+    async def test_final_chunk_failure_skips_transcript_row(self) -> None:
         personas = _FakePersonas()
-        personas.errors = [_http(400), None, None]  # anchor chunk fails
+        personas.errors = [None, None, _http(400)]  # anchor (final) chunk fails
         poster, _, store = _poster(personas)
         out = await poster.post_reply(
             _req(),
@@ -352,8 +361,28 @@ class TestPostReplyMultiChunk:
             initial_len=1,
             correlation_id="c1",
         )
-        assert out == "posted"  # later chunks still delivered
+        assert out == "posted"  # earlier chunks still delivered
         assert store.rows == []  # row is keyed to the anchor chunk's message id
+        # No surviving send carries the anchor — the final one failed.
+        assert all(s["reply_to"] is None for s in personas.sends)
+
+    async def test_middle_chunk_failure_still_writes_transcript_on_final(self) -> None:
+        """A gap in the middle must not drop the transcript: final chunk is the host."""
+        personas = _FakePersonas()
+        personas.errors = [None, _http(400, "bad chunk"), None]
+        poster, _, store = _poster(personas)
+        out = await poster.post_reply(
+            _req(),
+            Persona(name="scribe"),
+            _result("x" * 4500, message_history=_tool_history()),
+            initial_len=1,
+            correlation_id="c1",
+        )
+        assert out == "posted"
+        assert len(personas.sends) == 2
+        assert personas.sends[-1]["reply_to"] is not None
+        assert len(store.rows) == 1
+        assert store.rows[0].final_message_id == str(personas.sends[-1]["sent"].id)
 
     async def test_all_chunks_fail_returns_lost(self) -> None:
         personas = _FakePersonas()
