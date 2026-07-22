@@ -123,6 +123,7 @@ def test_run_creates_agent_md(tmp_path: Path) -> None:
     """A full create pass writes a re-parseable ``<name>.md`` with the chosen fields."""
     agents_dir = tmp_path / "agents"
     env_path = tmp_path / ".env"
+    # Memory defaults on, so a tools pick that omits write_file is topped up.
     prompter = _prompter(name="scribe", description="Takes notes", checkboxes=[["read_file", "web_search"]])
 
     rc = agent_create.run(prompter, agents_dir=agents_dir, env_path=env_path, name=None, home=None)
@@ -135,7 +136,9 @@ def test_run_creates_agent_md(tmp_path: Path) -> None:
     assert agent.description == "Takes notes"
     assert agent.provider == "anthropic"
     assert agent.model == "claude-haiku-4-5"
-    assert set(agent.tools) == {"read_file", "web_search"}
+    assert agent.memory is True
+    assert frontmatter.load(md).metadata["memory"] is True
+    assert set(agent.tools) == {"read_file", "web_search", "write_file"}
 
 
 def test_run_prints_created_and_next_step(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -538,6 +541,81 @@ def test_write_agent_named_grants_write_list(tmp_path: Path) -> None:
     md = _write_agent_tri(tmp_path, ["github"])
     assert frontmatter.load(md).metadata["mcp"] == ["github"]
     assert parse_agent_md(md).mcp == ("github",)
+
+
+def test_write_agent_defaults_memory_on(tmp_path: Path) -> None:
+    """New agents get an explicit ``memory: true`` so create/init teammates
+    start with the notepad enabled without changing the schema default for
+    omitted fields."""
+    md = _agents.write_agent(
+        tmp_path,
+        name="scribe",
+        description="Takes notes.",
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        tools=None,
+    )
+    assert frontmatter.load(md).metadata["memory"] is True
+    assert parse_agent_md(md).memory is True
+
+
+def test_write_agent_memory_false_is_honored(tmp_path: Path) -> None:
+    md = _agents.write_agent(
+        tmp_path,
+        name="ephemeral",
+        description="No notepad.",
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        tools=["terminal"],
+        memory=False,
+    )
+    assert frontmatter.load(md).metadata["memory"] is False
+    assert parse_agent_md(md).memory is False
+    assert parse_agent_md(md).tools == ("terminal",)
+
+
+def test_write_agent_memory_on_adds_missing_fs_tools(tmp_path: Path) -> None:
+    """An explicit tools list missing read_file/write_file is topped up when
+    memory is on, matching the factory's requirement without failing create."""
+    md = _agents.write_agent(
+        tmp_path,
+        name="scribe",
+        description="Takes notes.",
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        tools=["terminal", "web_search"],
+        memory=True,
+    )
+    assert parse_agent_md(md).tools == ("terminal", "web_search", "read_file", "write_file")
+
+
+def test_write_agent_update_preserves_existing_memory(tmp_path: Path) -> None:
+    """Re-running create against an on-disk agent must not flip its memory bit."""
+    md = tmp_path / "scribe.md"
+    md.write_text(
+        "---\n"
+        "name: scribe\n"
+        "description: old\n"
+        "provider: anthropic\n"
+        "model: claude-sonnet-4-5\n"
+        "memory: false\n"
+        "---\n"
+        "Body stays.\n",
+        encoding="utf-8",
+    )
+    _agents.write_agent(
+        tmp_path,
+        name="scribe",
+        description="new",
+        provider="openai",
+        model="gpt-5",
+        tools=["read_file"],
+        memory=True,
+    )
+    agent = parse_agent_md(md)
+    assert agent.memory is False
+    assert agent.description == "new"
+    assert md.read_text(encoding="utf-8").endswith("Body stays.\n")
 
 
 def test_create_agent_forwards_live_tools_fn_to_pick_tools(tmp_path: Path) -> None:

@@ -311,6 +311,30 @@ def is_pristine_seed(agents_dir: Path) -> bool:
     return parsed.agent_id == STARTER_AGENT_NAME and parsed.description == DEFAULT_DESCRIPTION
 
 
+# Filesystem tools a memory-enabled agent needs. Kept here (not imported from
+# the factory) so the create path can satisfy the same constraint without
+# pulling agent-runtime code into the CLI write helpers.
+_MEMORY_REQUIRED_TOOLS = ("read_file", "write_file")
+
+
+def _ensure_memory_tools(tools: list[str] | None, *, memory: bool) -> list[str] | None:
+    """Return ``tools`` with memory's required filesystem tools present when needed.
+
+    Memory-enabled agents manage their notepad with ``read_file`` / ``write_file``.
+    An omitted ``tools:`` (``None``) already discovers every builtin and is fine.
+    An explicit list that dropped either tool would otherwise pass create and
+    fail later at agent build — so top them up here and leave ordering stable
+    (required tools appended only when missing).
+    """
+    if not memory or tools is None:
+        return tools
+    ensured = list(tools)
+    for required in _MEMORY_REQUIRED_TOOLS:
+        if required not in ensured:
+            ensured.append(required)
+    return ensured
+
+
 def write_agent(
     agents_dir: Path,
     *,
@@ -320,6 +344,7 @@ def write_agent(
     model: str,
     tools: list[str] | None,
     mcp: bool | list[str] | tuple[str, ...] = True,
+    memory: bool = True,
     prune_seed: bool = False,
 ) -> Path:
     """Create or update ``agents_dir/<name>.md`` for the wizard's agent.
@@ -330,12 +355,21 @@ def write_agent(
       rewrite ``description``/``provider``/``model`` via
       :func:`md_writer._update_fields`, then the split tool grants via
       :func:`md_writer.update_tool_grants`. Both are validated-atomic, so a bad
-      value leaves the file untouched.
+      value leaves the file untouched. The existing ``memory`` setting is left
+      alone — re-running create against an on-disk agent must not silently flip
+      it.
     * **Target missing** — build the frontmatter as a mapping and serialize it
       with :func:`frontmatter.dumps` (NOT string interpolation), which
       YAML-quotes free-text values so a description like ``"Calendar: book
       meetings"`` or one carrying quotes/``#``/leading punctuation can't corrupt
-      the file. The synthetic :class:`AgentDefinition` is built *first* (mirroring
+      the file. New agents default to ``memory: true`` (written explicitly) so
+      ``disco agent create`` / ``disco init`` teammates start with the
+      persistent notepad on; the schema default for an *omitted* field stays
+      ``false`` so hand-authored and pre-existing agents are unchanged. When
+      memory is on and ``tools`` is an explicit list missing ``read_file`` /
+      ``write_file``, those tools are added before validation so the wizard
+      cannot produce an agent the factory would reject. The synthetic
+      :class:`AgentDefinition` is built *first* (mirroring
       :func:`md_writer._update_fields`), so an invalid value raises before any
       disk write. After the atomic write, when ``prune_seed`` is set and the
       operator named a *different* agent (``name != "assistant"``) on an install
@@ -359,12 +393,14 @@ def write_agent(
         md_writer.update_tool_grants(target, tools=tools, mcp=mcp)
         return target
 
+    tools = _ensure_memory_tools(tools, memory=memory)
     body = agent_body(name)
     metadata = {
         "name": name,
         "description": description,
         "provider": provider,
         "model": model,
+        "memory": memory,
     }
     if tools is not None:
         metadata["tools"] = list(tools)
