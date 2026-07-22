@@ -23,8 +23,13 @@ failed Discord render is logged and swallowed — it never faults the human turn
 from __future__ import annotations
 
 import logging
+import re
+import time
 from collections.abc import Awaitable
-from typing import assert_never
+from dataclasses import dataclass, field
+from typing import Literal, assert_never
+
+import discord
 
 from calfcord.bridge.a2a_dispatch import (
     A2ACall,
@@ -39,17 +44,14 @@ from calfcord.bridge.egress import A2AChannelResolver
 from calfcord.bridge.persona_resolve import persona_for
 from calfcord.bridge.step_events import StepEvent
 from calfcord.bridge.trace import Destination, StepTraceRenderer
+from calfcord.bridge.trace_rows import _plain
 from calfcord.discord.chunking import chunk_split
-from calfcord.discord.persona import DiscordPersonaSender, Persona
+from calfcord.discord.persona import DiscordPersonaSender
 
 logger = logging.getLogger(__name__)
 
 _EMPTY_PLACEHOLDER = "(empty response)"
 """Discord rejects an empty webhook message; substitute this for empty content."""
-
-_SYSTEM_PERSONA = persona_for("a2a")
-"""Persona for *meta* notes (rejections, handoffs, faults) that are not a peer's
-own words — rendered as a system annotation, not attributed to an agent (D-2)."""
 
 _AUDIT_GAP_REMEDY = (
     "Agent-to-agent exchanges are NOT being recorded. A 403 (error code 50013) here usually means "
@@ -64,25 +66,81 @@ this text exists to end."""
 # Thread-name shaping (re-homed from the old private_chat tool).
 _THREAD_NAME_MAX_TOTAL = 100
 """Discord's hard cap on thread names; exceeding it 400s the create."""
-_THREAD_NAME_CONTENT_MAX = 40
-"""Soft cap on the topic-tail portion (after ``caller→peer: ``)."""
-_THREAD_NAME_EMPTY_PLACEHOLDER = "<empty>"
-"""Substituted when the seed content is empty, avoiding a bare-trailing-space name."""
+_THREAD_NAME_EMPTY_PLACEHOLDER = "consultation"
+"""Turn-level subject when the triggering human message is empty."""
 
 
-def _build_thread_name(caller: str, peer: str, content: str) -> str:
-    """Produce a thread name like ``'conan→scribe: please summarize the doc'``.
+def _build_thread_name(root_agent: str, content: str) -> str:
+    """Produce a turn-level thread name like ``'marketing · plan launch'``.
 
     Control characters are normalized to spaces and runs collapsed; the topic tail
-    is truncated to :data:`_THREAD_NAME_CONTENT_MAX` and the whole name hard-capped
-    at :data:`_THREAD_NAME_MAX_TOTAL` (Discord's limit). The ``→`` (U+2192)
-    separator is char-counted (not byte-counted) by Discord, so it is cheap.
+    The leading routing token is removed when it names ``root_agent``; thread
+    identity describes the human turn, never whichever parallel peer happened to
+    be projected first.
     """
     cleaned = " ".join("".join(c if c.isprintable() else " " for c in content).split())
-    if not cleaned:
-        cleaned = _THREAD_NAME_EMPTY_PLACEHOLDER
-    name = f"{caller}→{peer}: {cleaned[:_THREAD_NAME_CONTENT_MAX]}"
+    cleaned = re.sub(rf"^!{re.escape(root_agent)}(?:\s+|$)", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = cleaned or _THREAD_NAME_EMPTY_PLACEHOLDER
+    name = f"{root_agent} · {cleaned}"
     return name[:_THREAD_NAME_MAX_TOTAL]
+
+
+BranchState = Literal["pending", "replied", "rejected", "failed", "interrupted"]
+
+
+@dataclass(slots=True)
+class _Branch:
+    request: A2ARequest
+    message_id: int
+    opened_at: float
+    state: BranchState = "pending"
+
+
+@dataclass(slots=True)
+class _Turn:
+    root_agent: str
+    subject: str
+    thread_id: int | None = None
+    branches: dict[str, _Branch] = field(default_factory=dict)
+
+
+class _ConsultCard(discord.ui.LayoutView):
+    def __init__(
+        self,
+        request: A2ARequest,
+        *,
+        state: BranchState,
+        note: str = "",
+        elapsed: float | None = None,
+    ) -> None:
+        super().__init__(timeout=None)
+        glyph, status = {
+            "pending": ("↗", "Consulting"),
+            "replied": ("✓", "Consulted"),
+            "rejected": ("⊘", "Not dispatched"),
+            "failed": ("❌", "Failed"),
+            "interrupted": ("⚠", "No response"),
+        }[state]
+        timing = f" · {elapsed:.1f}s" if elapsed is not None else ""
+        status_line = f"-# **{status}**{timing}"
+        if note:
+            status_line += f" · {_card_plain(note, 240)}"
+        prompt = _card_plain(request.message, 3000) or _EMPTY_PLACEHOLDER
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    content=f"### {glyph} {_card_plain(request.caller)} → {_card_plain(request.peer)}"
+                ),
+                discord.ui.TextDisplay(content=status_line),
+                discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                discord.ui.TextDisplay(content=f"> {prompt}"),
+            )
+        )
+
+
+def _card_plain(text: str, limit: int = 120) -> str:
+    """Flatten, markdown-escape, and safely bound model-controlled card text."""
+    return str(_plain(text, limit))
 
 
 _REQUEST_PREVIEW_MAX = 60
@@ -122,6 +180,7 @@ class A2AProjector:
         self._resolver = resolver
         self._personas = personas
         self._threads: dict[str, int] = {}
+        self._turns: dict[str, _Turn] = {}
         # The audit channel's OWN step renderer — a DIFFERENT instance from the
         # one rendering the human's thread (ADR-0026). Two surfaces, two entry
         # maps: both are keyed by correlation_id and both see the same one for a
@@ -129,6 +188,12 @@ class A2AProjector:
         self._steps = steps
         self._channel_id: int | None = None
         self._degraded = False
+
+    async def begin_turn(self, *, correlation_id: str, root_agent: str, subject: str) -> None:
+        """Register metadata used when the first consult lazily anchors its thread."""
+        # Idempotent for defensive re-entry: metadata registration must never
+        # discard cards already opened for this run.
+        self._turns.setdefault(correlation_id, _Turn(root_agent=root_agent, subject=subject))
 
     async def project(self, projection: A2AProjection) -> str | None:
         """Render one projection; return the audit thread's jump URL, or ``None``.
@@ -145,7 +210,7 @@ class A2AProjector:
         received this exchange. A receipt cannot drift from what was written.
         """
         thread_id = await self._guarded(self._dispatch(projection), type(projection).__name__)
-        if thread_id is None:
+        if thread_id is None or thread_id <= 0:
             return None
         return f"https://discord.com/channels/{self._resolver.guild_id}/{thread_id}"
 
@@ -191,16 +256,14 @@ class A2AProjector:
         )
 
     async def project_fault(self, call: A2ACall) -> None:
-        """Note a consult that never got a reply because the peer faulted (D-2)."""
-        await self._guarded(
-            self._emit(
-                call.correlation_id,
-                _SYSTEM_PERSONA,
-                f"⚠️ {call.peer} did not reply — the consult faulted before a response.",
-                thread_name=_build_thread_name(call.caller, call.peer, call.message),
-            ),
-            "A2AFault",
-        )
+        """Resolve the original card when a consult never produced a result."""
+        turn = self._turns.get(call.correlation_id)
+        if turn is None or call.tool_call_id not in turn.branches:
+            # Nested consults have inline rows, not cards. A request whose card
+            # failed to open has already logged the real audit gap. Neither case
+            # is a second Discord outage and must not poison the gap latch.
+            return
+        await self._guarded(self._resolve_branch(call.correlation_id, call.tool_call_id, "interrupted"), "A2AFault")
 
     async def project_step(self, step: StepEvent) -> None:
         """Fold one CONSULTED agent's step into its trace in that turn's thread
@@ -214,9 +277,9 @@ class A2AProjector:
         one edited-in-place message rather than 23 (ADR-0017), rendered in the
         same row grammar (ADR-0024).
 
-        A step never CREATES the thread: a thread is named ``caller→peer`` from
-        the consult, which a step cannot supply, and a step cannot precede its own
-        consult. So no thread means the request's render failed (best-effort) —
+        A step never CREATES the thread: the first consult's route card anchors
+        the turn-level thread, and a step cannot precede its own consult. So no
+        thread means the request's render failed (best-effort) —
         drop, matching the audit gap already logged there.
         """
         thread_id = self._threads.get(step.correlation_id)
@@ -306,60 +369,76 @@ class A2AProjector:
     async def finish(self, correlation_id: str) -> None:
         """Retire the turn's projector state.
 
-        MUST run after the terminal reply: a faulted run synthesises its
-        dangling-consult notes during delivery, and ``_emit`` needs the turn's
-        thread still mapped — evicting first would create a SECOND thread and
-        orphan each note in it.
+        MUST run after terminal delivery: a faulted run synthesises dangling
+        consult outcomes there, and their cards need the turn's thread mapping.
 
         The eviction is unconditional (a ``finally``) because ``_threads`` was
         previously never evicted at all. That was tolerable at ~100 bytes per
         turn; it is not now the projector owns a renderer, because an unretired
         entry strands a live asyncio writer task per turn.
         """
+        turn = self._turns.get(correlation_id)
+        if turn is not None:
+            for tool_call_id, branch in list(turn.branches.items()):
+                if branch.state != "pending":
+                    continue
+                await self._guarded(
+                    self._resolve_branch(correlation_id, tool_call_id, "interrupted"),
+                    "A2AInterruptedCard",
+                )
         try:
             await self._steps.finish(correlation_id)
         finally:
             self._threads.pop(correlation_id, None)
+            self._turns.pop(correlation_id, None)
 
     async def _dispatch(self, projection: A2AProjection) -> int:
         """Render one projection and return the thread it landed in."""
         if isinstance(projection, A2ARequest):
-            return await self._emit(
-                projection.correlation_id,
-                persona_for(projection.caller),
-                projection.message,
-                thread_name=_build_thread_name(projection.caller, projection.peer, projection.message),
-            )
+            return await self._open_branch(projection)
         elif isinstance(projection, A2AReply):
-            return await self._emit(
-                projection.correlation_id,
-                persona_for(projection.peer),
-                projection.text,
-                thread_name=_build_thread_name(projection.caller, projection.peer, projection.text),
-            )
+            turn = self._turns.get(projection.correlation_id)
+            branch = turn.branches.get(projection.tool_call_id) if turn is not None else None
+            if branch is not None and turn is not None:
+                # Card edits are cosmetic: a failed edit must not suppress the peer's
+                # substantive response, so it has its own best-effort boundary.
+                try:
+                    thread_id = await self._resolve_branch(
+                        projection.correlation_id,
+                        projection.tool_call_id,
+                        "replied",
+                        record_state=False,
+                    )
+                except Exception:
+                    self._note_gap("A2AReplyCard")
+                    thread_id = turn.thread_id or 0
+                # If thread creation failed after the card reached the parent,
+                # preserve the answer beside the card but return no jump receipt.
+                await self._post_response(projection, turn.thread_id, branch=branch)
+                return thread_id
+
+            # Nested requests are represented by an inline trace row, not a
+            # standalone card. Their reply still needs its explicit return route.
+            thread_id = self._threads.get(projection.correlation_id, 0)
+            if thread_id <= 0:
+                return 0
+            await self._post_response(projection, thread_id, branch=None)
+            return thread_id
         elif isinstance(projection, A2AReject):
-            # A rejected consult (peer offline / cycle / self) is a system note,
-            # not a peer post — the peer never spoke (D-2).
-            return await self._emit(
-                projection.correlation_id,
-                _SYSTEM_PERSONA,
-                f"⚠️ consult to {projection.peer} was rejected: {projection.text}",
-                thread_name=_build_thread_name(projection.caller, projection.peer, projection.text),
+            turn = self._turns.get(projection.correlation_id)
+            if turn is None or projection.tool_call_id not in turn.branches:
+                return 0
+            return await self._resolve_branch(
+                projection.correlation_id, projection.tool_call_id, "rejected", note=projection.text
             )
         elif isinstance(projection, A2AFailed):
-            # A consult that reached the peer but faulted — a system note distinct
-            # from a refused dispatch (A2AReject); the peer engaged but errored.
-            return await self._emit(
-                projection.correlation_id,
-                _SYSTEM_PERSONA,
-                f"💥 consult to {projection.peer} failed: {projection.text}",
-                thread_name=_build_thread_name(projection.caller, projection.peer, projection.text),
+            turn = self._turns.get(projection.correlation_id)
+            if turn is None or projection.tool_call_id not in turn.branches:
+                return 0
+            return await self._resolve_branch(
+                projection.correlation_id, projection.tool_call_id, "failed", note=projection.text
             )
         else:
-            # Exhaustiveness guard: a 4th A2AProjection variant added without a
-            # branch here is a mypy error, not a silent no-op render. (Handoffs
-            # are NOT projected here — they render inline in the main step stream
-            # via the step-trace renderer; the dispatcher no longer emits them.)
             assert_never(projection)
 
     async def _channel(self) -> int:
@@ -367,25 +446,82 @@ class A2AProjector:
             self._channel_id = await self._resolver.resolve_unified_channel()
         return self._channel_id
 
-    async def _emit(self, correlation_id: str, persona: Persona, content: str, *, thread_name: str) -> int:
-        """Post ``content`` under ``persona`` into ``correlation_id``'s thread, and
-        return that thread's id.
-
-        Creates the thread lazily on the first projection for the turn — the first
-        content chunk becomes the thread's anchor/starter message — then posts any
-        remaining chunks into the thread. Content over Discord's 2000-char limit is
-        split (:func:`chunk_split`); empty content uses :data:`_EMPTY_PLACEHOLDER`.
-        """
+    async def _open_branch(self, request: A2ARequest) -> int:
         channel_id = await self._channel()
-        chunks = chunk_split(content) or [_EMPTY_PLACEHOLDER]
-        thread_id = self._threads.get(correlation_id)
-        if thread_id is None:
-            sent = await self._personas.send(persona, channel_id=channel_id, content=chunks[0])
-            thread_id = await self._resolver.create_anchored_thread(channel_id, sent.id, name=thread_name)
-            self._threads[correlation_id] = thread_id
-            rest = chunks[1:]
-        else:
-            rest = chunks
-        for chunk in rest:
-            await self._personas.send(persona, channel_id=channel_id, content=chunk, thread_id=thread_id)
-        return thread_id
+        turn = self._turns.setdefault(
+            request.correlation_id,
+            _Turn(root_agent=request.caller, subject=request.message),
+        )
+        sent = await self._personas.send_components(
+            persona=persona_for(request.caller),
+            channel_id=channel_id,
+            view=_ConsultCard(request, state="pending"),
+            thread_id=turn.thread_id,
+        )
+        turn.branches[request.tool_call_id] = _Branch(
+            request=request,
+            message_id=sent.id,
+            opened_at=time.monotonic(),
+        )
+        if turn.thread_id is None:
+            turn.thread_id = await self._resolver.create_anchored_thread(
+                channel_id,
+                sent.id,
+                name=_build_thread_name(turn.root_agent, turn.subject),
+            )
+            self._threads[request.correlation_id] = turn.thread_id
+        return turn.thread_id
+
+    async def _resolve_branch(
+        self,
+        correlation_id: str,
+        tool_call_id: str,
+        state: BranchState,
+        *,
+        note: str = "",
+        record_state: bool = True,
+    ) -> int:
+        turn = self._turns.get(correlation_id)
+        if turn is None:
+            raise RuntimeError(f"A2A result has no turn thread: {correlation_id}")
+        branch = turn.branches.get(tool_call_id)
+        if branch is None:
+            raise RuntimeError(f"A2A result has no request card: {tool_call_id}")
+        # Runtime truth is independent of Discord projection success. Once the
+        # outcome event exists, finish must never relabel it "No response" merely
+        # because this best-effort card edit failed.
+        if record_state:
+            branch.state = state
+        channel_id = self._channel_id or await self._channel()
+        await self._personas.edit_components(
+            channel_id=channel_id,
+            message_id=branch.message_id,
+            view=_ConsultCard(
+                branch.request,
+                state=state,
+                note=note,
+                elapsed=max(0.0, time.monotonic() - branch.opened_at),
+            ),
+            thread_id=turn.thread_id,
+        )
+        return turn.thread_id or 0
+
+    async def _post_response(self, projection: A2AReply, thread_id: int | None, *, branch: _Branch | None) -> None:
+        await self._steps.flush(projection.correlation_id)
+        channel_id = self._channel_id or await self._channel()
+        prefix = f"-# **↩ {_card_plain(projection.peer)} → {_card_plain(projection.caller)} · response**"
+        content = projection.text or _EMPTY_PLACEHOLDER
+        chunks = chunk_split(f"{prefix}\n\n{content}")
+        for chunk in chunks:
+            await self._personas.send(
+                persona_for(projection.peer),
+                channel_id=channel_id,
+                content=chunk,
+                thread_id=thread_id,
+                suppress_mentions=True,
+            )
+            # Once any body chunk is visible, "No response" would be false even
+            # if a later chunk fails. A first-send failure leaves the card pending
+            # so finish can honestly correct it.
+            if branch is not None:
+                branch.state = "replied"

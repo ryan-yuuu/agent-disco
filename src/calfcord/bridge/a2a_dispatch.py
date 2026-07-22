@@ -20,10 +20,13 @@ Peer identity for the projected thread therefore always comes from the
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from calfcord.bridge.step_events import StepEvent
 from calfcord.bridge.trace_rows import RowState
+
+logger = logging.getLogger(__name__)
 
 _MESSAGE_AGENT = "message_agent"
 
@@ -120,6 +123,9 @@ class A2ADispatcher:
         # control (both are ADR-0011). It is rendered inline in the main step
         # stream by the step-trace renderer, so it falls through to ``return None``.
         if step.kind == "tool_call" and step.name == _MESSAGE_AGENT:
+            if not step.tool_call_id:
+                logger.warning("A2A consult missing tool_call_id; leaving it in the ordinary step trace")
+                return None
             args = step.args or {}
             call = A2ACall(
                 tool_call_id=step.tool_call_id or "",

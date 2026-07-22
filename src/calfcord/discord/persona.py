@@ -314,6 +314,7 @@ class DiscordPersonaSender:
         *,
         thread_id: int | None = None,
         reply_to: ReplyContext | None = None,
+        suppress_mentions: bool = False,
     ) -> SentMessage:
         """Send a message rendered under ``persona``'s identity.
 
@@ -330,6 +331,8 @@ class DiscordPersonaSender:
                 cannot produce real ``type: 19`` reply messages, so this
                 embed (author + snippet + jump link) is the closest
                 possible UX. See :class:`ReplyContext`.
+            suppress_mentions: Disable all Discord mention parsing for audit or
+                other model-controlled messages that must never notify users.
 
         Returns:
             :class:`SentMessage`. Its ``channel_id`` field is ``thread_id``
@@ -374,6 +377,7 @@ class DiscordPersonaSender:
             embeds=embeds,
             view=view,
             wait=True,  # required so the response carries the message ID
+            allowed_mentions=_NO_MENTIONS if suppress_mentions else discord.utils.MISSING,
         )
 
         message_channel = thread_id if thread_id is not None else channel_id

@@ -17,7 +17,7 @@ import discord
 import pytest
 
 from calfcord.bridge.a2a_dispatch import A2ACall, A2AFailed, A2AReject, A2AReply, A2ARequest
-from calfcord.bridge.a2a_project import _EMPTY_PLACEHOLDER, _SYSTEM_PERSONA, A2AProjector
+from calfcord.bridge.a2a_project import A2AProjector
 from calfcord.bridge.step_events import StepEvent
 from calfcord.bridge.trace import StepTraceRenderer
 from calfcord.discord.messages import SentMessage
@@ -31,8 +31,12 @@ class _FakePersonas:
         # the plain projection posts so tests can assert each surface on its own.
         self.component_sends: list[dict[str, Any]] = []
         self.component_edits: list[dict[str, Any]] = []
+        self.card_sends: list[dict[str, Any]] = []
+        self.card_edits: list[dict[str, Any]] = []
         self._next_id = 1000
         self.fail_on_send = False
+        self.fail_on_component_send = False
+        self.fail_on_component_edit = False
 
     async def send(
         self,
@@ -41,11 +45,20 @@ class _FakePersonas:
         content: str,
         *,
         thread_id: int | None = None,
+        suppress_mentions: bool = False,
     ) -> SentMessage:
         if self.fail_on_send:
             raise discord.HTTPException(response=_FakeResponse(), message="boom")
         self._next_id += 1
-        self.sends.append({"persona": persona, "channel_id": channel_id, "content": content, "thread_id": thread_id})
+        self.sends.append(
+            {
+                "persona": persona,
+                "channel_id": channel_id,
+                "content": content,
+                "thread_id": thread_id,
+                "suppress_mentions": suppress_mentions,
+            }
+        )
         return SentMessage(id=self._next_id, channel_id=thread_id or channel_id)
 
     async def send_components(
@@ -56,10 +69,11 @@ class _FakePersonas:
         view: discord.ui.LayoutView,
         thread_id: int | None = None,
     ) -> SentMessage:
+        if self.fail_on_component_send:
+            raise discord.HTTPException(response=_FakeResponse(), message="boom")
         self._next_id += 1
-        self.component_sends.append(
-            {"persona": persona, "channel_id": channel_id, "thread_id": thread_id, "body": _view_body(view)}
-        )
+        record = {"persona": persona, "channel_id": channel_id, "thread_id": thread_id, "body": _view_body(view)}
+        (self.card_sends if record["body"].startswith("### ") else self.component_sends).append(record)
         return SentMessage(id=self._next_id, channel_id=thread_id or channel_id)
 
     async def edit_components(
@@ -70,16 +84,17 @@ class _FakePersonas:
         view: discord.ui.LayoutView,
         thread_id: int | None = None,
     ) -> None:
-        self.component_edits.append(
-            {"channel_id": channel_id, "message_id": message_id, "thread_id": thread_id, "body": _view_body(view)}
-        )
+        if self.fail_on_component_edit:
+            raise discord.HTTPException(response=_FakeResponse(), message="boom")
+        record = {"channel_id": channel_id, "message_id": message_id, "thread_id": thread_id, "body": _view_body(view)}
+        (self.card_edits if record["body"].startswith("### ") else self.component_edits).append(record)
 
 
 def _view_body(view: discord.ui.LayoutView) -> str:
-    """The text of the view's single ``TextDisplay`` (the segment body)."""
+    """All text displayed by a Components-V2 view, in visual order."""
     bodies = [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
-    assert len(bodies) == 1, f"expected exactly one TextDisplay per segment view, got {len(bodies)}"
-    return bodies[0]
+    assert bodies, "expected at least one TextDisplay"
+    return "\n".join(bodies)
 
 
 class _FakeResolver:
@@ -90,12 +105,15 @@ class _FakeResolver:
         self.resolve_calls = 0
         self.created: list[dict[str, Any]] = []
         self._next_thread = 9000
+        self.fail_on_create = False
 
     async def resolve_unified_channel(self) -> int:
         self.resolve_calls += 1
         return self._channel_id
 
     async def create_anchored_thread(self, channel_id: int, anchor_message_id: int, *, name: str) -> int:
+        if self.fail_on_create:
+            raise discord.HTTPException(response=_FakeResponse(), message="boom")
         self._next_thread += 1
         self.created.append({"channel_id": channel_id, "anchor": anchor_message_id, "name": name})
         return self._next_thread
@@ -113,6 +131,140 @@ def _make(*, interval: float = 0.0) -> tuple[A2AProjector, _FakePersonas, _FakeR
     # these tests exercise the actual aggregation rather than a stand-in.
     steps = StepTraceRenderer(personas, min_edit_interval=interval)  # type: ignore[arg-type]
     return A2AProjector(resolver, personas, steps), personas, resolver  # type: ignore[arg-type]
+
+
+async def _begin(proj: A2AProjector, *, subject: str = "Plan the Reddit launch") -> None:
+    await proj.begin_turn(correlation_id="c1", root_agent="marketing", subject=subject)
+
+
+class TestTurnScopedConsultCards:
+    """The audit thread is one turn-level trace with one editable card per call."""
+
+    async def test_first_request_anchors_a_components_card_with_a_turn_level_title(self) -> None:
+        proj, personas, resolver = _make()
+        await _begin(proj, subject="!marketing   Plan\n the Reddit launch")
+
+        await proj.project(
+            A2ARequest(
+                correlation_id="c1",
+                tool_call_id="t1",
+                caller="marketing",
+                peer="grok",
+                message="Pressure-test the launch copy",
+            )
+        )
+
+        assert personas.sends == []
+        assert len(personas.card_sends) == 1
+        card = personas.card_sends[0]
+        assert card["persona"].name == "marketing"
+        assert card["thread_id"] is None
+        assert "↗ marketing → grok" in card["body"]
+        assert "Consulting" in card["body"]
+        assert "Pressure-test the launch copy" in card["body"]
+        assert resolver.created == [
+            {"channel_id": 500, "anchor": 1001, "name": "marketing · Plan the Reddit launch"}
+        ]
+
+    async def test_parallel_results_edit_only_their_own_cards_and_post_routed_responses(self) -> None:
+        proj, personas, resolver = _make()
+        await _begin(proj)
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy")
+        )
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="marketing", peer="sol", message="facts")
+        )
+
+        await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t2", caller="marketing", peer="sol", text="fact check")
+        )
+        await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", text="new hook")
+        )
+
+        assert len(resolver.created) == 1
+        assert [send["thread_id"] for send in personas.card_sends] == [None, 9001]
+        assert [edit["message_id"] for edit in personas.card_edits] == [1002, 1001]
+        assert all("Consulted" in edit["body"] for edit in personas.card_edits)
+        assert [(send["persona"].name, send["content"]) for send in personas.sends] == [
+            ("sol", "-# **↩ sol → marketing · response**\n\nfact check"),
+            ("grok", "-# **↩ grok → marketing · response**\n\nnew hook"),
+        ]
+        assert all("✓ marketing →" not in send["content"] for send in personas.sends)
+        assert all(send["suppress_mentions"] is True for send in personas.sends)
+
+    async def test_rejection_and_dangling_fault_resolve_the_original_card_without_extra_messages(self) -> None:
+        proj, personas, _ = _make()
+        await _begin(proj)
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy")
+        )
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="marketing", peer="sol", message="facts")
+        )
+
+        await proj.project(
+            A2AReject(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", text="cycle")
+        )
+        await proj.project_fault(
+            A2ACall(tool_call_id="t2", correlation_id="c1", caller="marketing", peer="sol", message="facts")
+        )
+
+        assert personas.sends == []
+        assert [edit["message_id"] for edit in personas.card_edits] == [1001, 1002]
+        assert "Not dispatched" in personas.card_edits[0]["body"]
+        assert "cycle" in personas.card_edits[0]["body"]
+        assert "No response" in personas.card_edits[1]["body"]
+
+    async def test_thread_create_failure_keeps_the_card_resolvable_without_a_false_link(self) -> None:
+        proj, personas, resolver = _make()
+        resolver.fail_on_create = True
+        assert await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy")
+        ) is None
+        await proj.project_fault(
+            A2ACall(tool_call_id="t1", correlation_id="c1", caller="marketing", peer="grok", message="copy")
+        )
+        assert "No response" in personas.card_edits[-1]["body"]
+        assert personas.card_edits[-1]["thread_id"] is None
+
+    async def test_thread_create_failure_still_posts_a_successful_reply_beside_the_parent_card(self) -> None:
+        proj, personas, resolver = _make()
+        resolver.fail_on_create = True
+        request = A2ARequest(
+            correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy"
+        )
+        assert await proj.project(request) is None
+
+        assert await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", text="answer")
+        ) is None
+
+        assert "Consulted" in personas.card_edits[-1]["body"]
+        assert personas.card_edits[-1]["thread_id"] is None
+        assert personas.sends[-1]["thread_id"] is None
+        assert personas.sends[-1]["content"].endswith("answer")
+        await proj.finish("c1")
+        assert not any("No response" in edit["body"] for edit in personas.card_edits)
+
+    async def test_a_failed_card_edit_does_not_suppress_the_peer_response(self) -> None:
+        proj, personas, _ = _make()
+        await _begin(proj)
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", message="copy")
+        )
+        personas.fail_on_component_edit = True
+
+        url = await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="marketing", peer="grok", text="answer")
+        )
+
+        assert url == "https://discord.com/channels/42/9001"
+        assert personas.sends[-1]["content"].endswith("answer")
+        personas.fail_on_component_edit = False
+        await proj.finish("c1")
+        assert not any("No response" in edit["body"] for edit in personas.card_edits)
 
 
 def _step(
@@ -156,119 +308,36 @@ async def _until(predicate: Callable[[], bool], timeout: float = 2.0) -> None:
         await asyncio.sleep(0.001)
 
 
-class TestRequest:
-    async def test_first_request_anchors_thread_under_caller_persona(self) -> None:
-        proj, personas, resolver = _make()
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="summarize")
-        )
-        # one anchor send under the caller persona, into the unified channel (no thread yet)
-        assert len(personas.sends) == 1
-        send = personas.sends[0]
-        assert send["persona"].name == "scribe"
-        assert send["channel_id"] == 500 and send["thread_id"] is None
-        assert send["content"] == "summarize"
-        # a thread was anchored on the sent message, named caller→peer
-        assert len(resolver.created) == 1
-        assert resolver.created[0]["name"] == "scribe→conan: summarize"
-        assert proj._threads["c1"] == 9001
-
-    async def test_second_request_same_correlation_reuses_thread(self) -> None:
-        proj, personas, resolver = _make()
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="one")
-        )
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t2", caller="scribe", peer="dot", message="two")
-        )
-        # only one thread ever created; the second request posts INTO it
-        assert len(resolver.created) == 1
-        assert personas.sends[1]["thread_id"] == 9001
-        assert personas.sends[1]["content"] == "two"
-
-    async def test_empty_message_uses_placeholder(self) -> None:
-        proj, personas, _ = _make()
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="")
-        )
-        assert personas.sends[0]["content"] == _EMPTY_PLACEHOLDER
-
-
-class TestReply:
-    async def test_reply_posts_under_peer_persona_in_thread(self) -> None:
-        proj, personas, resolver = _make()
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
-        )
-        await proj.project(
-            A2AReply(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="the answer")
-        )
-        # no second thread; reply posted into the existing thread under the PEER persona
-        assert len(resolver.created) == 1
-        reply_send = personas.sends[1]
-        assert reply_send["persona"].name == "conan"
-        assert reply_send["thread_id"] == 9001
-        assert reply_send["content"] == "the answer"
-
-
-class TestReject:
-    async def test_reject_renders_system_note_not_peer_post(self) -> None:
-        proj, personas, _ = _make()
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="ghost", message="q")
-        )
-        await proj.project(
-            A2AReject(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="ghost", text="agent offline")
-        )
-        note = personas.sends[1]
-        assert note["persona"].name == _SYSTEM_PERSONA.name  # NOT "ghost"
-        assert note["thread_id"] == 9001
-        assert "ghost" in note["content"] and "agent offline" in note["content"]
-
-
-class TestFailed:
-    async def test_failed_renders_system_note_distinct_from_reject(self) -> None:
+class TestResponseDeliveryFailure:
+    async def test_failed_body_send_allows_finish_to_correct_the_card(self) -> None:
         proj, personas, _ = _make()
         await proj.project(
             A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
         )
-        await proj.project(
-            A2AFailed(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="boom")
-        )
-        note = personas.sends[1]
-        assert note["persona"].name == _SYSTEM_PERSONA.name  # NOT "conan"
-        assert note["thread_id"] == 9001
-        content = note["content"]
-        assert "conan" in content and "boom" in content and "failed" in content
-        assert "rejected" not in content  # distinct from the A2AReject note
+        personas.fail_on_send = True
+        assert await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="answer")
+        ) is None
+        personas.fail_on_send = False
+        await proj.finish("c1")
+        assert "No response" in personas.card_edits[-1]["body"]
 
 
-class TestFault:
-    async def test_project_fault_notes_dangling_consult(self) -> None:
+class TestResponseChunking:
+    async def test_oversized_response_labels_only_the_first_chunk(self) -> None:
         proj, personas, _ = _make()
         await proj.project(
             A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
         )
-        await proj.project_fault(
-            A2ACall(tool_call_id="t1", correlation_id="c1", caller="scribe", peer="conan", message="q")
-        )
-        note = personas.sends[1]
-        assert note["persona"].name == _SYSTEM_PERSONA.name
-        assert "conan" in note["content"] and note["thread_id"] == 9001
-
-
-class TestChunking:
-    async def test_oversized_content_splits_anchor_then_thread(self) -> None:
-        proj, personas, _ = _make()
-        big = "x" * 4500  # > 2 chunks at CHUNK_SAFE_SIZE=1990
+        big = "x" * 4500
         await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message=big)
+            A2AReply(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text=big)
         )
-        # first chunk is the anchor (no thread), remaining chunks go INTO the thread
-        assert personas.sends[0]["thread_id"] is None
-        assert all(s["thread_id"] == 9001 for s in personas.sends[1:])
-        assert len(personas.sends) >= 3
-        assert "".join(s["content"] for s in personas.sends) == big
+        assert personas.sends[0]["content"].startswith("-# **↩ conan → scribe · response**")
+        assert all("response**" not in send["content"] for send in personas.sends[1:])
+        rendered = "".join(send["content"] for send in personas.sends)
+        assert rendered.endswith(big)
+        assert all(len(send["content"]) <= 2000 for send in personas.sends)
 
 
 class TestProjectReturnsAReceipt:
@@ -290,7 +359,7 @@ class TestProjectReturnsAReceipt:
         # turn. Nothing was written, so there is nothing to link to — the caller
         # renders the audit gap instead of a link to nowhere.
         proj, personas, _resolver = _make()
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
         assert await proj.project(self._req()) is None
 
     async def test_a_failed_second_consult_does_not_inherit_the_first_s_link(self) -> None:
@@ -300,8 +369,41 @@ class TestProjectReturnsAReceipt:
         # confident link to an exchange that isn't there.
         proj, personas, _resolver = _make()
         assert await proj.project(self._req(tcid="t1", peer="conan", msg="q1")) is not None
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
         assert await proj.project(self._req(tcid="t2", peer="dot", msg="q2")) is None
+
+    @pytest.mark.parametrize("outcome", ["reject", "failed"])
+    async def test_an_outcome_for_a_missing_card_never_returns_an_existing_thread(self, outcome: str) -> None:
+        proj, personas, _resolver = _make()
+        assert await proj.project(self._req(tcid="t1", peer="conan", msg="q1")) is not None
+        personas.fail_on_component_send = True
+        assert await proj.project(self._req(tcid="t2", peer="dot", msg="q2")) is None
+        projection: A2AReject | A2AFailed
+        if outcome == "reject":
+            projection = A2AReject(
+                correlation_id="c1", tool_call_id="t2", caller="scribe", peer="dot", text="offline"
+            )
+        else:
+            projection = A2AFailed(
+                correlation_id="c1", tool_call_id="t2", caller="scribe", peer="dot", text="boom"
+            )
+        assert await proj.project(projection) is None
+
+    async def test_a_nested_reply_without_a_thread_returns_no_receipt(self) -> None:
+        proj, _personas, _resolver = _make()
+        assert await proj.project(
+            A2AReply(correlation_id="c1", tool_call_id="nested", caller="conan", peer="dot", text="answer")
+        ) is None
+
+    async def test_begin_turn_is_idempotent_and_does_not_discard_open_cards(self) -> None:
+        proj, personas, _resolver = _make()
+        await _begin(proj)
+        await proj.project(self._req())
+        await proj.begin_turn(correlation_id="c1", root_agent="wrong", subject="wrong")
+        await proj.project(
+            A2AReject(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="offline")
+        )
+        assert "Not dispatched" in personas.card_edits[-1]["body"]
 
 
 class TestFailureIsLoudButNotSpammy:
@@ -320,7 +422,7 @@ class TestFailureIsLoudButNotSpammy:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         proj, personas, _resolver = _make()
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
         with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
             await proj.project(self._req())
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
@@ -329,7 +431,7 @@ class TestFailureIsLoudButNotSpammy:
 
     async def test_repeat_failures_do_not_re_log_at_error(self, caplog: pytest.LogCaptureFixture) -> None:
         proj, personas, _resolver = _make()
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
         with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
             for i in range(5):
                 await proj.project(self._req(f"c{i}"))
@@ -341,35 +443,53 @@ class TestFailureIsLoudButNotSpammy:
         # latch stuck and demote the next genuine outage to DEBUG — losing exactly
         # the loud line the latch exists to protect.
         proj, personas, _resolver = _make()
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
         await proj.project(self._req("c1"))  # arms the latch
-        personas.fail_on_send = False
+        personas.fail_on_component_send = False
+        await proj.project(self._req("c2"))
         await proj.project_fault(
             A2ACall(tool_call_id="t1", correlation_id="c2", caller="scribe", peer="conan", message="q")
         )
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
+        caplog.clear()
         with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
             await proj.project(self._req("c3"))
-        assert [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
 
     async def test_recovery_re_arms_the_error(self, caplog: pytest.LogCaptureFixture) -> None:
         # A channel fixed and then re-broken must announce itself again — the latch
         # suppresses noise from ONE ongoing outage, not every future one.
         proj, personas, _resolver = _make()
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
         await proj.project(self._req("c1"))
-        personas.fail_on_send = False
+        personas.fail_on_component_send = False
         await proj.project(self._req("c2"))  # recovered
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
+        caplog.clear()
         with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
             await proj.project(self._req("c3"))
-        assert [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+
+    async def test_a_nested_dangling_fault_does_not_poison_the_gap_latch(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        proj, personas, _resolver = _make()
+        await proj.project(self._req("c1"))
+        await proj.project_fault(
+            A2ACall(tool_call_id="nested", correlation_id="c1", caller="conan", peer="dot", message="q")
+        )
+        assert proj._degraded is False
+        personas.fail_on_component_send = True
+        caplog.clear()
+        with caplog.at_level(logging.ERROR, logger="calfcord.bridge.a2a_project"):
+            await proj.project(self._req("c2"))
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
 
 
 class TestBestEffort:
     async def test_discord_failure_is_swallowed(self) -> None:
         proj, personas, _ = _make()
-        personas.fail_on_send = True
+        personas.fail_on_component_send = True
         # must NOT raise — a failed render is an accepted audit gap
         await proj.project(
             A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
@@ -381,16 +501,18 @@ class TestBestEffort:
 
 
 @pytest.mark.parametrize(
-    ("content", "expected_tail"),
-    [("hello\nworld", "hello world"), ("", "<empty>"), ("a" * 80, "a" * 40)],
+    ("content", "expected"),
+    [
+        ("hello\nworld", "alice · hello world"),
+        ("", "alice · consultation"),
+        ("!alice   plan the launch", "alice · plan the launch"),
+    ],
 )
-def test_thread_name_shaping(content: str, expected_tail: str) -> None:
+def test_thread_name_shaping(content: str, expected: str) -> None:
     from calfcord.bridge.a2a_project import _build_thread_name
 
-    name = _build_thread_name("alice", "bob", content)
-    assert name.startswith("alice→bob: ")
-    assert name.endswith(expected_tail)
-    assert len(name) <= 100
+    assert _build_thread_name("alice", content) == expected
+    assert len(_build_thread_name("alice", "a" * 200)) == 100
 
 
 class TestProjectStep:
@@ -484,7 +606,7 @@ class TestNestedConsultRow:
         )
         await _until(lambda: len(personas.component_sends) == 1)
         sent = personas.component_sends[0]
-        assert sent["body"] == '◐ consulting terra · "review the auth changes in src"'
+        assert sent["body"] == '◐ sol → terra · "review the auth changes in src"'
         assert sent["persona"].name == "sol"  # the consulting agent's identity
         assert sent["thread_id"] == 9001  # the turn's one thread
 
@@ -497,7 +619,7 @@ class TestNestedConsultRow:
             A2ARequest(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", message="hi terra")
         )
         await _settle()
-        assert len(personas.sends) == 1  # only marketing→sol's starter
+        assert personas.sends == []  # the top-level starter is a card; nested prompt is suppressed
 
     async def test_a_long_prompt_is_truncated_to_a_bounded_preview(self) -> None:
         proj, personas, _ = _make()
@@ -507,7 +629,7 @@ class TestNestedConsultRow:
         )
         await _until(lambda: len(personas.component_sends) == 1)
         body = personas.component_sends[0]["body"]
-        assert body.startswith('◐ consulting terra · "')
+        assert body.startswith('◐ sol → terra · "')
         assert body.endswith('…"')  # truncated
         assert len(body) < 100  # bounded, not the full 200 chars
 
@@ -523,7 +645,7 @@ class TestNestedConsultRow:
         )
         await _until(lambda: len(personas.component_sends) == 1)
         body = personas.component_sends[0]["body"]
-        assert body == "◐ consulting terra"  # bare marker, no tail
+        assert body == "◐ sol → terra"  # bare marker, no tail
         assert "audit log" not in body
 
     async def test_no_thread_drops_the_row_and_never_creates_one(self) -> None:
@@ -548,7 +670,7 @@ class TestNestedConsultRow:
             A2AReply(correlation_id="c1", tool_call_id="t2", caller="sol", peer="terra", text="done")
         )
         await _until(lambda: len(personas.component_edits) == 1)  # resolved in the SAME message
-        assert personas.component_edits[-1]["body"] == '-# ● consulted terra · "review the auth"'
+        assert personas.component_edits[-1]["body"] == '-# ● sol → terra · consulted · "review the auth"'
 
     async def test_a_rejected_consult_resolves_to_denied_with_its_reason(self) -> None:
         proj, personas, _ = _make()
@@ -607,7 +729,7 @@ class TestNestedConsultRow:
         await _until(lambda: len(personas.component_sends) == 2)
         first, second = personas.component_sends[0], personas.component_sends[1]
         assert first["persona"].name == "sol"
-        assert first["body"].startswith("◐ consulting terra")
+        assert first["body"].startswith("◐ sol → terra")
         assert second["persona"].name == "terra"  # the peer's box, strictly after the row
 
     async def test_a_result_for_a_dropped_row_is_a_harmless_no_op(self) -> None:
@@ -627,6 +749,28 @@ class TestNestedConsultRow:
         assert resolver.created == []
 
 
+class TestResponseOrdering:
+    async def test_reply_flushes_dirty_peer_trace_before_posting(self) -> None:
+        proj, personas, _ = _make(interval=60.0)
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
+        )
+        await proj.project_step(
+            _step("tool_call", emitter="conan", name="read_file", tool_call_id="x1", args={"path": "a.py"})
+        )
+        await _until(lambda: len(personas.component_sends) == 1)
+        await proj.project_step(_step("tool_result", emitter="conan", name="read_file", tool_call_id="x1"))
+        assert personas.component_edits == []  # parked behind the 60s throttle
+
+        await asyncio.wait_for(
+            proj.project(A2AReply(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", text="done")),
+            timeout=2.0,
+        )
+
+        assert len(personas.component_edits) == 1
+        assert personas.sends[-1]["content"].endswith("done")
+
+
 class TestFinish:
     """The turn's per-correlation state is retired — the trace is flushed and the
     thread mapping evicted, so neither leaks for the bridge's lifetime."""
@@ -643,6 +787,14 @@ class TestFinish:
         assert personas.component_edits == []  # parked behind the interval
         await proj.finish("c1")
         assert len(personas.component_edits) == 1  # finish drained it
+
+    async def test_finish_resolves_any_pending_top_level_card_as_interrupted(self) -> None:
+        proj, personas, _ = _make()
+        await proj.project(
+            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="conan", message="q")
+        )
+        await proj.finish("c1")
+        assert "No response" in personas.card_edits[-1]["body"]
 
     async def test_finish_evicts_the_thread_mapping(self) -> None:
         proj, _personas, _ = _make()
@@ -664,6 +816,8 @@ class TestFinish:
         class _RaisingSteps:
             async def on_step(self, step: Any, dest: Any, *, acting_agent: str) -> None: ...
 
+            async def flush(self, correlation_id: str) -> None: ...
+
             async def finish(self, correlation_id: str) -> None:
                 raise RuntimeError("flush boom")
 
@@ -675,25 +829,6 @@ class TestFinish:
         with pytest.raises(RuntimeError):
             await proj.finish("c1")
         assert "c1" not in proj._threads
-
-
-class TestSystemPersonaIdentity:
-    """A system note is deliberately NOT attributed to an agent (D-2) — but it
-    still needs an identity of its own."""
-
-    async def test_system_notes_carry_an_avatar(self) -> None:
-        # avatar_url=None makes the sender fall back to the WEBHOOK's own avatar
-        # (persona.py), and the webhook is created without one — so the note renders
-        # with Discord's blank default icon. Discord bakes the avatar into the
-        # message at send time, so such a note is blank permanently.
-        proj, personas, _ = _make()
-        await proj.project(
-            A2ARequest(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="ghost", message="q")
-        )
-        await proj.project(
-            A2AReject(correlation_id="c1", tool_call_id="t1", caller="scribe", peer="ghost", text="agent offline")
-        )
-        assert personas.sends[1]["persona"].avatar_url is not None
 
 
 def _last_component_body(personas: Any) -> str:

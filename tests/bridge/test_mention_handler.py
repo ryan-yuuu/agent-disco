@@ -131,6 +131,10 @@ class _FakeA2A:
         # The audit thread's jump link; ``None`` models a swallowed projection
         # failure (no thread was anchored), which the marker must surface.
         self.url = url
+        self.begun: list[tuple[str, str, str]] = []
+
+    async def begin_turn(self, *, correlation_id: str, root_agent: str, subject: str) -> None:
+        self.begun.append((correlation_id, root_agent, subject))
 
     async def project(self, projection: Any) -> str | None:
         self.projected.append(projection)
@@ -907,6 +911,15 @@ class TestFaultRootCauses:
         assert "monthly quota exhausted" in notice
 
 
+class TestA2ATurnRegistration:
+    async def test_registers_root_agent_and_human_subject_before_projection(self) -> None:
+        steps = (_consult("t1", "conan", "q"), _consult_reply("t1", "conan", "answer"))
+        handler, _client, fakes = _make(handle=_FakeHandle(steps=steps, result=_result("done", "scribe")))
+        req = _req(content="!scribe plan the launch")
+        await handler.handle(req)
+        assert fakes["a2a"].begun == [("c1", "scribe", "!scribe plan the launch")]
+
+
 class TestTerminalSeals:
     """The trace is sealed from the stream's terminal (ADR-0025).
 
@@ -1014,6 +1027,9 @@ class TestNestedConsultIsAnnounced:
         # ...and the peer's answer is STILL projected for the audit (kept, not suppressed).
         projected_replies = [(p.caller, p.peer) for p in fakes["a2a"].projected if hasattr(p, "text")]
         assert ("conan", "dot") in projected_replies
+        result_index = fakes["a2a"].calls.index("project_consult_result")
+        reply_index = fakes["a2a"].calls.index("project", result_index)
+        assert result_index < reply_index
 
     async def test_a_nested_consult_never_touches_the_humans_thread(self) -> None:
         handler, _client, fakes = _make(handle=_FakeHandle(steps=self._nested_run(), result=_result("done", "scribe")))

@@ -651,7 +651,7 @@ class TestConsultLifecycle:
             request_preview="review the auth changes",
         )
         await _until(lambda: bool(sender.ok_sends()))
-        assert sender.ok_sends()[0]["body"] == '◐ consulting terra · "review the auth changes"'
+        assert sender.ok_sends()[0]["body"] == '◐ sol → terra · "review the auth changes"'
         await _end(r)
 
     async def test_the_consult_row_posts_under_the_caller_s_persona(self, sender: _FakeSender) -> None:
