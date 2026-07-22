@@ -57,8 +57,8 @@ bridge  client.agent(<name>).start(...)  ──►  agent runtime
    ├─ A2AProjector.project(...)
    │    resolve/create the unified audit channel (lazy, cached)
    │    anchor ONE thread per human turn (keyed by correlation_id)
-   │    post request (caller persona), reply (peer persona),
-   │    and any reject/handoff/fault notes (system "a2a" persona)
+   │    post one editable route card per consult (keyed by tool_call_id),
+   │    resolve it in place, and post routed replies under the peer persona
    │
    ├─ A2AProjector.project_step(...)      # steps of a CONSULTED agent
    │    every step whose emitter is not the turn's owner
@@ -95,13 +95,22 @@ is observable (it carries the same `correlation_id`, `emitter=C`,
 
 - **One thread per human turn.** The projector keys threads by
   `correlation_id` (one per top-level mention), created lazily on the
-  first A2A projection for that turn — that first post is the thread's
+  first A2A projection for that turn — that first route card is the thread's
   starter message. Every later request / reply / reject / fault **and every
   consulted agent's step** for the same turn posts into that thread. Only a
   *projection* ever creates the thread: a step arriving with none (the request's
   render failed) is dropped rather than anchoring a thread it cannot name.
-- **Thread name** is shaped `caller→peer: <first ~40 chars>` (Discord caps
-  thread names at 100 chars; the `→` is `U+2192`).
+- **Thread name** is shaped `<root agent> · <human subject>`, with a leading
+  `!<root agent>` routing token removed and the whole title capped at Discord's
+  100-character limit. It never names the first peer because parallel and nested
+  peers may join later.
+- **One Components V2 route card per top-level consult.** The card says
+  `caller → peer`, shows the prompt, and is keyed by `tool_call_id`. Reply,
+  rejection, failure, and interruption edit that card in place. No duplicate
+  completion/fault message is posted.
+- **Replies state their return route.** The peer's persona still authors the
+  substantive response, prefixed `↩ peer → caller · response`, so authorship and
+  addressee remain clear even when parallel branches interleave.
 - **Personas are a pure function** of the agent name —
   `persona_for(name)` → webhook username = the name, avatar = a
   deterministic [DiceBear](https://www.dicebear.com) image seeded by the

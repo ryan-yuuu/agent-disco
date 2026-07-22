@@ -262,6 +262,8 @@ class _Entry:
     tool_count: int = 0
     sealed: bool = False
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    flush_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    flushed: asyncio.Event = field(default_factory=asyncio.Event)
     finished: asyncio.Event = field(default_factory=asyncio.Event)
     writer: asyncio.Task[None] | None = None
 
@@ -544,7 +546,12 @@ class StepTraceRenderer:
             # `request_preview` is likewise model-controlled; ConsultRow
             # hygienises and bounds both.
             ConsultRow(
-                key=key, peer=_plain(peer), thread_url=thread_url, inline=inline, request_preview=request_preview
+                key=key,
+                caller=_plain(persona_name) if inline else "",
+                peer=_plain(peer),
+                thread_url=thread_url,
+                inline=inline,
+                request_preview=request_preview,
             ),
         )
         entry.wake.set()
@@ -635,6 +642,25 @@ class StepTraceRenderer:
         )
         entry.sealed = True
 
+    async def flush(self, correlation_id: str) -> None:
+        """Wait until the entry's current dirty segments have reached Discord.
+
+        The existing writer remains the only flusher. This barrier is used before
+        posting an A2A response so queued work cannot appear below the answer that
+        followed it. It is bounded and best-effort: a persistent Discord failure
+        must never hold up the human turn indefinitely.
+        """
+        entry = self._entries.get(correlation_id)
+        if entry is None:
+            return
+        entry.flushed.clear()
+        entry.flush_requested.set()
+        entry.wake.set()
+        try:
+            await asyncio.wait_for(entry.flushed.wait(), timeout=2.0)
+        except TimeoutError:
+            logger.warning("trace: timed out flushing correlation_id=%s before response", correlation_id)
+
     async def finish(self, correlation_id: str) -> None:
         """Flush pending content and retire the correlation's writer.
 
@@ -661,6 +687,7 @@ class StepTraceRenderer:
             # unknown — result() may still have returned a reply.
             self._seal_entry(entry, outcome="interrupted")
         entry.finished.set()
+        entry.flush_requested.set()  # interrupt the throttle interval
         entry.wake.set()
         if entry.writer is not None:
             await entry.writer
@@ -703,6 +730,13 @@ class StepTraceRenderer:
                 await self._flush(entry)
             except Exception:
                 logger.exception("trace: flush failed; continuing")
+            if entry.flush_requested.is_set() and not any(segment.dirty for segment in entry.segments):
+                # A row may have arrived while _flush awaited Discord, re-dirtying
+                # a segment after its body snapshot. Keep the request armed until
+                # the next pass has carried that row too; only then is the barrier
+                # allowed to release the routed response.
+                entry.flush_requested.clear()
+                entry.flushed.set()
             # `and not wake` is load-bearing: a flush awaits a full Discord
             # round-trip, and anything appended DURING it re-sets `wake`.
             # Exiting on `finished` alone would drop that content permanently —
@@ -719,7 +753,7 @@ class StepTraceRenderer:
                 return
             if self._min_edit_interval > 0:
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(entry.finished.wait(), self._min_edit_interval)
+                    await asyncio.wait_for(entry.flush_requested.wait(), self._min_edit_interval)
             else:
                 await asyncio.sleep(0)  # tests: still yield so the loop can't starve
 

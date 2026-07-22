@@ -271,6 +271,7 @@ class A2AProjectorLike(Protocol):
     consults ``is_acting`` routes here instead.
     """
 
+    async def begin_turn(self, *, correlation_id: str, root_agent: str, subject: str) -> None: ...
     async def project(self, projection: A2AProjection) -> str | None: ...
     async def project_fault(self, call: A2ACall) -> None: ...
     async def project_step(self, step: StepEvent) -> None: ...
@@ -394,6 +395,11 @@ class MentionHandler:
             deps=deps,
             author=req.author_label,
             model_settings=model_settings,
+        )
+        await self._a2a.begin_turn(
+            correlation_id=handle.correlation_id,
+            root_agent=target,
+            subject=req.content,
         )
 
         dispatcher = A2ADispatcher()

@@ -228,8 +228,10 @@ class TestRenderRow:
         # same audit thread, so its exchange sits right below — there is no
         # separate thread to link. The preview shows a glimpse of the ask in the
         # link's slot; the absent thread_url is deliberate, NOT an audit gap.
-        row = ConsultRow(key="c1", peer="terra", inline=True, request_preview="review the auth changes in src")
-        assert render_row(row) == '◐ consulting terra · "review the auth changes in src"'
+        row = ConsultRow(
+            key="c1", caller="sol", peer="terra", inline=True, request_preview="review the auth changes in src"
+        )
+        assert render_row(row) == '◐ sol → terra · "review the auth changes in src"'
 
     def test_resolved_inline_consult_keeps_the_request_preview(self) -> None:
         row = ConsultRow(key="c1", peer="terra", inline=True, request_preview="review the auth changes", state="ok")

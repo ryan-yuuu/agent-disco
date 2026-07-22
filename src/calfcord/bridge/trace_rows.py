@@ -241,6 +241,7 @@ class ConsultRow:
 
     key: str
     peer: str
+    caller: str = ""
     thread_url: str | None = None
     """The projection's receipt. NOT hygienised — a bridge-built URL, which
     escaping would corrupt."""
@@ -270,7 +271,7 @@ class ConsultRow:
     hygienised and bounded like every other such field."""
 
     def __post_init__(self) -> None:
-        _hygienise(self, "peer", "denial_reason", "request_preview")
+        _hygienise(self, "caller", "peer", "denial_reason", "request_preview")
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,11 +384,13 @@ def _render_consult(row: ConsultRow) -> str:
     tail_slot = f" · {tail}" if tail else ""
     match row.state:
         case "pending":
-            # Present tense. Today's marker says "consulted" the moment the
-            # consult STARTS and never updates — it states what has not happened.
-            return f"{_PENDING} consulting {row.peer}{tail_slot}"
+            # Present tense. Nested rows make the route explicit because several
+            # peers can participate in one shared audit thread.
+            head = f"{row.caller} → {row.peer}" if row.inline and row.caller else f"consulting {row.peer}"
+            return f"{_PENDING} {head}{tail_slot}"
         case "ok":
-            return f"{_DIM}{_OK} consulted {row.peer}{tail_slot}"
+            head = f"{row.caller} → {row.peer} · consulted" if row.inline and row.caller else f"consulted {row.peer}"
+            return f"{_DIM}{_OK} {head}{tail_slot}"
         case "failed":
             return f"{_FAILED} {row.peer} didn't answer{tail_slot}"
         case "denied":
