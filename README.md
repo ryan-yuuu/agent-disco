@@ -19,12 +19,12 @@
 | src/calfcord/bridge/a2a\_project.py           |      193 |        6 |       50 |        7 |     95% |381-\>389, 425-426, 438-442, 486, 489, 526-\>515 |
 | src/calfcord/bridge/egress.py                 |       90 |        4 |       18 |        0 |     96% |97, 219-225 |
 | src/calfcord/bridge/gateway.py                |      304 |       54 |       64 |        5 |     80% |138-139, 144-145, 317-320, 324-325, 411-413, 417-\>421, 444, 499, 588, 607, 621-740, 744 |
-| src/calfcord/bridge/history.py                |      276 |        7 |       86 |        5 |     97% |387-\>389, 399-\>401, 421-\>423, 665-672, 748, 893-\>895, 1076-1087 |
+| src/calfcord/bridge/history.py                |      276 |        7 |       86 |        5 |     97% |387-\>389, 399-\>401, 421-\>423, 665-672, 748, 898-\>900, 1081-1092 |
 | src/calfcord/bridge/mention\_handler.py       |      194 |        3 |       58 |        2 |     98% |97, 467-468 |
 | src/calfcord/bridge/normalizer.py             |       46 |        0 |        8 |        0 |    100% |           |
 | src/calfcord/bridge/overrides.py              |       23 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/persona\_resolve.py       |       12 |        0 |        0 |        0 |    100% |           |
-| src/calfcord/bridge/reply\_poster.py          |       85 |        0 |       12 |        0 |    100% |           |
+| src/calfcord/bridge/reply\_poster.py          |       89 |        0 |       12 |        0 |    100% |           |
 | src/calfcord/bridge/roster.py                 |       29 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/settings.py               |       48 |        1 |        6 |        0 |     98% |        86 |
 | src/calfcord/bridge/slash.py                  |       98 |        6 |       16 |        0 |     95% |74, 97, 185-186, 224-225 |
@@ -112,7 +112,7 @@
 | src/calfcord/supervisor/roster.py             |      290 |        5 |       92 |        2 |     98% |606-607, 673-675 |
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **9965** |  **516** | **2622** |  **137** | **94%** |           |
+| **TOTAL**                                     | **9969** |  **516** | **2622** |  **137** | **94%** |           |
 
 
 ## Setup coverage badge
