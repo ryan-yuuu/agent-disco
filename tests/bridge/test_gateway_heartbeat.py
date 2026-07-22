@@ -4,11 +4,11 @@ The §12.1 health contract is strict: the bridge's heartbeat must mean "connecte
 to Discord", not merely "process alive". Pinned here, all offline (no real Discord
 connection, no broker):
 
-* **First beat on ``on_ready`` BEFORE slash-sync.** A slow/429 ``slash.sync`` must
-  never delay or fail the readiness signal, so ``_on_ready`` writes the first
-  ``bridge`` beat — to the same ``<home>/state/health/`` the ``calfcord
-  _healthcheck bridge`` probe reads — *before* it awaits ``self._slash.sync``.
-* **The beat's identity is a display string, never a token** (§12.3): the bot's
+* **Discord readiness precedes slash-sync.** A slow/429 ``slash.sync`` must not
+  delay the co-located tool worker, so ``_on_ready`` sets its readiness event
+  before awaiting sync. The combined runtime writes the first heartbeat only
+  after the Worker starts, so a beat means both dependencies are serving.
+* **The identity is a display string, never a token** (§12.3): the bot's
   ``str(bot_user) (id)``, with the token nowhere in it.
 * **Connection state drives ``connected``.** ``_on_ready`` / ``_on_resumed`` set
   it True; ``_on_disconnect`` sets it False — the predicate the timer-refresher
@@ -27,7 +27,7 @@ from pydantic import SecretStr
 
 from calfcord.bridge.gateway import DiscordIngressGateway
 from calfcord.discord.settings import DiscordSettings
-from calfcord.health.heartbeat import is_fresh, read_beat
+from calfcord.health.heartbeat import read_beat
 
 
 def _settings() -> DiscordSettings:
@@ -81,37 +81,15 @@ def _fake_bot_user(*, name: str = "Calfbot#1234", user_id: int = 42) -> _FakeBot
     return _FakeBotUser(name=name, user_id=user_id)
 
 
-class TestOnReadyWritesFirstBeat:
-    """``_on_ready`` writes the first ``bridge`` heartbeat to the resolved home."""
+class TestOnReadySignalsDiscordReadiness:
+    """``_on_ready`` makes Discord usable before potentially slow slash sync."""
 
-    async def test_writes_fresh_bridge_beat_under_resolved_home(self, tmp_path, monkeypatch) -> None:
-        # The beat must land where ``disco _healthcheck bridge`` reads it:
-        # ``$CALFCORD_HOME/state/health/bridge.json``.
-        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
+    async def test_readiness_event_is_set_before_slash_sync(self) -> None:
         gateway = _gateway()
-        with (
-            patch.object(type(gateway._client), "user", new=_fake_bot_user(), create=True),
-            patch.object(gateway._slash, "sync", new=AsyncMock(return_value=None)),
-        ):
-            await gateway._on_ready()
-
-        beat = read_beat(tmp_path, "bridge")
-        assert beat is not None
-        assert beat.component == "bridge"
-        assert beat.status == "healthy"
-        from datetime import UTC, datetime
-
-        assert is_fresh(beat, now=datetime.now(UTC))
-
-    async def test_first_beat_is_written_before_slash_sync_is_awaited(self, tmp_path, monkeypatch) -> None:
-        # §12.1/§13.3: a slow/429 slash-sync must not gate readiness, so the beat
-        # must already exist on disk by the time ``slash.sync`` is awaited.
-        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
-        gateway = _gateway()
-        beat_when_synced: list[object] = []
+        ready_when_synced: list[bool] = []
 
         async def _record_then_return(_guild_id: object) -> None:
-            beat_when_synced.append(read_beat(tmp_path, "bridge"))
+            ready_when_synced.append(gateway._ready.is_set())
 
         with (
             patch.object(type(gateway._client), "user", new=_fake_bot_user(), create=True),
@@ -119,30 +97,10 @@ class TestOnReadyWritesFirstBeat:
         ):
             await gateway._on_ready()
 
-        assert len(beat_when_synced) == 1
-        assert beat_when_synced[0] is not None, "beat must exist BEFORE slash.sync is awaited"
-
-    async def test_on_ready_survives_a_heartbeat_write_failure(self, tmp_path, monkeypatch) -> None:
-        # A heartbeat write failure (read-only volume / disk full / EACCES) must NOT
-        # crash _on_ready: the bridge still slash-syncs and marks itself connected. A
-        # failed beat just ages to "not ready" at the probe (correct).
-        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
-        gateway = _gateway()
-        sync = AsyncMock(return_value=None)
-        with (
-            patch.object(type(gateway._client), "user", new=_fake_bot_user(), create=True),
-            patch.object(gateway._slash, "sync", new=sync),
-            patch("calfcord.bridge.gateway.write_beat", side_effect=OSError("read-only file system")),
-        ):
-            await gateway._on_ready()
-
-        sync.assert_awaited_once()
+        assert ready_when_synced == [True]
         assert gateway.connected is True
 
-    async def test_identity_is_a_display_string_never_the_token(self, tmp_path, monkeypatch) -> None:
-        # The identity must be a human-readable display string with the numeric id;
-        # the bot token must appear NOWHERE in the persisted beat (§12.3).
-        monkeypatch.setenv("CALFCORD_HOME", str(tmp_path))
+    async def test_identity_is_display_string_never_token(self) -> None:
         gateway = _gateway()
         with (
             patch.object(
@@ -152,11 +110,8 @@ class TestOnReadyWritesFirstBeat:
         ):
             await gateway._on_ready()
 
-        beat = read_beat(tmp_path, "bridge")
-        assert beat is not None
-        assert beat.identity == "Calfbot#1234 (42)"
-        assert "super-secret-token-value" not in (beat.identity or "")
-        assert "super-secret-token-value" not in beat.model_dump_json()
+        assert gateway.bot_identity == "Calfbot#1234 (42)"
+        assert "super-secret-token-value" not in (gateway.bot_identity or "")
 
 
 class TestConnectionStateFlag:

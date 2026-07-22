@@ -1,8 +1,9 @@
 """Unit tests for the gateway's ``_on_message`` intake and handler-task lifecycle.
 
-Post-0.12 the gateway is a pure caller surface: for each ``!mention`` it builds a
+The gateway's ingress path remains a caller surface: for each ``!mention`` it builds a
 :class:`MentionRequest` and runs :meth:`MentionHandler.handle` as a tracked
-asyncio task. There is no ingress/outbox/Worker anymore. These tests pin the
+asyncio task. The co-located Discord tool Worker has its own lifecycle tests;
+these tests pin the
 intake seam and the task machinery, all offline (no Discord, no broker):
 
 * **Filtering** — DMs, wrong-guild, pre-ready, the bot's own non-webhook posts
@@ -79,6 +80,19 @@ class _StickyStore:
         self.owner = None
 
 
+class _BlockingStickyStore(_StickyStore):
+    def __init__(self, owner: str | None = None) -> None:
+        super().__init__(owner)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get_sticky_owner(self, conversation_key: str) -> str | None:
+        self.gets.append(conversation_key)
+        self.entered.set()
+        await self.release.wait()
+        return self.owner
+
+
 def _gateway(
     *,
     bridge_settings: BridgeSettings | None = None,
@@ -111,6 +125,7 @@ def _ready(gateway: DiscordIngressGateway) -> None:
     """
     gateway._message_normalizer = MessageNormalizer(_OWNER_USER_ID)
     gateway._bot_user_id = _BOT_USER_ID
+    gateway.start_accepting_messages()
 
 
 class _RecordingHandler:
@@ -236,6 +251,84 @@ class TestOnMessageSpawnsHandler:
         await _settle(gateway)
 
         assert handler.calls[0].mention_ids == ("scribe", "echo")
+
+
+class TestIngressAdmissionLifecycle:
+    async def test_discord_ready_but_closed_ingress_has_no_side_effects(self, fake_message) -> None:
+        store = _StickyStore(owner="scribe")
+        gateway = _gateway(sticky_store=store)
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        gateway._message_normalizer = MessageNormalizer(_OWNER_USER_ID)
+        gateway._bot_user_id = _BOT_USER_ID
+
+        await gateway._on_message(fake_message(guild_id=_GUILD_ID, content="continue here"))
+
+        assert store.gets == []
+        assert handler.calls == []
+        assert gateway._inflight == set()
+
+    async def test_quiesce_is_terminal(self, fake_message) -> None:
+        gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+        gateway.quiesce()
+        gateway.start_accepting_messages()
+
+        await gateway._on_message(fake_message(guild_id=_GUILD_ID, content="!scribe hello"))
+
+        assert handler.calls == []
+
+    async def test_drain_ingress_cancels_suspended_route_before_handler_spawn(self, fake_message) -> None:
+        store = _BlockingStickyStore(owner="scribe")
+        gateway = _gateway(sticky_store=store)
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+
+        ingress = asyncio.create_task(
+            gateway._on_message(fake_message(guild_id=_GUILD_ID, content="continue here"))
+        )
+        await store.entered.wait()
+        assert ingress in gateway._ingress
+
+        gateway.quiesce()
+        await gateway.drain_ingress()
+        await gateway.drain_inflight()
+
+        assert ingress.cancelled()
+        assert gateway._ingress == set()
+        assert handler.calls == []
+        assert gateway._inflight == set()
+
+    async def test_drain_ingress_cancels_suspended_new_command(self, fake_message) -> None:
+        gateway = _gateway()
+        handler = _RecordingHandler()
+        gateway._handler = handler  # type: ignore[assignment]
+        _ready(gateway)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _blocked_create(*args, **kwargs) -> int:
+            entered.set()
+            await release.wait()
+            return 9000
+
+        with patch("calfcord.bridge.gateway.create_thread_from_message", new=_blocked_create):
+            ingress = asyncio.create_task(
+                gateway._on_message(
+                    fake_message(guild_id=_GUILD_ID, content="!new !scribe hello")
+                )
+            )
+            await entered.wait()
+            gateway.quiesce()
+            await gateway.drain_ingress()
+            await gateway.drain_inflight()
+
+        assert ingress.cancelled()
+        assert handler.calls == []
+        assert gateway._inflight == set()
 
 
 class TestStickyRouting:

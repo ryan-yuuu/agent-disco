@@ -94,8 +94,8 @@ class AgentDefinition(BaseModel):
 
     Semantics:
         - ``tools:`` omitted from frontmatter (default ``None``) — agent
-          discovers every live builtin tool. Convenient default for
-          general-purpose assistant agents.
+          discovers the default live builtin surface. Security-sensitive
+          bridge tools such as Discord history remain explicit opt-ins.
         - ``tools: []`` in frontmatter — agent gets NO tools (text-only).
           Explicit opt-out for read-only or routing-style agents.
         - ``tools: [a, b]`` — agent gets exactly those builtin tools.

@@ -147,9 +147,10 @@ through `CALFKIT_AGENT_DEFAULT_MODEL` rather than editing every `.md`.
 tools: [terminal, read_file, web_search]
 ```
 
-`tools` is a list of bare builtin tool names. Omitted `tools:` becomes a
-runtime `Tools(discover=True)` selector, so the agent binds every live builtin
-tool node advertised by the tools host. An explicit list becomes a runtime
+`tools` is a list of bare builtin tool names. Omitted `tools:` dynamically
+binds the default live builtin surface. Security-sensitive bridge tools
+(`discord_list_channels`, `discord_read_messages`) are excluded and require an
+explicit grant. An explicit list becomes a runtime
 `Tools(names=[...])` selector.
 
 The registry is the explicit `ALL_TOOLS` list in
@@ -171,8 +172,9 @@ list keyed by the calling agent's identity — see `docs/security.md` for
 the per-agent tenancy model and the operator-facing deployment patterns.
 
 Set `tools: []` for an LLM-only (text-only) agent. **Omitting `tools`
-entirely is the opposite** — it grants every live builtin tool
-(including `terminal` / `execute_code` / `write_file` / `patch`), per
+entirely is the opposite** — it grants every default live builtin tool
+(including `terminal` / `execute_code` / `write_file` / `patch`, but excluding
+the explicit-opt-in Discord read tools), per
 the security note above.
 
 #### MCP-server tools

@@ -85,9 +85,10 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # The Discord gateway: a pure calfkit ``Client`` (no embedded Worker and
-  # no control-plane consumers). It normalizes inbound Discord events, calls
-  # agents by name, and posts replies back as persona webhooks. It also hosts
+  # The Discord gateway: one calfkit ``Client`` for agent calls plus a co-located
+  # Worker exposing read-only Discord tools through that same broker connection.
+  # It normalizes inbound events, calls agents by name, and posts replies back as
+  # persona webhooks. It also hosts
   # the agent-to-agent (A2A) audit channel — the ``A2AChannelResolver`` moved
   # here from the tools process, since native A2A is bridge-side now.
   #

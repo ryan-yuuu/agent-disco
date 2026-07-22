@@ -201,9 +201,11 @@ def update_tool_grants(
     by :func:`apply_mcp_metadata`, which owns the canonical on-disk form.
     """
     from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
     if tools is not None:
-        _validate_builtin_tools(tools, TOOL_REGISTRY)
+        allowed = {**TOOL_REGISTRY, **dict.fromkeys(DISCORD_TOOL_NAMES)}
+        _validate_builtin_tools(tools, allowed)
     _validate_mcp_grants(mcp)
 
     try:
@@ -279,8 +281,10 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
             file is unchanged.
     """
     from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
-    _validate_builtin_tools(tools, TOOL_REGISTRY)
+    allowed = {**TOOL_REGISTRY, **dict.fromkeys(DISCORD_TOOL_NAMES)}
+    _validate_builtin_tools(tools, allowed)
 
     return _update_fields(md_path, {"tools": list(tools)})
 
