@@ -16,9 +16,8 @@ projection (``nodes/_projection.py``) re-roles it per viewer at read time
   :class:`HistoryRecord` list into a name-stamped ``list[ModelMessage]``
   (agent turns → :class:`ModelResponse` with ``name=``; humans →
   :class:`UserPromptPart` with ``name=``), splicing persisted tool-call
-  replay deltas before an agent's final-text response — and before the
-  whole contiguous same-agent chunk run when the join key is the last
-  chunk. calfkit strips the ``name`` before any provider sees it.
+  replay deltas before an agent's final-text response. calfkit strips the
+  ``name`` before any provider sees it.
 * :class:`DiscordHistoryProvider` — wires the fetcher + transcript store +
   builder into the ``MentionRequest`` → ``list[ModelMessage]`` seam the
   bridge's ``MentionHandler`` calls, and trims the result to the configured
@@ -804,15 +803,17 @@ def build_message_history(
         hydration: Optional tool-call replay map, ``message_id -> the stored,
             name-stamped structured delta`` for that agent reply. When an agent
             record's ``message_id`` is in the map, the delta is spliced in
-            IMMEDIATELY BEFORE that reply's final-text :class:`ModelResponse` —
-            and, when the join key is the **last** chunk of a multi-chunk
-            answer, before any contiguous earlier same-agent final-text chunks
-            already emitted for this turn. Tools must precede the whole answer
-            text, not land between chunks. The delta's responses must already
-            carry the agent's ``name`` (see
+            IMMEDIATELY BEFORE that record's final-text :class:`ModelResponse`,
+            so the agent re-sees the tool calls/returns it made on that turn. The
+            delta's responses must already carry the agent's ``name`` (see
             :meth:`DiscordHistoryProvider._build_replay_hydration`) so calfkit
             attributes them to the right viewer. ``None`` (default) reproduces
             the no-replay output exactly. Pure: never touches the DB.
+
+            Multi-chunk replies key the transcript on the **first successfully
+            posted** chunk (see :class:`~calfcord.bridge.reply_poster.ReplyPoster`);
+            later chunks are bare text with no row, so tools land before the
+            whole answer without a walkback heuristic.
 
     Returns:
         A list suitable for ``start(message_history=...)``. May be empty.
@@ -842,18 +843,10 @@ def build_message_history(
             # the trailing drop below removes — splicing its delta there would
             # orphan a tool-return ``ModelRequest`` (a ``tool_result`` with no
             # matching ``tool_use``) at the head → provider 400.
-            #
-            # Multi-chunk answers key the transcript row on the *last* chunk
-            # (the Discord message that carries the reply button). Earlier
-            # chunks of the same answer are already in ``out`` as pure-text
-            # same-agent ModelResponses; walk those back so tools land before
-            # the whole answer, not between chunks. A first-chunk join key
-            # (legacy rows) finds nothing to walk back and keeps old behavior.
             if hydration is not None and seen_request:
                 replay = hydration.get(r.message_id)
                 if replay:
-                    insert_at = _chunk_run_start(out, agent_name=r.author_display_name)
-                    out[insert_at:insert_at] = replay
+                    out.extend(replay)
             out.append(
                 ModelResponse(parts=[TextPart(content=r.content)], name=r.author_display_name)
             )
@@ -863,37 +856,6 @@ def build_message_history(
             )
             seen_request = True
     return _drop_until_user_request(out)
-
-
-def _chunk_run_start(out: list[ModelMessage], *, agent_name: str) -> int:
-    """Index at which to splice tools so they precede a multi-chunk answer.
-
-    Walks backward over trailing pure-text :class:`ModelResponse` entries that
-    already carry ``agent_name`` — i.e. earlier Discord chunks of the same
-    answer already emitted into ``out``. Stops at anything else (human request,
-    another agent's reply, a just-spliced tool delta, a non-text response).
-
-    Returns ``len(out)`` when there is no preceding same-agent chunk (single-
-    chunk reply, or a legacy first-chunk join key that matches before any
-    answer text has been emitted).
-    """
-    insert_at = len(out)
-    while insert_at > 0:
-        prev = out[insert_at - 1]
-        # Never walk across a request (human prompt or tool-return) — that
-        # ends the current answer's chunk run.
-        if isinstance(prev, ModelRequest):
-            break
-        if (
-            isinstance(prev, ModelResponse)
-            and prev.name == agent_name
-            and prev.parts
-            and all(isinstance(p, TextPart) for p in prev.parts)
-        ):
-            insert_at -= 1
-            continue
-        break
-    return insert_at
 
 
 REPLAY_TOOL_RETURN_MAX_CHARS: Final[int] = 6000

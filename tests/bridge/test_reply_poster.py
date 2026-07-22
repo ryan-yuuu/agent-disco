@@ -303,7 +303,8 @@ class TestPostReplySingleChunk:
 
 # --- multi-chunk replies -----------------------------------------------------
 class TestPostReplyMultiChunk:
-    async def test_long_reply_splits_final_chunk_anchored_and_writes_row(self) -> None:
+    async def test_long_reply_final_anchor_first_chunk_transcript(self) -> None:
+        """Button on last chunk; transcript join key on first successful chunk."""
         poster, personas, store = _poster()
         big = "x" * 4500
         out = await poster.post_reply(
@@ -315,11 +316,13 @@ class TestPostReplyMultiChunk:
         )
         assert out == "posted"
         assert len(personas.sends) >= 3  # >2 chunks
-        # Anchor + transcript row live on the final chunk only.
+        # Anchor lives on the final planned chunk only.
         assert all(s["reply_to"] is None for s in personas.sends[:-1])
         assert personas.sends[-1]["reply_to"] is not None
-        assert len(store.rows) == 1  # the turn used tools → one transcript row
-        assert store.rows[0].final_message_id == str(personas.sends[-1]["sent"].id)
+        # Transcript joins on the first successful chunk so tools replay before
+        # the whole answer (history splices immediately before that id).
+        assert len(store.rows) == 1
+        assert store.rows[0].final_message_id == str(personas.sends[0]["sent"].id)
 
     async def test_chunks_post_in_original_order(self) -> None:
         poster, personas, _ = _poster()
@@ -350,9 +353,11 @@ class TestPostReplyMultiChunk:
         # Surviving final chunk still carries the anchor.
         assert personas.sends[-1]["reply_to"] is not None
 
-    async def test_final_chunk_failure_skips_transcript_row(self) -> None:
+    async def test_final_chunk_failure_keeps_transcript_on_first_success(self) -> None:
+        """Final (anchor) chunk can fail without losing the transcript row —
+        the join key is the first successful chunk, not the anchor."""
         personas = _FakePersonas()
-        personas.errors = [None, None, _http(400)]  # anchor (final) chunk fails
+        personas.errors = [None, None, _http(400)]  # final chunk fails
         poster, _, store = _poster(personas)
         out = await poster.post_reply(
             _req(),
@@ -362,12 +367,15 @@ class TestPostReplyMultiChunk:
             correlation_id="c1",
         )
         assert out == "posted"  # earlier chunks still delivered
-        assert store.rows == []  # row is keyed to the anchor chunk's message id
+        assert len(personas.sends) == 2
         # No surviving send carries the anchor — the final one failed.
         assert all(s["reply_to"] is None for s in personas.sends)
+        # Transcript still written against the first successful chunk.
+        assert len(store.rows) == 1
+        assert store.rows[0].final_message_id == str(personas.sends[0]["sent"].id)
 
-    async def test_middle_chunk_failure_still_writes_transcript_on_final(self) -> None:
-        """A gap in the middle must not drop the transcript: final chunk is the host."""
+    async def test_middle_chunk_failure_still_writes_transcript_on_first(self) -> None:
+        """A gap in the middle must not drop the transcript: first success is the host."""
         personas = _FakePersonas()
         personas.errors = [None, _http(400, "bad chunk"), None]
         poster, _, store = _poster(personas)
@@ -382,10 +390,11 @@ class TestPostReplyMultiChunk:
         assert len(personas.sends) == 2
         assert personas.sends[-1]["reply_to"] is not None
         assert len(store.rows) == 1
-        assert store.rows[0].final_message_id == str(personas.sends[-1]["sent"].id)
+        assert store.rows[0].final_message_id == str(personas.sends[0]["sent"].id)
 
-    async def test_first_chunk_failure_final_success_still_anchors_and_writes(self) -> None:
-        """Losing an early chunk must not drop the final anchor or transcript."""
+    async def test_first_chunk_failure_final_success_anchors_and_keys_second(self) -> None:
+        """If chunk 1 fails, the first *successful* chunk becomes the join key;
+        the final planned chunk still carries the button."""
         personas = _FakePersonas()
         personas.errors = [_http(400), None, None]
         poster, _, store = _poster(personas)
@@ -401,7 +410,8 @@ class TestPostReplyMultiChunk:
         assert all(s["reply_to"] is None for s in personas.sends[:-1])
         assert personas.sends[-1]["reply_to"] is not None
         assert len(store.rows) == 1
-        assert store.rows[0].final_message_id == str(personas.sends[-1]["sent"].id)
+        # First successful send (originally chunk 2) is the join key.
+        assert store.rows[0].final_message_id == str(personas.sends[0]["sent"].id)
 
     async def test_all_chunks_fail_returns_lost(self) -> None:
         personas = _FakePersonas()

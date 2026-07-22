@@ -4,15 +4,20 @@ On the calfkit 0.12 caller surface the final reply is the return value of
 ``handle.result()`` (awaited by the :class:`~calfcord.bridge.mention_handler.MentionHandler`),
 not a Kafka outbox message. Every reply is delivered as consecutive
 ≤ :data:`~calfcord.discord.chunking.CHUNK_SAFE_SIZE` chunks — one chunk for a
-normal-length reply — with the **final** chunk carrying the inline-reply anchor
-and (if the turn used tools) the durable transcript row (for tool-call replay).
-Earlier chunks are bare continuations. Chunking is the only delivery mechanism:
-there is no retry that re-invokes the agent to shorten a rejected reply.
+normal-length reply. Two concerns are deliberately split across chunks:
 
-Anchoring the last chunk (rather than the first) keeps the "↩ Replying to"
-affordance on the message the reader finishes on, and keys
-``final_message_id`` to the same Discord message history joins against for
-tool-call replay.
+* **Inline-reply anchor** (the "↩ Replying to" button/embed) lives on the
+  **final** planned chunk, so the affordance sits on the message the reader
+  finishes on.
+* **Transcript row** (tool-call replay join key ``final_message_id``) is
+  written against the **first successfully posted** chunk. History hydration
+  splices tools immediately before that message id; keying the first chunk
+  keeps tools before the whole answer without needing a multi-chunk walkback
+  heuristic that cannot tell adjacent same-agent turns apart.
+
+Earlier non-final chunks are bare continuations. Chunking is the only delivery
+mechanism: there is no retry that re-invokes the agent to shorten a rejected
+reply.
 
 Per-chunk failures are logged independently so partial delivery survives; a
 single Discord 5xx per chunk is smoothed with one delayed re-send.
@@ -125,13 +130,14 @@ class ReplyPoster:
     ) -> Literal["posted", "empty", "lost"]:
         """Chunk-split ``result``'s final answer and post each chunk under ``persona``.
 
-        The **final** chunk carries the inline-reply anchor + (if the turn used
-        tools) the persisted transcript row; earlier chunks are bare
-        continuations. Per-chunk failures are logged independently so partial
-        delivery survives. If the final chunk fails after earlier chunks
-        posted, the reply still counts as ``"posted"`` but has no anchor and
-        no transcript row (same degradation the first-chunk design had when
-        the anchor send failed).
+        The **final** planned chunk carries the inline-reply anchor. The
+        transcript row (if the turn used tools) is written once, against the
+        **first successfully posted** chunk — that id is the history join key
+        so tools replay before the whole answer. Earlier non-final chunks are
+        bare continuations. Per-chunk failures are logged independently so
+        partial delivery survives. If the final chunk fails after earlier
+        chunks posted, the reply still counts as ``"posted"`` but has no
+        anchor; the transcript row still lands if any earlier chunk succeeded.
 
         Returns ``"posted"`` if at least one chunk was delivered, ``"empty"``
         if there was nothing to post (Discord rejects an empty webhook send;
@@ -150,6 +156,7 @@ class ReplyPoster:
         total = len(chunks)
         last_i = total - 1
         posted_any = False
+        transcript_written = False
         failures: list[int | None] = []
         for i, chunk in enumerate(chunks):
             is_final = i == last_i
@@ -183,7 +190,9 @@ class ReplyPoster:
                 )
                 continue
             posted_any = True
-            if is_final and write_transcript:
+            # Join key = first successful chunk so history can splice tools
+            # immediately before it (and thus before the whole answer).
+            if write_transcript and not transcript_written:
                 await _write_transcript(
                     self._store,
                     correlation_id=correlation_id,
@@ -192,6 +201,7 @@ class ReplyPoster:
                     final_message_id=sent.id,
                     delta=delta,
                 )
+                transcript_written = True
         if not posted_any:
             dominant = max(set(failures), key=failures.count)
             logger.error(

@@ -13,7 +13,7 @@ The agent currently assigned to receive ambient human messages for a sticky conv
 _Avoid_: Assigned agent, cached sticky name
 
 **Chunked reply**:
-An agent reply delivered as one or more consecutive Discord messages, each within Discord's message length limit; the final message is anchored to the triggering message (and hosts the transcript row used for tool-call replay). Chunking is the only delivery mechanism for agent replies — there is no retry that asks the agent to shorten its reply.
+An agent reply delivered as one or more consecutive Discord messages, each within Discord's message length limit; the final message is anchored to the triggering message (the "↩ Replying to" affordance), while the transcript row used for tool-call replay is keyed to the first successfully posted chunk so tools hydrate before the whole answer. Chunking is the only delivery mechanism for agent replies — there is no retry that asks the agent to shorten its reply.
 _Avoid_: Chunk-split fallback, retry-with-feedback
 
 **Acting agent**:
