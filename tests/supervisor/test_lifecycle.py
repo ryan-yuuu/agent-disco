@@ -1508,8 +1508,11 @@ async def test_start_readiness_timeout_diagnoses_privileged_intents(
 async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
     tmp_path, capsys, fake_pc_bin
 ) -> None:
-    # No bridge log signature to match => the not-ready branch prints the existing
-    # generic message unchanged (broker / privileged intents guess + log pointer).
+    # No bridge log signature to match => the not-ready branch prints the generic
+    # fallback. It must name the true residual causes (broker/Discord unreachable
+    # or an unrecognised startup crash) and must NOT single out privileged intents:
+    # that case now has its own specific diagnosis, so blaming it here — when it did
+    # not match — is the misleading guess this message replaced.
     home = _home(tmp_path)
     clock = _FakeClock()
     client = _StubClient(
@@ -1532,7 +1535,11 @@ async def test_start_readiness_timeout_falls_back_to_generic_without_diagnosis(
 
     assert code == 1
     out = capsys.readouterr().out.lower()
-    assert "likely the broker could not be reached" in out
+    assert "discord gateway could not be reached" in out
+    assert "crashed on startup" in out
+    # The old message blamed privileged intents as the likely cause; the generic
+    # fallback no longer does (that cause has its own specific diagnosis).
+    assert "privileged intents" not in out
     # The generic message points at the BRIDGE log too — the file the diagnoser
     # reads and where the real traceback lands (the supervisor log only echoes
     # the readiness timeout).
