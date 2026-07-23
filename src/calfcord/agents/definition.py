@@ -94,8 +94,8 @@ class AgentDefinition(BaseModel):
 
     Semantics:
         - ``tools:`` omitted from frontmatter (default ``None``) — agent
-          discovers the default live builtin surface. Security-sensitive
-          bridge tools such as Discord history remain explicit opt-ins.
+          discovers every live function-tool node, including bridge-hosted
+          Discord reads (``discord_list_channels``, ``discord_read_messages``).
         - ``tools: []`` in frontmatter — agent gets NO tools (text-only).
           Explicit opt-out for read-only or routing-style agents.
         - ``tools: [a, b]`` — agent gets exactly those builtin tools.
@@ -103,7 +103,8 @@ class AgentDefinition(BaseModel):
     Security note: the "all by default" behaviour means a new
     ``agents/<name>.md`` ships with ``terminal`` / ``execute_code`` /
     ``write_file`` / ``patch`` access to the workspace bind-mounted into
-    the ``calfkit-tools`` container unless the operator narrows the list
+    the ``calfkit-tools`` container, plus read access to every Discord
+    channel the bot can view, unless the operator narrows the list
     explicitly. If you need a restricted-tools agent, add the
     ``tools:`` line. See :doc:`docs/authoring-agents` for the security
     model."""

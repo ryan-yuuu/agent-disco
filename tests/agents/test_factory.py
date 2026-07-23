@@ -28,7 +28,6 @@ from calfkit.providers.pydantic_ai.model_client import PydanticModelClient
 from calfcord.agents.definition import AgentDefinition, Provider
 from calfcord.agents.factory import AgentFactory, resolve_provider
 from calfcord.agents.memory import MEMORY_PROMPT_DEPS_KEY
-from calfcord.agents.tool_selectors import DiscoverDefaultTools
 
 
 def _definition(
@@ -359,9 +358,9 @@ class TestResolveProviderModuleFunction:
 class TestToolsWiring:
     """``definition.tools`` and ``definition.mcp`` map to calfkit runtime
     *selectors*, resolved per turn against the capability view — never against a
-    local registry at build time. Omitted ``tools:`` discovers the default live
-    surface while filtering sensitive explicit opt-ins; an explicit builtin list
-    becomes one ``Tools(names=[...])``.
+    local registry at build time. Omitted ``tools:`` discovers every live
+    function-tool node (including bridge-hosted Discord reads); an explicit
+    builtin list becomes one ``Tools(names=[...])``.
     The tri-state ``mcp:`` field → ``Toolboxes(discover=True)`` (default, every
     live MCP server), a named ``Toolboxes`` for a grant list, or nothing when
     ``false``. Because these are deferred selectors, the agent carries no eager
@@ -370,10 +369,10 @@ class TestToolsWiring:
     the capability view."""
 
     def test_omitted_tools_yields_discover_selector(self) -> None:
-        """Omitted tools use calfcord's filtered runtime-discovery selector."""
+        """Omitted tools use calfkit's full function-tool discovery selector."""
         agent = _factory().build_node(_definition(tools=None))
         assert agent.tools == []
-        assert agent._tool_selectors == [DiscoverDefaultTools()]
+        assert agent._tool_selectors == [Tools(discover=True)]
 
     def test_empty_tools_yields_no_selectors(self) -> None:
         """``tools: []`` is the deliberate no-tools opt-out: no selectors, and
@@ -437,13 +436,13 @@ class TestToolsWiring:
         """The new default posture for a general agent — omitted ``tools:`` and
         ``mcp: true`` — discovers both live planes: builtins and MCP servers."""
         agent = _factory().build_node(_definition(tools=None, mcp=True))
-        assert agent._tool_selectors == [DiscoverDefaultTools(), Toolboxes(discover=True)]
+        assert agent._tool_selectors == [Tools(discover=True), Toolboxes(discover=True)]
 
     def test_omitted_tools_with_named_mcp_discovers_builtins_plus_named_mcp(self) -> None:
         """Omitted builtins with a named MCP list: "all live builtins plus named
         MCP" without pinning the builtin set in frontmatter."""
         agent = _factory().build_node(_definition(tools=None, mcp=("github",)))
-        assert agent._tool_selectors == [DiscoverDefaultTools(), Toolboxes(MCPToolbox("github"))]
+        assert agent._tool_selectors == [Tools(discover=True), Toolboxes(MCPToolbox("github"))]
 
     def test_build_log_describes_named_selector_surface(self, caplog: pytest.LogCaptureFixture) -> None:
         """The build log records the selector surface for operators: named builtins
@@ -463,7 +462,7 @@ class TestToolsWiring:
         with caplog.at_level(logging.INFO, logger="calfcord.agents.factory"):
             _factory().build_node(_definition(tools=None, mcp=False))
         message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("building agent"))
-        assert "discover:default" in message
+        assert "discover:*" in message
 
     def test_build_log_marks_mcp_discover(self, caplog: pytest.LogCaptureFixture) -> None:
         """A discover-mode ``mcp: true`` agent logs the MCP discover handle so an

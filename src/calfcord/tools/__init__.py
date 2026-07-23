@@ -68,3 +68,18 @@ TOOL_REGISTRY: dict[str, ToolNodeDef] = apply_deploy_filters(ALL_TOOLS)
 """Tool name → :class:`ToolNodeDef`, after applying the deploy-time
 ``CALFCORD_TOOLS_INCLUDE`` / ``CALFCORD_TOOLS_ALIAS`` transforms. Order
 follows :data:`ALL_TOOLS` so boot logs are reproducible."""
+
+
+def default_builtin_tool_names() -> frozenset[str]:
+    """Names granted by an omitted ``tools:`` frontmatter field.
+
+    The tools-host registry is only half of the default surface: the bridge also
+    advertises read-only Discord tools against its authenticated client. Those
+    names are not in :data:`TOOL_REGISTRY` (the tools host has no bot token), but
+    they are ordinary live function tools and ride the same omitted-field
+    discovery path. CLI create/edit UIs use this set so "accept defaults" and
+    runtime discovery cannot drift.
+    """
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
+
+    return frozenset(TOOL_REGISTRY) | DISCORD_TOOL_NAMES

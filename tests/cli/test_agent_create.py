@@ -462,6 +462,7 @@ def test_pick_tools_prechecks_discover_row_named_rows_unchecked(monkeypatch) -> 
     wizard agent matches a hand-authored ``mcp: true`` default); the *named*
     ``mcp/<server>`` and live per-tool rows start unchecked."""
     from calfcord.cli import _agents
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
     prompter = FakePrompter(checkboxes=[["terminal"]])
     selected = _agents.pick_tools(
@@ -476,8 +477,10 @@ def test_pick_tools_prechecks_discover_row_named_rows_unchecked(monkeypatch) -> 
     assert by_value[MCP_DISCOVER_ROW].checked is True
     assert by_value["mcp/github"].checked is False
     assert by_value["mcp/github/search"].checked is False
-    # Builtins are still the pre-checked default.
+    # Builtins — including bridge Discord reads — are the pre-checked default.
     assert by_value["terminal"].checked is True
+    for name in DISCORD_TOOL_NAMES:
+        assert by_value[name].checked is True
 
 
 def test_pick_tools_default_selection_yields_discover(monkeypatch) -> None:
@@ -488,6 +491,24 @@ def test_pick_tools_default_selection_yields_discover(monkeypatch) -> None:
     prompter = FakePrompter(checkboxes=[["terminal", MCP_DISCOVER_ROW]])
     selected = _agents.pick_tools(prompter, "helper", mcp_servers_fn=lambda: [], live_tools_fn=lambda: {})
     assert selected.mcp is True
+
+
+def test_pick_tools_accepting_defaults_omits_tools_including_discord() -> None:
+    """Enter-on-default (every pre-checked row) must yield ``tools=None`` so the
+    created agent keeps live discovery — Discord reads included — rather than a
+    pinned snapshot."""
+    from calfcord.cli import _agents
+    from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools.discord import DISCORD_TOOL_NAMES
+
+    # No scripted checkbox answer → FakePrompter returns every pre-checked row.
+    prompter = FakePrompter()
+    selected = _agents.pick_tools(prompter, "helper", mcp_servers_fn=lambda: [], live_tools_fn=lambda: {})
+    assert selected.tools is None
+    assert selected.mcp is True
+    checked = {c.value for c in prompter.last_checkbox_choices if c.checked}
+    assert DISCORD_TOOL_NAMES <= checked
+    assert set(TOOL_REGISTRY) <= checked
 
 
 def test_pick_tools_splits_selected_mcp_rows(monkeypatch) -> None:

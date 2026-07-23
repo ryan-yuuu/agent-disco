@@ -1,24 +1,18 @@
-"""Security policy for calfcord's default function-tool discovery."""
+"""Default function-tool discovery no longer needs a calfcord filter layer.
+
+Omitted ``tools:`` maps to calfkit's native ``Tools(discover=True)``. Bridge-
+hosted Discord reads are ordinary live tool nodes on that plane, so there is no
+security filter selector to unit-test here anymore. This module stays only to
+document that the old ``DiscoverDefaultTools`` seam is gone.
+"""
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import importlib
 
-from calfkit.models.tool_dispatch import SelectorResult
-
-from calfcord.agents.tool_selectors import DiscoverDefaultTools
+import pytest
 
 
-def test_default_discovery_filters_discord_tools() -> None:
-    allowed = type("Binding", (), {"name": "read_file"})()
-    discord_list = type("Binding", (), {"name": "discord_list_channels"})()
-    discord_read = type("Binding", (), {"name": "discord_read_messages"})()
-    resolved = SelectorResult(bindings=(allowed, discord_list, discord_read))  # type: ignore[arg-type]
-
-    with patch(
-        "calfcord.agents.tool_selectors.resolve_all_capabilities",
-        return_value=resolved,
-    ):
-        result = DiscoverDefaultTools().resolve_tools(object())  # type: ignore[arg-type]
-
-    assert [binding.name for binding in result.bindings] == ["read_file"]
+def test_discover_default_tools_filter_module_is_removed() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("calfcord.agents.tool_selectors")

@@ -15,7 +15,8 @@ import pytest
 from calfkit.nodes.tool import ToolNodeDef
 from calfkit_tools.hermes.node import HERMES_NODES
 
-from calfcord.tools import ALL_TOOLS, TOOL_REGISTRY
+from calfcord.tools import ALL_TOOLS, TOOL_REGISTRY, default_builtin_tool_names
+from calfcord.tools.discord import DISCORD_TOOL_NAMES
 
 # The exact tool surface calfcord exposes. Edit this when adopting or
 # dropping a tool — the tests below then flag any drift.
@@ -73,6 +74,15 @@ class TestToolRegistry:
     def test_subscribe_topic_matches_name_convention(self, name: str) -> None:
         node = TOOL_REGISTRY[name]
         assert node.subscribe_topics == [f"tool.{name}.input"]
+
+    def test_default_builtin_names_include_registry_and_discord_reads(self) -> None:
+        """Omitted ``tools:`` grants the tools-host registry plus bridge Discord
+        reads. Discord stays out of TOOL_REGISTRY (no bot token there) but must
+        still count as a default builtin for create/edit/runtime discovery."""
+        defaults = default_builtin_tool_names()
+        assert set(TOOL_REGISTRY) <= defaults
+        assert DISCORD_TOOL_NAMES <= defaults
+        assert DISCORD_TOOL_NAMES.isdisjoint(TOOL_REGISTRY)
 
 
 class TestSurfaceDriftGuard:

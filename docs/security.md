@@ -27,11 +27,12 @@ tool is gone — so a compromised tools host cannot leak the bot token. The
 shipped `docker-compose.yml` blanks `DISCORD_BOT_TOKEN` for the `tools`
 service to make that blast-radius reduction explicit. The bridge itself hosts
 `discord_list_channels` and `discord_read_messages` against its authenticated
-client. Those tools can read every channel the bot can view; they are excluded
-from default tool discovery and must be explicitly granted in an agent's
-`tools:` list. The caller's human Discord permissions are not propagated to a
-tool call—the bot's effective View Channel and Read Message History permissions
-are the authorization boundary.
+client. Those tools can read every channel the bot can view and are part of the
+default live function-tool surface (omitted `tools:` discovers them). Narrow an
+agent with an explicit `tools:` list if it should not read server history. The
+caller's human Discord permissions are not propagated to a tool call—the bot's
+effective View Channel and Read Message History permissions are the
+authorization boundary.
 
 **Stateful tools isolate per agent.** While there is no *sandbox*, the
 vendored stateful nodes (`terminal`, `process`, the in-flight file

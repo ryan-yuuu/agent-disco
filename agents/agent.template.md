@@ -99,10 +99,12 @@ model: claude-sonnet-4-5
 #
 # Semantics of the `tools:` line (builtins only — MCP is the separate `mcp:`
 # field below):
-#   - omitted entirely  → agent discovers EVERY live builtin. Convenient, but
-#                         means a new agent ships with terminal/write_file/
-#                         execute_code access to the shared workspace — narrow
-#                         the list if the agent takes input from untrusted users.
+#   - omitted entirely  → agent discovers EVERY live function tool, including
+#                         bridge Discord reads. Convenient, but means a new
+#                         agent ships with terminal/write_file/execute_code
+#                         access to the shared workspace plus channel history
+#                         the bot can view — narrow the list if the agent takes
+#                         input from untrusted users.
 #   - tools: []         → agent gets NO builtins (text-only unless `mcp:` grants).
 #   - tools: [a, b]     → exactly those builtins, e.g.
 #                         tools: [read_file, web_search]
