@@ -80,8 +80,8 @@ class TestToolRegistry:
         reads. Discord stays out of TOOL_REGISTRY (no bot token there) but must
         still count as a default builtin for create/edit/runtime discovery."""
         defaults = default_builtin_tool_names()
-        assert set(TOOL_REGISTRY) <= defaults
-        assert DISCORD_TOOL_NAMES <= defaults
+        assert defaults >= set(TOOL_REGISTRY)
+        assert defaults >= DISCORD_TOOL_NAMES
         assert DISCORD_TOOL_NAMES.isdisjoint(TOOL_REGISTRY)
 
 

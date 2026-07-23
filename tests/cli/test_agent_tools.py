@@ -544,7 +544,7 @@ def test_discord_rows_are_prechecked_when_tools_is_omitted(tmp_path: Path) -> No
     assert fake.last_checkbox_choices is not None
     offered = {c.value for c in fake.last_checkbox_choices}
     assert offered >= DISCORD_TOOL_NAMES
-    assert DISCORD_TOOL_NAMES <= _checked(fake.last_checkbox_choices)
+    assert _checked(fake.last_checkbox_choices) >= DISCORD_TOOL_NAMES
 
 
 def test_explicit_discord_grant_is_prechecked(tmp_path: Path) -> None:

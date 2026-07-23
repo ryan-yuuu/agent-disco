@@ -507,8 +507,8 @@ def test_pick_tools_accepting_defaults_omits_tools_including_discord() -> None:
     assert selected.tools is None
     assert selected.mcp is True
     checked = {c.value for c in prompter.last_checkbox_choices if c.checked}
-    assert DISCORD_TOOL_NAMES <= checked
-    assert set(TOOL_REGISTRY) <= checked
+    assert checked >= DISCORD_TOOL_NAMES
+    assert checked >= set(TOOL_REGISTRY)
 
 
 def test_pick_tools_splits_selected_mcp_rows(monkeypatch) -> None:
