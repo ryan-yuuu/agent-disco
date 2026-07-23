@@ -60,6 +60,21 @@ _PROBE_TIMEOUT_SECONDS = 10
 _PROBE_SUCCESS_THRESHOLD = 1
 _PROBE_FAILURE_THRESHOLD = 3
 
+# The bridge's readiness is a COMPOUND signal — Discord authenticated AND the
+# co-located tool Worker's Kafka consumer groups all joined — so it goes ready far
+# slower than the broker's single metadata check. Each consumer group join costs
+# ~5s and the Worker joins them serially, so a two-tool bridge needs ~4s (Discord)
+# + ~10s (joins) ≈ 14s cold. The broker's tight budget (initial_delay + 2*period ≈
+# 8s) SIGTERMs the bridge mid-join on every restart cycle, wedging `disco start` in
+# a bridge-never-ready loop. A wider failure_threshold buys the bridge a ~29s
+# not-ready window (initial_delay + (threshold - 1) * period) — headroom over the
+# ~14s cold start for an added read tool or a slow host — while staying well under
+# `start`'s 90s outer readiness wait, so the bridge reaches ready on its FIRST
+# supervised attempt. failure_threshold (not initial_delay) is the knob: the probe
+# keeps ticking every period, so a warm/fast startup still flips to ready early and
+# only a slow one spends the extra budget.
+_BRIDGE_PROBE_FAILURE_THRESHOLD = 10
+
 # Autorestart backoff for the substrate's `always` policy (the only processes
 # declared here — the roster is detached, off PC, with NO auto-respawn);
 # max_restarts 0 == unlimited retries in Process Compose. The backoff is a
@@ -194,15 +209,25 @@ def _restart(policy: str) -> dict:
     }
 
 
-def _readiness_probe(launcher: str, component: str) -> dict:
-    """An exec readiness probe driving ``depends_on: process_healthy``."""
+def _readiness_probe(
+    launcher: str,
+    component: str,
+    *,
+    failure_threshold: int = _PROBE_FAILURE_THRESHOLD,
+) -> dict:
+    """An exec readiness probe driving ``depends_on: process_healthy``.
+
+    ``failure_threshold`` defaults to the tight substrate budget; the bridge
+    overrides it with a wider one to cover its compound Discord-plus-tool-Worker
+    startup (see :data:`_BRIDGE_PROBE_FAILURE_THRESHOLD`).
+    """
     return {
         "exec": {"command": f"{launcher} _healthcheck {component}"},
         "initial_delay_seconds": _PROBE_INITIAL_DELAY_SECONDS,
         "period_seconds": _PROBE_PERIOD_SECONDS,
         "timeout_seconds": _PROBE_TIMEOUT_SECONDS,
         "success_threshold": _PROBE_SUCCESS_THRESHOLD,
-        "failure_threshold": _PROBE_FAILURE_THRESHOLD,
+        "failure_threshold": failure_threshold,
     }
 
 
@@ -291,7 +316,9 @@ def build_compose_project(
         disabled=False,
         restart_policy="always",
         depends_on=broker_dep,
-        readiness_probe=_readiness_probe(launcher, "bridge"),
+        readiness_probe=_readiness_probe(
+            launcher, "bridge", failure_threshold=_BRIDGE_PROBE_FAILURE_THRESHOLD
+        ),
     )
 
     return {

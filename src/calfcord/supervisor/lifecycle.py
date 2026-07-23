@@ -833,11 +833,18 @@ async def start(
                     f"{diagnosis} See {bridge_log} or run: disco doctor"
                 )
             else:
+                # Reached only when no known signature matched — so the specific
+                # causes (privileged intents, bad token, missing settings) were NOT
+                # seen and must not be named here. Blame the true residual causes:
+                # the broker or Discord gateway being unreachable (a hung consumer
+                # join or a dropped gateway keeps the heartbeat from ever ticking),
+                # or a startup crash whose signature we do not yet recognise.
                 print(
                     "error: bridge did not become ready within "
                     f"{ready_timeout_s:g}s; {outcome} "
-                    "Likely the broker could not be reached or Discord privileged "
-                    f"intents are off. See {bridge_log} or run: disco doctor"
+                    "Likely the broker or the Discord gateway could not be reached, "
+                    "or the bridge crashed on startup for an unrecognised reason. "
+                    f"See {bridge_log} or run: disco doctor"
                 )
             return 1
         reporter.done(BRIDGE_STEP)

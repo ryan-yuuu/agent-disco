@@ -80,7 +80,31 @@ def test_substrate_readiness_probes_are_exec_only() -> None:
         # the substrate (the readiness-spiral incident) — see compose._PROBE_TIMEOUT_SECONDS.
         assert probe["timeout_seconds"] == 10
         assert probe["success_threshold"] == 1
-        assert probe["failure_threshold"] == 3
+    # The broker's single metadata check goes ready fast, so it keeps the tight
+    # failure budget; the bridge's compound readiness needs a wider one (see
+    # test_bridge_readiness_budget_covers_compound_startup).
+    assert procs["broker"]["readiness_probe"]["failure_threshold"] == 3
+
+
+def test_bridge_readiness_budget_covers_compound_startup() -> None:
+    # The bridge's readiness is a COMPOUND signal — Discord authenticated AND the
+    # co-located tool Worker's Kafka consumer groups all joined — which is far
+    # slower than the broker's single metadata check: each consumer group join
+    # costs ~5s and the Worker joins them serially, so a two-tool bridge needs
+    # ~4s (Discord) + ~10s (joins) ≈ 14s cold. The broker's tight ~8s budget would
+    # SIGTERM the bridge mid-join on every restart cycle, so the bridge gets a
+    # wider failure_threshold. The tolerated not-ready window
+    # (initial_delay + (failure_threshold - 1) * period) must cover worst-case
+    # cold startup with headroom for an added tool or a slow host, while staying
+    # well under `start`'s outer readiness wait so the bridge reaches ready on its
+    # first supervised attempt instead of being bounced forever.
+    procs = _processes()
+    broker = procs["broker"]["readiness_probe"]
+    bridge = procs["bridge"]["readiness_probe"]
+
+    assert bridge["failure_threshold"] > broker["failure_threshold"]
+    budget = bridge["initial_delay_seconds"] + (bridge["failure_threshold"] - 1) * bridge["period_seconds"]
+    assert budget >= 25
 
 
 def test_readiness_probe_commands_invoke_the_launcher_healthcheck() -> None:

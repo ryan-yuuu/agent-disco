@@ -78,9 +78,12 @@ the substrate back down rather than leaving a half-open office.
 
 **What it means.** `start` is health-gated: it polls until the **bridge**
 heartbeat reports healthy before declaring success. The bridge writes its first
-healthy beat only once it is **connected to Discord** (`on_ready`), so the gate
-times out whenever the bridge can connect a process but never completes the
-Discord handshake.
+healthy beat only once it is fully serving — **connected to Discord** (`on_ready`)
+**and**, when Discord read tools are enabled, its co-located tool worker has
+joined every consumer group. That handshake plus the group joins take longer than
+a bare process start, and the bridge's readiness probe budget already allows for
+it, so a timeout here means the bridge can start a process but never finishes
+coming up — not merely that it is slow.
 
 **Most common cause — the Message Content intent is off.** If the bridge can
 reach Discord but the gateway never finishes coming up, the usual culprit is
