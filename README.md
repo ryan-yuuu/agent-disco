@@ -8,14 +8,13 @@
 | src/calfcord/\_provisioning.py                |       19 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/\_worker\_runtime.py             |       41 |        0 |       14 |        0 |    100% |           |
 | src/calfcord/agents/definition.py             |       98 |        0 |       24 |        0 |    100% |           |
-| src/calfcord/agents/factory.py                |      113 |        2 |       42 |        3 |     97% |156, 172, 249-\>244 |
+| src/calfcord/agents/factory.py                |      110 |        2 |       40 |        3 |     97% |156, 172, 247-\>244 |
 | src/calfcord/agents/identifier.py             |       26 |        0 |       10 |        0 |    100% |           |
 | src/calfcord/agents/loader.py                 |       38 |        1 |       16 |        1 |     96% |       115 |
-| src/calfcord/agents/md\_writer.py             |      113 |        0 |       28 |        3 |     98% |89-\>92, 340-\>346, 346-\>exit |
+| src/calfcord/agents/md\_writer.py             |      111 |        0 |       28 |        3 |     98% |89-\>92, 338-\>344, 344-\>exit |
 | src/calfcord/agents/memory.py                 |       53 |        0 |       10 |        0 |    100% |           |
 | src/calfcord/agents/runner.py                 |      113 |       21 |       24 |        1 |     84% |276-307, 311-320, 324 |
 | src/calfcord/agents/thinking.py               |       41 |        4 |       22 |        2 |     90% |103-107, 118-122 |
-| src/calfcord/agents/tool\_selectors.py        |       11 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/bridge/a2a\_dispatch.py          |       65 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/bridge/a2a\_project.py           |      193 |        6 |       50 |        7 |     95% |381-\>389, 425-426, 438-442, 486, 489, 526-\>515 |
 | src/calfcord/bridge/egress.py                 |       90 |        4 |       18 |        0 |     96% |97, 219-225 |
@@ -36,7 +35,7 @@
 | src/calfcord/bridge/transcripts.py            |      154 |        3 |       18 |        0 |     98% |   181-185 |
 | src/calfcord/bridge/wire.py                   |       40 |        0 |        6 |        0 |    100% |           |
 | src/calfcord/broker/runner.py                 |       30 |        1 |        6 |        1 |     94% |        80 |
-| src/calfcord/cli/\_agents.py                  |      127 |        5 |       26 |        1 |     96% |246-247, 289-291, 422-\>424 |
+| src/calfcord/cli/\_agents.py                  |      128 |        5 |       26 |        1 |     96% |246-247, 289-291, 422-\>424 |
 | src/calfcord/cli/\_editor.py                  |       28 |        1 |       12 |        1 |     95% |        92 |
 | src/calfcord/cli/\_envfile.py                 |       55 |        2 |       32 |        2 |     95% |   75, 141 |
 | src/calfcord/cli/\_fields.py                  |       78 |        0 |       30 |        0 |    100% |           |
@@ -48,7 +47,7 @@
 | src/calfcord/cli/agent\_edit.py               |      142 |       15 |       38 |        2 |     91% |98-102, 143-147, 171-173, 266-267, 296, 325-329 |
 | src/calfcord/cli/agent\_inspect.py            |       74 |        2 |       20 |        2 |     96% |   89, 152 |
 | src/calfcord/cli/agent\_lifecycle.py          |      110 |        2 |       34 |        1 |     98% |250-251, 265-\>267 |
-| src/calfcord/cli/agent\_tools.py              |      100 |        0 |       30 |        0 |    100% |           |
+| src/calfcord/cli/agent\_tools.py              |      101 |        0 |       30 |        0 |    100% |           |
 | src/calfcord/cli/deploy.py                    |       86 |        1 |       30 |        2 |     97% |488-\>493, 497 |
 | src/calfcord/cli/discord\_discovery.py        |      194 |       16 |       50 |        7 |     91% |223-224, 248-250, 392, 396, 503-\>501, 528-529, 548, 555, 563-564, 572-574 |
 | src/calfcord/cli/doctor.py                    |      198 |        5 |       76 |        0 |     98% |   106-110 |
@@ -115,7 +114,7 @@
 | src/calfcord/tools/deploy\_filters.py         |      114 |        0 |       62 |        0 |    100% |           |
 | src/calfcord/tools/discord.py                 |       11 |        0 |        0 |        0 |    100% |           |
 | src/calfcord/tools/runner.py                  |       56 |        1 |        6 |        1 |     97% |       169 |
-| **TOTAL**                                     | **10199** |  **504** | **2698** |  **149** | **94%** |           |
+| **TOTAL**                                     | **10185** |  **504** | **2696** |  **149** | **94%** |           |
 
 
 ## Setup coverage badge
