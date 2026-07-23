@@ -124,8 +124,8 @@ def test_omitted_tools_prechecks_all_builtins(tmp_path: Path) -> None:
     agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
 
     assert fake.last_checkbox_choices is not None
-    # ``tools:`` omitted ⇒ every builtin pre-checked.
-    assert _checked(fake.last_checkbox_choices) == BUILTIN_NAMES
+    # ``tools:`` omitted ⇒ every default builtin pre-checked, including Discord.
+    assert _checked(fake.last_checkbox_choices) == BUILTIN_NAMES | DISCORD_TOOL_NAMES
 
 
 def test_empty_tools_prechecks_none(tmp_path: Path) -> None:
@@ -215,15 +215,33 @@ def test_selecting_subset_writes_that_subset(tmp_path: Path) -> None:
     assert parse_agent_md(md_path).tools == ("read_file", "terminal")
 
 
-def test_selecting_all_builtins_removes_tools_key(tmp_path: Path) -> None:
+def test_selecting_all_default_builtins_removes_tools_key(tmp_path: Path) -> None:
+    """Default builtins include bridge Discord reads. Selecting that full set
+    must omit ``tools:`` so runtime discovery stays live rather than pinning a
+    snapshot that would drift from newly advertised tools."""
     md_path = _seed_agent(tmp_path, "assistant", tools_line="[read_file]")
-    fake = FakePrompter(checkbox_result=sorted(BUILTIN_NAMES))
+    fake = FakePrompter(checkbox_result=sorted(BUILTIN_NAMES | DISCORD_TOOL_NAMES))
     rc = agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
     assert rc == 0
 
     metadata = frontmatter.load(md_path).metadata
     assert "tools" not in metadata
     assert parse_agent_md(md_path).tools is None
+
+
+def test_selecting_registry_only_keeps_explicit_tools_list(tmp_path: Path) -> None:
+    """Leaving Discord reads unchecked is a real restriction, so the writer must
+    pin an explicit list rather than omitting ``tools:`` (which would re-grant
+    them via discovery)."""
+    md_path = _seed_agent(tmp_path, "assistant", tools_line="[read_file]")
+    fake = FakePrompter(checkbox_result=sorted(BUILTIN_NAMES))
+    rc = agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
+    assert rc == 0
+
+    written = frontmatter.load(md_path).metadata["tools"]
+    assert set(written) == BUILTIN_NAMES
+    assert DISCORD_TOOL_NAMES.isdisjoint(written)
+    assert parse_agent_md(md_path).tools is not None
 
 
 def test_deselecting_all_writes_empty_list(tmp_path: Path) -> None:
@@ -513,13 +531,12 @@ def test_first_line_returns_empty_for_blank_only_descriptions() -> None:
     assert agent_tools.first_line("\n   \n\t\n") == ""
 
 
-# ------------------------------------------------------------- discord opt-in ---
+# ------------------------------------------------------------- discord defaults ---
 
 
-def test_discord_rows_are_offered_but_unchecked_when_tools_is_omitted(tmp_path: Path) -> None:
-    """``tools:`` omitted means "all default builtins". Discord reads are NOT
-    default — they are security-sensitive, so they must be visible in the menu
-    yet pre-checked off, forcing an explicit operator opt-in."""
+def test_discord_rows_are_prechecked_when_tools_is_omitted(tmp_path: Path) -> None:
+    """``tools:`` omitted means every default builtin, including bridge Discord
+    reads — same posture as create's default checkbox and runtime discovery."""
     _seed_agent(tmp_path, "assistant", tools_line=None, mcp_line="false")
     fake = FakePrompter(checkbox_result=[])
     agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
@@ -527,7 +544,7 @@ def test_discord_rows_are_offered_but_unchecked_when_tools_is_omitted(tmp_path: 
     assert fake.last_checkbox_choices is not None
     offered = {c.value for c in fake.last_checkbox_choices}
     assert offered >= DISCORD_TOOL_NAMES
-    assert _checked(fake.last_checkbox_choices) & DISCORD_TOOL_NAMES == set()
+    assert _checked(fake.last_checkbox_choices) >= DISCORD_TOOL_NAMES
 
 
 def test_explicit_discord_grant_is_prechecked(tmp_path: Path) -> None:
@@ -539,16 +556,17 @@ def test_explicit_discord_grant_is_prechecked(tmp_path: Path) -> None:
     assert _checked(fake.last_checkbox_choices) == {"discord_read_messages"}
 
 
-def test_selecting_a_discord_tool_writes_an_explicit_tools_list(tmp_path: Path) -> None:
-    """Discord tools never count toward the "everything is selected" shortcut that
-    drops the ``tools:`` key — dropping it would silently revoke the grant, since
-    an omitted list means generic builtins only."""
-    _seed_agent(tmp_path, "assistant", tools_line="[]", mcp_line="false")
-    fake = FakePrompter(checkbox_result=[*sorted(BUILTIN_NAMES), "discord_list_channels"])
+def test_deselecting_one_discord_tool_writes_an_explicit_tools_list(tmp_path: Path) -> None:
+    """Narrowing away any default builtin, including one Discord read tool, must
+    pin an explicit list so the omitted-field discovery path cannot re-add it."""
+    _seed_agent(tmp_path, "assistant", tools_line=None, mcp_line="false")
+    selected = sorted((BUILTIN_NAMES | DISCORD_TOOL_NAMES) - {"discord_list_channels"})
+    fake = FakePrompter(checkbox_result=selected)
     rc = agent_tools.run(fake, agents_dir=tmp_path, name="assistant")
 
     assert rc == 0
     written = frontmatter.load(tmp_path / "assistant.md").metadata["tools"]
-    assert "discord_list_channels" in written
-    assert set(written) == BUILTIN_NAMES | {"discord_list_channels"}
+    assert "discord_list_channels" not in written
+    assert "discord_read_messages" in written
+    assert set(written) == set(selected)
     assert parse_agent_md(tmp_path / "assistant.md").tools is not None

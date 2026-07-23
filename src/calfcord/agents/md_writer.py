@@ -200,11 +200,10 @@ def update_tool_grants(
     The ``mcp`` tri-state (``True`` / ``False`` / a named grant list) is written
     by :func:`apply_mcp_metadata`, which owns the canonical on-disk form.
     """
-    from calfcord.tools import TOOL_REGISTRY
-    from calfcord.tools.discord import DISCORD_TOOL_NAMES
+    from calfcord.tools import default_builtin_tool_names
 
     if tools is not None:
-        allowed = {**TOOL_REGISTRY, **dict.fromkeys(DISCORD_TOOL_NAMES)}
+        allowed = dict.fromkeys(default_builtin_tool_names())
         _validate_builtin_tools(tools, allowed)
     _validate_mcp_grants(mcp)
 
@@ -259,18 +258,18 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
     untouched, rather than surfacing as a generic pydantic error:
 
     * an ``mcp/...`` token is rejected because ``tools:`` is builtin-only;
-    * a *builtin* token must be a key of
-      :data:`calfcord.tools.TOOL_REGISTRY`.
+    * a *builtin* token must be in
+      :func:`calfcord.tools.default_builtin_tool_names` (tools-host registry
+      plus bridge Discord reads).
 
     Existing ``mcp:`` grants are preserved. Use :func:`update_tool_grants` when
     a caller needs to rewrite both fields or remove ``tools:`` to express
     builtin discovery.
 
-    The ``TOOL_REGISTRY`` import is deferred to here (rather than module
-    scope) so :func:`update_thinking_effort`'s path stays light: importing
-    ``TOOL_REGISTRY`` eagerly composes the tool registry (importing the
-    vendored ``calfkit-tools`` nodes), which the thinking-effort slash
-    command has no reason to pay for.
+    The default-name import is deferred to here (rather than module scope) so
+    :func:`update_thinking_effort`'s path stays light: composing the tool
+    registry pulls in the vendored ``calfkit-tools`` nodes, which the
+    thinking-effort slash command has no reason to pay for.
 
     Raises:
         FileNotFoundError: ``md_path`` does not exist.
@@ -280,10 +279,9 @@ def update_tools(md_path: Path, tools: Sequence[str]) -> AgentDefinition:
         OSError: a filesystem error during the atomic write. The on-disk
             file is unchanged.
     """
-    from calfcord.tools import TOOL_REGISTRY
-    from calfcord.tools.discord import DISCORD_TOOL_NAMES
+    from calfcord.tools import default_builtin_tool_names
 
-    allowed = {**TOOL_REGISTRY, **dict.fromkeys(DISCORD_TOOL_NAMES)}
+    allowed = dict.fromkeys(default_builtin_tool_names())
     _validate_builtin_tools(tools, allowed)
 
     return _update_fields(md_path, {"tools": list(tools)})

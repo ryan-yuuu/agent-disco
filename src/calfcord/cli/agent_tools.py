@@ -141,7 +141,7 @@ def _build_choices(
         choices.append(Choice(name, label, name in current))
     for name in sorted(DISCORD_TOOL_NAMES):
         choices.append(
-            Choice(name, f"{name} — read Discord server data (explicit opt-in)", name in current)
+            Choice(name, f"{name} — read Discord server data", name in current)
         )
 
     choices.append(
@@ -236,11 +236,12 @@ def run(
         print(f"error: cannot read agent {agent_name!r}: {e}")
         return 1
 
-    from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools import default_builtin_tool_names
 
-    # ``tools:`` omitted means "all default builtins" — Discord reads remain
-    # unchecked because they are security-sensitive explicit opt-ins.
-    current = set(raw.tools) if raw.tools is not None else set(TOOL_REGISTRY)
+    default_builtins = set(default_builtin_tool_names())
+    # ``tools:`` omitted means every default builtin, including bridge Discord
+    # reads — same set create pre-checks and runtime discovery grants.
+    current = set(raw.tools) if raw.tools is not None else set(default_builtins)
     # ``mcp`` is tri-state: ``True`` pre-checks the discover row; a named tuple
     # pre-checks its ``mcp/<server>`` rows; ``False`` pre-checks nothing.
     if raw.mcp is True:
@@ -258,9 +259,7 @@ def run(
     )
 
     try:
-        # Only the generic registry is the implicit default. Discord tool rows
-        # intentionally count as non-default, forcing an explicit tools: list.
-        grants = _split_tool_selection(selected, set(TOOL_REGISTRY))
+        grants = _split_tool_selection(selected, default_builtins)
         update_tool_grants(md_path, tools=grants.tools, mcp=grants.mcp)
     except (ValueError, OSError) as e:
         # The write path: a read-only dir, ENOSPC, a concurrent delete, or a

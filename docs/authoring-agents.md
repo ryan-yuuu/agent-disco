@@ -148,10 +148,9 @@ tools: [terminal, read_file, web_search]
 ```
 
 `tools` is a list of bare builtin tool names. Omitted `tools:` dynamically
-binds the default live builtin surface. Security-sensitive bridge tools
-(`discord_list_channels`, `discord_read_messages`) are excluded and require an
-explicit grant. An explicit list becomes a runtime
-`Tools(names=[...])` selector.
+binds every live function-tool node, including bridge-hosted Discord reads
+(`discord_list_channels`, `discord_read_messages`). An explicit list becomes a
+runtime `Tools(names=[...])` selector.
 
 The registry is the explicit `ALL_TOOLS` list in
 `src/calfcord/tools/__init__.py`, narrowed/aliased at boot by
@@ -173,9 +172,8 @@ the per-agent tenancy model and the operator-facing deployment patterns.
 
 Set `tools: []` for an LLM-only (text-only) agent. **Omitting `tools`
 entirely is the opposite** — it grants every default live builtin tool
-(including `terminal` / `execute_code` / `write_file` / `patch`, but excluding
-the explicit-opt-in Discord read tools), per
-the security note above.
+(including `terminal` / `execute_code` / `write_file` / `patch` and the
+bridge Discord read tools), per the security note above.
 
 #### MCP-server tools
 

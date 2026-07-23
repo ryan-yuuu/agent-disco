@@ -444,12 +444,12 @@ def pick_tools(
 ) -> ToolGrantSelection:
     """Prompt for the agent's tools and return split builtin/MCP grants.
 
-    Every builtin (sorted :data:`calfcord.tools.TOOL_REGISTRY`) is offered
-    pre-checked so the default is the same "all builtins" set a frontmatter that
-    omits ``tools:`` would expand to, and the MCP discover row is likewise
-    pre-checked so a wizard-created agent matches a hand-authored one (which
-    defaults to ``mcp: true``). The *named* MCP rows (``mcp/<server>`` from
-    mcp.json plus live-discovered per-tool rows) start UNCHECKED — deselect
+    Every default builtin (tools-host registry plus bridge Discord reads) is
+    offered pre-checked so the default is the same "all builtins" set a
+    frontmatter that omits ``tools:`` discovers at runtime, and the MCP discover
+    row is likewise pre-checked so a wizard-created agent matches a hand-authored
+    one (which defaults to ``mcp: true``). The *named* MCP rows (``mcp/<server>``
+    from mcp.json plus live-discovered per-tool rows) start UNCHECKED — deselect
     discover to opt out or to pick named servers instead. Row building is shared
     with the ``agent tools`` editor (:func:`calfcord.cli.agent_tools._build_choices`)
     so the two surfaces can't drift. If a write/shell tool ends up selected we
@@ -461,13 +461,14 @@ def pick_tools(
         _default_live_tools,
         _default_mcp_servers,
     )
-    from calfcord.tools import TOOL_REGISTRY
+    from calfcord.tools import default_builtin_tool_names
 
+    default_builtins = set(default_builtin_tool_names())
     choices = _build_choices(
         # Builtins AND MCP-discover pre-checked, so a wizard-created agent's default
         # matches a hand-authored one (omitted ``tools:`` + ``mcp: true``); named MCP
         # rows start unchecked. Deselect discover to opt out or to pick named servers.
-        set(TOOL_REGISTRY) | {MCP_DISCOVER_ROW},
+        default_builtins | {MCP_DISCOVER_ROW},
         mcp_servers=(mcp_servers_fn or _default_mcp_servers)(),
         live_tools=(live_tools_fn or _default_live_tools)(),
     )
@@ -490,7 +491,7 @@ def pick_tools(
             "— keep the bot off public Discord (docs/security.md §3.4)."
         )
 
-    return _split_tool_selection(selected, set(TOOL_REGISTRY))
+    return _split_tool_selection(selected, default_builtins)
 
 
 def _split_tool_selection(selected: list[str], builtin_names: set[str]) -> ToolGrantSelection:
