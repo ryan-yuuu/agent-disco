@@ -167,10 +167,7 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
         # informative (a minted fault's message often is — e.g. "quota exhausted");
         # otherwise stay generic rather than expose a raw framework code.
         message = report.message if report is not None else None
-        if message:
-            text = f"{header} {message}. Please try again."
-        else:
-            text = f"{header} Please try again."
+        text = f"{header} {message}. Please try again." if message else f"{header} Please try again."
         return f"{text}\n\n{_CONTEXT_CLEAR_HINT}"
 
     footer = "Please try again, or ask an operator to check the logs."
