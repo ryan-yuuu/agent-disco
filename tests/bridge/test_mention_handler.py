@@ -910,6 +910,113 @@ class TestFaultRootCauses:
         assert "billing.quota_exceeded" in notice  # the minted child — not silently dropped
         assert "monthly quota exhausted" in notice
 
+    async def test_typed_context_window_fault_includes_clear_hint(self) -> None:
+        """calfkit's typed MODEL_CONTEXT_WINDOW_EXCEEDED signal gets the /clear recovery section."""
+        report = ErrorReport.build_safe(
+            error_type=FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED,
+            message="input exceeded the model context window",
+            origin_node_id="sol",
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError(report)))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "hit an error handling that message" in notice
+        assert "`/clear`" in notice
+        assert "context-window" in notice
+        assert "read tools" in notice
+        assert len(notice) <= 2000
+
+    async def test_provider_context_length_message_includes_clear_hint(self) -> None:
+        """Generic ModelHTTPError bodies that name context_length_exceeded also get the hint.
+
+        Today many providers still arrive as calf.exception rather than the typed
+        MODEL_CONTEXT_WINDOW_EXCEEDED code; phrase-match so users still get the
+        recovery guidance.
+        """
+        report = ErrorReport.build_safe(
+            error_type=FaultTypes.EXCEPTION,
+            message=(
+                "status_code: 400, model_name: gpt-5.6, body: "
+                "{'error': {'code': 'context_length_exceeded', "
+                "'message': 'Your input exceeds the context window of this model.'}}"
+            ),
+            origin_node_id="sol",
+            exception=ExceptionInfo(type="ModelHTTPError", attrs={"status_code": 400}),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError(report)))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "ModelHTTPError" in notice
+        assert "context window" in notice.lower()
+        assert "`/clear`" in notice
+        assert "continue chatting" in notice
+
+    async def test_anthropic_prompt_too_long_includes_clear_hint(self) -> None:
+        """Anthropic's free-text 'prompt is too long' overflow also gets the hint."""
+        report = ErrorReport.build_safe(
+            error_type=FaultTypes.EXCEPTION,
+            message="prompt is too long: 220000 tokens > 200000 maximum",
+            origin_node_id="sol",
+            exception=ExceptionInfo(type="ModelHTTPError", attrs={"status_code": 400}),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError(report)))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "`/clear`" in notice
+
+    async def test_context_window_code_in_exception_attrs_includes_clear_hint(self) -> None:
+        """Overflow code living only in harvested exception attrs still triggers the hint."""
+        report = ErrorReport.build_safe(
+            error_type=FaultTypes.EXCEPTION,
+            message="status_code: 400, model_name: gpt-5.6",
+            origin_node_id="sol",
+            exception=ExceptionInfo(
+                type="ModelHTTPError",
+                attrs={
+                    "status_code": 400,
+                    "body": {
+                        "error": {
+                            "code": "context_length_exceeded",
+                            "message": "Your input exceeds the context window of this model.",
+                        }
+                    },
+                },
+            ),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError(report)))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "`/clear`" in notice
+
+    async def test_unrelated_fault_does_not_include_clear_hint(self) -> None:
+        """Ordinary tool/runtime faults must not grow a spurious /clear recovery section."""
+        report = ErrorReport.build_safe(
+            error_type=FaultTypes.EXCEPTION,
+            message="Failed to fetch https://x.test/: 403 Forbidden",
+            origin_node_id="web_fetch",
+            exception=ExceptionInfo(type="WebFetchError", attrs={"status_code": 403}),
+        )
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError(report)))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "WebFetchError" in notice
+        assert "`/clear`" not in notice
+        assert "context-window" not in notice
+
+    async def test_nested_typed_context_window_fault_includes_clear_hint(self) -> None:
+        """A typed overflow nested under a fault_group is still found via report.find()."""
+        leaf = ErrorReport.build_safe(
+            error_type=FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED,
+            message="input exceeded the model context window",
+            origin_node_id="sol",
+        )
+        exc = _fault_group("sol", [leaf])
+        handler, _client, fakes = _make(handle=_FakeHandle(fault=exc))
+        await handler.handle(_req())
+        notice = fakes["reply"].notices[0]
+        assert "`/clear`" in notice
+        assert len(notice) <= 2000
+
 
 class TestA2ATurnRegistration:
     async def test_registers_root_agent_and_human_subject_before_projection(self) -> None:

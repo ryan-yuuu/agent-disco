@@ -55,6 +55,14 @@ _STICKY_OWNER_OFFLINE = (
     "This conversation is sticky to `{mention}`, but that agent is offline. "
     "Use `!unstick` or address another agent with `!name`."
 )
+# Actionable recovery when the model rejected the prompt as too large. `/clear`
+# posts a channel boundary the history fetcher truncates at; the agent can then
+# re-read recent messages with its ordinary read tools.
+_CONTEXT_WINDOW_HINT = (
+    "If this looks like a model context-window overflow, use `/clear` to reset "
+    "this channel's agent context, then continue chatting. The agent can use its "
+    "read tools to catch up on the last few messages."
+)
 
 # Notice budget: Discord caps a message at 2000 chars. The cap below is a SOFT
 # target — the "and N more" elision line (when appended) lives in the 100-char
@@ -66,10 +74,67 @@ _MAX_NOTICE_CHARS = _DISCORD_NOTICE_LIMIT - 100
 # the echoed URL); cap each line so one verbose cause can't crowd out the others.
 _MAX_CAUSE_MSG_CHARS = 240
 
+# Fallback markers for provider bodies that still arrive as generic
+# ``calf.exception`` / ``ModelHTTPError`` rather than the typed
+# ``FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED`` signal. Keep these specific —
+# broad tokens like bare "context" or ``max_tokens`` would false-positive on
+# unrelated faults (output caps, missing settings, etc.).
+_CONTEXT_WINDOW_MARKERS: tuple[str, ...] = (
+    "context_length_exceeded",
+    "context_window_exceeded",
+    "context window",
+    "maximum context length",
+    "maximum context window",
+    "prompt is too long",
+    "input exceeds the context",
+    "exceeds the context window",
+    "max input tokens",
+)
+
 
 def _none_online_text(mention_ids: tuple[str, ...]) -> str:
     names = ", ".join(f"`{MENTION_PREFIX}{m}`" for m in mention_ids)
     return f"No agent matching {names} is online right now."
+
+
+def _text_looks_like_context_window_error(text: str) -> bool:
+    """True when ``text`` matches a known provider context-overflow phrase."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _CONTEXT_WINDOW_MARKERS)
+
+
+def _is_context_window_error(report: ErrorReport | None) -> bool:
+    """Detect model context-window overflow on a fault report.
+
+    Prefers calfkit's typed ``FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED`` signal
+    (``report.find`` walks fault groups). Falls back to conservative phrase
+    matching on report / exception text because many providers still surface
+    overflow as a generic ``ModelHTTPError`` / ``calf.exception`` today — see
+    the calfkit context-window classification gap.
+    """
+    if report is None:
+        return False
+    if report.find(FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED) is not None:
+        return True
+    for node in report.walk():
+        if _text_looks_like_context_window_error(node.message or ""):
+            return True
+        if node.exception is not None and _text_looks_like_context_window_error(node.exception.type):
+            return True
+        # Harvested exception attrs often carry the provider body / code even
+        # when the message is a generic wrapper.
+        if node.exception is not None:
+            attrs = node.exception.attrs or {}
+            for value in attrs.values():
+                if isinstance(value, str) and _text_looks_like_context_window_error(value):
+                    return True
+                # Nested provider bodies are commonly dicts with ``code`` /
+                # ``message`` fields (OpenAI) or stringified in ``body``.
+                if isinstance(value, dict):
+                    blob = str(value)
+                    if _text_looks_like_context_window_error(blob):
+                        return True
+    return False
 
 
 def _root_cause_failures(report: ErrorReport | None) -> list[ErrorReport]:
@@ -134,6 +199,10 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
     fault like ``billing.quota_exceeded``), the notice includes ``report.message``
     if it adds actionable context, else falls back to the honest generic form.
 
+    When the fault is a model context-window overflow, appends a short recovery
+    hint pointing at ``/clear`` so the user can reset channel history and keep
+    chatting (the agent can re-read recent messages with its ordinary tools).
+
     Leak posture: ``failure.message`` is ``safe_exc_message(exc)`` — the raw
     exception message the failing tool raised. It is posted to Discord on the
     TRUST assumption that the agent's own tool exceptions (the only producers in
@@ -144,6 +213,7 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
     who = f"`{target}`" if target else "The agent"
     header = f"{who} hit an error handling that message:"
     failures = _root_cause_failures(report)
+    context_hint = _CONTEXT_WINDOW_HINT if _is_context_window_error(report) else None
 
     if not failures:
         # No harvested exception to surface. Include the report's message if it's
@@ -151,14 +221,21 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
         # otherwise stay generic rather than expose a raw framework code.
         message = report.message if report is not None else None
         if message:
-            return f"{header} {message}. Please try again."
-        return f"{header} Please try again."
+            text = f"{header} {message}. Please try again."
+        else:
+            text = f"{header} Please try again."
+        if context_hint is not None:
+            text = f"{text}\n\n{context_hint}"
+        return text
 
     footer = "Please try again, or ask an operator to check the logs."
+    # Reserve room for the optional context-window recovery section up front so
+    # a long multi-cause notice never drops the actionable `/clear` guidance.
+    reserved = (len(context_hint) + 2) if context_hint is not None else 0
     cause_lines = [_format_cause_line(f) for f in failures]
     # Soft budget: show as many lines as fit under the cap. The "and N more"
     # line (when it appends) lands in the 100-char headroom above the cap.
-    budget = _MAX_NOTICE_CHARS - len(header) - len(footer) - 2
+    budget = _MAX_NOTICE_CHARS - len(header) - len(footer) - reserved - 2
     shown = 0
     for line in cause_lines:
         if len(line) + 1 > budget:  # +1 for the newline joining it
@@ -170,6 +247,8 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
     if hidden:
         lines.append(f"… and {hidden} more failure(s) — see the bridge logs.")
     lines.append(footer)
+    if context_hint is not None:
+        lines.extend(["", context_hint])
     return "\n".join(lines)
 
 
