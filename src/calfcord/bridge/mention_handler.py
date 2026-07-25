@@ -55,6 +55,16 @@ _STICKY_OWNER_OFFLINE = (
     "This conversation is sticky to `{mention}`, but that agent is offline. "
     "Use `!unstick` or address another agent with `!name`."
 )
+# Always appended to agent fault notices. Context-window overflows are a common
+# failure mode and their provider shapes vary, so we do not try to detect them —
+# if the error is context-related, `/clear` is the recovery; otherwise the user
+# can ignore the hint. `/clear` posts a channel boundary the history fetcher
+# truncates at; the agent can then re-read recent messages with its tools.
+_CONTEXT_CLEAR_HINT = (
+    "If this error is model context-window related, use `/clear` to reset this "
+    "channel's agent context, then continue chatting. The agent can use its "
+    "read tools to catch up on the last few messages."
+)
 
 # Notice budget: Discord caps a message at 2000 chars. The cap below is a SOFT
 # target — the "and N more" elision line (when appended) lives in the 100-char
@@ -134,6 +144,10 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
     fault like ``billing.quota_exceeded``), the notice includes ``report.message``
     if it adds actionable context, else falls back to the honest generic form.
 
+    Always appends a short ``/clear`` recovery hint. Provider context-window
+    errors do not share a stable shape, so the notice does not try to detect
+    them; users can ignore the hint when it does not apply.
+
     Leak posture: ``failure.message`` is ``safe_exc_message(exc)`` — the raw
     exception message the failing tool raised. It is posted to Discord on the
     TRUST assumption that the agent's own tool exceptions (the only producers in
@@ -144,21 +158,23 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
     who = f"`{target}`" if target else "The agent"
     header = f"{who} hit an error handling that message:"
     failures = _root_cause_failures(report)
+    # Always reserve room for the recovery section so a long multi-cause notice
+    # never drops the actionable `/clear` guidance under the Discord cap.
+    reserved = len(_CONTEXT_CLEAR_HINT) + 2
 
     if not failures:
         # No harvested exception to surface. Include the report's message if it's
         # informative (a minted fault's message often is — e.g. "quota exhausted");
         # otherwise stay generic rather than expose a raw framework code.
         message = report.message if report is not None else None
-        if message:
-            return f"{header} {message}. Please try again."
-        return f"{header} Please try again."
+        text = f"{header} {message}. Please try again." if message else f"{header} Please try again."
+        return f"{text}\n\n{_CONTEXT_CLEAR_HINT}"
 
     footer = "Please try again, or ask an operator to check the logs."
     cause_lines = [_format_cause_line(f) for f in failures]
     # Soft budget: show as many lines as fit under the cap. The "and N more"
     # line (when it appends) lands in the 100-char headroom above the cap.
-    budget = _MAX_NOTICE_CHARS - len(header) - len(footer) - 2
+    budget = _MAX_NOTICE_CHARS - len(header) - len(footer) - reserved - 2
     shown = 0
     for line in cause_lines:
         if len(line) + 1 > budget:  # +1 for the newline joining it
@@ -170,6 +186,7 @@ def _agent_error_text(target: str | None, report: ErrorReport | None = None) -> 
     if hidden:
         lines.append(f"… and {hidden} more failure(s) — see the bridge logs.")
     lines.append(footer)
+    lines.extend(["", _CONTEXT_CLEAR_HINT])
     return "\n".join(lines)
 
 

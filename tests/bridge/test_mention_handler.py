@@ -832,17 +832,20 @@ class TestFaultRootCauses:
 
     async def test_minted_fault_without_message_stays_generic(self) -> None:
         """A minted typed fault with an empty ``message`` has nothing to add —
-        the notice is the honest generic form with no dangling detail clause."""
+        the notice is the honest generic form with no dangling detail clause,
+        plus the unconditional ``/clear`` recovery section."""
         handler, _client, fakes = _make(handle=_FakeHandle(fault=NodeFaultError("billing.quota_exceeded")))
         await handler.handle(_req())
         notice = fakes["reply"].notices[0]
         assert "hit an error" in notice
-        assert notice.rstrip().endswith("Please try again.")
+        assert "Please try again." in notice
+        assert "`/clear`" in notice
+        assert notice.rstrip().endswith("last few messages.")
 
     async def test_many_leaves_are_bounded_under_discord_limit(self) -> None:
         """A pathological fault_group (many causes with long messages) must not blow
         past Discord's 2000-char notice limit — show as many root causes as fit and
-        point to the logs for the rest."""
+        point to the logs for the rest, while still keeping the `/clear` hint."""
         causes = [
             _leaf_exception_fault(
                 "WebFetchError",
@@ -856,6 +859,7 @@ class TestFaultRootCauses:
         notice = fakes["reply"].notices[0]
         assert len(notice) <= 2000
         assert "more" in notice.lower()  # names the elision honestly
+        assert "`/clear`" in notice  # recovery guidance is reserved under the cap
 
     async def test_cause_chain_surfaces_only_outermost_not_cause_links(self) -> None:
         """A ``calf.exception`` whose ``causes`` hold a ``__cause__`` chain link
@@ -909,6 +913,55 @@ class TestFaultRootCauses:
         assert "403 Forbidden" in notice
         assert "billing.quota_exceeded" in notice  # the minted child — not silently dropped
         assert "monthly quota exhausted" in notice
+
+    async def test_every_fault_notice_includes_clear_hint(self) -> None:
+        """Every agent fault notice ends with the unconditional `/clear` recovery section.
+
+        Provider context-window errors do not share a stable shape, so the bridge
+        always prints the hint rather than trying to classify the fault.
+        """
+        cases = [
+            NodeFaultError("billing.quota_exceeded", message="monthly quota exhausted"),
+            NodeFaultError(
+                ErrorReport.build_safe(
+                    error_type=FaultTypes.EXCEPTION,
+                    message="Failed to fetch https://x.test/: 403 Forbidden",
+                    origin_node_id="web_fetch",
+                    exception=ExceptionInfo(type="WebFetchError", attrs={"status_code": 403}),
+                )
+            ),
+            NodeFaultError(
+                ErrorReport.build_safe(
+                    error_type=FaultTypes.EXCEPTION,
+                    message=(
+                        "status_code: 400, model_name: gpt-5.6, body: "
+                        "{'error': {'code': 'context_length_exceeded', "
+                        "'message': 'Your input exceeds the context window of this model.'}}"
+                    ),
+                    origin_node_id="sol",
+                    exception=ExceptionInfo(type="ModelHTTPError", attrs={"status_code": 400}),
+                )
+            ),
+            _fault_group(
+                "sol",
+                [
+                    ErrorReport.build_safe(
+                        error_type=FaultTypes.MODEL_CONTEXT_WINDOW_EXCEEDED,
+                        message="input exceeded the model context window",
+                        origin_node_id="sol",
+                    )
+                ],
+            ),
+        ]
+        for fault in cases:
+            handler, _client, fakes = _make(handle=_FakeHandle(fault=fault))
+            await handler.handle(_req())
+            notice = fakes["reply"].notices[0]
+            assert "hit an error handling that message" in notice
+            assert "`/clear`" in notice
+            assert "context-window related" in notice
+            assert "read tools" in notice
+            assert len(notice) <= 2000
 
 
 class TestA2ATurnRegistration:
