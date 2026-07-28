@@ -46,6 +46,9 @@ calfcord-broker = "calfcord.broker.runner:main"
 # config outranks user config. See docs/adr/0023.
 python-preference = "only-managed"
 python-downloads = "automatic"
+# MCP is required transitively. Constrain its resolved version without
+# publishing it as a direct Agent Disco runtime dependency.
+constraint-dependencies = ["mcp==1.28.1"]
 
 [build-system]
 requires = ["hatchling"]
