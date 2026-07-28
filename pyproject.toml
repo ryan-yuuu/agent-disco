@@ -49,6 +49,7 @@ python-downloads = "automatic"
 # Pillow is required transitively by openhands-sdk. Constrain its resolved
 # version without publishing it as a direct Agent Disco runtime dependency.
 constraint-dependencies = [
+    "joserfc==1.6.8",
     "mcp==1.28.1",
     "pillow==12.3.0",
 ]
