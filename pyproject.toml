@@ -14,6 +14,7 @@ dependencies = [
     "filelock>=3.29.0",
     "httpx>=0.28.1",
     "openhands-sdk>=1.23.1",
+    "pillow==12.3.0",
     "prompt-toolkit>=3.0.52,<4",
     "pydantic-settings>=2.14.1",
     "python-dotenv>=1.2.2",
