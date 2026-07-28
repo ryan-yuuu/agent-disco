@@ -8,6 +8,9 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+constraints = [{ name = "pillow", specifier = "==12.3.0" }]
+
 [[package]]
 name = "agent-client-protocol"
 version = "0.10.1"
@@ -497,7 +500,6 @@ dependencies = [
     { name = "filelock" },
     { name = "httpx" },
     { name = "openhands-sdk" },
-    { name = "pillow" },
     { name = "prompt-toolkit" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
@@ -527,7 +529,6 @@ requires-dist = [
     { name = "filelock", specifier = ">=3.29.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "openhands-sdk", specifier = ">=1.23.1" },
-    { name = "pillow", specifier = "==12.3.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.52,<4" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
