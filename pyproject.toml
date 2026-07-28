@@ -28,6 +28,11 @@ calfkit-mcp = "calfcord.mcp.runner:main"
 calfkit-auth = "calfcord.providers.codex.cli:main"
 calfcord-cli = "calfcord.cli.main:main"
 
+[tool.uv]
+# JOSERFC is required transitively. Constrain its resolved version without
+# publishing it as a direct Agent Disco runtime dependency.
+constraint-dependencies = ["joserfc==1.6.8"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
