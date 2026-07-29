@@ -893,10 +893,13 @@ def test_install_sh_parses() -> None:
 # individual functions against a throwaway ``$CALFCORD_HOME``. All offline.
 
 
-def _make_version(home: Path, sha: str) -> Path:
-    """Create a built ``versions/<sha>`` dir (the ``.calfcord-ok`` marker present)."""
+def _make_version(home: Path, sha: str, *, version: str = "0.1.1", build: int = 1) -> Path:
+    """Create a built ``versions/<sha>`` dir with version provenance."""
     vdir = home / "versions" / sha
     vdir.mkdir(parents=True, exist_ok=True)
+    (vdir / ".calfcord-build").write_text(
+        f"CALFCORD_VERSION={version}\nCALFCORD_BUILD_NUMBER={build}\nCALFCORD_COMMIT={sha}\n"
+    )
     (vdir / ".calfcord-ok").write_text("")
     return vdir
 
@@ -921,6 +924,8 @@ def test_activate_version_first_activation_has_empty_previous(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
 
     assert (home / "current").resolve() == aaa.resolve()
+    assert _version_field(home, "CALFCORD_VERSION") == "0.1.1"
+    assert _version_field(home, "CALFCORD_BUILD_NUMBER") == "1"
     assert _version_field(home, "CALFCORD_COMMIT") == "aaa"
     # No outgoing version on a first install → previous is empty.
     assert _version_field(home, "CALFCORD_PREVIOUS_COMMIT") == ""
@@ -1044,6 +1049,22 @@ def test_self_rollback_flips_current_and_swaps_version_fields(tmp_path: Path) ->
     assert (home / "current").resolve() == aaa.resolve()
     assert _version_field(home, "CALFCORD_COMMIT") == "aaa"
     assert _version_field(home, "CALFCORD_PREVIOUS_COMMIT") == "bbb"
+
+
+def test_self_rollback_to_legacy_install_records_unknown_version(tmp_path: Path) -> None:
+    """A pre-versioning rollback target stays valid without producing blank metadata."""
+    home = tmp_path / "home"
+    legacy = _make_version(home, "legacy")
+    current = _make_version(home, "current", version="0.1.42", build=42)
+    (legacy / ".calfcord-build").unlink()
+    prep = _source_and_run(f'activate_version "{legacy}"\nactivate_version "{current}"', home=home)
+    assert prep.returncode == 0, prep.stderr
+
+    result = _run_self(home, ["rollback"])
+    assert result.returncode == 0, result.stderr
+    assert _version_field(home, "CALFCORD_VERSION") == "unknown"
+    assert _version_field(home, "CALFCORD_BUILD_NUMBER") == "unknown"
+    assert _version_field(home, "CALFCORD_COMMIT") == "legacy"
 
 
 def test_self_rollback_refuses_when_previous_lacks_ok_marker(tmp_path: Path) -> None:

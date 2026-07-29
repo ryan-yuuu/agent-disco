@@ -30,6 +30,7 @@ import asyncio
 import os
 import sys
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from calfcord.cli._agents import detect_agents, pick_agent
@@ -39,6 +40,15 @@ from calfcord.cli._prompts import make_prompter
 from calfcord.cli._supervisor import open_workspace
 from calfcord.health.check import default_broker_probe, healthcheck
 from calfcord.supervisor import component, lifecycle, mcp_roster
+
+
+def _installed_version() -> str:
+    """Return the installed distribution version, with a source-tree fallback."""
+
+    try:
+        return version("calfcord")
+    except PackageNotFoundError:
+        return "0.1.0"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -57,6 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Concepts: disco explain topology   ·   Docs: docs/using-disco.md"
         ),
     )
+    parser.add_argument("--version", action="version", version=f"disco {_installed_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Guided first-run configuration of the install's .env.")
 

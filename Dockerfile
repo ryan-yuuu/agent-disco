@@ -16,6 +16,11 @@
 # ── builder ──────────────────────────────────────────────────────────────────
 FROM python:3.14-slim AS builder
 
+# CI assigns one ordered version to every successful main build. Local builds
+# keep the source tree's development default unless callers provide these args.
+ARG APP_VERSION=0.1.0
+ARG APP_COMMIT=unknown
+
 # Copy the static ``uv`` binary from the upstream image rather than
 # ``curl | sh``; keeps the build hermetic and version-pinnable.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
@@ -47,6 +52,7 @@ ENV UV_PYTHON_PREFERENCE=only-system
 # layer caches as long as those three files are unchanged. ``src/``
 # and ``agents/`` edits do NOT re-trigger this layer.
 COPY pyproject.toml uv.lock README.md ./
+RUN uv version --frozen "$APP_VERSION"
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
@@ -69,6 +75,11 @@ COPY agents ./agents
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM python:3.14-slim AS runtime
+
+ARG APP_VERSION=0.1.0
+ARG APP_COMMIT=unknown
+LABEL org.opencontainers.image.version="$APP_VERSION" \
+      org.opencontainers.image.revision="$APP_COMMIT"
 
 # OS packages the calfcord tools need at runtime. Strictly minimal — no
 # build toolchain leaks past the builder stage.

@@ -42,14 +42,19 @@ printf 'CALF_HOST_URL=\nDISCORD_BOT_TOKEN=keep-me\n' > "$TD/config/.env"; chmod 
 ln -sfn "$TD/versions/$Bsha" "$TD/current"
 
 marker(){ # $1=commit  $2=previous(optional)
-  { printf 'CALFCORD_COMMIT=%s\nCALFCORD_INSTALLED_AT=2026-01-01T00:00:00Z\n' "$1"
+  { printf 'CALFCORD_VERSION=0.1.42\nCALFCORD_BUILD_NUMBER=42\n'
+    printf 'CALFCORD_COMMIT=%s\nCALFCORD_INSTALLED_AT=2026-01-01T00:00:00Z\n' "$1"
     printf 'CALFCORD_REPO=ryan-yuuu/agent-disco\nCALFCORD_REF=main\n'
     [ -n "${2:-}" ] && printf 'CALFCORD_PREVIOUS_COMMIT=%s\n' "$2"; } > "$TD/version"
 }
 marker "$Bsha" "$A"
 
 # version reflects the parsed marker
-"$B" "$CS" version 2>&1 | grep -q "bbbbbbbbbbbb" && pass "version shows marker commit" || fail "version"
+out="$("$B" "$CS" version 2>&1)"
+{ printf '%s' "$out" | grep -q "version:      0.1.42" \
+  && printf '%s' "$out" | grep -q "build:        42" \
+  && printf '%s' "$out" | grep -q "bbbbbbbbbbbb"; } \
+  && pass "version shows build version + marker commit" || fail "version: $out"
 
 # `disco self ...` routes to the disco-self shim
 "$B" "$C" self version 2>&1 | grep -q "bbbbbbbbbbbb" && pass "self routing" || fail "self routing"
@@ -240,9 +245,14 @@ out="$(PATH="$SB:$PATH" "$B" "$CS" status 2>&1)"; rc=$?
 { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "could not reach GitHub"; } \
   && pass "status offline -> branded error" || fail "status offline (rc=$rc): $out"
 
-# status: outdated when remote sha differs
-printf '#!/usr/bin/env bash\nprintf "%%s" ffffffffffffffffffffffffffffffffffffffff\n' > "$SB/curl"; chmod +x "$SB/curl"
-PATH="$SB:$PATH" "$B" "$CS" status 2>&1 | grep -q "outdated" && pass "status outdated" || fail "status outdated"
+# status: outdated when the latest successful build manifest differs
+cat > "$SB/curl" <<'STUBCURL'
+#!/usr/bin/env bash
+printf 'CALFCORD_VERSION=0.1.43\nCALFCORD_BUILD_NUMBER=43\nCALFCORD_COMMIT=ffffffffffffffffffffffffffffffffffffffff\n'
+STUBCURL
+chmod +x "$SB/curl"
+PATH="$SB:$PATH" "$B" "$CS" status 2>&1 | grep -q "latest 0.1.43" \
+  && pass "status outdated by successful build version" || fail "status outdated"
 
 # update: forwards CALFCORD_REF/REPO/HOME into the re-run
 { printf 'CALFCORD_COMMIT=%s\nCALFCORD_INSTALLED_AT=x\n' "$Bsha"

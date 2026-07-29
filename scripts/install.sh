@@ -71,6 +71,9 @@ PROCESS_COMPOSE_VERSION="${CALFCORD_PROCESS_COMPOSE_VERSION:-v1.110.0}"
 UV_VERSION="${CALFCORD_UV_VERSION:-0.11.29}"
 PYTHON_VERSION="${CALFCORD_PYTHON_VERSION:-3.12.13}"
 VERSION_FILE="$CALFCORD_HOME/version"
+BUILD_VERSION=""
+BUILD_NUMBER=""
+BUILD_COMMIT=""
 
 API_BASE="https://api.github.com/repos/$REPO"
 DL_BASE="https://github.com/$REPO"
@@ -138,6 +141,30 @@ resolve_sha() {
   esac
   [ "${#sha}" -eq 40 ] || die "resolved '$ref' to a non-commit value (${#sha} chars): ${sha:0:60}"
   printf '%s' "$sha"
+}
+
+# Resolve the latest SUCCESSFUL main build. CI publishes this three-line,
+# shell-like manifest only after the gating test/type/image jobs pass. Parse it
+# as data (never source it), then pin the install to its exact commit.
+resolve_main_build() {
+  local manifest tmp line key value
+  tmp="$(mktemp)"
+  manifest="https://raw.githubusercontent.com/$REPO/build-version/version.env"
+  fetch "$manifest" > "$tmp"
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      CALFCORD_VERSION) BUILD_VERSION="$value" ;;
+      CALFCORD_BUILD_NUMBER) BUILD_NUMBER="$value" ;;
+      CALFCORD_COMMIT) BUILD_COMMIT="$value" ;;
+    esac
+  done < "$tmp"
+  rm -f "$tmp"
+  case "$BUILD_VERSION" in 0.1.*) ;; *) die "invalid build version in $manifest" ;; esac
+  case "$BUILD_NUMBER" in ""|*[!0-9]*) die "invalid build number in $manifest" ;; esac
+  case "$BUILD_COMMIT" in ""|*[!0-9a-f]*) die "invalid commit in $manifest" ;; esac
+  [ "${#BUILD_COMMIT}" -eq 40 ] || die "invalid commit length in $manifest"
 }
 
 # Stream the source tarball for a SHA into DEST, stripping the top-level dir.
@@ -335,14 +362,19 @@ interpreter_is_owned() {
 
 # Build versions/<sha> in place (idempotent). Sets INSTALLED_DEST.
 install_version() {
-  local sha="$1" vhome
+  local sha="$1" vhome recorded_version
   local dest="$VERSIONS_DIR/$sha"
   INSTALLED_DEST="$dest"
   # `.calfcord-ok` alone does not certify a build. Versions built before the
   # interpreter was pinned carry the marker yet are bound to whatever Python the
   # box offered, and the marker would short-circuit their repair forever — so
   # gate reuse on provenance and let those installs self-heal on the next run.
-  if [ -f "$dest/.calfcord-ok" ] && interpreter_is_owned "$dest"; then
+  recorded_version=""
+  if [ -f "$dest/.calfcord-build" ]; then
+    recorded_version="$(sed -n 's/^CALFCORD_VERSION=//p' "$dest/.calfcord-build" | head -n 1)"
+  fi
+  if [ -f "$dest/.calfcord-ok" ] && interpreter_is_owned "$dest" \
+      && { [ -z "$BUILD_VERSION" ] || [ "$recorded_version" = "$BUILD_VERSION" ]; }; then
     log "version ${sha:0:12} already built — reusing"
     return 0
   fi
@@ -350,6 +382,9 @@ install_version() {
   rm -rf "$dest"
   extract_source "$sha" "$dest"
   [ -f "$dest/pyproject.toml" ] || die "extracted source looks wrong (no pyproject.toml)"
+  if [ -n "$BUILD_VERSION" ]; then
+    "$UV" version --project "$dest" --no-sync "$BUILD_VERSION"
+  fi
   log "building isolated environment (uv sync --locked --no-dev) ..."
   build_env "$dest"
   # Mark good only once the build is provably on an owned interpreter. The die
@@ -362,6 +397,11 @@ install_version() {
   Deactivate any conda env / virtualenv and unset UV_PYTHON_PREFERENCE, then re-run.
   Agent Disco must build on the CPython $PYTHON_VERSION it pins (docs/adr/0023)."
   fi
+  cat > "$dest/.calfcord-build" <<EOF
+CALFCORD_VERSION=${BUILD_VERSION:-unknown}
+CALFCORD_BUILD_NUMBER=${BUILD_NUMBER:-unknown}
+CALFCORD_COMMIT=$sha
+EOF
   : > "$dest/.calfcord-ok"
 }
 
@@ -431,7 +471,7 @@ _version_field() {
 
 # Flip the current symlink atomically and record the version marker.
 activate_version() {
-  local dest="$1" sha now old_sha
+  local dest="$1" sha now old_sha artifact_version artifact_build
   sha="$(basename "$dest")"
   old_sha=""
   if [ -L "$CURRENT_LINK" ]; then
@@ -449,7 +489,15 @@ activate_version() {
   fi
   ln -sfn "$dest" "$CURRENT_LINK"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  artifact_version="unknown"
+  artifact_build="unknown"
+  if [ -f "$dest/.calfcord-build" ]; then
+    artifact_version="$(sed -n 's/^CALFCORD_VERSION=//p' "$dest/.calfcord-build" | head -n 1)"
+    artifact_build="$(sed -n 's/^CALFCORD_BUILD_NUMBER=//p' "$dest/.calfcord-build" | head -n 1)"
+  fi
   cat > "$VERSION_FILE" <<EOF
+CALFCORD_VERSION=${artifact_version:-unknown}
+CALFCORD_BUILD_NUMBER=${artifact_build:-unknown}
 CALFCORD_COMMIT=$sha
 CALFCORD_INSTALLED_AT=$now
 CALFCORD_REPO=$REPO
@@ -629,6 +677,8 @@ meta() {
   return 0
 }
 CALFCORD_COMMIT="$(meta CALFCORD_COMMIT)"
+CALFCORD_VERSION="$(meta CALFCORD_VERSION)"
+CALFCORD_BUILD_NUMBER="$(meta CALFCORD_BUILD_NUMBER)"
 CALFCORD_INSTALLED_AT="$(meta CALFCORD_INSTALLED_AT)"
 CALFCORD_REPO="$(meta CALFCORD_REPO)"
 CALFCORD_REF="$(meta CALFCORD_REF)"
@@ -637,20 +687,19 @@ REPO="${CALFCORD_REPO:-ryan-yuuu/agent-disco}"
 
 short() { printf '%s' "${1:0:12}"; }
 
-remote_sha() {
-  local ref="${1:-main}"
-  local url="https://api.github.com/repos/$REPO/commits/$ref"
+remote_build() {
+  local url="https://raw.githubusercontent.com/$REPO/build-version/version.env"
   if command -v curl >/dev/null 2>&1; then
     if [ -n "${GITHUB_TOKEN:-}" ]; then
-      curl -fsSL -H 'Accept: application/vnd.github.sha' -H "Authorization: Bearer $GITHUB_TOKEN" "$url"
+      curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$url"
     else
-      curl -fsSL -H 'Accept: application/vnd.github.sha' "$url"
+      curl -fsSL "$url"
     fi
   elif command -v wget >/dev/null 2>&1; then
     if [ -n "${GITHUB_TOKEN:-}" ]; then
-      wget -qO- --header='Accept: application/vnd.github.sha' --header="Authorization: Bearer $GITHUB_TOKEN" "$url"
+      wget -qO- --header="Authorization: Bearer $GITHUB_TOKEN" "$url"
     else
-      wget -qO- --header='Accept: application/vnd.github.sha' "$url"
+      wget -qO- "$url"
     fi
   else
     echo "disco self: need curl or wget" >&2; return 1
@@ -660,6 +709,8 @@ remote_sha() {
 cmd="${1:-}"; [ "$#" -gt 0 ] && shift || true
 case "$cmd" in
   version)
+    echo "version:      ${CALFCORD_VERSION:-unknown}"
+    echo "build:        ${CALFCORD_BUILD_NUMBER:-unknown}"
     echo "commit:       ${CALFCORD_COMMIT:-unknown}"
     echo "installed_at: ${CALFCORD_INSTALLED_AT:-unknown}"
     echo "repo:         $REPO"
@@ -669,14 +720,25 @@ case "$cmd" in
     have="${CALFCORD_COMMIT:-}"
     [ -n "$have" ] || { echo "no install metadata; re-run the installer" >&2; exit 1; }
     ref="${CALFCORD_REF:-main}"
-    if ! latest="$(remote_sha "$ref")" || [ -z "$latest" ]; then
+    if [ "$ref" != "main" ]; then
+      echo "disco self: build-number status is available for main installs only (this install tracks $ref)" >&2
+      exit 1
+    fi
+    if ! latest="$(remote_build)" || [ -z "$latest" ]; then
       echo "disco self: could not reach GitHub to check for updates (offline or rate-limited)" >&2
       exit 1
     fi
-    if [ "$have" = "$latest" ]; then
-      echo "up to date ($(short "$have") on $ref)"
+    latest_version="$(printf '%s\n' "$latest" | sed -n 's/^CALFCORD_VERSION=//p' | head -n 1)"
+    latest_build="$(printf '%s\n' "$latest" | sed -n 's/^CALFCORD_BUILD_NUMBER=//p' | head -n 1)"
+    latest_commit="$(printf '%s\n' "$latest" | sed -n 's/^CALFCORD_COMMIT=//p' | head -n 1)"
+    if [ -z "$latest_version" ] || [ -z "$latest_build" ] || [ -z "$latest_commit" ]; then
+      echo "disco self: latest build manifest is invalid" >&2
+      exit 1
+    fi
+    if [ "$have" = "$latest_commit" ]; then
+      echo "up to date (${CALFCORD_VERSION:-unknown}, $(short "$have"))"
     else
-      echo "outdated: have $(short "$have"), latest $(short "$latest") on $ref"
+      echo "outdated: have ${CALFCORD_VERSION:-unknown} ($(short "$have")), latest $latest_version ($(short "$latest_commit"))"
       echo "run 'disco self update' to upgrade"
     fi
     ;;
@@ -705,9 +767,17 @@ case "$cmd" in
       echo "disco self: no valid previous version to roll back to" >&2
       exit 1
     fi
+    rollback_version="unknown"
+    rollback_build="unknown"
+    if [ -f "$VERSIONS_DIR/$prev/.calfcord-build" ]; then
+      rollback_version="$(sed -n 's/^CALFCORD_VERSION=//p' "$VERSIONS_DIR/$prev/.calfcord-build" | head -n 1)"
+      rollback_build="$(sed -n 's/^CALFCORD_BUILD_NUMBER=//p' "$VERSIONS_DIR/$prev/.calfcord-build" | head -n 1)"
+    fi
     ln -sfn "$VERSIONS_DIR/$prev" "$CURRENT_LINK"
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cat > "$VERSION_FILE" <<EOF
+CALFCORD_VERSION=${rollback_version:-unknown}
+CALFCORD_BUILD_NUMBER=${rollback_build:-unknown}
 CALFCORD_COMMIT=$prev
 CALFCORD_INSTALLED_AT=$now
 CALFCORD_REPO=$REPO
@@ -735,8 +805,8 @@ EOF
   ""|-h|--help|help)
     cat >&2 <<'USAGE'
 disco self <command>:
-  version              show installed commit + timestamp
-  status               compare installed commit to the latest on the branch
+  version              show installed version, build, commit + timestamp
+  status               compare this install to the latest successful main build
   update               re-run the installer to upgrade to the latest
   rollback             switch back to the previous installed version
   set-broker <host:port>  set CALF_HOST_URL (Kafka bootstrap) in the config .env
@@ -927,7 +997,12 @@ main() {
   ensure_uv
   ensure_process_compose
   local sha
-  sha="$(resolve_sha "$REF")"
+  if [ "$REF" = "main" ]; then
+    resolve_main_build
+    sha="$BUILD_COMMIT"
+  else
+    sha="$(resolve_sha "$REF")"
+  fi
   log "resolved $REF -> ${sha:0:12}"
   install_version "$sha"
   warm_broker_cache "$INSTALLED_DEST"
