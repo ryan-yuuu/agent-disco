@@ -41,6 +41,16 @@ def test_main_help_exits_zero() -> None:
     assert exc.value.code == 0
 
 
+def test_main_version_uses_installed_package_metadata(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(main_mod, "version", lambda _name: "0.1.314")
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == "disco 0.1.314\n"
+
+
 def test_main_help_epilog_signposts_getting_started(capsys: pytest.CaptureFixture[str]) -> None:
     """Top-level ``--help`` teaches the getting-started arc: init → add a teammate →
     the org board, plus where concepts + docs live. The epilog must survive the raw

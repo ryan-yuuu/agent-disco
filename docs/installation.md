@@ -239,11 +239,16 @@ pieces split and why) and read
 ## 4. Keep it up to date
 
 ```bash
-disco self version     # show what's installed
-disco self status      # check whether a newer version is available
-disco self update      # upgrade to the latest
+disco --version        # concise installed version (for example 0.1.142)
+disco self version     # version + build number + commit + install timestamp
+disco self status      # compare with the latest successful main build
+disco self update      # upgrade to the latest successful main build
 disco self rollback    # undo the last update
 ```
+
+Each successful `main` CI run gets `0.1.<run-number>`. Failed runs leave harmless
+gaps and are never advertised to the installer. The exact commit SHA remains in
+the install metadata for traceability and rollback.
 
 `disco self update` does not stop a running workspace, so restart it before
 or right after upgrading — the old processes keep running the old code until

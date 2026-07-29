@@ -1,6 +1,7 @@
 # Continuous integration for pushes to main and pull-requests against main.
 #
-# Four jobs run in parallel:
+# Four verification jobs run in parallel, followed by one publication job on
+# successful pushes to main:
 #   lint  — ruff check. Advisory only (``continue-on-error: true``)
 #           while we work down the 25 pre-existing baseline errors.
 #           A red ✗ surfaces in the PR check list but does not block
@@ -17,6 +18,11 @@
 #           ``coverage.yml`` posts the comment for fork/Dependabot PRs.
 #   build — docker build (no push). Catches Dockerfile drift even when
 #           Python tests pass.
+#   publish-version — publishes the multi-architecture container tagged
+#           ``0.1.<run_number>`` and ``latest``, then writes that version and
+#           the verified commit SHA to the ``build-version`` branch. Native
+#           installs use that tiny manifest as the latest-successful-build
+#           pointer.
 #
 # Concurrency: pull-request runs cancel themselves when superseded by a
 # newer commit on the same PR branch, so we don't burn minutes verifying
@@ -188,6 +194,9 @@ jobs:
           push: false
           load: true
           tags: calfcord:ci
+          build-args: |
+            APP_VERSION=0.1.${{ github.run_number }}
+            APP_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       # A green build can still ship an unrunnable image: uv resolves the
@@ -197,4 +206,123 @@ jobs:
       # build itself succeeds. Executing an entry point is the only thing that
       # catches it. See docs/adr/0023.
       - name: The image must actually run
-        run: docker run --rm calfcord:ci calfkit-agent --help
+        run: |
+          docker run --rm calfcord:ci calfkit-agent --help
+          test "$(docker run --rm calfcord:ci calfcord-cli --version)" = "disco 0.1.${GITHUB_RUN_NUMBER}"
+
+  publish-version:
+    name: publish build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [types, test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    concurrency:
+      # A newer main build must win if two runs finish close together. Do not
+      # cancel the older verifier jobs; serialize only this final pointer update.
+      group: publish-build-version
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - name: Determine whether this build advances latest
+        id: publication
+        env:
+          BUILD_VERSION: 0.1.${{ github.run_number }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # Fetch into this ref explicitly: checkout's shallow, single-branch
+          # refspec would otherwise leave a named fetch only in FETCH_HEAD.
+          git fetch origin build-version:refs/remotes/origin/build-version || true
+          published_number=""
+          if git show-ref --verify --quiet refs/remotes/origin/build-version; then
+            published_number="$(git show origin/build-version:version.env 2>/dev/null | sed -n 's/^CALFCORD_BUILD_NUMBER=//p' | head -n 1)"
+          fi
+          if [ -n "$published_number" ] && [ "$published_number" -ge "$BUILD_NUMBER" ]; then
+            echo "build $published_number is already newer; publishing only $BUILD_VERSION"
+            echo "publish_manifest=false" >> "$GITHUB_OUTPUT"
+            image_tags="ghcr.io/${{ github.repository }}:$BUILD_VERSION"
+          else
+            echo "publish_manifest=true" >> "$GITHUB_OUTPUT"
+            image_tags="ghcr.io/${{ github.repository }}:$BUILD_VERSION"
+            image_tags+=$'\nghcr.io/${{ github.repository }}:latest'
+          fi
+          {
+            echo "image_tags<<EOF"
+            echo "$image_tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish multi-architecture image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.publication.outputs.image_tags }}
+          labels: |
+            org.opencontainers.image.version=0.1.${{ github.run_number }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            APP_VERSION=0.1.${{ github.run_number }}
+            APP_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Publish latest successful main build
+        if: steps.publication.outputs.publish_manifest == 'true'
+        env:
+          BUILD_VERSION: 0.1.${{ github.run_number }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          publish_dir="$(mktemp -d)"
+          trap 'git worktree remove --force "$publish_dir" >/dev/null 2>&1 || true; rm -rf "$publish_dir"' EXIT
+
+          # Fetch into the exact remote-tracking ref inspected below. A named
+          # fetch otherwise updates only FETCH_HEAD under checkout's shallow,
+          # single-branch refspec, making every publish after the first one try
+          # to overwrite the existing branch as a new orphan history.
+          git fetch origin build-version:refs/remotes/origin/build-version || true
+          if git show-ref --verify --quiet refs/remotes/origin/build-version; then
+            git worktree add --detach "$publish_dir" origin/build-version
+          else
+            git worktree add --detach "$publish_dir"
+            git -C "$publish_dir" switch --orphan build-version
+            git -C "$publish_dir" rm -rf .
+          fi
+
+          # Concurrency serializes writes but does not promise queued runs finish
+          # in numeric order. Refuse to move the pointer backwards if an older
+          # run reaches this step after a newer one.
+          published_number=""
+          if [ -f "$publish_dir/version.env" ]; then
+            published_number="$(sed -n 's/^CALFCORD_BUILD_NUMBER=//p' "$publish_dir/version.env" | head -n 1)"
+          fi
+          if [ -n "$published_number" ] && [ "$published_number" -ge "$BUILD_NUMBER" ]; then
+            echo "build $published_number is already published; leaving it in place"
+            exit 0
+          fi
+
+          cat > "$publish_dir/version.env" <<EOF
+          CALFCORD_VERSION=$BUILD_VERSION
+          CALFCORD_BUILD_NUMBER=$BUILD_NUMBER
+          CALFCORD_COMMIT=$BUILD_COMMIT
+          EOF
+
+          git -C "$publish_dir" add version.env
+          git -C "$publish_dir" config user.name github-actions[bot]
+          git -C "$publish_dir" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$publish_dir" commit -m "chore: publish $BUILD_VERSION"
+          git -C "$publish_dir" push origin HEAD:build-version
